@@ -1,6 +1,10 @@
 import type { ServiceAuthOption } from "../../lib/service-auth";
+import type {
+  BucketSecretFormPayload,
+  CredentialFamilyFormPayload,
+} from "../../lib/buckets";
 
-type BucketEntryKind = "secret" | "value";
+type BucketEntryKind = "secret" | "value" | "bucket_secret";
 
 export type SecretFormPayload = {
   serviceId: string;
@@ -25,6 +29,8 @@ export type SecretEntryForm = {
   password: string;
   certificate: string;
   privateKey: string;
+  clientId: string;
+  clientSecret: string;
   expiresAt: string;
 };
 
@@ -35,8 +41,17 @@ export type ValueEntryForm = {
   value: string;
 };
 
-export function validateEntry(kind: BucketEntryKind, secret: SecretEntryForm, value: ValueEntryForm, authOption?: ServiceAuthOption): string {
+// A bucket secret has no service selection or credential-type qualifier, so
+// it gets its own minimal form shape instead of reusing SecretEntryForm.
+export type BucketSecretEntryForm = {
+  keyName: string;
+  value: string;
+  expiresAt: string;
+};
+
+export function validateEntry(kind: BucketEntryKind, secret: SecretEntryForm, value: ValueEntryForm, bucketSecret: BucketSecretEntryForm, authOption?: ServiceAuthOption): string {
   if (kind === "secret") return validateSecret(secret, authOption);
+  if (kind === "bucket_secret") return validateBucketSecret(bucketSecret);
   return validateValue(value);
 }
 
@@ -67,8 +82,38 @@ export function serializeValuePayload(form: ValueEntryForm): ValueFormPayload {
   };
 }
 
+// OAuth/OIDC application pairs use Engine's semantic credential_family write
+// path (auth_name + client_id + client_secret) instead of the generic
+// two-row paired payload Basic/mTLS use, because Engine alone derives their
+// storage key names.
+export function serializeCredentialFamilyPayload(form: SecretEntryForm, authOption: ServiceAuthOption): CredentialFamilyFormPayload {
+  return {
+    serviceId: form.serviceId.trim(),
+    credentialType: authOption.credential_type,
+    authName: authOption.key_prefix.trim(),
+    clientId: form.clientId,
+    clientSecret: form.clientSecret,
+    expiresAt: serializedExpiry(form),
+  };
+}
+
+export function serializeBucketSecretPayload(form: BucketSecretEntryForm): BucketSecretFormPayload {
+  return {
+    keyName: form.keyName.trim(),
+    value: form.value,
+    expiresAt: form.expiresAt ? new Date(form.expiresAt).toISOString() : undefined,
+  };
+}
+
 export function secretHasTwoFields(credentialType: string): boolean {
-  return credentialType === "basic" || credentialType === "mtls";
+  return credentialType === "basic" || credentialType === "mtls" || credentialType === "oauth" || credentialType === "oidc";
+}
+
+// Distinguishes the oauth/oidc credential_family write path from the
+// row-oriented paired path Basic/mTLS still use, even though both render as
+// a two-field form.
+export function secretIsCredentialFamily(credentialType: string): boolean {
+  return credentialType === "oauth" || credentialType === "oidc";
 }
 
 export function tokenPlaceholder(credentialType: string): string {
@@ -83,7 +128,16 @@ function validateSecret(form: SecretEntryForm, authOption?: ServiceAuthOption): 
   if (!authOption) return "Choose a credential type.";
   if (authOption.required_fields.includes("username")) return validatePairedAuthSecret(authOption, form.username, form.password, "Enter the username.", "Enter the password.");
   if (authOption.required_fields.includes("certificate")) return validatePairedAuthSecret(authOption, form.certificate, form.privateKey, "Enter the certificate.", "Enter the private key.");
+  if (authOption.required_fields.includes("client_id")) return validatePairedAuthSecret(authOption, form.clientId, form.clientSecret, "Enter the client ID.", "Enter the client secret.");
   if (authOption.required_fields.includes("value") && !form.value.trim()) return `Enter the ${tokenLabel(authOption.auth_type)}.`;
+  return "";
+}
+
+// Bucket secrets have no service or credential type to validate -- just a
+// non-empty reference-safe name and a non-empty value.
+function validateBucketSecret(form: BucketSecretEntryForm): string {
+  if (!form.keyName.trim()) return "Enter a name.";
+  if (!form.value.trim()) return "Enter a value.";
   return "";
 }
 

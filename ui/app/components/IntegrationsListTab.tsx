@@ -2,7 +2,7 @@ import { FormEvent } from "react";
 import { Link } from "@remix-run/react";
 import { ArrowUpRight, Check, Loader2, Search, X, ChevronLeft, ChevronRight } from "lucide-react";
 import { Service, ActivatedService, serviceHref } from "~/lib/api";
-import { formatServiceName, formatVersion } from "~/lib/format";
+import { formatServiceName, formatVersion, truncateWords, stripMarkdown } from "~/lib/format";
 import { openServiceLink } from "~/lib/service-navigation";
 import { ServiceIcon } from "~/components/ServiceIcon";
 
@@ -391,7 +391,9 @@ function IntegrationDescription({ description }: { description?: string }) {
   const content = description?.trim();
   // Missing descriptions leave the card quiet instead of inventing catalogue copy.
   if (!content) return null;
-  return <p className="mt-4 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">{content}</p>;
+  // Cards preview a short, link-free excerpt (30 words); the service detail page retains the full provider prose.
+  const excerpt = truncateWords(stripMarkdown(content), 30);
+  return <p className="mt-4 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">{excerpt}</p>;
 }
 
 /** Presents compact contract breadth without implying runtime usage analytics. */

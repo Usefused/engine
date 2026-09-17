@@ -5,17 +5,19 @@
 # encryption in Engine-local storage, and connect session state signing.
 # Override in production via the FUSED_ENCRYPTION_KEY environment variable.
 # Generate a secure key: openssl rand -base64 32
-encryption_key: <32-byte AES key>
+encryption_key: "B2Ey1ye+mKA5/04WHlbFxuT6Oq5kFMassjNLLLqsZCI="
 database:
-  url: <database_url>
+  url: "postgres://opensync:password@192.168.0.112:5432/opensync?sslmode=disable"
 engine:
-  registry_endpoint: "http://127.0.0.1:8080/graphql"
-  license_key: <license_key>
+  registry_endpoint: "http://127.0.0.1:8090/graphql"
+  license_key: "fk_com_1707be57-95ed-45c8-a341-672a87fb2609"
   execution_retention_days: 30
   execution_cleanup_batch: 1000
   # Bounded OAuth refresh concurrency. Override with
   # FUSED_ENGINE_CONNECTED_AUTH_REFRESH_WORKERS; accepted range is 1..64.
   connected_auth_refresh_workers: 4
+  # Shared bundled-schema-dictionary ceiling (default 8192). Override with
+  # FUSED_SCHEMA_MAX_DEFINITIONS (1..500000); must match Registry's value.
 
 observability:
   # Engine exports OTLP over HTTP; environment signal endpoints take precedence.

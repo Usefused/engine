@@ -7,16 +7,38 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 )
 
+// defaultMaxDefinitions is the fallback schema dictionary width, raised from 2048 to admit large provider graphs (e.g. Microsoft Graph).
+const defaultMaxDefinitions = 8192
+
 const (
-	MaxDefinitions = 2048
-	MaxBytes       = 32 << 20
-	MaxNodes       = 500_000
-	MaxDepth       = 64
+	MaxBytes = 32 << 20
+	MaxNodes = 500_000
+	MaxDepth = 64
 )
+
+// MaxDefinitions bounds one service version's shared schema dictionary; override via FUSED_SCHEMA_MAX_DEFINITIONS. Registry and Engine vendor this separately and must agree.
+var MaxDefinitions = resolveMaxDefinitions(os.Getenv("FUSED_SCHEMA_MAX_DEFINITIONS"))
+
+// resolveMaxDefinitions parses the override, falling back to the default (with a warning) on any invalid value.
+func resolveMaxDefinitions(raw string) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultMaxDefinitions
+	}
+	value, err := strconv.Atoi(raw)
+	// Reject non-numeric, non-positive, or MaxNodes-exceeding overrides instead of admitting an unbounded dictionary.
+	if err != nil || value < 1 || value > MaxNodes {
+		slog.Warn("invalid FUSED_SCHEMA_MAX_DEFINITIONS; using default", "value", raw, "default", defaultMaxDefinitions)
+		return defaultMaxDefinitions
+	}
+	return value
+}
 
 var ErrInvalid = errors.New("shared schema definitions are invalid or exceed limits")
 

@@ -100,6 +100,7 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 		result, err := executeMCPConfigApply(ctx, configStore, s, registryClient, sdkApplyCall{
 			apiKey: r.Header.Get("X-API-Key"), accountID: actor.AccountID, actor: actor,
 			planID: planID, planRevision: planRevision, sourceHash: req.SourceHash,
+			skipToken: req.SkipToken,
 		})
 		if err != nil {
 			span.SetStatus(codes.Error, "mcp config apply failed")
@@ -235,13 +236,13 @@ func validateMCPAppRestrictions(doc sdkConfigDocument, kind string) error {
 // createMCPConfigPlan resolves service versions, operations, and auth policy
 // now so apply and later agent calls never need to infer provider setup.
 func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall) (sdkPlanResult, error) {
-	current, registryClient, owner, bucket, err := prepareMCPPlanAdmission(ctx, configStore, s, registryClient, call)
+	current, registryClient, owner, bucket, bucketOverrides, err := prepareMCPPlanAdmission(ctx, configStore, s, registryClient, call)
 	// State, authorization, bucket identity, and quota must all pass before contract resolution begins.
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
 	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
-	selections, services, resolved, credentialSources, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current))
+	selections, services, resolved, credentialSources, stateDoc, buckets, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), *bucket, bucketOverrides)
 	// MCP shares SDK selection/auth decisions rather than implementing an alternate planner.
 	if err != nil {
 		return sdkPlanResult{}, err
@@ -259,7 +260,7 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
-	readiness, err := inspectAppBucketReadiness(ctx, s, *bucket, selections, appReadinessServiceNames(append(append([]sdkResolvedService{}, resolved...), credentialSources...), nil))
+	readiness, err := inspectAppBucketReadiness(ctx, s, buckets, selections, appReadinessServiceNames(append(append([]sdkResolvedService{}, resolved...), credentialSources...), nil))
 	// Mutable credential absence becomes review metadata only after the exact
 	// immutable physical and Unified scope has passed admission.
 	if err != nil {
@@ -274,6 +275,7 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	payload := appResolvedPayload{
 		Description: strings.TrimSpace(call.document.Description),
 		Selections:  selections, ContractBindings: targetBindings, CredentialSourceBindings: credentialSourceBindings, BucketID: bucket.ID,
+		ServiceBuckets:                 appResolvedBucketRefs(buckets.Overrides),
 		UnifiedDefinitionSchemaVersion: unified.DefinitionSchemaVersion,
 		UnifiedDefinitions:             unifiedCompilation.DefinitionJSON,
 		UnifiedDefinitionHash:          unifiedCompilation.DefinitionHash,
@@ -282,7 +284,7 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	}
 	resolvedPayload, _ := json.Marshal(payload)
 	requiredPermissions, requiredCount, err := configPlanRequiredPermissionsWithBuckets(
-		ctx, s, current, serviceNamesFromResolved(resolved), []store.Bucket{*bucket}, call.document.Name,
+		ctx, s, current, serviceNamesFromResolved(resolved), buckets.distinct(), call.document.Name,
 	)
 	// Required permissions remain attached to the plan regardless of contract storage location.
 	if err != nil {
@@ -314,26 +316,26 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 }
 
 // prepareMCPPlanAdmission resolves local planning authority and all non-contract admission checks in one bounded stage.
-func prepareMCPPlanAdmission(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall) (*store.ConfigState, sandbox.RegistryClient, configOwner, *store.Bucket, error) {
+func prepareMCPPlanAdmission(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall) (*store.ConfigState, sandbox.RegistryClient, configOwner, *store.Bucket, map[string]store.Bucket, error) {
 	current, registryClient, err := loadMCPPlanningState(ctx, configStore, s, registryClient, call.request.ConfigKey)
 	// State and local snapshot authority must be available before another immutable version is planned.
 	if err != nil {
-		return nil, nil, configOwner{}, nil, err
+		return nil, nil, configOwner{}, nil, nil, err
 	}
-	owner, bucket, err := resolveAppPlanOwnerAndBucket(ctx, s, current, call.actor, call.request.OwnerTeamSlug, call.document.Bucket)
+	owner, bucket, bucketOverrides, err := resolveAppPlanOwnerAndBucket(ctx, s, current, call.actor, call.request.OwnerTeamSlug, call.document)
 	// Retained provider contracts do not bypass owner or credential-set authorization.
 	if err != nil {
-		return nil, nil, configOwner{}, nil, err
+		return nil, nil, configOwner{}, nil, nil, err
 	}
 	// Capacity is reviewable plan admission, so a full workspace must fail before contract resolution or plan persistence.
 	if err := enforceMCPFamilyLimit(ctx, s, call.accountID, call.document.Name); err != nil {
-		return nil, nil, configOwner{}, nil, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
+		return nil, nil, configOwner{}, nil, nil, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
 	}
 	// The named ingress registration must cover every selected service before the immutable MCP plan is created.
 	if err := validateWebhookAttachmentCoverage(ctx, configStore, s, call.document); err != nil {
-		return nil, nil, configOwner{}, nil, err
+		return nil, nil, configOwner{}, nil, nil, err
 	}
-	return current, registryClient, owner, bucket, nil
+	return current, registryClient, owner, bucket, bucketOverrides, nil
 }
 
 // loadMCPPlanningState admits local-only dependencies before inspecting the existing immutable configuration.
@@ -475,9 +477,17 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 		return mcpConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	runtimeID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(plan.ConfigKey))
+	// decodeAppApplyPlan above already re-verified payload.ServiceBuckets
+	// against live bucket identity, so its entries are trusted here rather
+	// than re-checked a second time for the same immutable JSON bytes.
+	serviceBuckets := make(map[uuid.UUID]store.AppServiceBucketBinding, len(payload.ServiceBuckets))
+	for serviceID, ref := range payload.ServiceBuckets {
+		serviceBuckets[serviceID] = store.AppServiceBucketBinding{BucketID: ref.BucketID, BucketName: ref.BucketName}
+	}
 	scope, err := appRuntimeForApply(persistAppRuntimeParams{
 		accountID: call.accountID, appID: runtimeID, ownerSubjectID: planOwnerSubjectID(plan), ownerTeamID: planOwnerTeamID(plan), bucketID: payload.BucketID, bucketName: doc.Bucket,
-		selections: payload.Selections, scopeSchemaVersion: models.AppScopeSchemaVersion,
+		serviceBuckets: serviceBuckets,
+		selections:     payload.Selections, scopeSchemaVersion: models.AppScopeSchemaVersion,
 		kind: store.AppKindMCP, name: doc.Name, version: doc.Version, configKey: plan.ConfigKey,
 		description:                    payload.Description,
 		unifiedDefinitionSchemaVersion: payload.UnifiedDefinitionSchemaVersion,
@@ -494,7 +504,7 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 		return mcpConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 
-	token, familyID, appID, _, err := applyAppConfigRuntime(ctx, configStore, s, call, plan, scope, doc.Bucket, "", "")
+	token, familyID, appID, _, err := applyAppConfigRuntime(ctx, configStore, s, call, plan, scope, doc.Bucket, serviceBuckets, "", "")
 	// A token is returned only after the canonical lifecycle transaction commits.
 	if err != nil {
 		return mcpConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "workspace_commit", call.planID.String(), "unknown")

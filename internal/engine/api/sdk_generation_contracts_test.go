@@ -242,7 +242,7 @@ func TestSDKGenerationPayloadHidesCredentialSourceBindings(t *testing.T) {
 	payload := resolvedSDKPayload(GenerateSDKRequest{
 		Selections:       []models.SDKSelection{{ServiceID: targetID, ServiceVersionID: targetBinding.ServiceVersionID}},
 		ContractBindings: []models.SDKContractBinding{targetBinding},
-	}, uuid.New(), uuid.New(), false)
+	}, uuid.New(), uuid.New(), false, nil)
 	payload.CredentialSourceBindings = []models.SDKContractBinding{sourceBinding}
 	raw, err := json.Marshal(payload)
 	// The immutable Engine plan must retain both independent revision fences.

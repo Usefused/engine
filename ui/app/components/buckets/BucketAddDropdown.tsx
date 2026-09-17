@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { ChevronDown, Database, KeyRound, Plus } from "lucide-react";
+import { ChevronDown, Database, KeyRound, Lock, Plus } from "lucide-react";
 import { type BucketEntryKind } from "~/lib/buckets";
 
 type BucketAddDropdownProps = {
@@ -42,7 +42,10 @@ export function BucketAddDropdown({ disabled, onSelect, allowedKinds }: BucketAd
       </button>
       {open && (
         <div className="absolute right-0 top-full z-20 mt-2 w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
-          {allowedKinds.includes("secret") && <MenuItem icon={<KeyRound className="w-4 h-4" />} label="Secret" onClick={() => choose("secret")} />}
+          {/* "secret" is a per-service auth credential, so it's labeled "Service Auth" to distinguish it from the generic, service-independent kind below. */}
+          {allowedKinds.includes("secret") && <MenuItem icon={<KeyRound className="w-4 h-4" />} label="Service Auth" onClick={() => choose("secret")} />}
+          {/* Bucket secrets are generic, service-independent credentials (no service selector); labeled plain "Secret" since it's the simpler/default case. */}
+          {allowedKinds.includes("bucket_secret") && <MenuItem icon={<Lock className="w-4 h-4" />} label="Secret" onClick={() => choose("bucket_secret")} />}
           {allowedKinds.includes("value") && <MenuItem icon={<Database className="w-4 h-4" />} label="Env" onClick={() => choose("value")} />}
         </div>
       )}

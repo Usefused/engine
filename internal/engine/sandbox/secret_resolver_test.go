@@ -129,6 +129,70 @@ func TestSecretResolverResolveExecutionCredentials(t *testing.T) {
 	}
 }
 
+// TestSecretResolverResolveExecutionCredentialsUsesPerServiceBucketOverride
+// exercises the two-service, two-bucket scenario called for by the
+// per-service bucket plan: serviceA has no override and resolves through the
+// family default bucket, while serviceB has its own override bucket. Each
+// service must resolve ONLY its own bucket's secret -- a same-named secret
+// seeded in the other bucket must never leak across, proving
+// ResolveExecutionCredentials threads the per-service resolved bucket (not
+// always the family default) into the secret lookup.
+func TestSecretResolverResolveExecutionCredentialsUsesPerServiceBucketOverride(t *testing.T) {
+	ctx := context.Background()
+	appID := uuid.New()
+	serviceA, serviceB := uuid.New(), uuid.New()
+	defaultBucketID, overrideBucketID := uuid.New(), uuid.New()
+	masterKey := []byte("12345678901234567890123456789012")
+
+	wrappedDEK, dek, _ := store.WrapDEK(masterKey)
+	encA, _ := store.EncryptWithDEK(dek, "value-in-default-bucket")
+	encB, _ := store.EncryptWithDEK(dek, "value-in-override-bucket")
+
+	mockStore := &resolverMockStore{
+		appRuntime:             &store.AppRuntime{BucketID: defaultBucketID},
+		serviceBucketOverrides: map[uuid.UUID]uuid.UUID{serviceB: overrideBucketID},
+		secrets: []store.WorkspaceSecret{
+			// serviceA's secret lives only in the family default bucket.
+			{
+				WorkspaceSecretMeta: store.WorkspaceSecretMeta{ServiceID: serviceA, BucketID: defaultBucketID, KeyName: "API_KEY", CredentialType: "string"},
+				EncryptedDEK: wrappedDEK, EncryptedValue: encA,
+			},
+			// serviceB's secret, same key name, lives only in its override
+			// bucket -- if resolution used the family default for serviceB
+			// too, this would never be found and the test would fail closed
+			// rather than silently reading the wrong bucket's value.
+			{
+				WorkspaceSecretMeta: store.WorkspaceSecretMeta{ServiceID: serviceB, BucketID: overrideBucketID, KeyName: "API_KEY", CredentialType: "string"},
+				EncryptedDEK: wrappedDEK, EncryptedValue: encB,
+			},
+		},
+	}
+	resolver := NewSecretResolver(mockStore, masterKey)
+
+	auths := fusedobject.AuthConfigs{{Name: "API_KEY", Type: "apiKey", Location: "header", KeyName: "X-API-Key"}}
+	requirements := singleAuthRequirement("API_KEY")
+
+	credsA, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
+		AppID: appID, ServiceID: serviceA, AuthType: "api_key", Auths: auths, Requirements: requirements,
+	})
+	if err != nil {
+		t.Fatalf("resolve serviceA credentials: %v", err)
+	}
+	if credsA["API_KEY"] != "value-in-default-bucket" {
+		t.Fatalf("serviceA API_KEY = %v, want the default-bucket secret", credsA["API_KEY"])
+	}
+
+	credsB, _, err := resolver.ResolveExecutionCredentials(ctx, CredentialRequest{
+		AppID: appID, ServiceID: serviceB, AuthType: "api_key", Auths: auths, Requirements: requirements,
+	})
+	if err != nil {
+		t.Fatalf("resolve serviceB credentials: %v", err)
+	}
+	if credsB["API_KEY"] != "value-in-override-bucket" {
+		t.Fatalf("serviceB API_KEY = %v, want the override-bucket secret", credsB["API_KEY"])
+	}
+}
+
 // TestSecretResolverReturnsActionableMissingStaticCredential proves an
 // unconfigured published app stops before dispatch with one safe setup command.
 func TestSecretResolverReturnsActionableMissingStaticCredential(t *testing.T) {
@@ -943,6 +1007,14 @@ type resolverMockStore struct {
 	// never match a secret seeded ahead of time.
 	bucketsByName        map[string]*store.Bucket
 	verifyWorkspaceOwner error
+	// serviceBucketOverrides lets a test simulate a per-service bucket
+	// override; ResolveAppFamilyServiceBucket falls back to the same default
+	// bucket GetAppRuntime resolves for any service with no entry here.
+	serviceBucketOverrides map[uuid.UUID]uuid.UUID
+	// cachedDefaultBucketID is lazily generated so GetAppRuntime and
+	// ResolveAppFamilyServiceBucket agree on the same default bucket within one
+	// test even when no appRuntime fixture is seeded.
+	cachedDefaultBucketID uuid.UUID
 	// preserveInvalidRuntime is set only by fail-closed schema tests; ordinary
 	// resolver fixtures receive a current minimal runtime selection by default.
 	preserveInvalidRuntime bool
@@ -997,7 +1069,32 @@ func (m *resolverMockStore) GetAppRuntime(ctx context.Context, appID uuid.UUID) 
 	selections, _ := json.Marshal([]models.SDKSelection{{
 		ServiceID: uuid.New(), ServiceVersionID: uuid.New(), SchemaVersion: models.AppSelectionSchemaVersion,
 	}})
-	return &store.AppRuntime{BucketID: uuid.New(), ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections}, nil
+	return &store.AppRuntime{BucketID: m.resolvedDefaultBucketID(), ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections}, nil
+}
+
+// resolvedDefaultBucketID returns the same bucket GetAppRuntime resolves for
+// this mock (the seeded appRuntime.BucketID, or a stable random default
+// lazily generated on first use) so GetAppRuntime and
+// ResolveAppFamilyServiceBucket never disagree within one test.
+func (m *resolverMockStore) resolvedDefaultBucketID() uuid.UUID {
+	if m.appRuntime != nil {
+		return m.appRuntime.BucketID
+	}
+	if m.cachedDefaultBucketID == uuid.Nil {
+		m.cachedDefaultBucketID = uuid.New()
+	}
+	return m.cachedDefaultBucketID
+}
+
+// ResolveAppFamilyServiceBucket mirrors the real override-else-default
+// fallback: a seeded per-service override wins, otherwise every service
+// shares the same default bucket GetAppRuntime resolves.
+func (m *resolverMockStore) ResolveAppFamilyServiceBucket(ctx context.Context, appFamilyID, serviceID uuid.UUID) (*store.AppFamilyBucket, error) {
+	bucketID := m.resolvedDefaultBucketID()
+	if override, ok := m.serviceBucketOverrides[serviceID]; ok {
+		bucketID = override
+	}
+	return &store.AppFamilyBucket{AppFamilyID: appFamilyID, BucketID: bucketID}, nil
 }
 
 func (m *resolverMockStore) ListSecretsForBucket(ctx context.Context, bucketID, serviceID uuid.UUID) ([]store.WorkspaceSecret, error) {

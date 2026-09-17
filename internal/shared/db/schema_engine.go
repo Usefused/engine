@@ -1567,16 +1567,58 @@ func engineSchemaQueries() []string {
 		);`,
 
 		// All versions in a family resolve through the same connection
-		// profile/credential bucket. Reconfiguration changes the mapping
-		// once without cloning version scopes.
+		// profile/credential bucket by default. An optional service_id lets
+		// one service within the family override that default so an app can
+		// route different services' credentials through different buckets;
+		// the service_id IS NULL row is always the family default.
+		// Reconfiguration changes a mapping in place without cloning version
+		// scopes.
 		`CREATE TABLE IF NOT EXISTS fused_app_family_buckets (
-			app_family_id uuid PRIMARY KEY
+			id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			app_family_id uuid NOT NULL
 			              REFERENCES fused_app_families(app_family_id)
 			              ON DELETE CASCADE,
+			service_id    uuid REFERENCES fused_workspace_services(service_id) ON DELETE RESTRICT,
 			bucket_id     uuid NOT NULL REFERENCES fused_buckets(id) ON DELETE RESTRICT,
 			created_at    timestamptz NOT NULL DEFAULT NOW(),
-			updated_at    timestamptz NOT NULL DEFAULT NOW()
+			updated_at    timestamptz NOT NULL DEFAULT NOW(),
+			UNIQUE (app_family_id, service_id)
 		);`,
+		// Postgres treats every NULL as distinct under a plain UNIQUE
+		// constraint, so "exactly one default (service_id IS NULL) row per
+		// family" requires a partial unique index instead of relying on the
+		// UNIQUE(app_family_id, service_id) constraint above.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_app_family_buckets_default
+			ON fused_app_family_buckets(app_family_id)
+			WHERE service_id IS NULL;`,
+		// Engines created before per-service bucket overrides existed have
+		// app_family_id as the sole primary key and no service_id column;
+		// migrate them in place to the shape declared above without losing
+		// their existing default-bucket rows.
+		`DO $$
+		BEGIN
+			-- The lock makes the primary-key replacement safe across concurrent Engine startups.
+			LOCK TABLE fused_app_family_buckets IN SHARE ROW EXCLUSIVE MODE;
+			ALTER TABLE fused_app_family_buckets ADD COLUMN IF NOT EXISTS id uuid DEFAULT gen_random_uuid();
+			ALTER TABLE fused_app_family_buckets ADD COLUMN IF NOT EXISTS service_id uuid REFERENCES fused_workspace_services(service_id) ON DELETE RESTRICT;
+			UPDATE fused_app_family_buckets SET id = gen_random_uuid() WHERE id IS NULL;
+			ALTER TABLE fused_app_family_buckets ALTER COLUMN id SET NOT NULL;
+			IF EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conrelid = 'fused_app_family_buckets'::regclass
+				  AND contype = 'p'
+				  AND conname = 'fused_app_family_buckets_pkey'
+				  AND conkey = ARRAY[(
+				      SELECT attnum FROM pg_attribute
+				      WHERE attrelid = 'fused_app_family_buckets'::regclass AND attname = 'app_family_id'
+				  )]
+			) THEN
+				ALTER TABLE fused_app_family_buckets DROP CONSTRAINT fused_app_family_buckets_pkey;
+				ALTER TABLE fused_app_family_buckets ADD CONSTRAINT fused_app_family_buckets_pkey PRIMARY KEY (id);
+			END IF;
+			ALTER TABLE fused_app_family_buckets DROP CONSTRAINT IF EXISTS uq_fused_app_family_buckets_family_service;
+			ALTER TABLE fused_app_family_buckets ADD CONSTRAINT uq_fused_app_family_buckets_family_service UNIQUE (app_family_id, service_id);
+		END $$;`,
 
 		// Token history is credential-free and outlives the active hash. Activity
 		// can therefore explain who issued an expired token without retaining a

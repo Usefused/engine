@@ -88,7 +88,16 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	if err != nil {
 		return nil, nil, err
 	}
-	bindings, err := r.loadBucketBindings(ctx, scope.BucketID, request)
+	// A service's own bucket override takes precedence over the family
+	// default; ResolveAppFamilyServiceBucket's single query already encodes
+	// that override-else-default fallback, so this never needs a second
+	// round trip or a separate override lookup.
+	familyBucket, err := r.db.ResolveAppFamilyServiceBucket(ctx, scope.AppFamilyID, request.ServiceID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to resolve execution bucket: %w", err)
+	}
+	bucketID := familyBucket.BucketID
+	bindings, err := r.loadBucketBindings(ctx, bucketID, request)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -107,26 +116,26 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	}
 	// The dispatcher needs the exact resolved bucket only to derive the fallback
 	// connection scope; this internal routing value is stripped before telemetry.
-	finalCreds["fused_bucket_id"] = scope.BucketID.String()
+	finalCreds["fused_bucket_id"] = bucketID.String()
 	if requestbinding.HasDynamicSource(bindings) {
 		finalCreds["fused_resource_required"] = "true"
 	}
 	// Connected families must prove their application registration before an absent user grant can be diagnosed safely.
-	if err := r.ensureConnectedApplicationCredentials(ctx, scope.BucketID, request.ServiceID, request.Auths, request.Requirements, finalCreds, selections); err != nil {
+	if err := r.ensureConnectedApplicationCredentials(ctx, bucketID, request.ServiceID, request.Auths, request.Requirements, finalCreds, selections); err != nil {
 		return nil, nil, err
 	}
-	if err := r.mergeStoredSecrets(ctx, scope.BucketID, request.ServiceID, finalCreds, request.Auths, request.Requirements); err != nil {
+	if err := r.mergeStoredSecrets(ctx, bucketID, request.ServiceID, finalCreds, request.Auths, request.Requirements); err != nil {
 		return nil, nil, err
 	}
-	if err := r.resolveConnectedAuth(ctx, scope.BucketID, request.ServiceID, request.Auths, request.Requirements, finalCreds); err != nil {
+	if err := r.resolveConnectedAuth(ctx, bucketID, request.ServiceID, request.Auths, request.Requirements, finalCreds); err != nil {
 		return nil, nil, err
 	}
-	values, err := resolveRequestBindings(bindings, finalCreds, scope.BucketID)
+	values, err := resolveRequestBindings(bindings, finalCreds, bucketID)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if err := r.resolveDynamicBucketValues(ctx, scope.BucketID, request.ServiceID, values); err != nil {
+	if err := r.resolveDynamicBucketValues(ctx, bucketID, request.ServiceID, values); err != nil {
 		return nil, nil, err
 	}
 

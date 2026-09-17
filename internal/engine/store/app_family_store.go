@@ -998,11 +998,16 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 
 // --- Family buckets ---
 
+// SetAppFamilyBucket upserts the family's default bucket binding (the
+// service_id IS NULL row). Services that don't declare their own override
+// resolve through this row, so the conflict target must match the partial
+// unique index that enforces "exactly one default row per family" rather
+// than a plain column-level unique constraint.
 func (s *postgresStore) SetAppFamilyBucket(ctx context.Context, appFamilyID, bucketID uuid.UUID) error {
 	_, err := s.db.Exec(ctx, `
 		INSERT INTO fused_app_family_buckets (app_family_id, bucket_id)
 		VALUES ($1, $2)
-		ON CONFLICT (app_family_id) DO UPDATE SET
+		ON CONFLICT (app_family_id) WHERE service_id IS NULL DO UPDATE SET
 			bucket_id = EXCLUDED.bucket_id,
 			updated_at = NOW()
 	`, appFamilyID, bucketID)
@@ -1012,12 +1017,15 @@ func (s *postgresStore) SetAppFamilyBucket(ctx context.Context, appFamilyID, buc
 	return nil
 }
 
+// GetAppFamilyBucket returns the family's default bucket binding. The
+// explicit service_id IS NULL filter keeps this scoped to the default row
+// even after per-service overrides exist for the same family.
 func (s *postgresStore) GetAppFamilyBucket(ctx context.Context, appFamilyID uuid.UUID) (*AppFamilyBucket, error) {
 	var fb AppFamilyBucket
 	err := s.db.QueryRow(ctx, `
 		SELECT app_family_id, bucket_id, created_at, updated_at
 		FROM fused_app_family_buckets
-		WHERE app_family_id = $1
+		WHERE app_family_id = $1 AND service_id IS NULL
 	`, appFamilyID).Scan(&fb.AppFamilyID, &fb.BucketID, &fb.CreatedAt, &fb.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrBucketNotFound
@@ -1026,6 +1034,92 @@ func (s *postgresStore) GetAppFamilyBucket(ctx context.Context, appFamilyID uuid
 		return nil, fmt.Errorf("get app family bucket: %w", err)
 	}
 	return &fb, nil
+}
+
+// SetAppFamilyServiceBucket upserts a per-service bucket override for one
+// family. The conflict target is the UNIQUE(app_family_id, service_id)
+// constraint, distinct from the default row's partial unique index because
+// service_id is never NULL here.
+func (s *postgresStore) SetAppFamilyServiceBucket(ctx context.Context, appFamilyID, serviceID, bucketID uuid.UUID) error {
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO fused_app_family_buckets (app_family_id, service_id, bucket_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (app_family_id, service_id) DO UPDATE SET
+			bucket_id = EXCLUDED.bucket_id,
+			updated_at = NOW()
+	`, appFamilyID, serviceID, bucketID)
+	if err != nil {
+		return fmt.Errorf("set app family service bucket: %w", err)
+	}
+	return nil
+}
+
+// DeleteAppFamilyServiceBucket removes a per-service override, reverting
+// that service to the family default bucket on the next resolution. It is a
+// no-op (not an error) when no override exists, matching apply's "diff and
+// remove" semantics for reverted overrides.
+func (s *postgresStore) DeleteAppFamilyServiceBucket(ctx context.Context, appFamilyID, serviceID uuid.UUID) error {
+	_, err := s.db.Exec(ctx, `
+		DELETE FROM fused_app_family_buckets
+		WHERE app_family_id = $1 AND service_id = $2
+	`, appFamilyID, serviceID)
+	if err != nil {
+		return fmt.Errorf("delete app family service bucket: %w", err)
+	}
+	return nil
+}
+
+// ResolveAppFamilyServiceBucket returns the bucket a specific service
+// resolves through: its own override if one exists, otherwise the family
+// default. ORDER BY service_id NULLS LAST plus LIMIT 1 lets a single query
+// prefer the override row over the default row without a second round trip
+// (this is the hot path used by runtime credential resolution).
+func (s *postgresStore) ResolveAppFamilyServiceBucket(ctx context.Context, appFamilyID, serviceID uuid.UUID) (*AppFamilyBucket, error) {
+	var fb AppFamilyBucket
+	err := s.db.QueryRow(ctx, `
+		SELECT app_family_id, bucket_id, created_at, updated_at
+		FROM fused_app_family_buckets
+		WHERE app_family_id = $1 AND (service_id = $2 OR service_id IS NULL)
+		ORDER BY service_id NULLS LAST
+		LIMIT 1
+	`, appFamilyID, serviceID).Scan(&fb.AppFamilyID, &fb.BucketID, &fb.CreatedAt, &fb.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrBucketNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve app family service bucket: %w", err)
+	}
+	return &fb, nil
+}
+
+// ListAppFamilyServiceBuckets batches every per-service override for one
+// family into a single query, keyed by service ID, so plan/apply diffing
+// (deciding which overrides to add/update/remove) never issues one query
+// per service.
+func (s *postgresStore) ListAppFamilyServiceBuckets(ctx context.Context, appFamilyID uuid.UUID) (map[uuid.UUID]AppFamilyBucket, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT app_family_id, service_id, bucket_id, created_at, updated_at
+		FROM fused_app_family_buckets
+		WHERE app_family_id = $1 AND service_id IS NOT NULL
+	`, appFamilyID)
+	if err != nil {
+		return nil, fmt.Errorf("list app family service buckets: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[uuid.UUID]AppFamilyBucket)
+	for rows.Next() {
+		var fb AppFamilyBucket
+		var serviceID uuid.UUID
+		if err := rows.Scan(&fb.AppFamilyID, &serviceID, &fb.BucketID, &fb.CreatedAt, &fb.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan app family service bucket: %w", err)
+		}
+		out[serviceID] = fb
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list app family service buckets: %w", err)
+	}
+	return out, nil
 }
 
 func (s *postgresStore) AppTombstoneExists(ctx context.Context, appFamilyID uuid.UUID, version string) (bool, error) {

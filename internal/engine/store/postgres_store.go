@@ -233,7 +233,8 @@ func (s *postgresStore) GetAppRuntime(ctx context.Context, appID uuid.UUID) (*Ap
 		SELECT ` + appRuntimeSelectColumns + `
 		FROM fused_apps a
 		JOIN fused_app_families f ON f.app_family_id = a.app_family_id AND f.account_id = a.account_id
-		LEFT JOIN fused_app_family_buckets fb ON fb.app_family_id = f.app_family_id
+		-- service_id IS NULL keeps this the family default row even once per-service overrides exist for the family.
+		LEFT JOIN fused_app_family_buckets fb ON fb.app_family_id = f.app_family_id AND fb.service_id IS NULL
 		WHERE a.app_id = $1 AND a.status IN ('active', 'deprecated')
 	`
 	scope, err := scanAppRuntime(s.db.QueryRow(ctx, query, appID))
@@ -262,7 +263,8 @@ func (s *postgresStore) ListAppRuntimes(ctx context.Context, appIDs []uuid.UUID)
 		SELECT ` + appRuntimeSelectColumns + `
 		FROM fused_apps a
 		JOIN fused_app_families f ON f.app_family_id = a.app_family_id AND f.account_id = a.account_id
-		LEFT JOIN fused_app_family_buckets fb ON fb.app_family_id = f.app_family_id
+		-- service_id IS NULL keeps this the family default row even once per-service overrides exist for the family.
+		LEFT JOIN fused_app_family_buckets fb ON fb.app_family_id = f.app_family_id AND fb.service_id IS NULL
 		WHERE a.app_id = ANY($1::uuid[]) AND a.status IN ('active', 'deprecated')
 	`
 	rows, err := s.db.Query(ctx, query, appIDs)
@@ -303,7 +305,8 @@ func (s *postgresStore) ListAuthorizedAppRuntimesByAccount(ctx context.Context, 
 		SELECT ` + appRuntimeSelectColumns + `, COUNT(*) OVER()
 		FROM fused_apps a
 		JOIN fused_app_families f ON f.app_family_id = a.app_family_id AND f.account_id = a.account_id
-		LEFT JOIN fused_app_family_buckets fb ON fb.app_family_id = f.app_family_id
+		-- service_id IS NULL keeps this the family default row even once per-service overrides exist for the family.
+		LEFT JOIN fused_app_family_buckets fb ON fb.app_family_id = f.app_family_id AND fb.service_id IS NULL
 		WHERE a.account_id = $1 AND ($2 = '' OR f.kind = $2)
 		  AND a.status IN ('active', 'deprecated')
 		  AND ($3 OR a.app_family_id = ANY($4::uuid[]))
@@ -340,7 +343,8 @@ func (s *postgresStore) GetMCPAppByName(ctx context.Context, accountID uuid.UUID
 		SELECT ` + appRuntimeSelectColumns + `
 		FROM fused_apps a
 		JOIN fused_app_families f ON f.app_family_id = a.app_family_id AND f.account_id = a.account_id
-		LEFT JOIN fused_app_family_buckets fb ON fb.app_family_id = f.app_family_id
+		-- service_id IS NULL keeps this the family default row even once per-service overrides exist for the family.
+		LEFT JOIN fused_app_family_buckets fb ON fb.app_family_id = f.app_family_id AND fb.service_id IS NULL
 		WHERE a.account_id = $1 AND f.kind = 'mcp' AND f.canonical_name = $2
 		  AND a.status IN ('active', 'deprecated')
 	`

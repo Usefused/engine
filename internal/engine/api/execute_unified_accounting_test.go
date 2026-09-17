@@ -194,6 +194,17 @@ func (fixture *unifiedConnectedAuthStore) GetAppRuntime(_ context.Context, appID
 	return &copy, nil
 }
 
+// ResolveAppFamilyServiceBucket returns this fixture's single family bucket
+// for every service -- no test using this fixture seeds a per-service
+// override, so the family default is always the correct answer.
+func (fixture *unifiedConnectedAuthStore) ResolveAppFamilyServiceBucket(_ context.Context, appFamilyID, _ uuid.UUID) (*store.AppFamilyBucket, error) {
+	if fixture.appRuntime == nil {
+		return nil, errors.New("app runtime not found")
+	}
+	return &store.AppFamilyBucket{AppFamilyID: appFamilyID, BucketID: fixture.appRuntime.BucketID}, nil
+}
+
+
 // ListWorkspaceBindingsForExecution proves the resolver uses the exact
 // service/version/operation query without needing fixture-specific bindings.
 func (fixture *unifiedConnectedAuthStore) ListWorkspaceBindingsForExecution(_ context.Context, _, _, _ uuid.UUID, _, _ string) ([]store.WorkspaceConnectionBinding, error) {

@@ -1895,6 +1895,55 @@ export const api = {
         }),
       }),
 
+    // OAuth/OIDC application pairs are Engine-owned semantic families, not row
+    // pairs the caller names itself, so they go through the bulk endpoint's
+    // credential_family shape instead of the generic secrets[] rows below.
+    upsertCredentialFamily: (payload: {
+      bucketId: string;
+      serviceId: string;
+      credentialType: string;
+      authName: string;
+      clientId: string;
+      clientSecret: string;
+      expiresAt?: string;
+    }) =>
+      req<void>("/workspace/secrets/bulk", {
+        method: "PUT",
+        body: JSON.stringify({
+          bucket_id: payload.bucketId,
+          credential_family: {
+            service_id: payload.serviceId,
+            credential_type: payload.credentialType,
+            auth_name: payload.authName,
+            values: {
+              client_id: payload.clientId,
+              client_secret: payload.clientSecret,
+            },
+            expires_at: payload.expiresAt || undefined,
+          },
+        }),
+      }),
+
+    // A bucket secret has no service_id: it's referenced generically (e.g.
+    // ${bucket.secrets.<key>}) rather than resolved through a workspace service.
+    upsertBucketSecret: (payload: {
+      bucketId: string;
+      keyName: string;
+      value: string;
+      expiresAt?: string;
+    }) =>
+      req<void>(
+        `/workspace/buckets/${encodeURIComponent(payload.bucketId)}/secrets`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            key_name: payload.keyName,
+            value: payload.value,
+            expires_at: payload.expiresAt || undefined,
+          }),
+        }
+      ),
+
     upsertSecrets: (payload: {
       bucketId: string;
       secrets: Array<{

@@ -254,9 +254,19 @@ type ApplyAppConfigPlanParams struct {
 	Plan                 ApplyConfigPlanParams
 	Scope                AppRuntime
 	AuthorizedBucketName string
-	TokenHash            string
-	TokenName            string
-	TokenPolicy          AppTokenPolicy
+	// SkipTokenIssuance opts a family's first-ever apply out of automatic
+	// token creation, for callers who will mint their own token separately
+	// (see fused-cli sdk|mcp token generate). Ignored once a family already
+	// has a token -- ensureAppFamilyTokenTx is already a no-op then.
+	SkipTokenIssuance bool
+	// AuthorizedServiceBuckets carries every per-service bucket override
+	// (keyed by ServiceID) already re-verified against live bucket identity by
+	// the API layer, mirroring AuthorizedBucketName's role for the family
+	// default bucket. A nil/empty map means no service overrides its bucket.
+	AuthorizedServiceBuckets map[uuid.UUID]AppServiceBucketBinding
+	TokenHash                string
+	TokenName                string
+	TokenPolicy              AppTokenPolicy
 	// Token issuer identity is distinct from the account-level config author so
 	// durable token audit references the authenticated local principal.
 	TokenIssuedBySubjectID    *uuid.UUID
@@ -276,6 +286,15 @@ type ApplyAppConfigPlanResult struct {
 	AppID          uuid.UUID
 	VersionCreated bool
 	TokenCreated   bool
+}
+
+// AppServiceBucketBinding pairs a resolved bucket ID with the authored bucket
+// name it must still match at apply time, mirroring AuthorizedBucketName's
+// re-verification pattern for the family default bucket, but scoped to a
+// single service's override.
+type AppServiceBucketBinding struct {
+	BucketID   uuid.UUID
+	BucketName string
 }
 
 // ApplyWebhookConfigPlanParams places the complete Engine-owned webhook
@@ -721,6 +740,13 @@ func prepareAppApplyTx(ctx context.Context, tx pgx.Tx, params *ApplyAppConfigPla
 	if err := verifyAuthorizedAppBucketTx(ctx, tx, params.Scope.BucketID, params.AuthorizedBucketName); err != nil {
 		return err
 	}
+	// Every per-service override must independently match a live bucket by
+	// ID and name before any of them can be trusted for this apply.
+	for _, binding := range params.AuthorizedServiceBuckets {
+		if err := verifyAuthorizedAppBucketTx(ctx, tx, binding.BucketID, binding.BucketName); err != nil {
+			return err
+		}
+	}
 	params.Plan.State.OwnerSubjectID = ownerSubjectID
 	params.Plan.State.OwnerTeamID = ownerTeamID
 	return validateStateParams(&params.Plan.State)
@@ -755,6 +781,11 @@ func persistAppRuntimeTx(ctx context.Context, tx pgx.Tx, params *ApplyAppConfigP
 	}
 	// Bucket selection is immutable at family scope and must precede publication.
 	if err := bindAppFamilyBucketTx(ctx, tx, familyID, params.Scope.BucketID); err != nil {
+		return uuid.Nil, uuid.Nil, false, false, err
+	}
+	// Per-service overrides are bound (or cleared, if reverted) right after the
+	// family default so runtime resolution always sees a consistent picture.
+	if err := bindAppFamilyServiceBucketsTx(ctx, tx, familyID, params.AuthorizedServiceBuckets); err != nil {
 		return uuid.Nil, uuid.Nil, false, false, err
 	}
 	appStatus := params.AppStatus
@@ -852,7 +883,7 @@ func bindAppFamilyBucketTx(ctx context.Context, tx pgx.Tx, familyID, bucketID uu
 	err := tx.QueryRow(ctx, `
 		INSERT INTO fused_app_family_buckets AS binding (app_family_id, bucket_id)
 		VALUES ($1, $2)
-		ON CONFLICT (app_family_id) DO UPDATE SET updated_at = binding.updated_at
+		ON CONFLICT (app_family_id) WHERE service_id IS NULL DO UPDATE SET updated_at = binding.updated_at
 		WHERE binding.bucket_id = EXCLUDED.bucket_id
 		RETURNING bucket_id
 	`, familyID, bucketID).Scan(&bound)
@@ -861,6 +892,47 @@ func bindAppFamilyBucketTx(ctx context.Context, tx pgx.Tx, familyID, bucketID uu
 	}
 	if err != nil {
 		return fmt.Errorf("ApplyAppConfigPlan: bind family bucket: %w", err)
+	}
+	return nil
+}
+
+// bindAppFamilyServiceBucketsTx reconciles every per-service bucket override
+// for one app family: reverted overrides (present at a prior apply, absent
+// now) are deleted so runtime resolution falls back to the family default
+// rather than keeping a stale routing row, and every remaining override is
+// upserted by service_id. overrides may be nil/empty, meaning "no service
+// overrides its bucket" -- in that case every existing override row is
+// cleared.
+func bindAppFamilyServiceBucketsTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, overrides map[uuid.UUID]AppServiceBucketBinding) error {
+	serviceIDs := make([]uuid.UUID, 0, len(overrides))
+	bucketIDs := make([]uuid.UUID, 0, len(overrides))
+	for serviceID, binding := range overrides {
+		serviceIDs = append(serviceIDs, serviceID)
+		bucketIDs = append(bucketIDs, binding.BucketID)
+	}
+	// NOT (service_id = ANY(serviceIDs)) is true for every existing override
+	// row when serviceIDs is empty, so this single statement also handles
+	// "clear every override" without a separate branch.
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM fused_app_family_buckets
+		WHERE app_family_id = $1 AND service_id IS NOT NULL AND NOT (service_id = ANY($2::uuid[]))
+	`, familyID, serviceIDs); err != nil {
+		return fmt.Errorf("ApplyAppConfigPlan: revert stale family service buckets: %w", err)
+	}
+	// Nothing left to upsert once stale rows are cleared and no overrides are desired.
+	if len(overrides) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO fused_app_family_buckets (app_family_id, service_id, bucket_id)
+		SELECT $1, service_id, bucket_id
+		FROM unnest($2::uuid[], $3::uuid[]) AS t(service_id, bucket_id)
+		ON CONFLICT (app_family_id, service_id) DO UPDATE SET
+			bucket_id = EXCLUDED.bucket_id,
+			updated_at = NOW()
+	`, familyID, serviceIDs, bucketIDs)
+	if err != nil {
+		return fmt.Errorf("ApplyAppConfigPlan: bind family service buckets: %w", err)
 	}
 	return nil
 }
@@ -987,6 +1059,11 @@ func validSDKGenerationRetryTarget(status AppStatus, generationStatus string) bo
 }
 
 func ensureAppFamilyTokenTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, params ApplyAppConfigPlanParams) (bool, error) {
+	// The caller intends to mint their own token later; leave the family
+	// without one rather than creating material nobody asked for.
+	if params.SkipTokenIssuance {
+		return false, nil
+	}
 	var tokenExists bool
 	// Locking the family serializes the check-and-create boundary across app
 	// versions without widening uniqueness rules onto retained token history.

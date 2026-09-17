@@ -325,8 +325,10 @@ func (policy AppTokenPolicy) AllowsOperation(operation string) bool {
 	return false
 }
 
-// AppFamilyBucket maps a family to its credential bucket. All versions in
-// the family resolve through the same bucket.
+// AppFamilyBucket maps a family (optionally scoped to one service) to a
+// credential bucket. A row with no per-service override represents the
+// family's default bucket, which every service resolves through unless it
+// has its own override row.
 type AppFamilyBucket struct {
 	AppFamilyID uuid.UUID
 	BucketID    uuid.UUID
@@ -938,6 +940,16 @@ type Store interface {
 	// Family buckets
 	SetAppFamilyBucket(ctx context.Context, appFamilyID, bucketID uuid.UUID) error
 	GetAppFamilyBucket(ctx context.Context, appFamilyID uuid.UUID) (*AppFamilyBucket, error)
+	// SetAppFamilyServiceBucket and DeleteAppFamilyServiceBucket manage a
+	// per-service override on top of the family default above.
+	SetAppFamilyServiceBucket(ctx context.Context, appFamilyID, serviceID, bucketID uuid.UUID) error
+	DeleteAppFamilyServiceBucket(ctx context.Context, appFamilyID, serviceID uuid.UUID) error
+	// ResolveAppFamilyServiceBucket is the runtime-path lookup: override if
+	// present, else the family default.
+	ResolveAppFamilyServiceBucket(ctx context.Context, appFamilyID, serviceID uuid.UUID) (*AppFamilyBucket, error)
+	// ListAppFamilyServiceBuckets batches every override for a family, keyed
+	// by service ID, for plan/apply diffing without N+1 queries.
+	ListAppFamilyServiceBuckets(ctx context.Context, appFamilyID uuid.UUID) (map[uuid.UUID]AppFamilyBucket, error)
 
 	// App tombstones
 	AppTombstoneExists(ctx context.Context, appFamilyID uuid.UUID, version string) (bool, error)

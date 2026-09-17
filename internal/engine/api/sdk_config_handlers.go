@@ -51,6 +51,12 @@ type SDKConfigPlanRequest struct {
 type SDKConfigApplyRequest struct {
 	PlanID     string `json:"plan_id"`
 	SourceHash string `json:"source_hash"`
+	// SkipToken opts a first-ever apply for an app family out of automatic
+	// execution-token issuance, for callers who will mint their own token via
+	// POST /workspace/app-tokens (see fused-cli sdk|mcp token generate).
+	// Ignored once a family already has a token, and unused by webhook apply
+	// (webhook configs never create an app runtime or token).
+	SkipToken bool `json:"skip_token,omitempty"`
 }
 
 type sdkConfigDocument struct {
@@ -101,7 +107,12 @@ type sdkConfigServiceDoc struct {
 	WebhooksSelectAll bool              `json:"webhooks_select_all,omitempty"`
 	Auth              *sdkAppAuthDoc    `json:"auth,omitempty"`
 	Connect           *sdkAppConnectDoc `json:"connect,omitempty"`
-	Injections        []InjectionConfig `json:"injections,omitempty"`
+	// Bucket overrides the app-level default sdkConfigDocument.Bucket for
+	// this service only, so one app can route different services'
+	// credentials through different buckets. Empty means this service
+	// resolves through the app-level default bucket (today's behavior).
+	Bucket     string            `json:"bucket,omitempty"`
+	Injections []InjectionConfig `json:"injections,omitempty"`
 }
 
 type sdkAppAuthDoc struct {
@@ -118,13 +129,76 @@ type GenerateSDKRequest = models.SDKGenerationRequest
 
 type sdkContractBinding = models.SDKContractBinding
 
+// appResolvedBucketRef pins one resolved bucket's identity (ID and the
+// authored name that produced it) so apply can re-verify it did not change
+// between plan and apply, the same way appResolvedPayload.BucketID is
+// re-verified against sdkConfigDocument.Bucket via validateAppBucketIdentity.
+type appResolvedBucketRef struct {
+	BucketID   uuid.UUID `json:"bucket_id"`
+	BucketName string    `json:"bucket_name"`
+}
+
+// appResolvedBucketRefs converts the plan-time ServiceID-keyed override map
+// into the wire/persistence shape stored on appResolvedPayload.
+func appResolvedBucketRefs(serviceBuckets map[uuid.UUID]store.Bucket) map[uuid.UUID]appResolvedBucketRef {
+	if len(serviceBuckets) == 0 {
+		return nil
+	}
+	refs := make(map[uuid.UUID]appResolvedBucketRef, len(serviceBuckets))
+	for serviceID, bucket := range serviceBuckets {
+		refs[serviceID] = appResolvedBucketRef{BucketID: bucket.ID, BucketName: bucket.Name}
+	}
+	return refs
+}
+
+// appBucketSet is the full set of buckets one plan/apply touches: the family
+// default plus every per-service override, keyed by resolved ServiceID.
+// Threading one set through readiness/permissions/auth-ref/persistence keeps
+// "one default + N overrides" from becoming N parallel single-bucket code
+// paths.
+type appBucketSet struct {
+	Default   store.Bucket
+	Overrides map[uuid.UUID]store.Bucket
+}
+
+// forService returns the bucket a given service resolves through: its own
+// override if one exists, otherwise the family default.
+func (b appBucketSet) forService(serviceID uuid.UUID) store.Bucket {
+	if override, ok := b.Overrides[serviceID]; ok {
+		return override
+	}
+	return b.Default
+}
+
+// distinct returns every unique bucket in the set (default plus overrides),
+// deduplicated by ID, for callers that need the full RBAC/readiness surface
+// rather than a per-service lookup.
+func (b appBucketSet) distinct() []store.Bucket {
+	seen := map[uuid.UUID]bool{b.Default.ID: true}
+	out := []store.Bucket{b.Default}
+	for _, bucket := range b.Overrides {
+		if seen[bucket.ID] {
+			continue
+		}
+		seen[bucket.ID] = true
+		out = append(out, bucket)
+	}
+	return out
+}
+
 // appResolvedPayload is the shared, generation-free record of resolved
 // selections used by both SDK and MCP config apply. SDK generation adds its
 // Registry-specific fields separately, while MCP never carries a target.
 type appResolvedPayload struct {
-	AppID                          uuid.UUID                              `json:"app_id,omitempty"`
-	Noop                           bool                                   `json:"noop,omitempty"`
-	BucketID                       uuid.UUID                              `json:"bucket_id"`
+	AppID    uuid.UUID `json:"app_id,omitempty"`
+	Noop     bool      `json:"noop,omitempty"`
+	BucketID uuid.UUID `json:"bucket_id"`
+	// ServiceBuckets holds the resolved bucket for each service that
+	// declares its own override, keyed by the immutable resolved ServiceID
+	// (not the authored config key, so apply-time re-verification and
+	// persistence survive a service being re-keyed between plan and apply).
+	// Services without an entry resolve through BucketID (the family default).
+	ServiceBuckets                 map[uuid.UUID]appResolvedBucketRef     `json:"service_buckets,omitempty"`
 	Name                           string                                 `json:"name,omitempty"`
 	Description                    string                                 `json:"description,omitempty"`
 	Version                        string                                 `json:"version,omitempty"`
@@ -167,6 +241,10 @@ type sdkPlanDefinition struct {
 	resolvedPayload  json.RawMessage
 	noop             bool
 	readiness        *appCredentialReadiness
+	// buckets is the default plus every per-service override this plan
+	// resolved, kept on the definition so the caller can compute required
+	// permissions across the full bucket set without re-resolving it.
+	buckets appBucketSet
 }
 
 type notificationInbox struct {
@@ -190,6 +268,10 @@ type sdkApplyCall struct {
 	planRevision int
 	applyLeaseID uuid.UUID
 	sourceHash   string
+	// skipToken carries SDKConfigApplyRequest.SkipToken through to
+	// applyAppConfigRuntime, the one function shared by SDK and MCP apply
+	// that issues a family's first execution token.
+	skipToken bool
 }
 
 type sdkGenerationResult struct {
@@ -295,6 +377,7 @@ func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, pr
 			planID:       planID,
 			planRevision: planRevision,
 			sourceHash:   req.SourceHash,
+			skipToken:    req.SkipToken,
 		})
 		if err != nil {
 			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "apply_execution", planID.String(), "unknown"), ctx)
@@ -565,6 +648,11 @@ func decodeAppApplyPlan(ctx context.Context, configStore store.ConfigRepository,
 	if err != nil {
 		return sdkConfigDocument{}, appResolvedPayload{}, err
 	}
+	// Every per-service override gets the same immutable-identity re-check as
+	// the family default before apply may persist or trust any of them.
+	if _, err := validateAppServiceBucketIdentities(ctx, s, payload.ServiceBuckets); err != nil {
+		return sdkConfigDocument{}, appResolvedPayload{}, err
+	}
 	// Credential values are mutable runtime dependencies, so apply preserves the
 	// immutable bucket identity without requiring the bucket to be ready now.
 	if err := validateWebhookAttachmentCoverage(ctx, configStore, s, doc); err != nil {
@@ -781,8 +869,8 @@ func createSDKConfigPlan(
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
-	owner, bucket, err := resolveAppPlanOwnerAndBucket(
-		ctx, s, currentState, call.actor, call.request.OwnerTeamSlug, call.document.Bucket,
+	owner, bucket, bucketOverrides, err := resolveAppPlanOwnerAndBucket(
+		ctx, s, currentState, call.actor, call.request.OwnerTeamSlug, call.document,
 	)
 	// Bucket and owner authorization remain independent of contract retention.
 	if err != nil {
@@ -797,14 +885,14 @@ func createSDKConfigPlan(
 		return sdkPlanResult{}, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
 	}
 	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
-	definition, err := resolveSDKPlanDefinition(ctx, configStore, s, registryClient, call, currentState, *bucket, appID)
+	definition, err := resolveSDKPlanDefinition(ctx, configStore, s, registryClient, call, currentState, *bucket, bucketOverrides, appID)
 	// Incomplete pin, auth, or selection resolution cannot become a stored plan.
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
 	notifications := sdkPlanNotifications(ctx, configStore, registryClient, call, definition.resolvedServices, definition.noop)
 	requiredPermissions, requiredCount, err := configPlanRequiredPermissionsWithBuckets(
-		ctx, s, appPermissionState(currentState, appID), serviceNamesFromResolved(definition.resolvedServices), []store.Bucket{*bucket}, call.document.Name,
+		ctx, s, appPermissionState(currentState, appID), serviceNamesFromResolved(definition.resolvedServices), definition.buckets.distinct(), call.document.Name,
 	)
 	// A retained contract grants no additional control-plane permissions.
 	if err != nil {
@@ -851,8 +939,8 @@ func sdkConfigGeneratesPackage(doc sdkConfigDocument) bool {
 }
 
 // resolveSDKPlanDefinition resolves sdk plan definition from immutable app scope before provider dispatch.
-func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall, current *store.ConfigState, bucket store.Bucket, appID uuid.UUID) (sdkPlanDefinition, error) {
-	selections, services, resolvedServices, credentialSources, stateDoc, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current))
+func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall, current *store.ConfigState, bucket store.Bucket, bucketOverrides map[string]store.Bucket, appID uuid.UUID) (sdkPlanDefinition, error) {
+	selections, services, resolvedServices, credentialSources, stateDoc, buckets, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), bucket, bucketOverrides)
 	// Selection/auth admission must precede generation identity binding.
 	if err != nil {
 		return sdkPlanDefinition{}, err
@@ -873,7 +961,7 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 	if err := validateDirectAPIOpenAPIPlan(ctx, s, call.document, appID, selections, unifiedCompilation); err != nil {
 		return sdkPlanDefinition{}, err
 	}
-	readiness, err := inspectAppBucketReadiness(ctx, s, bucket, selections, appReadinessServiceNames(append(append([]sdkResolvedService{}, resolvedServices...), credentialSources...), nil))
+	readiness, err := inspectAppBucketReadiness(ctx, s, buckets, selections, appReadinessServiceNames(append(append([]sdkResolvedService{}, resolvedServices...), credentialSources...), nil))
 	// Read failures remain planning failures, while authoritative absence becomes
 	// metadata only after immutable physical and Unified scope admission.
 	if err != nil {
@@ -892,14 +980,14 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 	}
 	generationRequest := sdkGenerateRequest(call.document, selections, targetBindings, call.defaultEngineURL)
 	generationRequest.UnifiedOperations = unifiedCompilation.Descriptors
-	payload := resolvedSDKPayload(generationRequest, bucket.ID, appID, noop)
+	payload := resolvedSDKPayload(generationRequest, bucket.ID, appID, noop, buckets.Overrides)
 	payload.CredentialSourceBindings = credentialSourceBindings
 	payload.UnifiedDefinitionSchemaVersion = unified.DefinitionSchemaVersion
 	payload.UnifiedDefinitions = unifiedCompilation.DefinitionJSON
 	payload.UnifiedDefinitionHash = unifiedCompilation.DefinitionHash
 	payload.UnifiedCodegenDescriptorHash = unifiedCompilation.CodegenDescriptorHash
 	resolvedPayload, _ := json.Marshal(payload)
-	return sdkPlanDefinition{services: services, resolvedServices: resolvedServices, desiredState: desiredState, resolvedPayload: resolvedPayload, noop: noop, readiness: readiness}, nil
+	return sdkPlanDefinition{services: services, resolvedServices: resolvedServices, desiredState: desiredState, resolvedPayload: resolvedPayload, noop: noop, readiness: readiness, buckets: buckets}, nil
 }
 
 // sdkPlanIsNoop requires canonical desired state and compiled Unified hashes to match the existing app runtime.
@@ -964,23 +1052,60 @@ func optionalAppID(id uuid.UUID) *uuid.UUID {
 	return &id
 }
 
+// resolveAppPlanOwnerAndBucket resolves plan owner authorization plus every
+// bucket this plan can touch: the family default and, keyed by authored
+// service name, any per-service override. RBAC for overrides is not checked
+// here -- every returned bucket later feeds configPlanRequiredPermissionsWithBuckets,
+// which is the single place bucket-scoped permissions are computed.
 func resolveAppPlanOwnerAndBucket(
 	ctx context.Context,
 	s store.Store,
 	current *store.ConfigState,
 	actor accesscontrol.Actor,
 	requestedOwnerTeamSlug string,
-	bucketName string,
-) (configOwner, *store.Bucket, error) {
+	doc sdkConfigDocument,
+) (configOwner, *store.Bucket, map[string]store.Bucket, error) {
 	owner, err := resolveConfigPlanOwner(ctx, s, current, actor, requestedOwnerTeamSlug)
 	if err != nil {
-		return configOwner{}, nil, err
+		return configOwner{}, nil, nil, err
 	}
-	bucket, err := resolveAppBucket(ctx, s, bucketName)
+	bucket, err := resolveAppBucket(ctx, s, doc.Bucket)
 	if err != nil {
-		return configOwner{}, nil, err
+		return configOwner{}, nil, nil, err
 	}
-	return owner, bucket, nil
+	overrides, err := resolveAppServiceBucketOverrides(ctx, s, doc)
+	if err != nil {
+		return configOwner{}, nil, nil, err
+	}
+	return owner, bucket, overrides, nil
+}
+
+// resolveAppServiceBucketOverrides resolves each distinct per-service bucket
+// override name declared in doc.Services, keyed by the authored service key
+// (the same map key resolveSDKSelections iterates over). Lookups are cached
+// per distinct bucket name so a config with many services on the same
+// override bucket does not repeat the same existence check.
+func resolveAppServiceBucketOverrides(ctx context.Context, s store.Store, doc sdkConfigDocument) (map[string]store.Bucket, error) {
+	byName := make(map[string]store.Bucket)
+	result := make(map[string]store.Bucket, len(doc.Services))
+	for serviceKey, serviceDoc := range doc.Services {
+		name := strings.TrimSpace(serviceDoc.Bucket)
+		// Empty override means this service resolves through the family default bucket.
+		if name == "" {
+			continue
+		}
+		bucket, ok := byName[name]
+		if !ok {
+			resolved, err := resolveAppBucket(ctx, s, name)
+			if err != nil {
+				return nil, err
+			}
+			bucket = *resolved
+			byName[name] = bucket
+		}
+		result[serviceKey] = bucket
+	}
+	return result, nil
 }
 
 // resolveSDKSelections resolves sdk selections from immutable app scope before provider dispatch.
@@ -993,12 +1118,14 @@ func resolveSDKSelections(
 
 	doc sdkConfigDocument,
 	previous sdkConfigDocument,
-) ([]models.SDKSelection, []map[string]any, []sdkResolvedService, []sdkResolvedService, sdkConfigDocument, error) {
+	defaultBucket store.Bucket,
+	bucketOverrides map[string]store.Bucket,
+) ([]models.SDKSelection, []map[string]any, []sdkResolvedService, []sdkResolvedService, sdkConfigDocument, appBucketSet, error) {
 	doc = canonicalAppDocument(doc)
 	services, err := workspaceServicesByConfigKey(ctx, s, registryClient, apiKey, doc)
 	// Exact service identity must be known before any allowed-version membership is checked.
 	if err != nil {
-		return nil, nil, nil, nil, sdkConfigDocument{}, err
+		return nil, nil, nil, nil, sdkConfigDocument{}, appBucketSet{}, err
 	}
 	// One batched lookup for every service this SDK config references,
 	// instead of one ListWorkspaceServiceVersions call per service inside the
@@ -1006,19 +1133,23 @@ func resolveSDKSelections(
 	allowedVersions, err := s.ListWorkspaceServiceVersionsForServices(ctx, sdkReferencedServiceIDs(doc, services))
 	// A failed batch cannot be interpreted as permission to use any Registry version.
 	if err != nil {
-		return nil, nil, nil, nil, sdkConfigDocument{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to list allowed versions"}
+		return nil, nil, nil, nil, sdkConfigDocument{}, appBucketSet{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to list allowed versions"}
 	}
 	var selections []models.SDKSelection
 	var summary []map[string]any
 	var resolved []sdkResolvedService
 	stateDoc := doc
 	stateDoc.Services = make(map[string]sdkConfigServiceDoc, len(doc.Services))
+	// serviceBucketOverrides is keyed by resolved ServiceID (not the authored
+	// config key) so it survives being merged into an appBucketSet alongside
+	// selections/auth-ref checks that only carry ServiceID, not the config key.
+	serviceBucketOverrides := make(map[uuid.UUID]store.Bucket, len(bucketOverrides))
 	for serviceName, serviceDoc := range doc.Services {
 		activation, ok := services[serviceName]
 		resolvedServiceVersionID, resolvedVersionStr, err := validateSDKServiceSelection(serviceName, serviceDoc, activation, ok, allowedVersions)
 		// Every service must resolve before a multi-service selection can become plan authority.
 		if err != nil {
-			return nil, nil, nil, nil, sdkConfigDocument{}, err
+			return nil, nil, nil, nil, sdkConfigDocument{}, appBucketSet{}, err
 		}
 		serviceDoc.Version = resolvedVersionStr
 		selections = append(selections, models.SDKSelection{
@@ -1042,18 +1173,23 @@ func resolveSDKSelections(
 			Version: resolvedVersionStr, ServiceName: activation.ServiceName, PublicTarget: serviceName,
 		})
 		stateDoc.Services[activation.ServiceName] = serviceDoc
+		// A service without its own override bucket resolves through the family default; only record an entry when one was declared.
+		if override, hasOverride := bucketOverrides[serviceName]; hasOverride {
+			serviceBucketOverrides[activation.ServiceID] = override
+		}
 	}
 	// The local planner must distinguish generated targets from source-only auth metadata before the shared auth batch.
 	if local, ok := registryClient.(*generationPlanningClient); ok {
 		local.setGenerationTargets(resolved)
 	}
+	buckets := appBucketSet{Default: defaultBucket, Overrides: serviceBucketOverrides}
 	// Auth, credentials, attachments, and exact membership share one final admission boundary.
-	credentialSources, err := validateResolvedSDKSelections(ctx, configStore, s, registryClient, apiKey, doc, services, resolved, selections)
+	credentialSources, err := validateResolvedSDKSelections(ctx, configStore, s, registryClient, apiKey, doc, services, resolved, selections, buckets)
 	if err != nil {
-		return nil, nil, nil, nil, sdkConfigDocument{}, err
+		return nil, nil, nil, nil, sdkConfigDocument{}, appBucketSet{}, err
 	}
 
-	return selections, summary, resolved, credentialSources, stateDoc, nil
+	return selections, summary, resolved, credentialSources, stateDoc, buckets, nil
 }
 
 // sdkSelectionValidator keeps app selection admission separate from Registry transport capabilities.
@@ -1062,7 +1198,7 @@ type sdkSelectionValidator interface {
 }
 
 // validateResolvedSDKSelections admits exact local scope before it can cross the shared app publication boundary.
-func validateResolvedSDKSelections(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, apiKey string, doc sdkConfigDocument, workspaceServices map[string]store.WorkspaceService, resolved []sdkResolvedService, selections []models.SDKSelection) ([]sdkResolvedService, error) {
+func validateResolvedSDKSelections(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, apiKey string, doc sdkConfigDocument, workspaceServices map[string]store.WorkspaceService, resolved []sdkResolvedService, selections []models.SDKSelection, buckets appBucketSet) ([]sdkResolvedService, error) {
 	// Unified target aliases must be unambiguous before auth policy resolution attaches authority to them.
 	if err := validateResolvedUnifiedTargets(doc, resolved); err != nil {
 		return nil, err
@@ -1079,7 +1215,7 @@ func validateResolvedSDKSelections(ctx context.Context, configStore store.Config
 		return nil, err
 	}
 	// Reference resolution pins source identity only after the target and source contracts share one batch.
-	if err := resolveAppAuthReferences(doc, workspaceServices, resolved, selections, contracts); err != nil {
+	if err := resolveAppAuthReferences(doc, workspaceServices, resolved, selections, contracts, buckets); err != nil {
 		return nil, err
 	}
 	credentialSources, err := resolvedCredentialSourceServices(sourceRequests, contracts)
@@ -1155,6 +1291,7 @@ func canonicalAppDocument(doc sdkConfigDocument) sdkConfigDocument {
 		service.Version = strings.TrimSpace(service.Version)
 		service.Operations = sortedUniqueStrings(service.Operations)
 		service.Webhooks = sortedUniqueStrings(service.Webhooks)
+		service.Bucket = strings.TrimSpace(service.Bucket)
 		if service.Auth != nil {
 			auth := *service.Auth
 			auth.Type = strings.ToLower(strings.TrimSpace(auth.Type))
@@ -1349,7 +1486,7 @@ func appAuthSourceContractSelections(doc sdkConfigDocument, workspaceServices ma
 }
 
 // resolveAppAuthReferences pins enabled, contract-verified source identity without adding source operations to app capability.
-func resolveAppAuthReferences(doc sdkConfigDocument, workspaceServices map[string]store.WorkspaceService, services []sdkResolvedService, selections []models.SDKSelection, contracts map[string]sandbox.ServiceVersionExecutionAuthContract) error {
+func resolveAppAuthReferences(doc sdkConfigDocument, workspaceServices map[string]store.WorkspaceService, services []sdkResolvedService, selections []models.SDKSelection, contracts map[string]sandbox.ServiceVersionExecutionAuthContract, buckets appBucketSet) error {
 	serviceIndexes := appResolvedServiceIndexes(services)
 	for targetKey, serviceDoc := range doc.Services {
 		// Services without a reference retain direct lookup under their own selected scheme.
@@ -1361,7 +1498,7 @@ func resolveAppAuthReferences(doc sdkConfigDocument, workspaceServices map[strin
 		if !ok || index >= len(selections) {
 			return errors.New("app auth reference target is unavailable")
 		}
-		if err := resolveAppAuthReferenceSelection(&selections[index], serviceDoc.Auth, workspaceServices, contracts); err != nil {
+		if err := resolveAppAuthReferenceSelection(&selections[index], serviceDoc.Auth, workspaceServices, contracts, buckets); err != nil {
 			return fmt.Errorf("service %s auth ref: %w", targetKey, err)
 		}
 	}
@@ -1380,7 +1517,7 @@ func appResolvedServiceIndexes(services []sdkResolvedService) map[string]int {
 }
 
 // resolveAppAuthReferenceSelection validates one target/source pair and writes only credential-routing metadata.
-func resolveAppAuthReferenceSelection(selection *models.SDKSelection, auth *sdkAppAuthDoc, workspaceServices map[string]store.WorkspaceService, contracts map[string]sandbox.ServiceVersionExecutionAuthContract) error {
+func resolveAppAuthReferenceSelection(selection *models.SDKSelection, auth *sdkAppAuthDoc, workspaceServices map[string]store.WorkspaceService, contracts map[string]sandbox.ServiceVersionExecutionAuthContract, buckets appBucketSet) error {
 	parsed, err := parseAppAuthReference(auth.Ref)
 	if err != nil {
 		return err
@@ -1405,6 +1542,13 @@ func resolveAppAuthReferenceSelection(selection *models.SDKSelection, auth *sdkA
 	// A self-reference adds no routing identity and would obscure the direct credential contract.
 	if source.ServiceID == selection.ServiceID && parsed.AuthName == selection.AuthName {
 		return errors.New("a credential cannot reference itself")
+	}
+	// auth.ref stays same-bucket-only: rebasing a target's credential onto a
+	// source resolved to a different bucket would silently execute using
+	// secrets stored under an unrelated bucket at runtime, so planning
+	// rejects the cross-bucket reference outright instead of accepting it.
+	if buckets.forService(source.ServiceID).ID != buckets.forService(selection.ServiceID).ID {
+		return errors.New("credential reference source is in a different bucket than the target service")
 	}
 	selection.CredentialSourceServiceID = source.ServiceID
 	selection.CredentialSourceAuthType = selection.AuthType
@@ -2258,9 +2402,12 @@ func sdkGenerateRequest(doc sdkConfigDocument, selections []models.SDKSelection,
 }
 
 // resolvedSDKPayload packages compiled private definitions and public descriptors into the signed plan payload.
-func resolvedSDKPayload(request GenerateSDKRequest, bucketID, appID uuid.UUID, noop bool) appResolvedPayload {
+// serviceBuckets carries every per-service override (keyed by ServiceID) so
+// apply can re-verify and persist them the same way it does the family
+// default bucket; a nil/empty map means no service overrides its bucket.
+func resolvedSDKPayload(request GenerateSDKRequest, bucketID, appID uuid.UUID, noop bool, serviceBuckets map[uuid.UUID]store.Bucket) appResolvedPayload {
 	return appResolvedPayload{
-		AppID: appID, Noop: noop, BucketID: bucketID, Name: request.Name, Description: request.Description, Version: request.Version,
+		AppID: appID, Noop: noop, BucketID: bucketID, ServiceBuckets: appResolvedBucketRefs(serviceBuckets), Name: request.Name, Description: request.Description, Version: request.Version,
 		Selections: request.Selections, IncludeMCP: request.IncludeMCP, TargetType: request.TargetType,
 		TargetLanguage: request.TargetLanguage, DefaultEngineURL: request.DefaultEngineURL,
 		SkipSandbox: request.SkipSandbox, SkipPackaging: request.SkipPackaging, ContractBindings: request.ContractBindings,
@@ -3399,14 +3546,38 @@ func validateAppBucketIdentity(ctx context.Context, s store.Store, bucketName st
 	return bucket, nil
 }
 
+// validateAppServiceBucketIdentities re-verifies every per-service bucket
+// override the same way validateAppBucketIdentity re-verifies the family
+// default: a bucket renamed or recreated between plan and apply must not
+// silently bind a different bucket than the one reviewed at plan time.
+// Returns a store.AppServiceBucketBinding per ServiceID for apply persistence.
+func validateAppServiceBucketIdentities(ctx context.Context, s store.Store, refs map[uuid.UUID]appResolvedBucketRef) (map[uuid.UUID]store.AppServiceBucketBinding, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	verified := make(map[uuid.UUID]store.AppServiceBucketBinding, len(refs))
+	for serviceID, ref := range refs {
+		if _, err := validateAppBucketIdentity(ctx, s, ref.BucketName, ref.BucketID); err != nil {
+			return nil, err
+		}
+		verified[serviceID] = store.AppServiceBucketBinding{BucketID: ref.BucketID, BucketName: ref.BucketName}
+	}
+	return verified, nil
+}
+
 type appReadinessBucket struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 }
 
 type appMissingCredential struct {
-	ServiceID         string                        `json:"service_id"`
-	Service           string                        `json:"service,omitempty"`
+	ServiceID string `json:"service_id"`
+	Service   string `json:"service,omitempty"`
+	// BucketID/BucketName identify which bucket this credential is missing
+	// from -- the family default, or this service's own override -- so
+	// remediation targets the correct bucket once overrides exist.
+	BucketID          string                        `json:"bucket_id"`
+	BucketName        string                        `json:"bucket_name,omitempty"`
 	AuthType          string                        `json:"auth_type"`
 	AuthName          string                        `json:"auth_name"`
 	BasicPasswordMode authrouting.BasicPasswordMode `json:"basic_password_mode,omitempty"`
@@ -3419,39 +3590,62 @@ type appMissingCredentialField struct {
 }
 
 type appCredentialReadiness struct {
-	Bucket             appReadinessBucket     `json:"bucket"`
+	// Buckets lists every bucket this plan/apply reads credentials from --
+	// the family default plus any per-service overrides -- so a caller can
+	// see the full readiness surface even when MissingCredentials only
+	// covers a subset of them.
+	Buckets            []appReadinessBucket   `json:"buckets"`
 	MissingCredentials []appMissingCredential `json:"missing_credentials"`
 }
 
 // inspectAppBucketReadiness reports mutable credential availability without
 // making it authority for publishing an otherwise valid immutable app.
-func inspectAppBucketReadiness(ctx context.Context, s store.Store, bucket store.Bucket, selections []models.SDKSelection, serviceNames map[uuid.UUID]string) (*appCredentialReadiness, error) {
+func inspectAppBucketReadiness(ctx context.Context, s store.Store, buckets appBucketSet, selections []models.SDKSelection, serviceNames map[uuid.UUID]string) (*appCredentialReadiness, error) {
 	// A missing bucket identity is a malformed plan dependency rather than a
 	// deferrable credential-value concern.
-	if bucket.ID == uuid.Nil {
+	if buckets.Default.ID == uuid.Nil {
 		return nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "app config requires exactly one bucket"}
 	}
 	// Anonymous and webhook-only selections have no provider credential dependency to report.
 	if !appSelectionsRequireAuth(selections) {
 		return nil, nil
 	}
-	ready, secretKeys, err := loadAppBucketMaterial(ctx, s, bucket.ID, selections)
-	// Store failures cannot be represented as an authoritative "not configured" warning.
-	if err != nil {
-		return nil, err
+	// Group selections by their resolved bucket so credential presence is read
+	// once per distinct bucket (not once per selection), mirroring the
+	// existing no-N+1 discipline for the single-bucket case.
+	grouped := make(map[uuid.UUID][]models.SDKSelection)
+	bucketsByID := make(map[uuid.UUID]store.Bucket)
+	for _, selection := range selections {
+		bucket := buckets.forService(selection.ServiceID)
+		grouped[bucket.ID] = append(grouped[bucket.ID], selection)
+		bucketsByID[bucket.ID] = bucket
 	}
 	missing := make([]appMissingCredential, 0)
-	for _, selection := range selections {
-		missing = append(missing, missingAppBucketMaterial(selection, serviceNames, ready, secretKeys)...)
+	responseBuckets := make([]appReadinessBucket, 0, len(grouped))
+	for bucketID, group := range grouped {
+		ready, secretKeys, err := loadAppBucketMaterial(ctx, s, bucketID, group)
+		// Store failures cannot be represented as an authoritative "not configured" warning.
+		if err != nil {
+			return nil, err
+		}
+		for _, selection := range group {
+			for _, item := range missingAppBucketMaterial(selection, serviceNames, ready, secretKeys) {
+				item.BucketID = bucketID.String()
+				item.BucketName = bucketsByID[bucketID].Name
+				missing = append(missing, item)
+			}
+		}
+		responseBuckets = append(responseBuckets, appReadinessBucket{ID: bucketID.String(), Name: bucketsByID[bucketID].Name})
 	}
-	// A fully ready bucket needs no response field or warning.
+	// A fully ready bucket set needs no response field or warning.
 	if len(missing) == 0 {
 		return nil, nil
 	}
 	// Stable ordering keeps warnings, prompts, and JSON plans reproducible across map-backed metadata sources.
+	sort.Slice(responseBuckets, func(i, j int) bool { return responseBuckets[i].ID < responseBuckets[j].ID })
 	sort.Slice(missing, func(i, j int) bool { return appMissingCredentialKey(missing[i]) < appMissingCredentialKey(missing[j]) })
 	return &appCredentialReadiness{
-		Bucket:             appReadinessBucket{ID: bucket.ID.String(), Name: bucket.Name},
+		Buckets:            responseBuckets,
 		MissingCredentials: missing,
 	}, nil
 }
@@ -3481,14 +3675,21 @@ func withAppCredentialReadinessWarning(inbox notificationInbox, readiness *appCr
 	if readiness == nil || len(readiness.MissingCredentials) == 0 {
 		return inbox
 	}
-	label := strings.TrimSpace(readiness.Bucket.Name)
-	// A valid UUID remains useful when an older bucket row has no display name.
-	if label == "" {
-		label = readiness.Bucket.ID
+	// Missing credentials may now span more than one bucket once per-service
+	// overrides exist, so the human-readable summary names every affected
+	// bucket instead of assuming a single one.
+	labels := make([]string, 0, len(readiness.Buckets))
+	for _, bucket := range readiness.Buckets {
+		label := strings.TrimSpace(bucket.Name)
+		// A valid UUID remains useful when an older bucket row has no display name.
+		if label == "" {
+			label = bucket.ID
+		}
+		labels = append(labels, label)
 	}
 	inbox.Warnings = append(inbox.Warnings, fmt.Sprintf(
-		"bucket_credentials_missing: %d credential requirement(s) are not configured in bucket %q; the app can be published, but affected calls will fail until configured",
-		len(readiness.MissingCredentials), label,
+		"bucket_credentials_missing: %d credential requirement(s) are not configured in bucket(s) %s; the app can be published, but affected calls will fail until configured",
+		len(readiness.MissingCredentials), strings.Join(labels, ", "),
 	))
 	return inbox
 }
@@ -3698,12 +3899,16 @@ func appRequiredOAuthSecretFields(name string) []appMissingCredentialField {
 // persistAppRuntimeParams carries the exact app version plus its family-level
 // bucket and owner inputs into the atomic config apply transaction.
 type persistAppRuntimeParams struct {
-	accountID          uuid.UUID
-	appID              uuid.UUID
-	ownerSubjectID     uuid.UUID
-	ownerTeamID        uuid.UUID
-	bucketID           uuid.UUID
-	bucketName         string
+	accountID      uuid.UUID
+	appID          uuid.UUID
+	ownerSubjectID uuid.UUID
+	ownerTeamID    uuid.UUID
+	bucketID       uuid.UUID
+	bucketName     string
+	// serviceBuckets carries every already-verified per-service bucket
+	// override (keyed by ServiceID) into the apply transaction, alongside the
+	// family default bucketID/bucketName above.
+	serviceBuckets     map[uuid.UUID]store.AppServiceBucketBinding
 	selections         []models.SDKSelection
 	scopeSchemaVersion int
 	// Kind and name label the exact version for the app catalogue.
@@ -3791,6 +3996,14 @@ func applyGeneratedAppRuntime(
 	// Registry resolves concrete operation IDs, while Engine remains the owner
 	// of schema identity and immutable service-version bindings.
 	selections := finalizeAppSelections(result.Selections, payload.ContractBindings)
+	// payload.ServiceBuckets was already re-verified against live bucket
+	// identity by decodeAppApplyPlan earlier in this same apply request (see
+	// resolveSDKGenerationApplyInput), so it is trusted here rather than
+	// re-checked a second time for the same immutable JSON bytes.
+	serviceBuckets := make(map[uuid.UUID]store.AppServiceBucketBinding, len(payload.ServiceBuckets))
+	for serviceID, ref := range payload.ServiceBuckets {
+		serviceBuckets[serviceID] = store.AppServiceBucketBinding{BucketID: ref.BucketID, BucketName: ref.BucketName}
+	}
 	return applyAppConfigPlan(ctx, configStore, s, call, plan, persistAppRuntimeParams{
 		accountID:                      call.accountID,
 		appID:                          result.AppID,
@@ -3798,6 +4011,7 @@ func applyGeneratedAppRuntime(
 		ownerTeamID:                    planOwnerTeamID(plan),
 		bucketID:                       payload.BucketID,
 		bucketName:                     doc.Bucket,
+		serviceBuckets:                 serviceBuckets,
 		selections:                     selections,
 		scopeSchemaVersion:             result.ScopeSchemaVersion,
 		kind:                           store.AppKindSDK,
@@ -3823,7 +4037,7 @@ func applyAppConfigPlan(ctx context.Context, configStore store.ConfigRepository,
 	if err != nil {
 		return "", uuid.Nil, uuid.Nil, false, err
 	}
-	return applyAppConfigRuntime(ctx, configStore, s, call, plan, scope, params.bucketName, params.targetLanguage, params.generatorVersion, sdkApplyGenerationState{
+	return applyAppConfigRuntime(ctx, configStore, s, call, plan, scope, params.bucketName, params.serviceBuckets, params.targetLanguage, params.generatorVersion, sdkApplyGenerationState{
 		jobID: params.generationJobID, status: params.generationStatus,
 	})
 }
@@ -3835,7 +4049,7 @@ type sdkApplyGenerationState struct {
 
 // applyAppConfigRuntime atomically publishes app scope, plan state, and the
 // first family token, optionally leaving a generated SDK non-runnable while it builds.
-func applyAppConfigRuntime(ctx context.Context, configStore store.ConfigRepository, s store.Store, call sdkApplyCall, plan *store.ConfigPlan, scope store.AppRuntime, authorizedBucketName, targetLanguage, generatorVersion string, generationStates ...sdkApplyGenerationState) (string, uuid.UUID, uuid.UUID, bool, error) {
+func applyAppConfigRuntime(ctx context.Context, configStore store.ConfigRepository, s store.Store, call sdkApplyCall, plan *store.ConfigPlan, scope store.AppRuntime, authorizedBucketName string, serviceBuckets map[uuid.UUID]store.AppServiceBucketBinding, targetLanguage, generatorVersion string, generationStates ...sdkApplyGenerationState) (string, uuid.UUID, uuid.UUID, bool, error) {
 	generation := sdkApplyGenerationState{}
 	// MCP and legacy terminal callers omit generation state and remain immediately active.
 	if len(generationStates) > 0 {
@@ -3846,10 +4060,17 @@ func applyAppConfigRuntime(ctx context.Context, configStore store.ConfigReposito
 	if generation.status == models.SDKGenerationStatusPending {
 		appStatus = store.AppStatusBuilding
 	}
-	rawToken, tokenHash, err := applifecycle.NewExecutionToken()
-	// Token creation precedes the transaction so plaintext can be returned once without persistence.
-	if err != nil {
-		return "", uuid.Nil, uuid.Nil, false, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to issue sdk execution credential"}
+	var rawToken, tokenHash string
+	// Skip minting credential material entirely when the caller asked Engine
+	// not to issue a token -- they intend to mint their own separately via
+	// POST /workspace/app-tokens (fused-cli sdk|mcp token generate).
+	if !call.skipToken {
+		var err error
+		rawToken, tokenHash, err = applifecycle.NewExecutionToken()
+		// Token creation precedes the transaction so plaintext can be returned once without persistence.
+		if err != nil {
+			return "", uuid.Nil, uuid.Nil, false, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to issue sdk execution credential"}
+		}
 	}
 	result, err := applifecycle.New(s).ApplyConfigPlan(ctx, configStore, store.ApplyAppConfigPlanParams{
 		Plan: store.ApplyConfigPlanParams{
@@ -3860,8 +4081,9 @@ func applyAppConfigRuntime(ctx context.Context, configStore store.ConfigReposito
 			PlanID: call.planID, BaseGeneration: plan.BaseGeneration, ExpectedRevision: call.planRevision,
 			ApplyLeaseID: call.applyLeaseID,
 		},
-		Scope: scope, AuthorizedBucketName: authorizedBucketName,
-		TokenHash: tokenHash, TokenName: "default", TokenPolicy: applifecycle.FullAccessTokenPolicy(),
+		Scope: scope, AuthorizedBucketName: authorizedBucketName, AuthorizedServiceBuckets: serviceBuckets,
+		SkipTokenIssuance: call.skipToken,
+		TokenHash:         tokenHash, TokenName: "default", TokenPolicy: applifecycle.FullAccessTokenPolicy(),
 		TokenIssuedBySubjectID: optionalActorID(call.actor.SubjectID), TokenIssuedByCredentialID: optionalActorID(call.actor.CredentialID),
 		TargetLanguage:      targetLanguage,
 		GeneratorVersion:    generatorVersion,

@@ -397,6 +397,39 @@ func TestCachedStoreAppStatusAndFamilyBucketMutationsInvalidate(t *testing.T) {
 	}
 }
 
+// TestCachedStoreAppFamilyServiceBucketMutationsInvalidate verifies the two
+// new per-service bucket mutating methods invalidate the cached runtime
+// projection with the same broad blast radius as the existing default-bucket
+// mutation, since a per-service override changes credential resolution for
+// every immutable version in the family just like the default does.
+func TestCachedStoreAppFamilyServiceBucketMutationsInvalidate(t *testing.T) {
+	appID, familyID, serviceID := uuid.New(), uuid.New(), uuid.New()
+	firstBucket, overrideBucket := uuid.New(), uuid.New()
+	delegate := newRuntimeCacheDelegate(AppRuntime{AppID: appID, BucketID: firstBucket, Status: AppStatusActive})
+	cached := NewCachedStore(delegate, nil).(*cachedStore)
+	mustGetRuntime(t, cached, appID)
+
+	if err := cached.SetAppFamilyServiceBucket(context.Background(), familyID, serviceID, overrideBucket); err != nil {
+		t.Fatalf("SetAppFamilyServiceBucket: %v", err)
+	}
+	// A committed override must force the next read to reload rather than
+	// serve the pre-override cached projection.
+	if runtime := mustGetRuntime(t, cached, appID); runtime.BucketID != overrideBucket {
+		t.Fatalf("runtime bucket after override = %s, want %s", runtime.BucketID, overrideBucket)
+	}
+	if err := cached.DeleteAppFamilyServiceBucket(context.Background(), familyID, serviceID); err != nil {
+		t.Fatalf("DeleteAppFamilyServiceBucket: %v", err)
+	}
+	// Reverting the override must also invalidate, or a stale cached hit
+	// would keep resolving credentials through the removed override bucket.
+	if runtime := mustGetRuntime(t, cached, appID); runtime.BucketID != uuid.Nil {
+		t.Fatalf("runtime bucket after revert = %s, want zero value", runtime.BucketID)
+	}
+	if calls := delegate.loadCount(); calls != 3 {
+		t.Fatalf("runtime delegate loads = %d, want one per committed mutation generation (initial fill, override, revert)", calls)
+	}
+}
+
 func TestCachedStoreSuccessfulMutationRecordsBoundedInvalidationEvent(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
@@ -557,6 +590,25 @@ func (d *runtimeCacheDelegate) SetAppFamilyBucket(_ context.Context, _, bucketID
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.runtime.BucketID = bucketID
+	return nil
+}
+
+// SetAppFamilyServiceBucket mirrors SetAppFamilyBucket's fake behavior so
+// tests can assert the wrapper invalidates on the per-service override path
+// too, without needing a real per-service-aware runtime projection here.
+func (d *runtimeCacheDelegate) SetAppFamilyServiceBucket(_ context.Context, _, _, bucketID uuid.UUID) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.runtime.BucketID = bucketID
+	return nil
+}
+
+// DeleteAppFamilyServiceBucket reverts the fake runtime to a sentinel bucket
+// so the invalidation test can distinguish "still overridden" from "reverted".
+func (d *runtimeCacheDelegate) DeleteAppFamilyServiceBucket(_ context.Context, _, _ uuid.UUID) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.runtime.BucketID = uuid.Nil
 	return nil
 }
 

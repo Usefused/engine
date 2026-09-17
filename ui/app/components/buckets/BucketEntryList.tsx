@@ -131,12 +131,20 @@ function credentialLabel(value: string): string {
   if (credentialType === "basic") return "Basic credentials";
   if (["mtls", "mutualtls", "mutual_tls"].includes(credentialType))
     return "mTLS credentials";
+  // OAuth/OIDC store an application client_id/client_secret pair, not a
+  // single connected-user token, so the label must reflect that pairing.
   if (credentialType === "oauth" || credentialType === "oauth2")
-    return "OAuth token";
+    return "OAuth credentials";
   if (credentialType === "oidc" || credentialType === "openidconnect")
-    return "OIDC token";
+    return "OIDC credentials";
   if (credentialType === "bearer") return "Bearer token";
-  return "Secret";
+  // Bucket secrets are generic, service-independent values (Engine tags them
+  // with this fixed credential_type rather than a per-auth-scheme one); shown
+  // as plain "Secret" since it's the simpler/default case.
+  if (credentialType === "bucket_secret") return "Secret";
+  // Any other/unrecognized per-service auth type falls back to this label,
+  // named "Service Auth" to distinguish it from the generic kind above.
+  return "Service Auth";
 }
 
 function valueEntry(
@@ -157,7 +165,7 @@ function valueEntry(
 function EntryRow({ entry, canRemove }: { entry: EntryRowModel; canRemove: boolean }) {
   const actions = bucketEntryActions(entry.kind, entry.value, canRemove);
   return (
-    <div className="grid grid-cols-[minmax(0,0.9fr)_minmax(220px,1.4fr)_auto] items-center gap-3 px-4 py-3">
+    <div className={entryRowGridClass(entry.kind)}>
       <div className="flex min-w-0 items-center gap-3">
         <span className="font-mono text-xs text-slate-400">
           {/* Keep secret and environment rows visually distinct without exposing values. */}
@@ -191,6 +199,20 @@ function EntryRow({ entry, canRemove }: { entry: EntryRowModel; canRemove: boole
       </div>
     </div>
   );
+}
+
+/**
+ * Secret rows only ever render a fixed masked placeholder ("********"), so
+ * they don't need the wide value column env rows require for real, possibly
+ * long values and their hover tooltip. Shrinking that column to fit-content
+ * on secret rows leaves the name/label column room to breathe instead of
+ * wrapping/truncating on narrow (mobile) viewports.
+ */
+function entryRowGridClass(kind: EntryRowModel["kind"]): string {
+  if (kind === "secret") {
+    return "grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 px-4 py-3";
+  }
+  return "grid grid-cols-[minmax(0,0.9fr)_minmax(220px,1.4fr)_auto] items-center gap-3 px-4 py-3";
 }
 
 function EntryValue({ entry }: { entry: EntryRowModel }) {

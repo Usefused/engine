@@ -29,6 +29,8 @@ import {
   type BucketContentState,
   type BucketDetailTab,
   type BucketEntryKind,
+  type BucketSecretFormPayload,
+  type CredentialFamilyFormPayload,
   type SecretFormPayload,
   type ValueFormPayload,
 } from "~/lib/buckets";
@@ -229,7 +231,8 @@ export default function BucketsPage() {
   };
 
   const addEntry = (kind: BucketEntryKind) => {
-    selectTab(kind === "secret" ? "secrets" : "env");
+    // Bucket secrets render alongside service secrets in the "secrets" tab.
+    selectTab(kind === "value" ? "env" : "secrets");
     setEntryModalKind(kind);
   };
 
@@ -474,6 +477,22 @@ export default function BucketsPage() {
       reloadBucketState,
       toast
     );
+  const saveCredentialFamily = (payload: CredentialFamilyFormPayload) =>
+    saveBucketCredentialFamily(
+      selectedBucket,
+      payload,
+      setSaving,
+      reloadBucketState,
+      toast
+    );
+  const saveGenericBucketSecret = (payload: BucketSecretFormPayload) =>
+    saveBucketGenericSecret(
+      selectedBucket,
+      payload,
+      setSaving,
+      reloadBucketState,
+      toast
+    );
   const removeSecret = (item: SecretMeta) =>
     removeBucketSecret(item, setSaving, reloadBucketState, toast);
   const removeValue = (item: BucketValue) =>
@@ -528,7 +547,9 @@ export default function BucketsPage() {
         onCancelEntry={() => setEntryModalKind(null)}
         onSaveSecret={saveSecret}
         onSaveSecrets={saveSecrets}
+        onSaveCredentialFamily={saveCredentialFamily}
         onSaveValue={saveValue}
+        onSaveBucketSecret={saveGenericBucketSecret}
         onRemoveSecret={removeSecret}
         onRemoveValue={removeValue}
         onRemoveConnection={removeConnection}
@@ -737,9 +758,9 @@ async function saveBucketSecret(
     async () => {
       await api.workspace.upsertSecret({ bucketId: bucket.id, ...payload });
       loadContents(bucket.id);
-      toast.success("Secret saved");
+      toast.success("Service Auth saved");
     },
-    (err) => toast.error(errorMessage(err, "Failed to save secret"))
+    (err) => toast.error(errorMessage(err, "Failed to save service auth"))
   );
   if (err) throw err;
 }
@@ -760,9 +781,9 @@ async function saveBucketSecrets(
         secrets: payloads,
       });
       loadContents(bucket.id);
-      toast.success("Secrets saved");
+      toast.success("Service Auth entries saved");
     },
-    (err) => toast.error(errorMessage(err, "Failed to save secrets"))
+    (err) => toast.error(errorMessage(err, "Failed to save service auth entries"))
   );
   if (err) throw err;
 }
@@ -786,6 +807,56 @@ async function saveBucketValue(
       toast.success("Value saved");
     },
     (err) => toast.error(errorMessage(err, "Failed to save value"))
+  );
+  if (err) throw err;
+}
+
+// OAuth/OIDC application registrations go through Engine's semantic
+// credential_family write path rather than raw secret rows.
+async function saveBucketCredentialFamily(
+  bucket: BucketSummary | undefined,
+  payload: CredentialFamilyFormPayload,
+  setSaving: (saving: boolean) => void,
+  loadContents: (bucketId: string) => void,
+  toast: ReturnType<typeof useToast>
+) {
+  if (!bucket) return;
+  const err = await withSaving(
+    setSaving,
+    async () => {
+      await api.workspace.upsertCredentialFamily({
+        bucketId: bucket.id,
+        ...payload,
+      });
+      loadContents(bucket.id);
+      toast.success("Credentials saved");
+    },
+    (err) => toast.error(errorMessage(err, "Failed to save credentials"))
+  );
+  if (err) throw err;
+}
+
+// A generic bucket secret has no service_id: it is referenced directly
+// (e.g. ${bucket.secrets.<key>}) instead of resolved through a workspace service.
+async function saveBucketGenericSecret(
+  bucket: BucketSummary | undefined,
+  payload: BucketSecretFormPayload,
+  setSaving: (saving: boolean) => void,
+  loadContents: (bucketId: string) => void,
+  toast: ReturnType<typeof useToast>
+) {
+  if (!bucket) return;
+  const err = await withSaving(
+    setSaving,
+    async () => {
+      await api.workspace.upsertBucketSecret({
+        bucketId: bucket.id,
+        ...payload,
+      });
+      loadContents(bucket.id);
+      toast.success("Secret saved");
+    },
+    (err) => toast.error(errorMessage(err, "Failed to save secret"))
   );
   if (err) throw err;
 }

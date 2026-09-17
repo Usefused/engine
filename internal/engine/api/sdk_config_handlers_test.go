@@ -359,7 +359,7 @@ func assertNoopSDKApplyResult(t *testing.T, configStore *mockConfigStore, proxy 
 
 func resolvedDefaultBucketPayload(t *testing.T, request GenerateSDKRequest) json.RawMessage {
 	t.Helper()
-	payload, err := json.Marshal(resolvedSDKPayload(request, workspaceTestBucketID("default"), uuid.Nil, false))
+	payload, err := json.Marshal(resolvedSDKPayload(request, workspaceTestBucketID("default"), uuid.Nil, false, nil))
 	if err != nil {
 		t.Fatalf("marshal resolved SDK payload: %v", err)
 	}
@@ -372,7 +372,7 @@ func TestInspectAppBucketReadinessReportsEveryMissingOAuthService(t *testing.T) 
 	first, second := uuid.New(), uuid.New()
 	bucket := store.Bucket{ID: bucketID, Name: "production"}
 	s := &workspaceTestStore{}
-	readiness, err := inspectAppBucketReadiness(context.Background(), s, bucket, []models.SDKSelection{
+	readiness, err := inspectAppBucketReadiness(context.Background(), s, appBucketSet{Default: bucket}, []models.SDKSelection{
 		{ServiceID: first, RequiredAuth: []models.SDKRequiredAuth{{AuthType: "oauth", AuthName: "primaryOAuth"}}},
 		{ServiceID: second, RequiredAuth: []models.SDKRequiredAuth{{AuthType: "oidc", AuthName: "primaryOIDC"}}},
 	}, map[uuid.UUID]string{first: "Google Drive", second: "Identity Provider"})
@@ -380,9 +380,8 @@ func TestInspectAppBucketReadinessReportsEveryMissingOAuthService(t *testing.T) 
 	if err != nil || readiness == nil {
 		t.Fatalf("expected structured readiness metadata, got %#v / %v", readiness, err)
 	}
-	gotBucket := readiness.Bucket
-	if gotBucket != (appReadinessBucket{ID: bucketID.String(), Name: "production"}) {
-		t.Fatalf("bucket details = %#v", gotBucket)
+	if len(readiness.Buckets) != 1 || readiness.Buckets[0] != (appReadinessBucket{ID: bucketID.String(), Name: "production"}) {
+		t.Fatalf("bucket details = %#v", readiness.Buckets)
 	}
 	missing := readiness.MissingCredentials
 	if len(missing) != 2 {
@@ -390,15 +389,62 @@ func TestInspectAppBucketReadinessReportsEveryMissingOAuthService(t *testing.T) 
 	}
 	byService := map[string]appMissingCredential{missing[0].ServiceID: missing[0], missing[1].ServiceID: missing[1]}
 	assertAppMissingCredential(t, byService[first.String()], appMissingCredential{
-		ServiceID: first.String(), Service: "Google Drive", AuthType: "oauth", AuthName: "primaryOAuth",
+		ServiceID: first.String(), Service: "Google Drive", BucketID: bucketID.String(), BucketName: "production", AuthType: "oauth", AuthName: "primaryOAuth",
 		RequiredFields: []appMissingCredentialField{{Name: "client_id", SecretKey: "primaryOAuth_client_id"}, {Name: "client_secret", SecretKey: "primaryOAuth_client_secret"}},
 	})
 	assertAppMissingCredential(t, byService[second.String()], appMissingCredential{
-		ServiceID: second.String(), Service: "Identity Provider", AuthType: "oidc", AuthName: "primaryOIDC",
+		ServiceID: second.String(), Service: "Identity Provider", BucketID: bucketID.String(), BucketName: "production", AuthType: "oidc", AuthName: "primaryOIDC",
 		RequiredFields: []appMissingCredentialField{{Name: "client_id", SecretKey: "primaryOIDC_client_id"}, {Name: "client_secret", SecretKey: "primaryOIDC_client_secret"}},
 	})
 	if got := [2]int{s.appBucketReadinessCalls, s.secretMetaCalls}; got != [2]int{1, 0} {
 		t.Fatalf("readiness queries = exact:%d broad-secret:%d", s.appBucketReadinessCalls, s.secretMetaCalls)
+	}
+}
+
+// TestInspectAppBucketReadinessAttributesEachServiceToItsOwnResolvedBucket
+// proves a plan with a per-service override bucket checks/attributes
+// credential readiness against the CORRECT bucket per service, not just the
+// family default: one distinct GetAppBucketCredentialPresence call per
+// distinct bucket (no N+1 per selection), and each missing-credential entry
+// carries the bucket it was actually evaluated against.
+func TestInspectAppBucketReadinessAttributesEachServiceToItsOwnResolvedBucket(t *testing.T) {
+	defaultBucketID, overrideBucketID := uuid.New(), uuid.New()
+	defaultServiceID, overrideServiceID := uuid.New(), uuid.New()
+	s := &workspaceTestStore{secretMetas: map[uuid.UUID][]store.WorkspaceSecretMeta{
+		// The override bucket has the override service's credential, but the
+		// default bucket does not -- proving each service is checked against
+		// its own resolved bucket rather than the family default for both.
+		overrideBucketID: {{ServiceID: overrideServiceID, KeyName: "apiKey"}},
+	}}
+	buckets := appBucketSet{
+		Default:   store.Bucket{ID: defaultBucketID, Name: "default"},
+		Overrides: map[uuid.UUID]store.Bucket{overrideServiceID: {ID: overrideBucketID, Name: "override"}},
+	}
+	selections := []models.SDKSelection{
+		{ServiceID: defaultServiceID, RequiredAuth: []models.SDKRequiredAuth{{AuthType: "api_key", AuthName: "apiKey"}}},
+		{ServiceID: overrideServiceID, RequiredAuth: []models.SDKRequiredAuth{{AuthType: "api_key", AuthName: "apiKey"}}},
+	}
+	readiness, err := inspectAppBucketReadiness(context.Background(), s, buckets, selections, map[uuid.UUID]string{
+		defaultServiceID: "Default Service", overrideServiceID: "Override Service",
+	})
+	if err != nil || readiness == nil {
+		t.Fatalf("expected structured readiness metadata, got %#v / %v", readiness, err)
+	}
+	// Two distinct buckets were touched, so both must be reported, and the
+	// override service's credential must be recognized as present (not
+	// missing) since it exists in ITS bucket rather than the default.
+	if len(readiness.Buckets) != 2 {
+		t.Fatalf("bucket details = %#v, want one entry per distinct bucket", readiness.Buckets)
+	}
+	missing := readiness.MissingCredentials
+	if len(missing) != 1 || missing[0].ServiceID != defaultServiceID.String() || missing[0].BucketID != defaultBucketID.String() {
+		t.Fatalf("missing credentials = %#v, want exactly the default-bucket service missing from its own bucket", missing)
+	}
+	// Exactly one GetAppBucketCredentialPresence call per distinct bucket
+	// (two buckets, two calls) -- not one per selection, preserving the
+	// repo's no-N+1 rule even with per-service overrides in play.
+	if s.appBucketReadinessCalls != 2 {
+		t.Fatalf("readiness queries = %d, want exactly one per distinct bucket", s.appBucketReadinessCalls)
 	}
 }
 
@@ -423,7 +469,7 @@ func TestInspectAppBucketReadinessAcceptsOAuthAndMTLSAlternative(t *testing.T) {
 		{AuthType: "oauth", AuthName: "oauthAuth"},
 		{AuthType: "mtls", AuthName: "clientCertificate"},
 	}}
-	if readiness, err := inspectAppBucketReadiness(context.Background(), s, store.Bucket{ID: bucketID, Name: "production"}, []models.SDKSelection{selection}, nil); err != nil || readiness != nil {
+	if readiness, err := inspectAppBucketReadiness(context.Background(), s, appBucketSet{Default: store.Bucket{ID: bucketID, Name: "production"}}, []models.SDKSelection{selection}, nil); err != nil || readiness != nil {
 		t.Fatalf("OAuth+mTLS readiness = %#v / %v", readiness, err)
 	}
 }
@@ -439,11 +485,11 @@ func TestInspectAppBucketReadinessChecksEveryStaticScheme(t *testing.T) {
 		{ServiceID: serviceID, KeyName: "apiKey"}, {ServiceID: serviceID, KeyName: "apiToken"},
 	}}}
 	bucket := store.Bucket{ID: bucketID, Name: "production"}
-	if readiness, err := inspectAppBucketReadiness(context.Background(), s, bucket, []models.SDKSelection{selection}, nil); err != nil || readiness != nil {
+	if readiness, err := inspectAppBucketReadiness(context.Background(), s, appBucketSet{Default: bucket}, []models.SDKSelection{selection}, nil); err != nil || readiness != nil {
 		t.Fatalf("API key AND token readiness = %#v / %v", readiness, err)
 	}
 	s.secretMetas[bucketID] = s.secretMetas[bucketID][:1]
-	readiness, err := inspectAppBucketReadiness(context.Background(), s, bucket, []models.SDKSelection{selection}, nil)
+	readiness, err := inspectAppBucketReadiness(context.Background(), s, appBucketSet{Default: bucket}, []models.SDKSelection{selection}, nil)
 	// Missing material stays available to prompt/render without rejecting the plan.
 	if err != nil || readiness == nil {
 		t.Fatalf("missing secondary credential metadata = %#v / %v", readiness, err)
@@ -470,7 +516,7 @@ func TestAppRequiredSecretFieldsHonorsBasicPasswordMode(t *testing.T) {
 // TestInspectAppBucketReadinessIncludesReviewedBasicPasswordMode retains safe prompt semantics.
 func TestInspectAppBucketReadinessIncludesReviewedBasicPasswordMode(t *testing.T) {
 	bucketID, serviceID := uuid.New(), uuid.New()
-	readiness, err := inspectAppBucketReadiness(context.Background(), &workspaceTestStore{}, store.Bucket{ID: bucketID, Name: "production"}, []models.SDKSelection{{
+	readiness, err := inspectAppBucketReadiness(context.Background(), &workspaceTestStore{}, appBucketSet{Default: store.Bucket{ID: bucketID, Name: "production"}}, []models.SDKSelection{{
 		ServiceID: serviceID,
 		RequiredAuth: []models.SDKRequiredAuth{{
 			AuthType: "basic", AuthName: "basicAuth", BasicPasswordMode: authrouting.BasicPasswordRequired,
@@ -537,7 +583,7 @@ func TestDecodeAppApplyPlanDoesNotRequireCredentialValues(t *testing.T) {
 func TestInspectAppBucketReadinessSkipsCredentialReadsForAnonymousAndWebhookSelections(t *testing.T) {
 	bucketID := uuid.New()
 	s := &workspaceTestStore{appBucketReadinessErr: errors.New("credential reads must be skipped")}
-	readiness, err := inspectAppBucketReadiness(context.Background(), s, store.Bucket{ID: bucketID, Name: "production"}, []models.SDKSelection{
+	readiness, err := inspectAppBucketReadiness(context.Background(), s, appBucketSet{Default: store.Bucket{ID: bucketID, Name: "production"}}, []models.SDKSelection{
 		{ServiceID: uuid.New(), OperationNames: []string{"health"}},
 		{ServiceID: uuid.New(), WebhookNames: []string{"created"}},
 	}, nil)
@@ -1070,7 +1116,7 @@ func TestExecuteSDKConfigApplyRejectsSameNameBucketReplacementBeforeGeneration(t
 	payload, err := json.Marshal(resolvedSDKPayload(GenerateSDKRequest{
 		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
 		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
-	}, authorizedBucketID, uuid.Nil, false))
+	}, authorizedBucketID, uuid.Nil, false, nil))
 	if err != nil {
 		t.Fatalf("marshal resolved payload: %v", err)
 	}
@@ -1147,6 +1193,47 @@ func TestExecuteSDKConfigApplyPersistsEngineScopeBeforeMarkingApplied(t *testing
 		t.Fatal("expected Engine to return the one-time execution token")
 	}
 	assertSavedScopeEndpointSelection(t, saved.Selections, endpointID)
+}
+
+// TestExecuteSDKConfigApplySkipsTokenWhenRequested verifies SkipToken
+// suppresses the family's first-ever execution token instead of the caller
+// getting one back to discard -- they intend to mint their own separately.
+func TestExecuteSDKConfigApplySkipsTokenWhenRequested(t *testing.T) {
+	serviceID := uuid.New()
+	serviceVersionID := uuid.New()
+	endpointID := uuid.New()
+	accountID := uuid.New()
+	planID := uuid.New()
+	appID := stableAppIDForPlan(planID)
+	payload := resolvedDefaultBucketPayload(t, GenerateSDKRequest{
+		Selections:       []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: serviceVersionID}},
+		ContractBindings: []sdkContractBinding{{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"}},
+	})
+	configStore := &mockConfigStore{plan: &store.ConfigPlan{
+		ID: planID, ConfigKey: "sdk:security", ConfigType: store.ConfigTypeSDK, SourceHash: "config-hash",
+		Status: store.ConfigPlanStatusPending, DesiredState: json.RawMessage(`{"name":"security","version":"1.0.0","language":"typescript","bucket":"default"}`), ResolvedPayload: payload,
+	}}
+	s := &workspaceTestStore{workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{
+		serviceID: {{ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID}},
+	}}
+	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
+		serviceID.String() + "|1.0": {ServiceID: serviceID, Version: "1.0", ServiceVersionID: serviceVersionID, Revision: 3, SourceHash: "hash"},
+	}}
+	proxy := &recordingForwarder{body: `{"app_id":"` + appID.String() + `","account_id":"` + accountID.String() + `","job_id":"job-1","status":"complete","scope_schema_version":3,"selections":[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","endpoint_ids":["` + endpointID.String() + `"]}]}`}
+
+	result, err := executeSDKConfigApply(context.Background(), configStore, s, proxy, registry, sdkApplyCall{
+		apiKey: "fsk_test", accountID: accountID, planID: planID, planRevision: 1, sourceHash: "config-hash",
+		skipToken: true,
+	})
+	if err != nil {
+		t.Fatalf("expected apply success, got %v", err)
+	}
+	if result.ExecutionToken != "" {
+		t.Fatalf("expected no token when SkipToken was requested, got %q", result.ExecutionToken)
+	}
+	if configStore.artifactApply == nil || !configStore.artifactApply.SkipTokenIssuance {
+		t.Fatal("expected SkipTokenIssuance to reach ApplyAppConfigPlan")
+	}
 }
 
 func assertSavedScopeEndpointSelection(t *testing.T, payload []byte, endpointID uuid.UUID) {
@@ -2480,7 +2567,7 @@ func TestSDKGenerateRequestCarriesSkipPackagingFromDocument(t *testing.T) {
 			}
 			// The plan payload is what apply decodes back into a request, so the
 			// flag has to survive that round trip or apply would silently build.
-			payload := resolvedSDKPayload(request, uuid.New(), uuid.New(), false)
+			payload := resolvedSDKPayload(request, uuid.New(), uuid.New(), false, nil)
 			encoded, err := json.Marshal(payload)
 			if err != nil {
 				t.Fatalf("marshal resolved payload: %v", err)

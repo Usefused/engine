@@ -742,11 +742,15 @@ const listWorkspaceServicesSQL = `
 // Bucket service summaries aggregate context across all resources linked to a bucket.
 const bucketServiceIDsSQL = `
 	WITH bucket_service_ids AS (
-		SELECT service_id FROM fused_workspace_secrets WHERE bucket_id = $1 AND ($2 OR service_id = ANY($3::uuid[]))
+		-- Bucket-level secrets (kind "bucket_secret") are stored with a nil
+		-- service_id because they aren't tied to any service; exclude that
+		-- placeholder from the "services using this set" aggregation so it
+		-- doesn't render as a fake service with no name.
+		SELECT service_id FROM fused_workspace_secrets WHERE bucket_id = $1 AND service_id <> '00000000-0000-0000-0000-000000000000'::uuid AND ($2 OR service_id = ANY($3::uuid[]))
 		UNION
-		SELECT service_id FROM fused_auth_connections WHERE bucket_id = $1 AND ($2 OR service_id = ANY($3::uuid[]))
+		SELECT service_id FROM fused_auth_connections WHERE bucket_id = $1 AND service_id <> '00000000-0000-0000-0000-000000000000'::uuid AND ($2 OR service_id = ANY($3::uuid[]))
 		UNION
-		SELECT service_id FROM fused_bucket_values WHERE bucket_id = $1 AND ($2 OR service_id = ANY($3::uuid[]))
+		SELECT service_id FROM fused_bucket_values WHERE bucket_id = $1 AND service_id <> '00000000-0000-0000-0000-000000000000'::uuid AND ($2 OR service_id = ANY($3::uuid[]))
 	)`
 
 const bucketServiceSummaryCountSQL = bucketServiceIDsSQL + `

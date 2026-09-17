@@ -901,7 +901,7 @@ func (m *mockConfigStore) ApplyAppConfigPlan(ctx context.Context, params store.A
 	created := m.state == nil || m.state.LatestResourceID == nil
 	return &store.ApplyAppConfigPlanResult{
 		State: state, AppFamilyID: uuid.New(), AppID: params.Scope.AppID,
-		VersionCreated: created, TokenCreated: created,
+		VersionCreated: created, TokenCreated: created && !params.SkipTokenIssuance,
 	}, nil
 }
 

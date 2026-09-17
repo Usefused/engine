@@ -24,3 +24,28 @@ func TestLimitErrorsRemainDistinctFromBrokenReferences(t *testing.T) {
 		t.Fatalf("reference error=%v", err)
 	}
 }
+
+// TestResolveMaxDefinitions verifies FUSED_SCHEMA_MAX_DEFINITIONS parsing/fallback in isolation from process env.
+func TestResolveMaxDefinitions(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{"unset uses default", "", defaultMaxDefinitions},
+		{"blank uses default", "   ", defaultMaxDefinitions},
+		{"valid override adopted", "5000", 5000},
+		{"non-numeric falls back", "not-a-number", defaultMaxDefinitions},
+		{"zero falls back", "0", defaultMaxDefinitions},
+		{"negative falls back", "-1", defaultMaxDefinitions},
+		{"exceeds MaxNodes falls back", fmt.Sprint(MaxNodes + 1), defaultMaxDefinitions},
+		{"exactly MaxNodes adopted", fmt.Sprint(MaxNodes), MaxNodes},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Each case is independent of process env; only the pure parser is under test.
+			if got := resolveMaxDefinitions(test.raw); got != test.want {
+				t.Fatalf("resolveMaxDefinitions(%q) = %d, want %d", test.raw, got, test.want)
+			}
+		})
+	}
+}

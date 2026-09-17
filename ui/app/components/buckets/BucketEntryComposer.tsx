@@ -5,11 +5,17 @@ import type { ServiceAuthOption } from "~/lib/service-auth";
 import { BucketServiceSelect } from "~/components/buckets/BucketServiceSelect";
 import {
   type BucketEntryKind,
+  type BucketSecretFormPayload,
+  type CredentialFamilyFormPayload,
   type SecretFormPayload,
   type ValueFormPayload,
 } from "~/lib/buckets";
 import {
+  type BucketSecretEntryForm,
   secretHasTwoFields,
+  secretIsCredentialFamily,
+  serializeBucketSecretPayload,
+  serializeCredentialFamilyPayload,
   serializeSecretPayloads,
   serializeValuePayload,
   type SecretEntryForm,
@@ -25,7 +31,9 @@ type BucketEntryComposerProps = {
   onCancel: () => void;
   onSaveSecret: (payload: SecretFormPayload) => Promise<void>;
   onSaveSecrets: (payloads: SecretFormPayload[]) => Promise<void>;
+  onSaveCredentialFamily: (payload: CredentialFamilyFormPayload) => Promise<void>;
   onSaveValue: (payload: ValueFormPayload) => Promise<void>;
+  onSaveBucketSecret: (payload: BucketSecretFormPayload) => Promise<void>;
 };
 
 const emptySecret: SecretEntryForm = {
@@ -36,6 +44,8 @@ const emptySecret: SecretEntryForm = {
   password: "",
   certificate: "",
   privateKey: "",
+  clientId: "",
+  clientSecret: "",
   expiresAt: "",
 };
 
@@ -46,6 +56,13 @@ const emptyValue: ValueEntryForm = {
   value: "",
 };
 
+// A bucket secret is service-independent, so it never needs a service_id.
+const emptyBucketSecret: BucketSecretEntryForm = {
+  keyName: "",
+  value: "",
+  expiresAt: "",
+};
+
 export function BucketEntryComposer({
   kind,
   saving,
@@ -53,15 +70,25 @@ export function BucketEntryComposer({
   onCancel,
   onSaveSecret,
   onSaveSecrets,
+  onSaveCredentialFamily,
   onSaveValue,
+  onSaveBucketSecret,
 }: BucketEntryComposerProps) {
   const [secret, setSecret] = useState(emptySecret);
   const [value, setValue] = useState(emptyValue);
+  const [bucketSecret, setBucketSecret] = useState(emptyBucketSecret);
   const [serviceSearch, setServiceSearch] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (!kind) resetForms(setSecret, setValue, setServiceSearch, setError);
+    if (!kind)
+      resetForms(
+        setSecret,
+        setValue,
+        setBucketSecret,
+        setServiceSearch,
+        setError
+      );
   }, [kind]);
 
   useEffect(() => {
@@ -94,6 +121,7 @@ export function BucketEntryComposer({
       kind,
       secret,
       value,
+      bucketSecret,
       selectedAuthOption
     );
     if (validationError) {
@@ -105,10 +133,13 @@ export function BucketEntryComposer({
         kind,
         secret,
         value,
+        bucketSecret,
         selectedAuthOption,
         onSaveSecret,
         onSaveSecrets,
-        onSaveValue
+        onSaveCredentialFamily,
+        onSaveValue,
+        onSaveBucketSecret
       );
       onCancel();
     } catch {
@@ -122,51 +153,74 @@ export function BucketEntryComposer({
       <div
         className={composerGridClass(kind, selectedAuthOption?.auth_type || "")}
       >
-        <ComposerServiceSelect
-          services={services}
-          search={serviceSearch}
-          value={kind === "secret" ? secret.serviceId : value.serviceId}
-          onSearchChange={setServiceSearch}
-          onChange={(next) => {
-            setError("");
-            updateServiceID(kind, next, services, setSecret, setValue);
-          }}
-        />
-        <QualifierSelect
-          kind={kind}
-          authOptions={authOptions}
-          secret={secret}
-          value={value}
-          setSecret={setSecret}
-          setValue={setValue}
-        />
+        {kind !== "bucket_secret" && (
+          <ComposerServiceSelect
+            services={services}
+            search={serviceSearch}
+            value={kind === "secret" ? secret.serviceId : value.serviceId}
+            onSearchChange={setServiceSearch}
+            onChange={(next) => {
+              setError("");
+              updateServiceID(kind, next, services, setSecret, setValue);
+            }}
+          />
+        )}
+        {kind !== "bucket_secret" && (
+          <QualifierSelect
+            kind={kind}
+            authOptions={authOptions}
+            secret={secret}
+            value={value}
+            setSecret={setSecret}
+            setValue={setValue}
+          />
+        )}
         <EntryValueFields
           kind={kind}
           authOption={selectedAuthOption}
           secret={secret}
           value={value}
+          bucketSecret={bucketSecret}
           setSecret={setSecret}
           setValue={setValue}
+          setBucketSecret={setBucketSecret}
         />
-        <button
-          type="submit"
-          disabled={saving || services.length === 0}
-          className="inline-flex h-[38px] w-[32px] items-center justify-center text-blue-600 hover:text-blue-700 disabled:opacity-40"
-          aria-label={`Save ${kind}`}
-          title="Save"
-        >
-          <Check className="w-4 h-4" />
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          disabled={saving}
-          className="inline-flex h-[38px] w-[32px] items-center justify-center text-slate-500 hover:text-slate-700 disabled:opacity-40"
-          aria-label="Cancel entry"
-          title="Cancel"
-        >
-          <X className="w-4 h-4" />
-        </button>
+        {/* Env values are resolved live and never expire; only secrets do. */}
+        {kind !== "value" && (
+          <ExpiryInput
+            value={kind === "bucket_secret" ? bucketSecret.expiresAt : secret.expiresAt}
+            onChange={(nextExpiresAt) =>
+              kind === "bucket_secret"
+                ? setBucketSecret((prev) => ({ ...prev, expiresAt: nextExpiresAt }))
+                : setSecret((prev) => ({ ...prev, expiresAt: nextExpiresAt }))
+            }
+          />
+        )}
+        {/* Save and Cancel are grouped into one grid cell so they always sit
+            side-by-side, even when the grid collapses to a single column
+            below the "lg" breakpoint -- otherwise each button would land in
+            its own full-width row and appear disconnected from the other. */}
+        <div className="flex items-center gap-1">
+          <button
+            type="submit"
+            disabled={saving || (kind !== "bucket_secret" && services.length === 0)}
+            className="inline-flex h-[38px] w-[32px] items-center justify-center text-blue-600 hover:text-blue-700 disabled:opacity-40"
+            aria-label={`Save ${composerKindLabel(kind)}`}
+            title="Save"
+          >
+            <Check className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={saving}
+            className="inline-flex h-[38px] w-[32px] items-center justify-center text-slate-500 hover:text-slate-700 disabled:opacity-40"
+            aria-label="Cancel entry"
+            title="Cancel"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
       </div>
       {error && (
         <p className="mt-2 text-xs font-medium text-red-600">{error}</p>
@@ -175,14 +229,38 @@ export function BucketEntryComposer({
   );
 }
 
+/**
+ * Maps the internal entry-kind literal to the display wording used in the Add
+ * dropdown ("Service Auth" / "Secret" / "Env") so the Save button's
+ * accessible name matches what the user picked, instead of leaking the raw
+ * "bucket_secret" kind literal into assistive text.
+ */
+function composerKindLabel(kind: BucketEntryKind): string {
+  if (kind === "secret") return "service auth";
+  if (kind === "bucket_secret") return "secret";
+  return "env value";
+}
+
 function composerGridClass(
   kind: BucketEntryKind,
   credentialType: string
 ): string {
-  if (kind === "value" || secretHasTwoFields(credentialType)) {
-    return "grid grid-cols-1 items-end gap-2 lg:grid-cols-[minmax(220px,0.9fr)_150px_minmax(180px,0.8fr)_minmax(180px,0.8fr)_auto_auto]";
+  // Bucket secrets have no service or qualifier column, but do carry an
+  // optional expiry, so they use a shorter grid than service-scoped kinds.
+  // The trailing "auto" is a single column because Save/Cancel are now one
+  // grid cell (see the button group above), not two.
+  if (kind === "bucket_secret") {
+    return "grid grid-cols-1 items-end gap-2 lg:grid-cols-[minmax(220px,0.9fr)_minmax(220px,0.9fr)_180px_auto]";
   }
-  return "grid grid-cols-1 items-end gap-2 lg:grid-cols-[minmax(220px,0.9fr)_150px_minmax(260px,1fr)_auto_auto]";
+  // Env values have no expiry column, so their grid stays one column narrower
+  // than the equivalent paired-secret layout.
+  if (kind === "value") {
+    return "grid grid-cols-1 items-end gap-2 lg:grid-cols-[minmax(220px,0.9fr)_150px_minmax(180px,0.8fr)_minmax(180px,0.8fr)_auto]";
+  }
+  if (secretHasTwoFields(credentialType)) {
+    return "grid grid-cols-1 items-end gap-2 lg:grid-cols-[minmax(200px,0.8fr)_140px_minmax(150px,0.6fr)_minmax(150px,0.6fr)_170px_auto]";
+  }
+  return "grid grid-cols-1 items-end gap-2 lg:grid-cols-[minmax(220px,0.9fr)_150px_minmax(220px,0.9fr)_170px_auto]";
 }
 
 function ComposerServiceSelect({
@@ -226,17 +304,23 @@ function EntryValueFields({
   authOption,
   secret,
   value,
+  bucketSecret,
   setSecret,
   setValue,
+  setBucketSecret,
 }: {
   kind: BucketEntryKind;
   authOption?: ServiceAuthOption;
   secret: typeof emptySecret;
   value: typeof emptyValue;
+  bucketSecret: typeof emptyBucketSecret;
   setSecret: (
     updater: (prev: typeof emptySecret) => typeof emptySecret
   ) => void;
   setValue: (updater: (prev: typeof emptyValue) => typeof emptyValue) => void;
+  setBucketSecret: (
+    updater: (prev: typeof emptyBucketSecret) => typeof emptyBucketSecret
+  ) => void;
 }) {
   if (kind === "secret") {
     return (
@@ -244,6 +328,16 @@ function EntryValueFields({
         authOption={authOption}
         secret={secret}
         setSecret={setSecret}
+      />
+    );
+  }
+  // A bucket secret is service-independent: it only ever needs a name and a
+  // value, never a service selector or credential-type qualifier.
+  if (kind === "bucket_secret") {
+    return (
+      <BucketSecretFields
+        bucketSecret={bucketSecret}
+        setBucketSecret={setBucketSecret}
       />
     );
   }
@@ -267,6 +361,38 @@ function EntryValueFields({
   );
 }
 
+function BucketSecretFields({
+  bucketSecret,
+  setBucketSecret,
+}: {
+  bucketSecret: typeof emptyBucketSecret;
+  setBucketSecret: (
+    updater: (prev: typeof emptyBucketSecret) => typeof emptyBucketSecret
+  ) => void;
+}) {
+  return (
+    <>
+      <ComposerInput
+        label="Name"
+        value={bucketSecret.keyName}
+        placeholder="Secret name"
+        onChange={(keyName) =>
+          setBucketSecret((prev) => ({ ...prev, keyName }))
+        }
+      />
+      <ComposerInput
+        label="Value"
+        type="password"
+        value={bucketSecret.value}
+        placeholder="Secret value"
+        onChange={(nextValue) =>
+          setBucketSecret((prev) => ({ ...prev, value: nextValue }))
+        }
+      />
+    </>
+  );
+}
+
 function SecretValueFields({
   authOption,
   secret,
@@ -278,22 +404,27 @@ function SecretValueFields({
     updater: (prev: typeof emptySecret) => typeof emptySecret
   ) => void;
 }) {
-  if (authOption?.required_fields.includes("username")) {
+  // Nothing has been identified yet (no service picked, or the picked service
+  // has no auth options): there's no way to know which fields to collect, so
+  // render nothing instead of a token box no one can fill in meaningfully.
+  if (!authOption) return null;
+  if (authOption.required_fields.includes("username")) {
     return <BasicSecretFields secret={secret} setSecret={setSecret} />;
   }
-  if (authOption?.required_fields.includes("certificate")) {
+  if (authOption.required_fields.includes("certificate")) {
     return <MTLSSecretFields secret={secret} setSecret={setSecret} />;
+  }
+  // OAuth/OIDC store an application client pair rather than a single opaque
+  // token, so they get dedicated Client ID / Client secret inputs.
+  if (authOption.required_fields.includes("client_id")) {
+    return <ClientCredentialFields secret={secret} setSecret={setSecret} />;
   }
   return (
     <ComposerInput
-      label={authOption?.auth_type === "api_key" ? "Secret value" : "Token"}
+      label={authOption.auth_type === "api_key" ? "Secret value" : "Token"}
       type="password"
       value={secret.value}
-      placeholder={
-        authOption
-          ? tokenPlaceholder(authOption.auth_type)
-          : "Choose a credential type"
-      }
+      placeholder={tokenPlaceholder(authOption.auth_type)}
       onChange={(next) => setSecret((prev) => ({ ...prev, value: next }))}
     />
   );
@@ -404,11 +535,43 @@ function QualifierSelect({
           <>
             <option value="header">Header</option>
             <option value="query">Query</option>
+            <option value="path">Path</option>
             <option value="body">Body</option>
+            <option value="env">Env</option>
           </>
         )}
       </select>
     </label>
+  );
+}
+
+function ClientCredentialFields({
+  secret,
+  setSecret,
+}: {
+  secret: typeof emptySecret;
+  setSecret: (
+    updater: (prev: typeof emptySecret) => typeof emptySecret
+  ) => void;
+}) {
+  return (
+    <>
+      <ComposerInput
+        label="Client ID"
+        value={secret.clientId}
+        placeholder="Client ID"
+        onChange={(clientId) => setSecret((prev) => ({ ...prev, clientId }))}
+      />
+      <ComposerInput
+        label="Client secret"
+        type="password"
+        value={secret.clientSecret}
+        placeholder="Client secret"
+        onChange={(clientSecret) =>
+          setSecret((prev) => ({ ...prev, clientSecret }))
+        }
+      />
+    </>
   );
 }
 
@@ -435,6 +598,30 @@ function ComposerInput({
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
+        className="h-[38px] w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+      />
+    </label>
+  );
+}
+
+// Expiry is optional for every secret kind: an empty value means the stored
+// credential never expires, matching the CLI's optional --expires-at flag.
+function ExpiryInput({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="min-w-0">
+      <span className="mb-1 block text-xs font-medium text-slate-500">
+        Expires at
+      </span>
+      <input
+        type="datetime-local"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
         className="h-[38px] w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
       />
     </label>
@@ -468,11 +655,13 @@ async function submitValue(
 function resetForms(
   setSecret: (value: typeof emptySecret) => void,
   setValue: (value: typeof emptyValue) => void,
+  setBucketSecret: (value: typeof emptyBucketSecret) => void,
   setServiceSearch: (search: string) => void,
   setError: (error: string) => void
 ) {
   setSecret(emptySecret);
   setValue(emptyValue);
+  setBucketSecret(emptyBucketSecret);
   setServiceSearch("");
   setError("");
 }
@@ -486,6 +675,9 @@ function applyDefaultService(
   setValue: (updater: (prev: typeof emptyValue) => typeof emptyValue) => void,
   setServiceSearch: (search: string) => void
 ) {
+  // Bucket secrets aren't service-scoped, so there is no default service to
+  // preselect for them.
+  if (kind === "bucket_secret") return;
   if (services.length === 0) return;
   const service = services[0];
   // The form submits service_id because bucket entries are service-scoped, but
@@ -558,12 +750,31 @@ async function saveEntry(
   kind: BucketEntryKind,
   secret: typeof emptySecret,
   value: typeof emptyValue,
+  bucketSecret: typeof emptyBucketSecret,
   authOption: ServiceAuthOption | undefined,
   onSaveSecret: (payload: SecretFormPayload) => Promise<void>,
   onSaveSecrets: (payloads: SecretFormPayload[]) => Promise<void>,
-  onSaveValue: (payload: ValueFormPayload) => Promise<void>
+  onSaveCredentialFamily: (
+    payload: CredentialFamilyFormPayload
+  ) => Promise<void>,
+  onSaveValue: (payload: ValueFormPayload) => Promise<void>,
+  onSaveBucketSecret: (payload: BucketSecretFormPayload) => Promise<void>
 ) {
-  if (kind === "secret")
+  if (kind === "secret") {
+    // OAuth/OIDC application pairs use Engine's credential_family write path;
+    // every other credential type keeps the existing row-oriented path.
+    if (authOption && secretIsCredentialFamily(authOption.credential_type)) {
+      await onSaveCredentialFamily(
+        serializeCredentialFamilyPayload(secret, authOption)
+      );
+      return;
+    }
     await submitSecret(secret, authOption, onSaveSecret, onSaveSecrets);
-  else await submitValue(value, onSaveValue);
+    return;
+  }
+  if (kind === "bucket_secret") {
+    await onSaveBucketSecret(serializeBucketSecretPayload(bucketSecret));
+    return;
+  }
+  await submitValue(value, onSaveValue);
 }

@@ -17,8 +17,7 @@ import (
 )
 
 // TestMCPConfigPlanResponseIncludesExactApplyPermissions keeps plan authorization explicit after server metadata admission.
-func TestMCPConfigPlanResponseIncludesExactApplyPermissions(t *testing.T) {
-	serviceID := uuid.New()
+func TestMCPConfigPlanResponseIncludesExactApplyPermissions(t *testing.T) {	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
 	s := &workspaceTestStore{
 		accountID: uuid.New(),
@@ -57,6 +56,35 @@ func TestMCPConfigPlanResponseIncludesExactApplyPermissions(t *testing.T) {
 	}
 	if !hasRequiredPermission(payload.RequiredPermissions, "service.consume", "service", serviceID) {
 		t.Fatalf("required permissions = %#v", payload.RequiredPermissions)
+	}
+}
+
+// TestConfigBucketRequirementsIncludesEveryDistinctBucket proves a plan
+// touching a per-service override bucket in addition to the family default
+// surfaces bucket.use permission requirements for BOTH buckets, not just the
+// default -- otherwise a workspace member could plan/apply against an
+// override bucket they were never granted access to.
+func TestConfigBucketRequirementsIncludesEveryDistinctBucket(t *testing.T) {
+	defaultBucket := store.Bucket{ID: uuid.New(), Name: "default"}
+	overrideBucket := store.Bucket{ID: uuid.New(), Name: "override"}
+	requirements, displayNames, err := configBucketRequirements([]store.Bucket{defaultBucket, overrideBucket})
+	if err != nil {
+		t.Fatalf("configBucketRequirements: %v", err)
+	}
+	if len(requirements) != 2 {
+		t.Fatalf("requirements = %#v, want exactly one bucket.use entry per distinct bucket", requirements)
+	}
+	for _, bucket := range []store.Bucket{defaultBucket, overrideBucket} {
+		resource := accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: bucket.ID}
+		found := false
+		for _, requirement := range requirements {
+			if requirement.Resource == resource && requirement.Permission == accesscontrol.PermissionBucketUse {
+				found = true
+			}
+		}
+		if !found || displayNames[resource] != bucket.Name {
+			t.Fatalf("missing/incorrect requirement for bucket %s: requirements=%#v displayNames=%#v", bucket.Name, requirements, displayNames)
+		}
 	}
 }
 

@@ -17,6 +17,8 @@ import { BucketOverview } from "~/components/buckets/BucketOverview";
 import {
   type BucketDetailTab,
   type BucketEntryKind,
+  type BucketSecretFormPayload,
+  type CredentialFamilyFormPayload,
   type SecretFormPayload,
   type ValueFormPayload,
 } from "~/lib/buckets";
@@ -49,7 +51,9 @@ type BucketDetailsPanelProps = {
   onCancelEntry: () => void;
   onSaveSecret: (payload: SecretFormPayload) => Promise<void>;
   onSaveSecrets: (payloads: SecretFormPayload[]) => Promise<void>;
+  onSaveCredentialFamily: (payload: CredentialFamilyFormPayload) => Promise<void>;
   onSaveValue: (payload: ValueFormPayload) => Promise<void>;
+  onSaveBucketSecret: (payload: BucketSecretFormPayload) => Promise<void>;
   onRemoveSecret: (item: SecretMeta) => void;
   onRemoveValue: (item: BucketValue) => void;
   onRemoveConnection: (connection: AuthConnection) => void;
@@ -131,7 +135,9 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
           onCancel={props.onCancelEntry}
           onSaveSecret={props.onSaveSecret}
           onSaveSecrets={props.onSaveSecrets}
+          onSaveCredentialFamily={props.onSaveCredentialFamily}
           onSaveValue={props.onSaveValue}
+          onSaveBucketSecret={props.onSaveBucketSecret}
         />}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-6 py-3">
           <span className="text-sm font-medium text-slate-700">
@@ -330,6 +336,9 @@ function BucketDetailsHeader({
             onSelect={onAddEntry}
             allowedKinds={[
               ...(permissions.manageCredentials ? ["secret" as const] : []),
+              // Bucket secrets share the credential-management permission since
+              // they are still stored as workspace secrets, just service-independent.
+              ...(permissions.manageCredentials ? ["bucket_secret" as const] : []),
               ...(permissions.manageValues ? ["value" as const] : []),
             ]}
           />

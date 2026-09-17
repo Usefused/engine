@@ -138,6 +138,28 @@ func (s *cachedStore) SetAppFamilyBucket(ctx context.Context, appFamilyID, bucke
 	return err
 }
 
+// SetAppFamilyServiceBucket mirrors SetAppFamilyBucket's broad invalidation:
+// a per-service override changes credential resolution for every immutable
+// version in the family, not just the version that happened to trigger it.
+func (s *cachedStore) SetAppFamilyServiceBucket(ctx context.Context, appFamilyID, serviceID, bucketID uuid.UUID) error {
+	err := s.Store.SetAppFamilyServiceBucket(ctx, appFamilyID, serviceID, bucketID)
+	if err == nil {
+		s.invalidateRuntimeConfiguration(ctx)
+	}
+	return err
+}
+
+// DeleteAppFamilyServiceBucket also broadly invalidates: reverting an
+// override changes the effective bucket back to the family default for
+// every version, the same blast radius as setting one.
+func (s *cachedStore) DeleteAppFamilyServiceBucket(ctx context.Context, appFamilyID, serviceID uuid.UUID) error {
+	err := s.Store.DeleteAppFamilyServiceBucket(ctx, appFamilyID, serviceID)
+	if err == nil {
+		s.invalidateRuntimeConfiguration(ctx)
+	}
+	return err
+}
+
 // runtimeBindingsKey includes every SQL predicate; length-prefixing authType
 // prevents a delimiter in an operation name from creating an aliasing key.
 func runtimeBindingsKey(bucketID, serviceID, serviceVersionID uuid.UUID, authType, operationID string) string {

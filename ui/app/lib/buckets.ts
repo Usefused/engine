@@ -59,13 +59,34 @@ export type SDKBucketState = {
   sdkBuckets: Bucket[];
 };
 
-export type BucketEntryKind = "secret" | "value";
+export type BucketEntryKind = "secret" | "value" | "bucket_secret";
 export type BucketDetailTab = "secrets" | "env" | "connected-users";
 
 export type SecretFormPayload = {
   serviceId: string;
   keyName: string;
   credentialType: string;
+  value: string;
+  expiresAt?: string;
+};
+
+// OAuth/OIDC application registrations are a client_id/client_secret pair
+// bound to one named auth scheme, so they carry their own payload shape
+// instead of reusing the single-value SecretFormPayload.
+export type CredentialFamilyFormPayload = {
+  serviceId: string;
+  credentialType: string;
+  authName: string;
+  clientId: string;
+  clientSecret: string;
+  expiresAt?: string;
+};
+
+// A bucket secret has no service_id: it is a generic, service-independent
+// credential (e.g. for ${bucket.secrets.<key>} references) rather than a
+// per-service credential.
+export type BucketSecretFormPayload = {
+  keyName: string;
   value: string;
   expiresAt?: string;
 };

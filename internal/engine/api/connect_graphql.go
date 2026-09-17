@@ -2687,10 +2687,12 @@ func authOptionLabel(authType string) string {
 		return "Bearer token"
 	case "basic":
 		return "Basic"
+	// OAuth/OIDC store an application client pair, not a connected user's
+	// token, so the label must not imply a single opaque value.
 	case "oauth":
-		return "OAuth token"
+		return "OAuth application credentials"
 	case "oidc":
-		return "OIDC token"
+		return "OIDC application credentials"
 	case "mtls":
 		return "mTLS"
 	default:
@@ -2705,15 +2707,24 @@ func bucketSecretCredentialType(authType string) string {
 	return authType
 }
 
+// isPairedBucketAuthType reports whether an auth family stores two related
+// values under one derived key prefix instead of a single opaque value.
+// OAuth/OIDC are paired here too: they hold a client_id/client_secret
+// application pair, the same shape as Basic (username/password) and mTLS
+// (cert/key), so they share the same key-naming convention.
+func isPairedBucketAuthType(authType string) bool {
+	return authType == "basic" || authType == "mtls" || authType == "oauth" || authType == "oidc"
+}
+
 func singleAuthKeyName(authType, keyName string) string {
-	if authType == "basic" || authType == "mtls" {
+	if isPairedBucketAuthType(authType) {
 		return ""
 	}
 	return keyName
 }
 
 func pairedAuthKeyPrefix(authType, keyName string) string {
-	if authType == "basic" || authType == "mtls" {
+	if isPairedBucketAuthType(authType) {
 		return keyName
 	}
 	return ""
@@ -2725,6 +2736,10 @@ func authRequiredFields(authType string) []string {
 		return []string{"username", "password"}
 	case "mtls":
 		return []string{"certificate", "private_key"}
+	// OAuth/OIDC application registrations require exactly this pair; Engine
+	// rejects anything else in expandOAuthApplicationFamily.
+	case "oauth", "oidc":
+		return []string{"client_id", "client_secret"}
 	default:
 		return []string{"value"}
 	}

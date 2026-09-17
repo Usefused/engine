@@ -187,6 +187,64 @@ func TestMCPConfigApplyPersistsCompiledUnifiedState(t *testing.T) {
 	}
 }
 
+// TestMCPConfigApplySkipsTokenWhenRequested mirrors the SDK apply behavior:
+// SkipToken must suppress the family's first-ever token instead of the
+// caller getting one back to discard, for callers minting their own via
+// POST /workspace/app-tokens.
+func TestMCPConfigApplySkipsTokenWhenRequested(t *testing.T) {
+	accountID, serviceID, serviceVersionID := uuid.New(), uuid.New(), uuid.New()
+	actor := controlTestOwnerActor(accountID)
+	ctx := accesscontrol.ContextWithActor(t.Context(), actor)
+	s := &workspaceTestStore{
+		accountID: accountID,
+		workspaceServices: []store.WorkspaceService{{
+			ServiceID: serviceID, ServiceName: "okta", Version: "2026-07-01",
+		}},
+		workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{
+			serviceID: {{ServiceID: serviceID, ServiceVersionID: serviceVersionID, Version: "2026-07-01"}},
+		},
+	}
+	revision := sandbox.ServiceVersionRevision{
+		ServiceID: serviceID, Version: "2026-07-01", ServiceVersionID: serviceVersionID, Revision: 1,
+	}
+	registryClient := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{
+		serviceID.String() + "|2026-07-01": revision,
+	}}
+	configStore := &mockConfigStore{}
+	doc := sdkConfigDocument{
+		APIVersion: "fused/v1", Kind: store.AppKindMCP.String(), Name: "security", Version: "1.0.0", Bucket: "default",
+		Description: "Look up identities and coordinate security workflows in Okta.",
+		Services:    map[string]sdkConfigServiceDoc{"okta": {Version: "2026-07-01", Operations: []string{"getUser"}}},
+		UnifiedOperations: map[string]sdkUnifiedOperationDoc{
+			"security.lookup": {
+				Input:    json.RawMessage(`{"type":"object"}`),
+				Bindings: map[string]sdkUnifiedBindingDoc{"okta": {Operation: "getUser"}},
+			},
+		},
+	}
+	planResult, err := createMCPConfigPlan(ctx, configStore, s, registryClient, sdkPlanCall{
+		apiKey: "fsk_test", accountID: accountID, actor: actor,
+		request: SDKConfigPlanRequest{ConfigKey: "mcp:security:1.0.0", SourceHash: "sha256:test"}, document: doc,
+	})
+	if err != nil {
+		t.Fatalf("createMCPConfigPlan() error = %v", err)
+	}
+	result, err := executeMCPConfigApply(ctx, configStore, s, registryClient, sdkApplyCall{
+		apiKey: "fsk_test", accountID: accountID, actor: actor,
+		planID: planResult.plan.ID, planRevision: planResult.plan.Revision, sourceHash: planResult.plan.SourceHash,
+		skipToken: true,
+	})
+	if err != nil {
+		t.Fatalf("executeMCPConfigApply() error = %v", err)
+	}
+	if result.ExecutionToken != "" {
+		t.Fatalf("expected no token when SkipToken was requested, got %q", result.ExecutionToken)
+	}
+	if configStore.artifactApply == nil || !configStore.artifactApply.SkipTokenIssuance {
+		t.Fatal("expected SkipTokenIssuance to reach ApplyAppConfigPlan")
+	}
+}
+
 // TestValidateAppConfigDocumentMCPRequiresBoundedDescription keeps server identity useful and bounded before planning.
 func TestValidateAppConfigDocumentMCPRequiresBoundedDescription(t *testing.T) {
 	doc := sdkConfigDocument{
