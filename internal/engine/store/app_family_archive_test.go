@@ -51,7 +51,10 @@ func TestArchiveAppFamilyReleasesNameAndRetainsCatalogueHistory(t *testing.T) {
 		_, _ = fixture.pool.Exec(context.Background(), `DELETE FROM fused_buckets WHERE id = $1`, bucket.ID)
 	})
 	// A persisted family binding proves archive cleanup releases the bucket dependency.
-	if err := fixture.repository.SetAppFamilyBucket(fixture.ctx, original.AppFamilyID, bucket.ID); err != nil {
+	if _, err := fixture.pool.Exec(fixture.ctx, `
+		INSERT INTO fused_app_family_buckets (app_family_id, bucket_id)
+		VALUES ($1, $2)
+	`, original.AppFamilyID, bucket.ID); err != nil {
 		t.Fatalf("bind family bucket: %v", err)
 	}
 	tokenID := uuid.New()

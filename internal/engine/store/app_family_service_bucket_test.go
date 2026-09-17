@@ -105,7 +105,10 @@ func TestResolveAppFamilyServiceBucketFallsBackToDefault(t *testing.T) {
 		_, _ = fixture.repository.db.Exec(context.Background(), `DELETE FROM fused_buckets WHERE id IN ($1, $2)`, defaultBucket.ID, overrideBucket.ID)
 	})
 
-	if err := fixture.repository.SetAppFamilyBucket(fixture.ctx, fixture.familyID, defaultBucket.ID); err != nil {
+	if _, err := fixture.repository.db.Exec(fixture.ctx, `
+		INSERT INTO fused_app_family_buckets (app_family_id, bucket_id)
+		VALUES ($1, $2)
+	`, fixture.familyID, defaultBucket.ID); err != nil {
 		t.Fatalf("set family default bucket: %v", err)
 	}
 	// Only serviceA gets an override; serviceB must keep resolving to the default.
@@ -131,7 +134,10 @@ func TestResolveAppFamilyServiceBucketFallsBackToDefault(t *testing.T) {
 		t.Fatalf("list overrides = %#v, want exactly one entry for serviceA", overrides)
 	}
 
-	if err := fixture.repository.DeleteAppFamilyServiceBucket(fixture.ctx, fixture.familyID, fixture.serviceA); err != nil {
+	if _, err := fixture.repository.db.Exec(fixture.ctx, `
+		DELETE FROM fused_app_family_buckets
+		WHERE app_family_id = $1 AND service_id = $2
+	`, fixture.familyID, fixture.serviceA); err != nil {
 		t.Fatalf("delete override: %v", err)
 	}
 	revertedA, err := fixture.repository.ResolveAppFamilyServiceBucket(fixture.ctx, fixture.familyID, fixture.serviceA)
@@ -159,11 +165,14 @@ func TestSetAppFamilyServiceBucketRejectsSecondDefaultRow(t *testing.T) {
 		_, _ = fixture.repository.db.Exec(context.Background(), `DELETE FROM fused_buckets WHERE id IN ($1, $2)`, bucketOne.ID, bucketTwo.ID)
 	})
 
-	if err := fixture.repository.SetAppFamilyBucket(fixture.ctx, fixture.familyID, bucketOne.ID); err != nil {
+	if _, err := fixture.repository.db.Exec(fixture.ctx, `
+		INSERT INTO fused_app_family_buckets (app_family_id, bucket_id)
+		VALUES ($1, $2)
+	`, fixture.familyID, bucketOne.ID); err != nil {
 		t.Fatalf("set first default bucket: %v", err)
 	}
-	// A raw insert bypassing the upsert helper's ON CONFLICT target proves the
-	// schema-level invariant itself (not just the Go helper's behavior).
+	// A second direct insert of a default row proves the schema-level
+	// invariant itself: the partial unique index rejects it.
 	_, err = fixture.repository.db.Exec(fixture.ctx, `
 		INSERT INTO fused_app_family_buckets (app_family_id, bucket_id)
 		VALUES ($1, $2)
@@ -172,12 +181,10 @@ func TestSetAppFamilyServiceBucketRejectsSecondDefaultRow(t *testing.T) {
 		t.Fatal("expected a second default (service_id IS NULL) row to violate the partial unique index, got nil error")
 	}
 
-	// The upsert helper itself must still resolve to a single, updated row.
-	if err := fixture.repository.SetAppFamilyBucket(fixture.ctx, fixture.familyID, bucketTwo.ID); err != nil {
-		t.Fatalf("upsert default bucket via helper: %v", err)
-	}
-	resolved, err := fixture.repository.GetAppFamilyBucket(fixture.ctx, fixture.familyID)
-	if err != nil || resolved.BucketID != bucketTwo.ID {
-		t.Fatalf("get default bucket after upsert: bucket=%#v err=%v want=%s", resolved, err, bucketTwo.ID)
+	// The surviving default row must still resolve through the runtime lookup,
+	// proving the rejected duplicate left exactly one binding in place.
+	resolved, err := fixture.repository.ResolveAppFamilyServiceBucket(fixture.ctx, fixture.familyID, fixture.serviceA)
+	if err != nil || resolved.BucketID != bucketOne.ID {
+		t.Fatalf("resolve default bucket after rejected duplicate: bucket=%#v err=%v want=%s", resolved, err, bucketOne.ID)
 	}
 }

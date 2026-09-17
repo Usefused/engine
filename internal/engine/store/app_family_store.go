@@ -998,44 +998,6 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 
 // --- Family buckets ---
 
-// SetAppFamilyBucket upserts the family's default bucket binding (the
-// service_id IS NULL row). Services that don't declare their own override
-// resolve through this row, so the conflict target must match the partial
-// unique index that enforces "exactly one default row per family" rather
-// than a plain column-level unique constraint.
-func (s *postgresStore) SetAppFamilyBucket(ctx context.Context, appFamilyID, bucketID uuid.UUID) error {
-	_, err := s.db.Exec(ctx, `
-		INSERT INTO fused_app_family_buckets (app_family_id, bucket_id)
-		VALUES ($1, $2)
-		ON CONFLICT (app_family_id) WHERE service_id IS NULL DO UPDATE SET
-			bucket_id = EXCLUDED.bucket_id,
-			updated_at = NOW()
-	`, appFamilyID, bucketID)
-	if err != nil {
-		return fmt.Errorf("set app family bucket: %w", err)
-	}
-	return nil
-}
-
-// GetAppFamilyBucket returns the family's default bucket binding. The
-// explicit service_id IS NULL filter keeps this scoped to the default row
-// even after per-service overrides exist for the same family.
-func (s *postgresStore) GetAppFamilyBucket(ctx context.Context, appFamilyID uuid.UUID) (*AppFamilyBucket, error) {
-	var fb AppFamilyBucket
-	err := s.db.QueryRow(ctx, `
-		SELECT app_family_id, bucket_id, created_at, updated_at
-		FROM fused_app_family_buckets
-		WHERE app_family_id = $1 AND service_id IS NULL
-	`, appFamilyID).Scan(&fb.AppFamilyID, &fb.BucketID, &fb.CreatedAt, &fb.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrBucketNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get app family bucket: %w", err)
-	}
-	return &fb, nil
-}
-
 // SetAppFamilyServiceBucket upserts a per-service bucket override for one
 // family. The conflict target is the UNIQUE(app_family_id, service_id)
 // constraint, distinct from the default row's partial unique index because
@@ -1050,21 +1012,6 @@ func (s *postgresStore) SetAppFamilyServiceBucket(ctx context.Context, appFamily
 	`, appFamilyID, serviceID, bucketID)
 	if err != nil {
 		return fmt.Errorf("set app family service bucket: %w", err)
-	}
-	return nil
-}
-
-// DeleteAppFamilyServiceBucket removes a per-service override, reverting
-// that service to the family default bucket on the next resolution. It is a
-// no-op (not an error) when no override exists, matching apply's "diff and
-// remove" semantics for reverted overrides.
-func (s *postgresStore) DeleteAppFamilyServiceBucket(ctx context.Context, appFamilyID, serviceID uuid.UUID) error {
-	_, err := s.db.Exec(ctx, `
-		DELETE FROM fused_app_family_buckets
-		WHERE app_family_id = $1 AND service_id = $2
-	`, appFamilyID, serviceID)
-	if err != nil {
-		return fmt.Errorf("delete app family service bucket: %w", err)
 	}
 	return nil
 }

@@ -938,12 +938,10 @@ type Store interface {
 	GetAppTokenBinding(ctx context.Context, tokenID, serviceID uuid.UUID, authName string) (*AppTokenBinding, error)
 
 	// Family buckets
-	SetAppFamilyBucket(ctx context.Context, appFamilyID, bucketID uuid.UUID) error
-	GetAppFamilyBucket(ctx context.Context, appFamilyID uuid.UUID) (*AppFamilyBucket, error)
-	// SetAppFamilyServiceBucket and DeleteAppFamilyServiceBucket manage a
-	// per-service override on top of the family default above.
+	// SetAppFamilyServiceBucket manages a per-service override on top of the
+	// family default bucket; reverting an override is done by diffing and
+	// clearing the row during apply.
 	SetAppFamilyServiceBucket(ctx context.Context, appFamilyID, serviceID, bucketID uuid.UUID) error
-	DeleteAppFamilyServiceBucket(ctx context.Context, appFamilyID, serviceID uuid.UUID) error
 	// ResolveAppFamilyServiceBucket is the runtime-path lookup: override if
 	// present, else the family default.
 	ResolveAppFamilyServiceBucket(ctx context.Context, appFamilyID, serviceID uuid.UUID) (*AppFamilyBucket, error)
