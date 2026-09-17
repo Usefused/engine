@@ -94,6 +94,10 @@ var dynamicControlRequirements = map[string]dynamicRequirementKind{
 var authenticatedOnlyControlRoutes = map[string]struct{}{
 	http.MethodGet + " /auth/whoami":      {},
 	http.MethodPost + " /auth/cli/logout": {},
+	// A user manages only their own OAuth consents; no workspace RBAC grant
+	// governs this, matching /auth/whoami's authenticated-only shape.
+	http.MethodGet + " /oauth/connected-apps":                {},
+	http.MethodDelete + " /oauth/connected-apps/{client_id}": {},
 }
 
 func workspaceRequirement(permission accesscontrol.Permission) routeRequirement {
@@ -111,6 +115,8 @@ func pathRequirement(permission accesscontrol.Permission, resourceType accesscon
 var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodGet, "/auth/whoami", false, nil},
 	{http.MethodPost, "/auth/cli/logout", false, nil},
+	{http.MethodGet, "/oauth/connected-apps", false, nil},
+	{http.MethodDelete, "/oauth/connected-apps/{client_id}", false, nil},
 	{http.MethodGet, "/audit/export", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionAuditRead),
 	}},
