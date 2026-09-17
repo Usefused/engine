@@ -999,7 +999,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// Engine-native MCP GraphQL surface (list/deploy/kill/reactivate/delete +
 	// analytics) -- a distinct endpoint from POST /graphql, which is a pure
 	// Registry forward-proxy with no resolvers of its own (graphql_proxy.go).
-	if err := api.MountMCPGraphQLRoute(r, deps.configStore, deps.engineStore, deps.registryClient, deps.registryClient, deps.masterKey, deps.connectRedirectURI, deps.controlAuth); err != nil {
+	if err := api.MountMCPGraphQLRoute(r, deps.configStore, deps.engineStore, deps.registryClient, deps.registryClient, deps.masterKey, deps.connectRedirectURI, deps.oauthProvider, deps.controlAuth); err != nil {
 		slog.Error("failed to mount mcp graphql route", slog.Any("error", err))
 		os.Exit(1)
 	}

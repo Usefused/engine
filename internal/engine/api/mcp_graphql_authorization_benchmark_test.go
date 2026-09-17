@@ -158,7 +158,7 @@ func benchmarkGraphQLTotalRequest(b *testing.B, fieldCount int) {
 		accountID:       uuid.New(),
 		bucketSummaries: []store.BucketSummary{{Bucket: store.Bucket{ID: bucketID, Name: "production"}}},
 	}
-	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, testStore, &mockVerifier{}, &mockRegistryClient{}, testMasterKey)
+	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, testStore, &mockVerifier{}, &mockRegistryClient{}, testMasterKey, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func newGraphQLPreflightFixture(tb testing.TB, fieldCount int) graphQLPreflightF
 	tb.Helper()
 	workspaceID, bucketID, serviceID := uuid.New(), uuid.New(), uuid.New()
 	testStore := &workspaceTestStore{accountID: uuid.New()}
-	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, testStore, &mockVerifier{}, &mockRegistryClient{}, testMasterKey)
+	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, testStore, &mockVerifier{}, &mockRegistryClient{}, testMasterKey, nil)
 	if err != nil {
 		tb.Fatalf("create benchmark schema: %v", err)
 	}

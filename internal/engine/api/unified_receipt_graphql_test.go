@@ -42,7 +42,7 @@ func assertUnifiedReceiptGraphQL(t *testing.T, transport string, audit bool) {
 	t.Helper()
 	account, app, family, parent := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	s := &unifiedReceiptQueryStore{workspaceTestStore: &workspaceTestStore{accountID: account, apps: map[uuid.UUID]store.App{app: {AppID: app, AppFamilyID: family, AccountID: account, Status: store.AppStatusActive}}}, event: models.EngineExecutionEvent{ID: uuid.New(), AppID: app, AppFamilyID: family, Transport: transport, ExecutionKind: "physical", ParentExecutionID: parent, UnifiedTarget: "items", ExecutionPhase: "rollback"}}
-	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"))
+	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"), nil)
 	// Construction catches missing schema fields before request authorization is exercised.
 	if err != nil {
 		t.Fatal(err)

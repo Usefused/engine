@@ -93,7 +93,7 @@ func TestAppAccessGraphQLSelectorsUseOneRepositoryCallPerAggregate(t *testing.T)
 		}}, Total: 1},
 		teamPage: store.AppOwningTeamPage{Items: []store.AppOwningTeam{{ID: teamID, Name: "Platform", Slug: "platform"}}, Total: 1},
 	}
-	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil)
+	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("new schema: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestAppAccessGraphQLSelectorsUseOneRepositoryCallPerAggregate(t *testing.T)
 func TestAppAccessGraphQLSelectorsDefaultToPersonalOwner(t *testing.T) {
 	actor := controlTestOwnerActor(uuid.New())
 	repository := &appAccessGraphQLStore{selectorPage: store.AppSelectorPage{Items: []store.AppBuildSelector{}, Total: 0}}
-	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil)
+	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("new schema: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestAppAccessGraphQLSelectorsResolveOwnerTeamSlug(t *testing.T) {
 	actor := controlTestOwnerActor(uuid.New())
 	teamID := uuid.New()
 	repository := &appAccessGraphQLStore{resolvedID: teamID, selectorPage: store.AppSelectorPage{Items: []store.AppBuildSelector{}}}
-	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil)
+	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("new schema: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestAppAccessGraphQLSelectorsResolveOwnerTeamSlug(t *testing.T) {
 func TestAppAccessGraphQLSelectorsDoNotRevealIneligibleTeamSlugs(t *testing.T) {
 	actor := controlTestOwnerActor(uuid.New())
 	repository := &appAccessGraphQLStore{referenceErr: store.ErrResourceReferenceNotFound}
-	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil)
+	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("new schema: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestAppAccessGraphQLSelectorsDoNotRevealIneligibleTeamSlugs(t *testing.T) {
 
 func TestAppAccessGraphQLPolicyTraversesFragmentsAndMultipleRoots(t *testing.T) {
 	workspaceID := uuid.New()
-	schema, err := newMCPGraphQLSchema(nil, &appAccessGraphQLStore{}, nil, nil, nil)
+	schema, err := newMCPGraphQLSchema(nil, &appAccessGraphQLStore{}, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("new schema: %v", err)
 	}

@@ -46,6 +46,7 @@ func TestUIEngineGraphQLDocuments(t *testing.T) {
 		&mockVerifier{},
 		&mockRegistryClient{},
 		[]byte("12345678901234567890123456789012"),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("newMCPGraphQLSchema() error = %v", err)

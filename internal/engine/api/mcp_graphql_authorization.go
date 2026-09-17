@@ -131,6 +131,7 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"authConnections":             argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionConnectionRead),
 		"authConnectionPage":          argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionConnectionRead),
 		"connectionResources":         connectionPermissions("connection_id", accesscontrol.PermissionConnectionRead),
+		"oauthClients":                excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
 	},
 	mutationRoots: map[string]graphQLFieldPolicy{
 		// User/team identity and access management, and credential issuance,
@@ -174,6 +175,10 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"setDefaultConnectionResource":      connectionPermissions("connection_id", accesscontrol.PermissionConnectionManage),
 		"rediscoverConnectionResources":     connectionPermissions("connection_id", accesscontrol.PermissionConnectionManage),
 		"refreshMissingServiceContracts":    permissions(accesscontrol.PermissionServiceManage),
+		// Registering or revoking an OAuth client is itself the capability a
+		// delegated OAuth token must never carry, regardless of its scope.
+		"createOAuthClient": excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"revokeOAuthClient": excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
 	},
 	protected: map[string]graphQLFieldPolicy{
 		// An MCP execution token is a credential, even when reached through a
