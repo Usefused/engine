@@ -475,6 +475,7 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"authConnectionPage":          authConnectionPageGraphQLField(s),
 			"connectionResources":         connectionResourcesGraphQLField(s),
 			"oauthClients":                oauthClientsGraphQLField(oauthProvider),
+			"oauthScopeCatalog":           oauthScopeCatalogGraphQLField(),
 		},
 	})
 	mutation := graphql.NewObject(graphql.ObjectConfig{

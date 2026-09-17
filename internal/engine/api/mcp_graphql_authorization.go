@@ -131,7 +131,13 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"authConnections":             argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionConnectionRead),
 		"authConnectionPage":          argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionConnectionRead),
 		"connectionResources":         connectionPermissions("connection_id", accesscontrol.PermissionConnectionRead),
-		"oauthClients":                excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		// Viewing registered clients only needs access.read, matching teams/team;
+		// creating or revoking a client needs access.manage (see mutationRoots).
+		"oauthClients": excludeDelegatedClients(permissions(accesscontrol.PermissionAccessRead)),
+		// The scope catalog only labels permission strings for the registration
+		// form; gate it the same as oauthClients so it's reachable wherever that
+		// page is, and never through a delegated OAuth token.
+		"oauthScopeCatalog": excludeDelegatedClients(permissions(accesscontrol.PermissionAccessRead)),
 	},
 	mutationRoots: map[string]graphQLFieldPolicy{
 		// User/team identity and access management, and credential issuance,

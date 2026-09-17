@@ -340,6 +340,16 @@ func (s *postgresStore) RotateOAuthRefreshToken(ctx context.Context, input OAuth
 	defer func() { _ = tx.Rollback(ctx) }()
 	metadata, err := rotateOAuthRefreshTokenTx(ctx, tx, input, at)
 	if err != nil {
+		// Reuse detection revokes the entire token family as a side effect
+		// inside this same transaction. That revocation is the actual
+		// security response to a suspected replay, so it must be committed
+		// even though the requested grant itself is denied -- rolling it
+		// back here would silently leave the stolen/duplicated tokens live.
+		if errors.Is(err, ErrOAuthGrantReuseDetected) {
+			if commitErr := tx.Commit(ctx); commitErr != nil {
+				return OAuthTokenMetadata{}, fmt.Errorf("commit OAuth reuse revocation: %w", commitErr)
+			}
+		}
 		return OAuthTokenMetadata{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

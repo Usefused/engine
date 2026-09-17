@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"html/template"
 	"net/http"
 	"net/url"
 	"strings"
@@ -46,7 +45,7 @@ func MountOAuthProviderRoutes(router chi.Router, service OAuthProviderService, s
 	router.With(limitAuthenticationRequests(browserauth.NewRequestLimiter(30, 300, time.Minute))).
 		Get("/oauth/authorize", oauthAuthorizeHandler(service, s, sessions, cookies, loginPath))
 	router.With(limitAuthenticationRequests(browserauth.NewRequestLimiter(30, 300, time.Minute))).
-		Post("/oauth/authorize/consent", oauthConsentHandler(service, sessions, cookies))
+		Post("/oauth/authorize/consent", oauthConsentHandler(service, s, sessions, cookies))
 	router.With(limitAuthenticationRequests(browserauth.NewRequestLimiter(60, 600, time.Minute))).
 		Post("/oauth/token", oauthTokenHandler(service))
 	router.With(limitAuthenticationRequests(browserauth.NewRequestLimiter(60, 600, time.Minute))).
@@ -62,7 +61,7 @@ func oauthAuthorizeHandler(service OAuthProviderService, s store.Store, sessions
 	return func(w http.ResponseWriter, r *http.Request) {
 		setOAuthResponseHeaders(w)
 		if service == nil || sessions == nil || cookies == nil {
-			renderOAuthErrorPage(w, http.StatusServiceUnavailable, "OAuth is not available on this Engine.")
+			renderOAuthErrorPage(r, s, w, http.StatusServiceUnavailable, "OAuth is not available on this Engine.")
 			return
 		}
 		actor, ok := resolveOAuthBrowserActor(r, sessions, cookies)
@@ -77,7 +76,7 @@ func oauthAuthorizeHandler(service OAuthProviderService, s store.Store, sessions
 				http.Redirect(w, r, target, http.StatusFound)
 				return
 			}
-			renderOAuthErrorPage(w, http.StatusBadRequest, "This connection request could not be verified. Return to the application and try again.")
+			renderOAuthErrorPage(r, s, w, http.StatusBadRequest, "This connection request could not be verified. Return to the application and try again.")
 			return
 		}
 		if !result.RequiresConsent {
@@ -166,16 +165,16 @@ func oauthErrorCode(err error) string {
 
 // -- POST /oauth/authorize/consent --
 
-func oauthConsentHandler(service OAuthProviderService, sessions BrowserSessionService, cookies *browserauth.CookieManager) http.HandlerFunc {
+func oauthConsentHandler(service OAuthProviderService, s store.Store, sessions BrowserSessionService, cookies *browserauth.CookieManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setOAuthResponseHeaders(w)
 		if service == nil || sessions == nil || cookies == nil {
-			renderOAuthErrorPage(w, http.StatusServiceUnavailable, "OAuth is not available on this Engine.")
+			renderOAuthErrorPage(r, s, w, http.StatusServiceUnavailable, "OAuth is not available on this Engine.")
 			return
 		}
 		actor, ok := resolveOAuthBrowserActor(r, sessions, cookies)
 		if !ok {
-			renderOAuthErrorPage(w, http.StatusUnauthorized, "Your session has expired. Sign in again and retry from the original link.")
+			renderOAuthErrorPage(r, s, w, http.StatusUnauthorized, "Your session has expired. Sign in again and retry from the original link.")
 			return
 		}
 		// The consent form is a plain browser POST, not an SPA fetch call, so it
@@ -183,12 +182,12 @@ func oauthConsentHandler(service OAuthProviderService, sessions BrowserSessionSe
 		// same mitigation already used for the other non-SPA browser endpoint
 		// (managed login start).
 		if !cookies.ValidateSameOrigin(r) {
-			renderOAuthErrorPage(w, http.StatusForbidden, "This request could not be verified. Return to the application and try again.")
+			renderOAuthErrorPage(r, s, w, http.StatusForbidden, "This request could not be verified. Return to the application and try again.")
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
 		if err := r.ParseForm(); err != nil {
-			renderOAuthErrorPage(w, http.StatusBadRequest, "The consent request was invalid.")
+			renderOAuthErrorPage(r, s, w, http.StatusBadRequest, "The consent request was invalid.")
 			return
 		}
 		req := oauthprovider.ConsentRequest{
@@ -199,7 +198,7 @@ func oauthConsentHandler(service OAuthProviderService, sessions BrowserSessionSe
 		if r.PostForm.Get("decision") != "allow" {
 			target, ok := oauthErrorRedirect(req.RedirectURI, "access_denied", req.State)
 			if !ok {
-				renderOAuthErrorPage(w, http.StatusBadRequest, "The connection request was invalid.")
+				renderOAuthErrorPage(r, s, w, http.StatusBadRequest, "The connection request was invalid.")
 				return
 			}
 			http.Redirect(w, r, target, http.StatusFound)
@@ -207,7 +206,7 @@ func oauthConsentHandler(service OAuthProviderService, sessions BrowserSessionSe
 		}
 		redirectURL, err := service.Consent(r.Context(), actor, req)
 		if err != nil {
-			renderOAuthErrorPage(w, http.StatusBadRequest, "The connection could not be authorized. Return to the application and try again.")
+			renderOAuthErrorPage(r, s, w, http.StatusBadRequest, "The connection could not be authorized. Return to the application and try again.")
 			return
 		}
 		http.Redirect(w, r, redirectURL, http.StatusFound)
@@ -322,16 +321,13 @@ func oauthScopeDescription(scope string) string {
 	return scope
 }
 
-var oauthErrorPageTemplate = template.Must(template.New("oauth-error").Parse(`<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connection request could not be completed</title>
-<style>:root{color-scheme:only light}body{min-height:100svh;margin:0;padding:clamp(1rem,4vw,3rem);background:#fbfaf8;color:#15121c;font-family:Inter,ui-sans-serif,system-ui,sans-serif}main{width:min(100%,29rem);margin:clamp(1rem,8vh,6rem) auto;padding:clamp(1.25rem,4vw,2rem);background:#fff;border:1px solid #e7e2ea;border-radius:1rem}</style>
-</head><body><main><h1>Connection request could not be completed</h1><p>{{.}}</p></main></body></html>`))
-
-func renderOAuthErrorPage(w http.ResponseWriter, status int, message string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(status)
-	_ = oauthErrorPageTemplate.Execute(w, message)
+// renderOAuthErrorPage renders Engine-owned OAuth failures by reusing the
+// same branded "connection failed" page the hosted-connect broker callback
+// already shows (writeConnectCallbackFallback/connectCallbackTemplate),
+// instead of maintaining a second near-duplicate template that can drift out
+// of sync with the shared hosted-connect look and responsive layout.
+func renderOAuthErrorPage(r *http.Request, s store.Store, w http.ResponseWriter, status int, message string) {
+	writeConnectCallbackFallback(r.Context(), s, w, status, message, true)
 }
 
 // -- POST /oauth/token --

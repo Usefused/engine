@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,10 +34,13 @@ var oauthClientTypeGraphQLEnum = graphql.NewEnum(graphql.EnumConfig{
 var oauthClientGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "OAuthClient",
 	Fields: graphql.Fields{
-		"id":             &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
-		"name":           &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
-		"client_id":      &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
-		"client_type":    &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"id":        &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"name":      &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"client_id": &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		// Reuse the same enum as the input side so the output serializes back
+		// to "CONFIDENTIAL"/"PUBLIC" instead of leaking the lowercase storage
+		// value, matching the frontend's OAuthClientType union.
+		"client_type":    &graphql.Field{Type: graphql.NewNonNull(oauthClientTypeGraphQLEnum)},
 		"redirect_uris":  &graphql.Field{Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(graphql.String)))},
 		"allowed_scopes": &graphql.Field{Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(graphql.String)))},
 		"has_secret":     &graphql.Field{Type: graphql.NewNonNull(graphql.Boolean)},
@@ -76,6 +80,47 @@ func oauthClientsGraphQLField(service OAuthProviderService) *graphql.Field {
 			return projectGraphQLOAuthClients(clients), nil
 		},
 	}
+}
+
+// oauthScopeGraphQLType describes one entry of the built-in OAuth scope
+// catalog: the raw permission string a client registration stores, plus the
+// human label shown in both the consent screen and the scope picker.
+var oauthScopeGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "OAuthScope",
+	Fields: graphql.Fields{
+		"value": &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"label": &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+	},
+})
+
+// oauthScopeCatalogGraphQLField exposes the same oauthScopeDescriptions map
+// used to label the consent screen (oauth_provider_handlers.go) as a query,
+// so the workspace UI's scope picker fetches its value/label pairs from the
+// server instead of duplicating them as static frontend data that could drift
+// out of sync when a new permission is added.
+func oauthScopeCatalogGraphQLField() *graphql.Field {
+	return &graphql.Field{
+		Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(oauthScopeGraphQLType))),
+		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			return projectGraphQLOAuthScopeCatalog(), nil
+		},
+	}
+}
+
+// projectGraphQLOAuthScopeCatalog turns oauthScopeDescriptions into a stable,
+// alphabetically sorted list (map iteration order is randomized in Go) so
+// repeated requests return scopes in the same order.
+func projectGraphQLOAuthScopeCatalog() []map[string]interface{} {
+	values := make([]string, 0, len(oauthScopeDescriptions))
+	for value := range oauthScopeDescriptions {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	catalog := make([]map[string]interface{}, 0, len(values))
+	for _, value := range values {
+		catalog = append(catalog, map[string]interface{}{"value": value, "label": oauthScopeDescriptions[value]})
+	}
+	return catalog
 }
 
 func createOAuthClientGraphQLField(service OAuthProviderService) *graphql.Field {
