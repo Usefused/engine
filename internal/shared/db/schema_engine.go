@@ -307,11 +307,16 @@ func engineSchemaQueries() []string {
 
 		// Authorization audit events contain identifiers and sanitized metadata,
 		// never request bodies, credentials, tokens, or provider secret values.
+		// actor_credential_id deliberately carries no foreign key: it records the
+		// authenticating credential's id for attribution, and that credential may
+		// be a control credential OR a delegated OAuth token, which live in
+		// different tables. A hard FK to fused_control_credentials would reject
+		// every OAuth-token audit event and fail the audit preflight closed.
 		`CREATE TABLE IF NOT EXISTS fused_audit_events (
 			id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			occurred_at         timestamptz NOT NULL DEFAULT NOW(),
 			actor_subject_id    uuid REFERENCES fused_subjects(id) ON DELETE SET NULL,
-			actor_credential_id uuid REFERENCES fused_control_credentials(id) ON DELETE SET NULL,
+			actor_credential_id uuid,
 			action              text NOT NULL,
 			permission          text,
 			resource_type       text,
@@ -334,6 +339,11 @@ func engineSchemaQueries() []string {
 			CONSTRAINT chk_fused_audit_events_status_code
 				CHECK (status_code BETWEEN 0 AND 599)
 		);`,
+		// Engines created before OAuth delegated tokens had actor_credential_id
+		// referencing fused_control_credentials; drop that FK so audit events for
+		// OAuth-token actors (whose credential id lives in fused_oauth_tokens)
+		// can be recorded instead of failing the audit preflight.
+		`ALTER TABLE fused_audit_events DROP CONSTRAINT IF EXISTS fused_audit_events_actor_credential_id_fkey;`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_audit_events_occurred_at
 		ON fused_audit_events(occurred_at DESC, id);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_audit_events_actor
@@ -1588,13 +1598,12 @@ func engineSchemaQueries() []string {
 		// constraint, so "exactly one default (service_id IS NULL) row per
 		// family" requires a partial unique index instead of relying on the
 		// UNIQUE(app_family_id, service_id) constraint above.
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_app_family_buckets_default
-			ON fused_app_family_buckets(app_family_id)
-			WHERE service_id IS NULL;`,
 		// Engines created before per-service bucket overrides existed have
 		// app_family_id as the sole primary key and no service_id column;
 		// migrate them in place to the shape declared above without losing
-		// their existing default-bucket rows.
+		// their existing default-bucket rows. This must run before the
+		// partial index below so the service_id column that index filters on
+		// exists on pre-override tables.
 		`DO $$
 		BEGIN
 			-- The lock makes the primary-key replacement safe across concurrent Engine startups.
@@ -1619,6 +1628,14 @@ func engineSchemaQueries() []string {
 			ALTER TABLE fused_app_family_buckets DROP CONSTRAINT IF EXISTS uq_fused_app_family_buckets_family_service;
 			ALTER TABLE fused_app_family_buckets ADD CONSTRAINT uq_fused_app_family_buckets_family_service UNIQUE (app_family_id, service_id);
 		END $$;`,
+		// Postgres treats every NULL as distinct under a plain UNIQUE
+		// constraint, so "exactly one default (service_id IS NULL) row per
+		// family" requires a partial unique index instead of relying on the
+		// UNIQUE(app_family_id, service_id) constraint above. It runs after
+		// the ALTER migration so pre-override Engines already have service_id.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_app_family_buckets_default
+			ON fused_app_family_buckets(app_family_id)
+			WHERE service_id IS NULL;`,
 
 		// Token history is credential-free and outlives the active hash. Activity
 		// can therefore explain who issued an expired token without retaining a
@@ -1779,6 +1796,10 @@ func oauthProviderSchemaQueries() []string {
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_oauth_clients_client_id ON fused_oauth_clients(client_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_oauth_clients_active ON fused_oauth_clients(created_at DESC) WHERE revoked_at IS NULL;`,
 
+		// Ephemeral clients minted by POST /oauth/register carry an absolute
+		// expiry so a registration-key holder cannot leave dormant clients.
+		`ALTER TABLE fused_oauth_clients ADD COLUMN IF NOT EXISTS expires_at timestamptz;`,
+
 		// A code is single-use and short-lived; consumed_at is set atomically by
 		// the same statement that issues its token pair, matching the CLI login
 		// transaction claim idiom used elsewhere in Engine.
@@ -1835,6 +1856,21 @@ func oauthProviderSchemaQueries() []string {
 			PRIMARY KEY (client_id, subject_id)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_oauth_user_consents_subject ON fused_oauth_user_consents(subject_id);`,
+
+		// A per-user registration key gates POST /oauth/register. Only its hash
+		// is stored; the raw value is shown once at mint/rotation, matching every
+		// other credential in Engine. The partial unique index enforces at most
+		// one active key per subject.
+		`CREATE TABLE IF NOT EXISTS fused_oauth_registration_keys (
+			id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			subject_id  uuid NOT NULL REFERENCES fused_subjects(id) ON DELETE CASCADE,
+			key_hash    text NOT NULL,
+			created_at  timestamptz NOT NULL DEFAULT NOW(),
+			revoked_at  timestamptz,
+			CONSTRAINT chk_fused_oauth_registration_keys_hash CHECK (key_hash <> '')
+		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_oauth_registration_keys_hash ON fused_oauth_registration_keys(key_hash);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_oauth_registration_keys_active ON fused_oauth_registration_keys(subject_id) WHERE revoked_at IS NULL;`,
 	}
 }
 

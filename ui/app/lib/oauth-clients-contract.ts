@@ -29,3 +29,21 @@ export const OAUTH_CLIENT_OPERATIONS = {
     }
   `,
 } as const;
+
+export const OAUTH_REGISTRATION_KEY_OPERATIONS = {
+  status: `
+    query OAuthRegistrationKey {
+      oauthRegistrationKey { exists }
+    }
+  `,
+  create: `
+    mutation CreateOAuthRegistrationKey {
+      createOAuthRegistrationKey { key }
+    }
+  `,
+  revoke: `
+    mutation RevokeOAuthRegistrationKey {
+      revokeOAuthRegistrationKey
+    }
+  `,
+} as const;

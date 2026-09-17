@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
@@ -38,6 +39,9 @@ const (
 	clientSecretPrefix = "fos_"
 	accessTokenPrefix  = "foat_"
 	refreshTokenPrefix = "fort_"
+
+	registrationKeyPrefix = "frk_"
+	ephemeralClientTTL    = 10 * time.Minute
 )
 
 var (
@@ -130,6 +134,108 @@ func (s *Service) CreateClient(ctx context.Context, actor accesscontrol.Actor, i
 
 func (s *Service) ListClients(ctx context.Context) ([]store.OAuthClient, error) {
 	return s.store.ListOAuthClients(ctx)
+}
+
+// RegisterClientRequest is the inbound dynamic-registration request: the caller
+// proves possession of a per-user registration key and asks for one ephemeral
+// public client bound to a single loopback redirect URI.
+type RegisterClientRequest struct {
+	RegistrationKey string
+	RedirectURI     string
+	Scopes          []string
+	// Name labels the ephemeral client in consent and audit. An empty name falls
+	// back to a fixed label because the registering system may not provide one.
+	Name string
+}
+
+// RegisterClientResult is the one-time output of dynamic registration. The
+// client id must be used promptly, before ClientIDExpiresAt.
+type RegisterClientResult struct {
+	ClientID          string
+	ClientIDExpiresAt time.Time
+}
+
+// RegisterClient validates a registration key and mints one ephemeral public
+// (PKCE) client whose redirect URI is a single loopback address and whose
+// lifetime is bounded by ephemeralClientTTL. The client is inert until a user
+// consents to it.
+func (s *Service) RegisterClient(ctx context.Context, req RegisterClientRequest) (RegisterClientResult, error) {
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.identity.oauth.client.register")
+	defer span.End()
+	subjectID, err := s.store.GetOAuthRegistrationKeySubject(ctx, hashSecret(req.RegistrationKey))
+	if err != nil {
+		if errors.Is(err, store.ErrOAuthRegistrationKeyNotFound) {
+			span.SetAttributes(attribute.String("outcome", "unauthorized"))
+			return RegisterClientResult{}, ErrUnauthorizedClient
+		}
+		span.SetAttributes(attribute.String("outcome", "failed"))
+		return RegisterClientResult{}, err
+	}
+	if err := validateLoopbackRedirectURI(req.RedirectURI); err != nil {
+		return RegisterClientResult{}, err
+	}
+	clientID, err := randomIdentifier(clientIDPrefix, 16)
+	if err != nil {
+		return RegisterClientResult{}, err
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = "Dynamic client"
+	}
+	expiresAt := s.now().Add(ephemeralClientTTL)
+	if _, err := s.store.RegisterOAuthClient(ctx, store.OAuthClientRegistration{
+		Name:          name,
+		ClientType:    store.OAuthClientPublic,
+		ClientID:      clientID,
+		RedirectURIs:  []string{req.RedirectURI},
+		AllowedScopes: req.Scopes,
+		ExpiresAt:     &expiresAt,
+		Actor:         store.MutationActor{SubjectID: subjectID},
+	}); err != nil {
+		span.SetAttributes(attribute.String("outcome", "failed"))
+		return RegisterClientResult{}, err
+	}
+	span.SetAttributes(attribute.String("outcome", "created"), attribute.String("oauth.client_id", clientID))
+	return RegisterClientResult{ClientID: clientID, ClientIDExpiresAt: expiresAt}, nil
+}
+
+// SetRegistrationKey mints (or rotates) the caller's registration key and
+// returns the raw value exactly once; any prior key is revoked in the same
+// transaction.
+func (s *Service) SetRegistrationKey(ctx context.Context, actor accesscontrol.Actor) (string, error) {
+	rawKey, err := randomIdentifier(registrationKeyPrefix, 32)
+	if err != nil {
+		return "", err
+	}
+	if _, err := s.store.SetOAuthRegistrationKey(ctx, actor.SubjectID, hashSecret(rawKey), mutationActor(ctx, actor)); err != nil {
+		return "", err
+	}
+	return rawKey, nil
+}
+
+// RevokeRegistrationKey deactivates the caller's active registration key, if any.
+func (s *Service) RevokeRegistrationKey(ctx context.Context, actor accesscontrol.Actor) error {
+	return s.store.RevokeOAuthRegistrationKey(ctx, actor.SubjectID, mutationActor(ctx, actor))
+}
+
+// HasRegistrationKey reports whether the caller currently holds an active key.
+func (s *Service) HasRegistrationKey(ctx context.Context, actor accesscontrol.Actor) (bool, error) {
+	return s.store.HasOAuthRegistrationKey(ctx, actor.SubjectID)
+}
+
+// validateLoopbackRedirectURI admits only explicit HTTP loopback redirects for
+// dynamically-registered clients: the authorization code lands on the authorizing
+// user's own machine, so a remote attacker cannot harvest it.
+func validateLoopbackRedirectURI(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "http" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+		return fmt.Errorf("%w: redirect_uri must be an HTTP loopback URL", ErrInvalidRequest)
+	}
+	host := parsed.Hostname()
+	if !strings.EqualFold(host, "localhost") && host != "127.0.0.1" && host != "::1" {
+		return fmt.Errorf("%w: redirect_uri must be a loopback address", ErrInvalidRequest)
+	}
+	return nil
 }
 
 func (s *Service) RevokeClient(ctx context.Context, actor accesscontrol.Actor, id uuid.UUID) error {

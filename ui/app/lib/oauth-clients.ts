@@ -1,5 +1,5 @@
 import { api } from "./api";
-import { OAUTH_CLIENT_OPERATIONS } from "./oauth-clients-contract";
+import { OAUTH_CLIENT_OPERATIONS, OAUTH_REGISTRATION_KEY_OPERATIONS } from "./oauth-clients-contract";
 
 export type OAuthClientType = "CONFIDENTIAL" | "PUBLIC";
 
@@ -55,4 +55,29 @@ export async function createOAuthClient(input: {
 export async function revokeOAuthClient(id: string): Promise<boolean> {
   const data = await api.mcpGraphql<{ revokeOAuthClient: boolean }>(OAUTH_CLIENT_OPERATIONS.revoke, { id });
   return data.revokeOAuthClient;
+}
+
+export interface OAuthRegistrationKeyStatus {
+  exists: boolean;
+}
+
+export async function getOAuthRegistrationKeyStatus(): Promise<OAuthRegistrationKeyStatus> {
+  const data = await api.mcpGraphql<{ oauthRegistrationKey: OAuthRegistrationKeyStatus }>(
+    OAUTH_REGISTRATION_KEY_OPERATIONS.status
+  );
+  return data.oauthRegistrationKey;
+}
+
+export async function createOAuthRegistrationKey(): Promise<string> {
+  const data = await api.mcpGraphql<{ createOAuthRegistrationKey: { key: string } }>(
+    OAUTH_REGISTRATION_KEY_OPERATIONS.create
+  );
+  return data.createOAuthRegistrationKey.key;
+}
+
+export async function revokeOAuthRegistrationKey(): Promise<boolean> {
+  const data = await api.mcpGraphql<{ revokeOAuthRegistrationKey: boolean }>(
+    OAUTH_REGISTRATION_KEY_OPERATIONS.revoke
+  );
+  return data.revokeOAuthRegistrationKey;
 }

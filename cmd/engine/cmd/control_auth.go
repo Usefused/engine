@@ -98,9 +98,11 @@ func controlActorMiddlewareWithAudit(authenticator *accesscontrol.Authenticator,
 				return
 			}
 			authenticated := r.Clone(accesscontrol.ContextWithActor(r.Context(), actor))
-			if source == browserauth.CredentialSourceCookie {
-				// Existing handlers consume this internal header shape. Populating it only
-				// after cookie authentication avoids a second authorization code path.
+			if source == browserauth.CredentialSourceCookie || source == browserauth.CredentialSourceBearer {
+				// Existing handlers consume this internal header shape. Populating it
+				// only after cookie or bearer authentication avoids a second
+				// authorization code path and lets downstream plan/apply resolve the
+				// same credential that produced the actor.
 				authenticated.Header = r.Header.Clone()
 				authenticated.Header.Set("X-API-Key", credential)
 			}
@@ -211,7 +213,7 @@ func isRuntimeControlExclusion(request *http.Request) bool {
 
 func isOAuthProviderProtocolRoute(path string) bool {
 	switch path {
-	case "/oauth/authorize", "/oauth/authorize/consent", "/oauth/token", "/oauth/revoke":
+	case "/oauth/authorize", "/oauth/authorize/consent", "/oauth/token", "/oauth/revoke", "/oauth/register":
 		return true
 	default:
 		return false

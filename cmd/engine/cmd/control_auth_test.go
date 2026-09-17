@@ -24,6 +24,52 @@ func (s *controlPrincipalLoaderStub) LoadControlPrincipal(context.Context, strin
 	return s.principal, nil
 }
 
+// credentialHashLoaderStub admits only the one credential whose sha256 hash
+// matches, proving a Bearer token reached the authenticator with the exact value.
+type credentialHashLoaderStub struct {
+	wantHash  string
+	principal accesscontrol.ControlPrincipal
+}
+
+func (s *credentialHashLoaderStub) LoadControlPrincipal(_ context.Context, credentialHash string) (accesscontrol.ControlPrincipal, error) {
+	if credentialHash != s.wantHash {
+		return accesscontrol.ControlPrincipal{}, accesscontrol.ErrAuthenticationRequired
+	}
+	return s.principal, nil
+}
+
+func TestControlActorMiddlewareAuthenticatesBearerToken(t *testing.T) {
+	const rawToken = "fsk_bearer_token"
+	loader := &credentialHashLoaderStub{
+		wantHash:  accesscontrol.HashControlCredential(rawToken),
+		principal: controlTestPrincipal(),
+	}
+	authenticator, err := accesscontrol.NewAuthenticator(loader, 1, accesscontrol.AuthenticatorOptions{})
+	if err != nil {
+		t.Fatalf("NewAuthenticator: %v", err)
+	}
+	handler := controlActorMiddleware(authenticator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		actor, ok := accesscontrol.ActorFromContext(r.Context())
+		if !ok || actor.SubjectID != loader.principal.SubjectID {
+			t.Fatalf("request actor = %#v, %v", actor, ok)
+		}
+		// Downstream plan/apply handlers resolve the credential from X-API-Key;
+		// the middleware must republish the bearer token there for them.
+		if got := r.Header.Get("X-API-Key"); got != rawToken {
+			t.Fatalf("X-API-Key = %q, want %q", got, rawToken)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	request := httptest.NewRequest(http.MethodGet, "/workspace/services", nil)
+	request.Header.Set("Authorization", "Bearer "+rawToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+}
+
 func TestControlActorMiddlewareHydratesActorAndReusesCache(t *testing.T) {
 	loader := &controlPrincipalLoaderStub{principal: controlTestPrincipal()}
 	authenticator, err := accesscontrol.NewAuthenticator(loader, 1, accesscontrol.AuthenticatorOptions{})

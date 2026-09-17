@@ -31,6 +31,7 @@ var (
 	ErrOAuthGrantDenied        = errors.New("OAuth grant denied")
 	ErrOAuthGrantReuseDetected = errors.New("OAuth refresh token reuse detected")
 	ErrOAuthConsentNotFound    = errors.New("OAuth consent not found")
+	ErrOAuthRegistrationKeyNotFound = errors.New("OAuth registration key not found")
 )
 
 // OAuthClient is the sanitized, secret-free projection of a registered
@@ -44,7 +45,10 @@ type OAuthClient struct {
 	AllowedScopes []string
 	HasSecret     bool
 	CreatedAt     time.Time
-	RevokedAt     *time.Time
+	// ExpiresAt marks an ephemeral client minted by POST /oauth/register; it is
+	// nil for the long-lived clients created through the admin surface.
+	ExpiresAt *time.Time
+	RevokedAt *time.Time
 }
 
 // OAuthClientRegistration carries store-ready crypto material: the caller
@@ -59,7 +63,9 @@ type OAuthClientRegistration struct {
 	ClientSecretHash string
 	RedirectURIs     []string
 	AllowedScopes    []string
-	Actor            MutationActor
+	// ExpiresAt is set only for ephemeral dynamically-registered clients.
+	ExpiresAt *time.Time
+	Actor     MutationActor
 }
 
 type OAuthConsent struct {
@@ -138,8 +144,22 @@ type OAuthConnectedApp struct {
 	GrantedAt    time.Time
 }
 
+// OAuthRegistrationKey is the secret-free projection of a per-user registration
+// key, surfaced in settings for mint/rotate/revoke. The raw value is only ever
+// returned at mint time by the service, never persisted.
+type OAuthRegistrationKey struct {
+	ID        uuid.UUID
+	SubjectID uuid.UUID
+	CreatedAt time.Time
+	RevokedAt *time.Time
+}
+
 type OAuthClientStore interface {
 	CreateOAuthClient(context.Context, OAuthClientRegistration) (OAuthClientMutationResult, error)
+	// RegisterOAuthClient persists a dynamically-registered ephemeral client on
+	// behalf of a registration-key subject; it requires no active control
+	// credential because the caller already authenticated the key.
+	RegisterOAuthClient(context.Context, OAuthClientRegistration) (OAuthClientMutationResult, error)
 	ListOAuthClients(context.Context) ([]OAuthClient, error)
 	RevokeOAuthClient(context.Context, uuid.UUID, MutationActor) (int64, error)
 
@@ -161,6 +181,14 @@ type OAuthClientStore interface {
 	RevokeOAuthConnectedApp(context.Context, uuid.UUID, uuid.UUID, MutationActor) (int64, error)
 
 	ExpireOAuthArtifacts(context.Context, time.Time, int) (int, error)
+
+	// Registration keys gate POST /oauth/register. A subject keeps at most one
+	// active key; SetOAuthRegistrationKey doubles as mint and rotation by
+	// atomically revoking the prior active key before inserting the new one.
+	SetOAuthRegistrationKey(context.Context, uuid.UUID, string, MutationActor) (OAuthRegistrationKey, error)
+	RevokeOAuthRegistrationKey(context.Context, uuid.UUID, MutationActor) error
+	GetOAuthRegistrationKeySubject(context.Context, string) (uuid.UUID, error)
+	HasOAuthRegistrationKey(context.Context, uuid.UUID) (bool, error)
 }
 
 func validateOAuthClientRegistration(input OAuthClientRegistration) error {

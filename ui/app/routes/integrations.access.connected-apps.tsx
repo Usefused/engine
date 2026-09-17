@@ -9,6 +9,7 @@ const ACCESS_TABS = [
   { label: "People", to: "/integrations/access/people" },
   { label: "Teams", to: "/integrations/access/teams" },
   { label: "OAuth Clients", to: "/integrations/access/oauth-clients" },
+  { label: "Registration Key", to: "/integrations/access/registration-key" },
   { label: "Connected Apps", to: "/integrations/access/connected-apps" },
 ];
 

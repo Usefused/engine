@@ -47,6 +47,15 @@ type fakeOAuthStore struct {
 	connectedAppsErr error
 	revokeAppRev     int64
 	revokeAppErr     error
+
+	registrationKeySubject uuid.UUID
+	registrationKeyErr     error
+	registerErr            error
+	recordedRegister       store.OAuthClientRegistration
+	setKeySubject          uuid.UUID
+	revokeKeyErr           error
+	hasKey                 bool
+	hasKeyErr              error
 }
 
 func (f *fakeOAuthStore) CreateOAuthClient(_ context.Context, input store.OAuthClientRegistration) (store.OAuthClientMutationResult, error) {
@@ -99,6 +108,37 @@ func (f *fakeOAuthStore) RevokeOAuthConnectedApp(_ context.Context, _, _ uuid.UU
 
 func (f *fakeOAuthStore) ExpireOAuthArtifacts(_ context.Context, _ time.Time, _ int) (int, error) {
 	return 0, nil
+}
+
+func (f *fakeOAuthStore) RegisterOAuthClient(_ context.Context, input store.OAuthClientRegistration) (store.OAuthClientMutationResult, error) {
+	f.recordedRegister = input
+	if f.registerErr != nil {
+		return store.OAuthClientMutationResult{}, f.registerErr
+	}
+	return store.OAuthClientMutationResult{Client: store.OAuthClient{
+		ID: uuid.New(), ClientID: input.ClientID, Name: input.Name, ClientType: input.ClientType,
+		RedirectURIs: input.RedirectURIs, AllowedScopes: input.AllowedScopes, ExpiresAt: input.ExpiresAt,
+	}}, nil
+}
+
+func (f *fakeOAuthStore) SetOAuthRegistrationKey(_ context.Context, subjectID uuid.UUID, _ string, _ store.MutationActor) (store.OAuthRegistrationKey, error) {
+	f.setKeySubject = subjectID
+	return store.OAuthRegistrationKey{ID: uuid.New(), SubjectID: subjectID}, nil
+}
+
+func (f *fakeOAuthStore) RevokeOAuthRegistrationKey(_ context.Context, _ uuid.UUID, _ store.MutationActor) error {
+	return f.revokeKeyErr
+}
+
+func (f *fakeOAuthStore) GetOAuthRegistrationKeySubject(_ context.Context, _ string) (uuid.UUID, error) {
+	if f.registrationKeyErr != nil {
+		return uuid.Nil, f.registrationKeyErr
+	}
+	return f.registrationKeySubject, nil
+}
+
+func (f *fakeOAuthStore) HasOAuthRegistrationKey(_ context.Context, _ uuid.UUID) (bool, error) {
+	return f.hasKey, f.hasKeyErr
 }
 
 var _ store.OAuthClientStore = (*fakeOAuthStore)(nil)
@@ -500,5 +540,70 @@ func TestIsOAuthClientActorMatchesOnlyDelegatedTokens(t *testing.T) {
 	}
 	if !IsOAuthClientActor(accesscontrol.Actor{CredentialSource: "oauth_client"}) {
 		t.Fatal("oauth_client actor not recognized")
+	}
+}
+
+func TestRegisterClientMintsEphemeralPublicClientWithLoopbackRedirect(t *testing.T) {
+	repository := &fakeOAuthStore{registrationKeySubject: uuid.New()}
+	service, _ := newTestService(t, repository)
+	result, err := service.RegisterClient(t.Context(), RegisterClientRequest{
+		RegistrationKey: "frk_test", RedirectURI: "http://localhost:4321/callback", Scopes: []string{"app.read"},
+	})
+	if err != nil {
+		t.Fatalf("RegisterClient: %v", err)
+	}
+	if result.ClientID == "" || !strings.HasPrefix(result.ClientID, clientIDPrefix) {
+		t.Fatalf("client id = %q", result.ClientID)
+	}
+	if result.ClientIDExpiresAt.IsZero() {
+		t.Fatal("client expiry missing")
+	}
+	recorded := repository.recordedRegister
+	if recorded.ClientType != store.OAuthClientPublic || recorded.ClientSecretHash != "" {
+		t.Fatalf("registered client type/secret = %q/%q", recorded.ClientType, recorded.ClientSecretHash)
+	}
+	if recorded.ExpiresAt == nil || !recorded.ExpiresAt.After(time.Now()) {
+		t.Fatal("registered client has no future expiry")
+	}
+	if recorded.Actor.SubjectID != repository.registrationKeySubject {
+		t.Fatal("registered client was not attributed to the key subject")
+	}
+}
+
+func TestRegisterClientRejectsUnknownRegistrationKey(t *testing.T) {
+	repository := &fakeOAuthStore{registrationKeyErr: store.ErrOAuthRegistrationKeyNotFound}
+	service, _ := newTestService(t, repository)
+	_, err := service.RegisterClient(t.Context(), RegisterClientRequest{
+		RegistrationKey: "frk_bad", RedirectURI: "http://localhost:4321/callback", Scopes: []string{"app.read"},
+	})
+	if !errors.Is(err, ErrUnauthorizedClient) {
+		t.Fatalf("err = %v, want ErrUnauthorizedClient", err)
+	}
+}
+
+func TestRegisterClientRejectsNonLoopbackRedirect(t *testing.T) {
+	repository := &fakeOAuthStore{registrationKeySubject: uuid.New()}
+	service, _ := newTestService(t, repository)
+	_, err := service.RegisterClient(t.Context(), RegisterClientRequest{
+		RegistrationKey: "frk_test", RedirectURI: "https://evil.example.com/callback", Scopes: []string{"app.read"},
+	})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("err = %v, want ErrInvalidRequest", err)
+	}
+}
+
+func TestSetRegistrationKeyReturnsPrefixedRawKeyForCaller(t *testing.T) {
+	repository := &fakeOAuthStore{}
+	service, _ := newTestService(t, repository)
+	actor := browserActor(t)
+	rawKey, err := service.SetRegistrationKey(t.Context(), actor)
+	if err != nil {
+		t.Fatalf("SetRegistrationKey: %v", err)
+	}
+	if !strings.HasPrefix(rawKey, registrationKeyPrefix) {
+		t.Fatalf("key = %q", rawKey)
+	}
+	if repository.setKeySubject != actor.SubjectID {
+		t.Fatal("key was not bound to the caller's subject")
 	}
 }

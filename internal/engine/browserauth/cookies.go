@@ -23,6 +23,7 @@ const (
 	CredentialSourceNone   CredentialSource = "none"
 	CredentialSourceHeader CredentialSource = "api_key"
 	CredentialSourceCookie CredentialSource = "cookie"
+	CredentialSourceBearer CredentialSource = "bearer"
 )
 
 type CookieManager struct {
@@ -170,6 +171,7 @@ func constantTimeEqual(left, right string) bool {
 
 func CredentialFromRequest(r *http.Request, manager *CookieManager) (string, CredentialSource, error) {
 	header := strings.TrimSpace(r.Header.Get("X-API-Key"))
+	bearer := bearerCredential(r)
 	cookie := ""
 	if manager != nil {
 		value, err := oneCookieValue(r, manager.sessionName())
@@ -178,16 +180,48 @@ func CredentialFromRequest(r *http.Request, manager *CookieManager) (string, Cre
 		}
 		cookie = strings.TrimSpace(value)
 	}
-	if header != "" && cookie != "" {
+	// Header, bearer, and cookie are mutually exclusive credential sources;
+	// combining them leaves the request's authority ambiguous.
+	present := 0
+	if header != "" {
+		present++
+	}
+	if bearer != "" {
+		present++
+	}
+	if cookie != "" {
+		present++
+	}
+	if present > 1 {
 		return "", CredentialSourceNone, ErrAmbiguousCredential
 	}
 	if header != "" {
 		return header, CredentialSourceHeader, nil
 	}
+	if bearer != "" {
+		return bearer, CredentialSourceBearer, nil
+	}
 	if cookie != "" {
 		return cookie, CredentialSourceCookie, nil
 	}
 	return "", CredentialSourceNone, nil
+}
+
+// bearerCredential extracts the token from a single `Authorization: Bearer`
+// header. Non-Bearer schemes (Basic, Digest, ...) are provider-facing, not a
+// Fused control credential, so they are ignored.
+func bearerCredential(r *http.Request) string {
+	values := r.Header.Values("Authorization")
+	// A duplicated Authorization header carries no unambiguous bearer token.
+	if len(values) != 1 {
+		return ""
+	}
+	const prefix = "Bearer "
+	value := strings.TrimSpace(values[0])
+	if !strings.HasPrefix(value, prefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(value, prefix))
 }
 
 func oneCookieValue(r *http.Request, name string) (string, error) {

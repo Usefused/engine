@@ -166,6 +166,16 @@ func insertAppTokenHistory(ctx context.Context, tx pgx.Tx, issue AppTokenIssue) 
 // insertActiveAppToken detects name conflicts atomically without replacing an
 // existing credential; the caller rolls back the new history row on rejection.
 func insertActiveAppToken(ctx context.Context, tx pgx.Tx, issue AppTokenIssue) error {
+	// An expired temporary token is no longer a usable credential, so its name
+	// may be reused. Purge the expired row first so the unique (app_family_id,
+	// name) constraint only ever competes with tokens that are still live.
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM fused_app_tokens
+		WHERE app_family_id = $1 AND name = $2
+		  AND expires_at IS NOT NULL AND expires_at <= NOW()
+	`, issue.AppFamilyID, issue.Name); err != nil {
+		return fmt.Errorf("purge expired app token: %w", err)
+	}
 	result, err := tx.Exec(ctx, `
 		INSERT INTO fused_app_tokens
 			(id, app_family_id, token_hash, name, allow_all, allowed_operations, expires_at, binding_mode)

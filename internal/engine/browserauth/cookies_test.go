@@ -42,6 +42,43 @@ func TestCredentialFromRequestRejectsHeaderCookieAmbiguity(t *testing.T) {
 	}
 }
 
+func TestCredentialFromRequestExtractsBearerToken(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/workspace", nil)
+	request.Header.Set("Authorization", "Bearer fsk_bearer")
+	credential, source, err := CredentialFromRequest(request, nil)
+	if err != nil || credential != "fsk_bearer" || source != CredentialSourceBearer {
+		t.Fatalf("bearer credential = %q, %q, %v", credential, source, err)
+	}
+}
+
+func TestCredentialFromRequestIgnoresNonBearerAuthorization(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/workspace", nil)
+	request.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	credential, source, err := CredentialFromRequest(request, nil)
+	if err != nil || credential != "" || source != CredentialSourceNone {
+		t.Fatalf("non-bearer credential = %q, %q, %v", credential, source, err)
+	}
+}
+
+func TestCredentialFromRequestRejectsBearerHeaderAmbiguity(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/workspace", nil)
+	request.Header.Set("Authorization", "Bearer fsk_bearer")
+	request.Header.Set("X-API-Key", "fsk_header")
+	if _, _, err := CredentialFromRequest(request, nil); err != ErrAmbiguousCredential {
+		t.Fatalf("bearer+header ambiguity = %v", err)
+	}
+}
+
+func TestCredentialFromRequestRejectsBearerCookieAmbiguity(t *testing.T) {
+	manager := testCookieManager(t)
+	request := httptest.NewRequest(http.MethodGet, "/workspace", nil)
+	request.Header.Set("Authorization", "Bearer fsk_bearer")
+	request.AddCookie(&http.Cookie{Name: manager.sessionName(), Value: "fsk_cookie"})
+	if _, _, err := CredentialFromRequest(request, manager); err != ErrAmbiguousCredential {
+		t.Fatalf("bearer+cookie ambiguity = %v", err)
+	}
+}
+
 func TestCredentialFromRequestRejectsDuplicateSessionCookies(t *testing.T) {
 	manager := testCookieManager(t)
 	request := httptest.NewRequest(http.MethodGet, "/workspace", nil)

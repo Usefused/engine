@@ -30,6 +30,10 @@ type OAuthProviderService interface {
 	Consent(ctx context.Context, actor accesscontrol.Actor, req oauthprovider.ConsentRequest) (string, error)
 	Token(ctx context.Context, req oauthprovider.TokenRequest) (oauthprovider.TokenResponse, error)
 	Revoke(ctx context.Context, req oauthprovider.RevokeRequest) error
+	RegisterClient(ctx context.Context, req oauthprovider.RegisterClientRequest) (oauthprovider.RegisterClientResult, error)
+	SetRegistrationKey(ctx context.Context, actor accesscontrol.Actor) (string, error)
+	RevokeRegistrationKey(ctx context.Context, actor accesscontrol.Actor) error
+	HasRegistrationKey(ctx context.Context, actor accesscontrol.Actor) (bool, error)
 	ListConnectedApps(ctx context.Context, actor accesscontrol.Actor) ([]store.OAuthConnectedApp, error)
 	RevokeConnectedApp(ctx context.Context, actor accesscontrol.Actor, clientID uuid.UUID) error
 }
@@ -50,6 +54,8 @@ func MountOAuthProviderRoutes(router chi.Router, service OAuthProviderService, s
 		Post("/oauth/token", oauthTokenHandler(service))
 	router.With(limitAuthenticationRequests(browserauth.NewRequestLimiter(60, 600, time.Minute))).
 		Post("/oauth/revoke", oauthRevokeHandler(service))
+	router.With(limitAuthenticationRequests(browserauth.NewRequestLimiter(30, 300, time.Minute))).
+		Post("/oauth/register", oauthRegisterHandler(service))
 	router.Get("/oauth/connected-apps", oauthConnectedAppsListHandler(service))
 	router.Delete("/oauth/connected-apps/{client_id}", oauthConnectedAppsRevokeHandler(service))
 	router.Get("/.well-known/oauth-authorization-server", oauthMetadataHandler(publicURL))
@@ -399,6 +405,62 @@ func writeOAuthTokenError(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": code})
+}
+
+// oauthRegisterRequest is the JSON body of POST /oauth/register. The redirect
+// URI must be loopback and the scopes are the permission names the ephemeral
+// client may later request at consent.
+type oauthRegisterRequest struct {
+	Name        string   `json:"name"`
+	RedirectURI string   `json:"redirect_uri"`
+	Scopes      []string `json:"scopes"`
+}
+
+// -- POST /oauth/register (dynamic client registration) --
+
+func oauthRegisterHandler(service OAuthProviderService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		setOAuthResponseHeaders(w)
+		if service == nil {
+			writeOAuthTokenError(w, http.StatusServiceUnavailable, "server_error")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
+		var body oauthRegisterRequest
+		// Reject malformed or extra input before any client is minted.
+		if err := decodeOneStrictJSON(r.Body, &body); err != nil {
+			writeOAuthTokenError(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		// The registration key is a Bearer credential; a missing or malformed
+		// header must fail before registration, never mint an anonymous client.
+		key := oauthRegistrationKey(r)
+		if key == "" {
+			writeOAuthTokenError(w, http.StatusUnauthorized, "invalid_client")
+			return
+		}
+		result, err := service.RegisterClient(r.Context(), oauthprovider.RegisterClientRequest{
+			RegistrationKey: key, RedirectURI: body.RedirectURI, Scopes: body.Scopes, Name: body.Name,
+		})
+		if err != nil {
+			writeOAuthTokenError(w, oauthTokenErrorStatus(err), oauthTokenErrorCode(err))
+			return
+		}
+		writeOAuthJSON(w, http.StatusCreated, map[string]any{
+			"client_id":            result.ClientID,
+			"client_id_expires_at": result.ClientIDExpiresAt.Format(time.RFC3339),
+		})
+	}
+}
+
+// oauthRegistrationKey extracts the Bearer registration key from a request.
+func oauthRegistrationKey(r *http.Request) string {
+	const prefix = "Bearer "
+	header := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(header, prefix) {
+		return strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	}
+	return ""
 }
 
 // -- POST /oauth/revoke (RFC 7009) --

@@ -24,6 +24,14 @@ func (s *cachedStore) CreateOAuthClient(ctx context.Context, input OAuthClientRe
 	return repository.CreateOAuthClient(ctx, input)
 }
 
+func (s *cachedStore) RegisterOAuthClient(ctx context.Context, input OAuthClientRegistration) (OAuthClientMutationResult, error) {
+	repository, err := s.oauthClientStore()
+	if err != nil {
+		return OAuthClientMutationResult{}, err
+	}
+	return repository.RegisterOAuthClient(ctx, input)
+}
+
 func (s *cachedStore) ListOAuthClients(ctx context.Context) ([]OAuthClient, error) {
 	repository, err := s.oauthClientStore()
 	if err != nil {
@@ -110,6 +118,38 @@ func (s *cachedStore) ExpireOAuthArtifacts(ctx context.Context, at time.Time, li
 		return 0, err
 	}
 	return repository.ExpireOAuthArtifacts(ctx, at, limit)
+}
+
+func (s *cachedStore) SetOAuthRegistrationKey(ctx context.Context, subjectID uuid.UUID, keyHash string, actor MutationActor) (OAuthRegistrationKey, error) {
+	repository, err := s.oauthClientStore()
+	if err != nil {
+		return OAuthRegistrationKey{}, err
+	}
+	return repository.SetOAuthRegistrationKey(ctx, subjectID, keyHash, actor)
+}
+
+func (s *cachedStore) RevokeOAuthRegistrationKey(ctx context.Context, subjectID uuid.UUID, actor MutationActor) error {
+	repository, err := s.oauthClientStore()
+	if err != nil {
+		return err
+	}
+	return repository.RevokeOAuthRegistrationKey(ctx, subjectID, actor)
+}
+
+func (s *cachedStore) GetOAuthRegistrationKeySubject(ctx context.Context, keyHash string) (uuid.UUID, error) {
+	repository, err := s.oauthClientStore()
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return repository.GetOAuthRegistrationKeySubject(ctx, keyHash)
+}
+
+func (s *cachedStore) HasOAuthRegistrationKey(ctx context.Context, subjectID uuid.UUID) (bool, error) {
+	repository, err := s.oauthClientStore()
+	if err != nil {
+		return false, err
+	}
+	return repository.HasOAuthRegistrationKey(ctx, subjectID)
 }
 
 var _ OAuthClientStore = (*cachedStore)(nil)

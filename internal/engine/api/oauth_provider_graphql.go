@@ -123,6 +123,67 @@ func projectGraphQLOAuthScopeCatalog() []map[string]interface{} {
 	return catalog
 }
 
+// oauthRegistrationKeyGraphQLType is the settings status projection of a
+// per-user registration key; the raw value is only returned by the create
+// mutation, never by a read.
+var oauthRegistrationKeyGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "OAuthRegistrationKeyStatus",
+	Fields: graphql.Fields{
+		"exists": &graphql.Field{Type: graphql.NewNonNull(graphql.Boolean)},
+	},
+})
+
+var oauthRegistrationKeyCreatedGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "OAuthRegistrationKeyCreatedPayload",
+	Fields: graphql.Fields{
+		// The raw key is returned exactly once at mint/rotation, matching every
+		// other one-time credential in Engine.
+		"key": &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+	},
+})
+
+func oauthRegistrationKeyGraphQLField(service OAuthProviderService) *graphql.Field {
+	return &graphql.Field{
+		Type: graphql.NewNonNull(oauthRegistrationKeyGraphQLType),
+		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			actor, ok := accesscontrol.ActorFromContext(p.Context)
+			if !ok {
+				return nil, accesscontrol.ErrAuthenticationRequired
+			}
+			s := oauthProviderFromField(service)
+			if s == nil {
+				return nil, oauthGraphQLError(errors.New("OAuth provider management is unavailable"))
+			}
+			exists, err := s.HasRegistrationKey(p.Context, actor)
+			if err != nil {
+				return nil, oauthGraphQLError(err)
+			}
+			return map[string]interface{}{"exists": exists}, nil
+		},
+	}
+}
+
+func createOAuthRegistrationKeyGraphQLField(service OAuthProviderService) *graphql.Field {
+	return oauthMutationField(oauthRegistrationKeyCreatedGraphQLType, graphql.FieldConfigArgument{}, "oauth_registration_key.create", service,
+		func(p graphql.ResolveParams, s OAuthProviderService, actor accesscontrol.Actor) (interface{}, error) {
+			rawKey, err := s.SetRegistrationKey(p.Context, actor)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{"key": rawKey}, nil
+		})
+}
+
+func revokeOAuthRegistrationKeyGraphQLField(service OAuthProviderService) *graphql.Field {
+	return oauthMutationField(graphql.NewNonNull(graphql.Boolean), graphql.FieldConfigArgument{}, "oauth_registration_key.revoke", service,
+		func(p graphql.ResolveParams, s OAuthProviderService, actor accesscontrol.Actor) (interface{}, error) {
+			if err := s.RevokeRegistrationKey(p.Context, actor); err != nil {
+				return nil, err
+			}
+			return true, nil
+		})
+}
+
 func createOAuthClientGraphQLField(service OAuthProviderService) *graphql.Field {
 	return oauthMutationField(oauthClientCreatedGraphQLType, graphql.FieldConfigArgument{
 		"input": &graphql.ArgumentConfig{Type: graphql.NewNonNull(createOAuthClientGraphQLInput)},
