@@ -2250,7 +2250,7 @@ func TestWorkspaceNotificationsGraphQL_PaginatesAndOrdersUnreadFirst(t *testing.
 
 func mountWorkspaceNotificationsGraphQLTestHandler(t *testing.T, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient) http.HandlerFunc {
 	t.Helper()
-	schema, err := newMCPGraphQLSchema(configStore, s, &mockVerifier{}, registryClient, testMasterKey)
+	schema, err := newMCPGraphQLSchema(configStore, s, &mockVerifier{}, registryClient, testMasterKey, nil)
 	if err != nil {
 		t.Fatalf("newMCPGraphQLSchema() error = %v", err)
 	}

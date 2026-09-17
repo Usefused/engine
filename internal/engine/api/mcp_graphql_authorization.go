@@ -39,6 +39,11 @@ type graphQLFieldPolicy struct {
 	protectedArgument   string
 	protectedValue      string
 	protectedPermission accesscontrol.Permission
+	// excludeDelegatedClient marks a root field that a delegated OAuth token
+	// (oauthprovider.IsOAuthClientActor) must never reach regardless of its
+	// claimed scope, since that scope can include the very permission this
+	// field checks (scopes are drawn from the same permission catalogue).
+	excludeDelegatedClient bool
 }
 
 type graphQLScopeMode string
@@ -126,30 +131,42 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"authConnections":             argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionConnectionRead),
 		"authConnectionPage":          argumentPermissions(accesscontrol.ResourceBucket, "bucket_id", accesscontrol.PermissionConnectionRead),
 		"connectionResources":         connectionPermissions("connection_id", accesscontrol.PermissionConnectionRead),
+		// Viewing registered clients only needs access.read, matching teams/team;
+		// creating or revoking a client needs access.manage (see mutationRoots).
+		"oauthClients": excludeDelegatedClients(permissions(accesscontrol.PermissionAccessRead)),
+		// The scope catalog only labels permission strings for the registration
+		// form; gate it the same as oauthClients so it's reachable wherever that
+		// page is, and never through a delegated OAuth token.
+		"oauthScopeCatalog": excludeDelegatedClients(permissions(accesscontrol.PermissionAccessRead)),
 	},
 	mutationRoots: map[string]graphQLFieldPolicy{
-		"createUser":                        permissions(accesscontrol.PermissionAccessManage),
-		"updateUser":                        permissions(accesscontrol.PermissionAccessManage),
-		"suspendUser":                       permissions(accesscontrol.PermissionAccessManage),
-		"reactivateUser":                    permissions(accesscontrol.PermissionAccessManage),
-		"addTeamMember":                     permissions(accesscontrol.PermissionAccessManage),
-		"removeTeamMember":                  permissions(accesscontrol.PermissionAccessManage),
-		"issueUserCredential":               permissions(accesscontrol.PermissionAccessManage),
-		"revokeUserCredential":              permissions(accesscontrol.PermissionAccessManage),
-		"createTeam":                        permissions(accesscontrol.PermissionAccessManage),
-		"updateTeam":                        permissions(accesscontrol.PermissionAccessManage),
-		"archiveTeam":                       permissions(accesscontrol.PermissionAccessManage),
-		"setTeamWorkspaceRole":              protectedValuePermissions("role", "OWNER", accesscontrol.PermissionAccountManage, accesscontrol.PermissionAccessManage),
-		"grantTeamServiceAccess":            permissions(accesscontrol.PermissionAccessManage),
-		"revokeTeamServiceAccess":           permissions(accesscontrol.PermissionAccessManage),
-		"grantTeamBucketAccess":             permissions(accesscontrol.PermissionAccessManage),
-		"revokeTeamBucketAccess":            permissions(accesscontrol.PermissionAccessManage),
-		"grantTeamAppAccess":                permissions(accesscontrol.PermissionAccessManage),
-		"revokeTeamAppAccess":               permissions(accesscontrol.PermissionAccessManage),
-		"grantWorkspaceBucketAccess":        permissions(accesscontrol.PermissionAccessManage),
-		"revokeWorkspaceBucketAccess":       permissions(accesscontrol.PermissionAccessManage),
-		"grantWorkspaceAppAccess":           permissions(accesscontrol.PermissionAccessManage),
-		"revokeWorkspaceAppAccess":          permissions(accesscontrol.PermissionAccessManage),
+		// User/team identity and access management, and credential issuance,
+		// must never be reachable through a delegated OAuth token: its scope is
+		// drawn from this same permission catalogue, so a third party granted
+		// e.g. access.manage for its own narrow purpose must not be able to use
+		// that grant to create users, rotate credentials, or manage teams.
+		"createUser":                        excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"updateUser":                        excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"suspendUser":                       excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"reactivateUser":                    excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"addTeamMember":                     excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"removeTeamMember":                  excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"issueUserCredential":               excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"revokeUserCredential":              excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"createTeam":                        excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"updateTeam":                        excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"archiveTeam":                       excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"setTeamWorkspaceRole":              excludeDelegatedClients(protectedValuePermissions("role", "OWNER", accesscontrol.PermissionAccountManage, accesscontrol.PermissionAccessManage)),
+		"grantTeamServiceAccess":            excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"revokeTeamServiceAccess":           excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"grantTeamBucketAccess":             excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"revokeTeamBucketAccess":            excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"grantTeamAppAccess":                excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"revokeTeamAppAccess":               excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"grantWorkspaceBucketAccess":        excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"revokeWorkspaceBucketAccess":       excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"grantWorkspaceAppAccess":           excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"revokeWorkspaceAppAccess":          excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
 		"setWorkspaceConnectionProfile":     argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceManage),
 		"resetWorkspaceConnectionProfile":   argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceManage),
 		"updateWorkspaceNotificationStatus": permissions(accesscontrol.PermissionNotificationUpdate),
@@ -164,11 +181,15 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"setDefaultConnectionResource":      connectionPermissions("connection_id", accesscontrol.PermissionConnectionManage),
 		"rediscoverConnectionResources":     connectionPermissions("connection_id", accesscontrol.PermissionConnectionManage),
 		"refreshMissingServiceContracts":    permissions(accesscontrol.PermissionServiceManage),
+		// Registering or revoking an OAuth client is itself the capability a
+		// delegated OAuth token must never carry, regardless of its scope.
+		"createOAuthClient": excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
+		"revokeOAuthClient": excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
 	},
 	protected: map[string]graphQLFieldPolicy{
 		// An MCP execution token is a credential, even when reached through a
 		// read-only root or a fragment, so selecting it requires token management.
-		"MCPServer.execution_token": permissions(accesscontrol.PermissionAppTokensManage),
+		"MCPServer.execution_token": excludeDelegatedClients(permissions(accesscontrol.PermissionAppTokensManage)),
 		"BucketValue.value":         permissions(accesscontrol.PermissionBucketValuesRead),
 		// Literal connection bindings can contain configuration values that are
 		// more sensitive than the surrounding connection-profile metadata.
@@ -179,6 +200,16 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 
 func permissions(values ...accesscontrol.Permission) graphQLFieldPolicy {
 	return graphQLFieldPolicy{permissions: values, scope: graphQLScopeWorkspace}
+}
+
+// excludeDelegatedClients wraps any policy constructor to additionally deny
+// the field to a delegated OAuth token actor, independent of its granted
+// scope. Use it for sensitive control-plane mutations (credential rotation,
+// user/team management, OAuth client management itself) that a third party
+// must never reach through a token issued to a Fused user.
+func excludeDelegatedClients(policy graphQLFieldPolicy) graphQLFieldPolicy {
+	policy.excludeDelegatedClient = true
+	return policy
 }
 
 func protectedValuePermissions(argument, value string, protected accesscontrol.Permission, values ...accesscontrol.Permission) graphQLFieldPolicy {
@@ -386,13 +417,14 @@ func schemaHasObjectField(schema *graphql.Schema, typeName, fieldName string) bo
 }
 
 type graphQLAuthorizationPlan struct {
-	requirements        []accesscontrol.Requirement
-	scopes              []graphQLScopeRequest
-	rootFields          int
-	deployments         []sdkConfigDocument
-	connections         []graphQLConnectionRequirement
-	apps                []graphQLAppRequirement
-	resolvedConnections map[uuid.UUID]store.AuthConnection
+	requirements            []accesscontrol.Requirement
+	scopes                  []graphQLScopeRequest
+	rootFields              int
+	deployments             []sdkConfigDocument
+	connections             []graphQLConnectionRequirement
+	apps                    []graphQLAppRequirement
+	resolvedConnections     map[uuid.UUID]store.AuthConnection
+	excludesDelegatedClient bool
 }
 
 type graphQLAppRequirement struct {
@@ -411,19 +443,20 @@ type graphQLConnectionRequirement struct {
 }
 
 type graphQLPlanBuilder struct {
-	schema        *graphql.Schema
-	policy        graphQLAuthorizationPolicy
-	fragments     map[string]*ast.FragmentDefinition
-	requirements  map[accesscontrol.Requirement]struct{}
-	scopes        map[graphQLScopeRequest]struct{}
-	visiting      map[string]bool
-	variables     map[string]any
-	workspaceID   uuid.UUID
-	introspection bool
-	rootFields    int
-	deployments   []sdkConfigDocument
-	connections   []graphQLConnectionRequirement
-	apps          []graphQLAppRequirement
+	schema                  *graphql.Schema
+	policy                  graphQLAuthorizationPolicy
+	fragments               map[string]*ast.FragmentDefinition
+	requirements            map[accesscontrol.Requirement]struct{}
+	scopes                  map[graphQLScopeRequest]struct{}
+	visiting                map[string]bool
+	variables               map[string]any
+	workspaceID             uuid.UUID
+	introspection           bool
+	rootFields              int
+	deployments             []sdkConfigDocument
+	connections             []graphQLConnectionRequirement
+	apps                    []graphQLAppRequirement
+	excludesDelegatedClient bool
 }
 
 func buildGraphQLAuthorizationPlan(schema *graphql.Schema, body []byte, workspaceID uuid.UUID) (graphQLAuthorizationPlan, error) {
@@ -507,6 +540,9 @@ func (b *graphQLPlanBuilder) collectRootSelections(selectionSet *ast.SelectionSe
 		policy, ok := policies[field.Name.Value]
 		if !ok {
 			return accesscontrol.ResourceRef{}, fmt.Errorf("%w: %s.%s", errGraphQLPolicyMissing, rootType.Name(), field.Name.Value)
+		}
+		if policy.excludeDelegatedClient {
+			b.excludesDelegatedClient = true
 		}
 		if policy.scope == graphQLScopeCollection {
 			b.addScopeRequests(policy)
@@ -848,6 +884,7 @@ func (b *graphQLPlanBuilder) plan() (graphQLAuthorizationPlan, error) {
 	return graphQLAuthorizationPlan{
 		requirements: requirements, scopes: scopes, rootFields: b.rootFields,
 		deployments: b.deployments, connections: b.connections, apps: b.apps,
+		excludesDelegatedClient: b.excludesDelegatedClient,
 	}, nil
 }
 

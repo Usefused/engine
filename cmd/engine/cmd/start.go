@@ -34,6 +34,7 @@ import (
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/managedauth"
 	enginemiddleware "github.com/Usefused/engine/internal/engine/middleware"
+	"github.com/Usefused/engine/internal/engine/oauthprovider"
 	"github.com/Usefused/engine/internal/engine/ratelimitcoordinator"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
@@ -245,6 +246,7 @@ func runEngine() {
 	browserCookies, browserSessionService := newBrowserSessionService(ctx, engineStore, registryClient, controlAuthenticator, masterKey)
 	managedLoginService := newManagedLoginService(ctx, engineStore, registryClient, controlAuthenticator, masterKey)
 	cliLoginService := newCLILoginService(ctx, engineStore, controlAuthenticator)
+	oauthProviderService := newOAuthProviderService(ctx, engineStore, controlAuthenticator)
 
 	r := buildEngineRouter(engineRouterDeps{
 		cfg:                cfg,
@@ -264,6 +266,7 @@ func runEngine() {
 		providerRateLimits: rateLimits,
 		tokenValidator:     tokenValidator,
 		appTokenRevoker:    tokenRevoker,
+		oauthProvider:      oauthProviderService,
 	})
 
 	webhookSrv := startWebhookServer(ctx, r)
@@ -921,6 +924,7 @@ type engineRouterDeps struct {
 	providerRateLimits store.ProviderRateLimitStore
 	tokenValidator     auth.TokenValidator
 	appTokenRevoker    api.AppTokenRevoker
+	oauthProvider      api.OAuthProviderService
 }
 
 // buildEngineRouter serves API and embedded UI on one origin, so cross-origin
@@ -952,6 +956,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	api.MountBrowserSessionRoutes(r, deps.browserSession)
 	api.MountManagedIdentityRoutes(r, deps.managedLogin, deps.browserCookies)
 	api.MountCLILoginRoutes(r, deps.cliLogin, deps.browserSession)
+	api.MountOAuthProviderRoutes(r, deps.oauthProvider, deps.engineStore, deps.browserSession, deps.browserCookies, "/login", deps.cfg.Engine.PublicURL)
 
 	// Exact Engine-owned control routes must be registered before Registry
 	// prefix mounts so /sdks/{app_id}/download resolves locally while generation
@@ -994,7 +999,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// Engine-native MCP GraphQL surface (list/deploy/kill/reactivate/delete +
 	// analytics) -- a distinct endpoint from POST /graphql, which is a pure
 	// Registry forward-proxy with no resolvers of its own (graphql_proxy.go).
-	if err := api.MountMCPGraphQLRoute(r, deps.configStore, deps.engineStore, deps.registryClient, deps.registryClient, deps.masterKey, deps.connectRedirectURI, deps.controlAuth); err != nil {
+	if err := api.MountMCPGraphQLRoute(r, deps.configStore, deps.engineStore, deps.registryClient, deps.registryClient, deps.masterKey, deps.connectRedirectURI, deps.oauthProvider, deps.controlAuth); err != nil {
 		slog.Error("failed to mount mcp graphql route", slog.Any("error", err))
 		os.Exit(1)
 	}
@@ -1069,6 +1074,25 @@ func newCLILoginService(
 		slog.ErrorContext(ctx, "CLI login service is unavailable")
 		return nil
 	}
+	return service
+}
+
+func newOAuthProviderService(
+	ctx context.Context,
+	engineStore store.Store,
+	authenticator *accesscontrol.Authenticator,
+) *oauthprovider.Service {
+	oauthStore, ok := engineStore.(store.OAuthClientStore)
+	if !ok {
+		slog.ErrorContext(ctx, "OAuth provider store is unavailable")
+		return nil
+	}
+	service, err := oauthprovider.NewService(oauthStore, authenticator)
+	if err != nil {
+		slog.ErrorContext(ctx, "OAuth provider service is unavailable")
+		return nil
+	}
+	service.StartCleanupWorker(ctx, time.Minute)
 	return service
 }
 

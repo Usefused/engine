@@ -86,7 +86,7 @@ func TestAppScaffoldRequirementsGraphQLProjectsAuthorizedBatch(t *testing.T) {
 			{ServiceID: zetaService, ServiceVersionID: zetaVersion}: {ServerVariables: map[string]string{"region": "eu"}},
 		},
 	}
-	schema, err := newMCPGraphQLSchema(nil, fixture, nil, nil, nil)
+	schema, err := newMCPGraphQLSchema(nil, fixture, nil, nil, nil, nil)
 	// A missing authorization policy would make schema construction fail closed.
 	if err != nil {
 		t.Fatalf("newMCPGraphQLSchema: %v", err)
@@ -128,7 +128,7 @@ func TestAppScaffoldRequirementsGraphQLProjectsAuthorizedBatch(t *testing.T) {
 // collection query never promotes a workspace-authenticated actor to services.
 func TestAppScaffoldRequirementsGraphQLFailsClosedWithoutServiceRead(t *testing.T) {
 	fixture := &appScaffoldGraphQLStore{}
-	schema, err := newMCPGraphQLSchema(nil, fixture, nil, nil, nil)
+	schema, err := newMCPGraphQLSchema(nil, fixture, nil, nil, nil, nil)
 	// Schema construction is a test precondition rather than the behavior under test.
 	if err != nil {
 		t.Fatalf("newMCPGraphQLSchema: %v", err)

@@ -387,7 +387,7 @@ func TestRemoveTeamMemberGraphQLRepeatedRemoveReturnsNullMembership(t *testing.T
 
 func executeUserGraphQL(t *testing.T, s *userGraphQLTestStore, actor accesscontrol.Actor, query string, variables map[string]interface{}, sink authorizationRevisionSink) *httptest.ResponseRecorder {
 	t.Helper()
-	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"))
+	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"), nil)
 	if err != nil {
 		t.Fatalf("new schema: %v", err)
 	}
@@ -404,7 +404,7 @@ func executeUserGraphQL(t *testing.T, s *userGraphQLTestStore, actor accesscontr
 
 func executeUserGraphQLWithoutActor(t *testing.T, s *userGraphQLTestStore, query string) *httptest.ResponseRecorder {
 	t.Helper()
-	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"))
+	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"), nil)
 	if err != nil {
 		t.Fatalf("new schema: %v", err)
 	}

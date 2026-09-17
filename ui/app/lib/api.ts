@@ -150,6 +150,13 @@ export interface ConnectBranding extends ConnectBrandingInput {
   updated_at?: string;
 }
 
+export interface OAuthConnectedApp {
+  client_id: string;
+  client_name: string;
+  scope: string[];
+  granted_at: string;
+}
+
 export interface CreditBundle {
   id: string;
   name: string;
@@ -1293,6 +1300,13 @@ export const api = {
         method: "PUT",
         body: JSON.stringify(input),
       }),
+  },
+
+  connectedApps: {
+    // Every signed-in user manages only their own OAuth consents; Engine
+    // scopes both of these to the caller's own subject, no workspace RBAC involved.
+    list: () => req<{ connected_apps: OAuthConnectedApp[] }>("/oauth/connected-apps"),
+    revoke: (clientId: string) => req<void>(`/oauth/connected-apps/${clientId}`, { method: "DELETE" }),
   },
 
   credits: {

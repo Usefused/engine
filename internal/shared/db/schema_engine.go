@@ -1745,7 +1745,97 @@ func engineSchemaQueries() []string {
 		`CREATE INDEX IF NOT EXISTS idx_fused_mcp_sessions_cursor
 			ON fused_mcp_sessions(app_id, started_at DESC, id DESC);`,
 	}
+	queries = append(queries, oauthProviderSchemaQueries()...)
 	return append(queries, unifiedSchemaConvergenceQueries()...)
+}
+
+// oauthProviderSchemaQueries declares Engine's own OAuth2 authorization-server
+// tables: third-party clients registered by a workspace Owner/Admin obtain a
+// delegated, scope-limited token for one Fused user via Authorization Code +
+// PKCE. This is the inverse of the existing hosted-connect flow, where Fused
+// brokers a workspace's OAuth connection TO a third-party provider.
+func oauthProviderSchemaQueries() []string {
+	return []string{
+		// The public client_id is opaque and unique; client_secret_hash stays NULL
+		// for public/native clients that authenticate with PKCE alone.
+		`CREATE TABLE IF NOT EXISTS fused_oauth_clients (
+			id                     uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			name                   text NOT NULL,
+			client_id              text NOT NULL,
+			client_secret_hash     text,
+			redirect_uris          text[] NOT NULL,
+			allowed_scopes         text[] NOT NULL,
+			client_type            text NOT NULL,
+			created_by_subject_id  uuid REFERENCES fused_subjects(id) ON DELETE SET NULL,
+			created_at             timestamptz NOT NULL DEFAULT NOW(),
+			revoked_at             timestamptz,
+			CONSTRAINT chk_fused_oauth_clients_type CHECK (client_type IN ('confidential', 'public')),
+			CONSTRAINT chk_fused_oauth_clients_redirect_uris CHECK (array_length(redirect_uris, 1) > 0),
+			CONSTRAINT chk_fused_oauth_clients_secret_shape CHECK (
+				(client_type = 'confidential' AND client_secret_hash IS NOT NULL)
+				OR (client_type = 'public' AND client_secret_hash IS NULL)
+			)
+		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_oauth_clients_client_id ON fused_oauth_clients(client_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_oauth_clients_active ON fused_oauth_clients(created_at DESC) WHERE revoked_at IS NULL;`,
+
+		// A code is single-use and short-lived; consumed_at is set atomically by
+		// the same statement that issues its token pair, matching the CLI login
+		// transaction claim idiom used elsewhere in Engine.
+		`CREATE TABLE IF NOT EXISTS fused_oauth_authorization_codes (
+			id                     uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			client_id              uuid NOT NULL REFERENCES fused_oauth_clients(id) ON DELETE CASCADE,
+			subject_id             uuid NOT NULL REFERENCES fused_subjects(id) ON DELETE CASCADE,
+			redirect_uri           text NOT NULL,
+			scope                  text[] NOT NULL,
+			code_hash              text NOT NULL,
+			code_challenge         text NOT NULL,
+			code_challenge_method  text NOT NULL DEFAULT 'S256',
+			expires_at             timestamptz NOT NULL,
+			consumed_at            timestamptz,
+			created_at             timestamptz NOT NULL DEFAULT NOW(),
+			CONSTRAINT chk_fused_oauth_authorization_codes_pkce CHECK (code_challenge_method = 'S256')
+		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_oauth_authorization_codes_hash ON fused_oauth_authorization_codes(code_hash);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_oauth_authorization_codes_expiry ON fused_oauth_authorization_codes(expires_at) WHERE consumed_at IS NULL;`,
+
+		// Each row is the current token pair for one grant. Refresh rotates a row
+		// in place is deliberately avoided: rotation instead marks this row
+		// consumed_at and inserts a new row sharing token_family_id, so a reused
+		// (already-consumed) refresh token is detectable and the whole family can
+		// be cascade-revoked without losing the audit trail of prior generations.
+		`CREATE TABLE IF NOT EXISTS fused_oauth_tokens (
+			id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			client_id             uuid NOT NULL REFERENCES fused_oauth_clients(id) ON DELETE CASCADE,
+			subject_id            uuid NOT NULL REFERENCES fused_subjects(id) ON DELETE CASCADE,
+			token_family_id       uuid NOT NULL,
+			access_token_hash     text NOT NULL,
+			refresh_token_hash    text NOT NULL,
+			scope                 text[] NOT NULL,
+			access_expires_at     timestamptz NOT NULL,
+			refresh_expires_at    timestamptz NOT NULL,
+			consumed_at           timestamptz,
+			revoked_at            timestamptz,
+			created_at            timestamptz NOT NULL DEFAULT NOW()
+		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_oauth_tokens_access_hash ON fused_oauth_tokens(access_token_hash);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_oauth_tokens_refresh_hash ON fused_oauth_tokens(refresh_token_hash);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_oauth_tokens_family ON fused_oauth_tokens(token_family_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_oauth_tokens_client_subject ON fused_oauth_tokens(client_id, subject_id) WHERE revoked_at IS NULL;`,
+
+		// One row per (client, user): the consent already on file, so a repeat
+		// authorize request at or below the granted scope can skip the consent
+		// screen. Also backs the end-user "connected apps" list/revoke surface.
+		`CREATE TABLE IF NOT EXISTS fused_oauth_user_consents (
+			client_id      uuid NOT NULL REFERENCES fused_oauth_clients(id) ON DELETE CASCADE,
+			subject_id     uuid NOT NULL REFERENCES fused_subjects(id) ON DELETE CASCADE,
+			granted_scope  text[] NOT NULL,
+			granted_at     timestamptz NOT NULL DEFAULT NOW(),
+			updated_at     timestamptz NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (client_id, subject_id)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_oauth_user_consents_subject ON fused_oauth_user_consents(subject_id);`,
+	}
 }
 
 // unifiedSchemaConvergenceQueries makes v3 the only writable Unified shape.

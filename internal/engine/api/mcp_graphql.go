@@ -22,6 +22,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/applifecycle"
+	"github.com/Usefused/engine/internal/engine/oauthprovider"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -78,8 +79,8 @@ func requestFromContext(ctx context.Context) *http.Request {
 // MountMCPGraphQLRoute registers the Engine-native MCP GraphQL endpoint.
 func MountMCPGraphQLRoute(mux interface {
 	Post(pattern string, handlerFn http.HandlerFunc)
-}, configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, masterKey []byte, redirectURI string, revisionSinks ...authorizationRevisionSink) error {
-	schema, err := newMCPGraphQLSchema(configStore, s, verifier, registryClient, masterKey, redirectURI)
+}, configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, masterKey []byte, redirectURI string, oauthProvider OAuthProviderService, revisionSinks ...authorizationRevisionSink) error {
+	schema, err := newMCPGraphQLSchema(configStore, s, verifier, registryClient, masterKey, oauthProvider, redirectURI)
 	// Do not mount a route whose authorization policy schema could not be constructed.
 	if err != nil {
 		return fmt.Errorf("build mcp graphql schema: %w", err)
@@ -254,6 +255,12 @@ func firstGraphQLAuthorizationResources(values []graphQLAuthorizationResources) 
 }
 
 func authorizeGraphQLPlan(ctx context.Context, actor accesscontrol.Actor, plan graphQLAuthorizationPlan) error {
+	// A delegated OAuth token's scope is drawn from the same permission
+	// catalogue as every other grant, so a permission check alone cannot
+	// exclude it from fields that must stay unreachable regardless of scope.
+	if plan.excludesDelegatedClient && oauthprovider.IsOAuthClientActor(actor) {
+		return accesscontrol.ErrPolicyDenied
+	}
 	authorizer := accesscontrol.SnapshotAuthorizer{}
 	if err := authorizer.CheckAll(ctx, actor, plan.requirements...); err != nil {
 		return err
@@ -399,7 +406,7 @@ var mcpAnalyticsDashboardType = graphql.NewObject(graphql.ObjectConfig{
 })
 
 // newMCPGraphQLSchema keeps session history and execution Activity behind the shared Engine authorization surface.
-func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, masterKey []byte, redirectURIs ...string) (graphql.Schema, error) {
+func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, masterKey []byte, oauthProvider OAuthProviderService, redirectURIs ...string) (graphql.Schema, error) {
 	publicInsightReader := newPublicInsightReader(registryClient)
 	packageDownloads, _ := registryClient.(sandbox.SDKPackageDownloadCountClient)
 	query := graphql.NewObject(graphql.ObjectConfig{
@@ -467,6 +474,8 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"authConnections":             authConnectionsGraphQLField(s),
 			"authConnectionPage":          authConnectionPageGraphQLField(s),
 			"connectionResources":         connectionResourcesGraphQLField(s),
+			"oauthClients":                oauthClientsGraphQLField(oauthProvider),
+			"oauthScopeCatalog":           oauthScopeCatalogGraphQLField(),
 		},
 	})
 	mutation := graphql.NewObject(graphql.ObjectConfig{
@@ -508,6 +517,8 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"setDefaultConnectionResource":      setDefaultConnectionResourceGraphQLField(s),
 			"rediscoverConnectionResources":     rediscoverConnectionResourcesGraphQLField(s, verifier, masterKey),
 			"refreshMissingServiceContracts":    refreshMissingServiceContractsGraphQLField(s, registryBatchRuntimeContractFetcher(registryClient)),
+			"createOAuthClient":                 createOAuthClientGraphQLField(oauthProvider),
+			"revokeOAuthClient":                 revokeOAuthClientGraphQLField(oauthProvider),
 		},
 	})
 	schema, err := graphql.NewSchema(graphql.SchemaConfig{Query: query, Mutation: mutation})

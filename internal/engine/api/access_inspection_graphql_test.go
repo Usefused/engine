@@ -125,7 +125,7 @@ func TestAuditEventsGraphQLPassesFiltersAndOpaqueCursorInOneCall(t *testing.T) {
 
 func TestInspectionGraphQLPolicyTraversesFragmentsAndMultipleRoots(t *testing.T) {
 	workspaceID := uuid.New()
-	schema, err := newMCPGraphQLSchema(nil, &accessInspectionGraphQLStore{}, nil, nil, nil)
+	schema, err := newMCPGraphQLSchema(nil, &accessInspectionGraphQLStore{}, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("new schema: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestCurrentActorAccessUsesAuthenticatedSnapshotWithoutRepositoryReads(t *te
 
 func TestCurrentActorAccessPolicyRequiresAuthenticationButNoBusinessPermission(t *testing.T) {
 	workspaceID := uuid.New()
-	schema, err := newMCPGraphQLSchema(nil, &accessInspectionGraphQLStore{}, nil, nil, nil)
+	schema, err := newMCPGraphQLSchema(nil, &accessInspectionGraphQLStore{}, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("new schema: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestCurrentActorAccessPolicyRequiresAuthenticationButNoBusinessPermission(t
 func TestInspectionGraphQLPreflightDeniesForgedFragmentBeforeAnyRepositoryCall(t *testing.T) {
 	workspaceID := uuid.New()
 	repository := &accessInspectionGraphQLStore{}
-	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil)
+	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("new schema: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestInspectionGraphQLPreflightDeniesForgedFragmentBeforeAnyRepositoryCall(t
 
 func executeAccessInspectionGraphQL(t *testing.T, repository *accessInspectionGraphQLStore, actor accesscontrol.Actor, query string, variables map[string]interface{}) *graphql.Result {
 	t.Helper()
-	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil)
+	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("new schema: %v", err)
 	}

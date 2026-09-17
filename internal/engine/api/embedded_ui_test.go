@@ -91,6 +91,30 @@ func TestEmbeddedUIMiddleware(t *testing.T) {
 			wantBody:   "next",
 		},
 		{
+			// Regression test: a real browser navigating to the OAuth
+			// authorize endpoint sends Accept: text/html with no X-API-Key,
+			// which used to be indistinguishable from an ordinary SPA page
+			// load and was silently swallowed by the SPA fallback instead of
+			// reaching oauthAuthorizeHandler.
+			name:       "passes oauth authorize browser navigation through",
+			method:     http.MethodGet,
+			path:       "/oauth/authorize?client_id=foc_1&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcallback&response_type=code",
+			accept:     "text/html,application/xhtml+xml",
+			wantStatus: http.StatusTeapot,
+			wantBody:   "next",
+		},
+		{
+			// Regression test: the RFC 8414 discovery document must also
+			// reach its handler rather than the SPA fallback if a browser
+			// (rather than a JSON-Accept client) requests it directly.
+			name:       "passes oauth discovery document browser navigation through",
+			method:     http.MethodGet,
+			path:       "/.well-known/oauth-authorization-server",
+			accept:     "text/html,application/xhtml+xml",
+			wantStatus: http.StatusTeapot,
+			wantBody:   "next",
+		},
+		{
 			name:       "passes writes through",
 			method:     http.MethodPost,
 			path:       "/integrations",

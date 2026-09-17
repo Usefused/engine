@@ -602,7 +602,7 @@ func executeTeamGraphQLRequest(t *testing.T, s *teamGraphQLTestStore, actor acce
 	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{SSOEnabled: true})
 	defer entitlement.LiveEntitlement.Reset()
 
-	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"))
+	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"), nil)
 	if err != nil {
 		t.Fatalf("new schema: %v", err)
 	}

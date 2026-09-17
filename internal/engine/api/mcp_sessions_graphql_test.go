@@ -43,7 +43,7 @@ func assertMCPSessionGraphQLPermissions(t *testing.T, permissions []accesscontro
 	t.Helper()
 	account, app, family := uuid.New(), uuid.New(), uuid.New()
 	s := &mcpSessionGraphQLTestStore{workspaceTestStore: &workspaceTestStore{accountID: account, apps: map[uuid.UUID]store.App{app: {AppID: app, AppFamilyID: family, AccountID: account, Status: store.AppStatusActive}}}, page: store.MCPSessionPage{Items: []models.MCPSession{{ID: uuid.New(), SessionID: "synthetic-session", ClientName: "Example Agent", ClientVersion: "1", InitialClientIP: "192.0.2.2", StartedAt: time.Now(), LastActivityAt: time.Now()}}, NextCursor: "next-page", HasMore: true}}
-	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"))
+	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"), nil)
 	// Schema construction verifies the new field and permission policy are wired together.
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func assertMCPSessionGraphQLQuery(t *testing.T, s *mcpSessionGraphQLTestStore, r
 func TestMCPSessionsGraphQLCrossAccountDenial(t *testing.T) {
 	account, app := uuid.New(), uuid.New()
 	s := &mcpSessionGraphQLTestStore{workspaceTestStore: &workspaceTestStore{accountID: account, apps: map[uuid.UUID]store.App{app: {AppID: app, AppFamilyID: uuid.New(), AccountID: uuid.New()}}}}
-	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"))
+	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"), nil)
 	// Cross-account denial is tested through the same complete schema as a permitted query.
 	if err != nil {
 		t.Fatal(err)

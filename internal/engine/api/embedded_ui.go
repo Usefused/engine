@@ -54,8 +54,20 @@ func EmbeddedUIMiddleware(uiFS http.FileSystem, runtimeConfigs ...EmbeddedUIRunt
 
 // isEmbeddedUIRuntimeBrowserRoute reserves exact Engine-owned browser paths
 // without weakening SPA navigation behavior for neighboring workspace routes.
+// GET /oauth/authorize and the RFC 8414 discovery document are server-rendered
+// full-page responses just like the hosted-connect routes above -- a real
+// browser navigation to either one sends Accept: text/html with no
+// X-API-Key, which is indistinguishable from an ordinary SPA page load, so
+// without this exact-path reservation the SPA fallback claims the request
+// and oauthAuthorizeHandler/oauthMetadataHandler are never reached.
 func isEmbeddedUIRuntimeBrowserRoute(rawPath string) bool {
-	return rawPath == "/workspace/connect/input" || rawPath == "/workspace/connect/callback"
+	switch rawPath {
+	case "/workspace/connect/input", "/workspace/connect/callback",
+		"/oauth/authorize", "/.well-known/oauth-authorization-server":
+		return true
+	default:
+		return false
+	}
 }
 
 func firstEmbeddedUIRuntimeConfig(configs []EmbeddedUIRuntimeConfig) EmbeddedUIRuntimeConfig {

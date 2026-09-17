@@ -183,7 +183,7 @@ func mountMCPGraphQLTestHandlerWithRegistryAndSink(t *testing.T, s store.Store, 
 			return fixture.SaveAppRuntime(context.Background(), scope)
 		}
 	}
-	schema, err := newMCPGraphQLSchema(configStore, s, &mockVerifier{}, registry, []byte("12345678901234567890123456789012"))
+	schema, err := newMCPGraphQLSchema(configStore, s, &mockVerifier{}, registry, []byte("12345678901234567890123456789012"), nil)
 	// The fixture cannot exercise request authorization without a complete schema.
 	if err != nil {
 		t.Fatalf("newMCPGraphQLSchema() error = %v", err)
@@ -279,7 +279,7 @@ func doMCPGraphQLRequestWithVariables(t *testing.T, h http.HandlerFunc, query st
 
 func TestMCPGraphQLHandler_RejectsUnauthenticated(t *testing.T) {
 	s := &workspaceTestStore{workspaceErr: errWorkspaceNotFoundForTest{}}
-	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"))
+	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"), nil)
 	if err != nil {
 		t.Fatalf("newMCPGraphQLSchema() error = %v", err)
 	}
@@ -591,7 +591,7 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 			AuthConfigs: fusedobject.AuthConfigs{{Name: "apiKeyAuth", Type: "apiKey", KeyName: "X-API-Key"}},
 		}},
 	}
-	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, verifier, &mockRegistryClient{}, []byte("12345678901234567890123456789012"))
+	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, verifier, &mockRegistryClient{}, []byte("12345678901234567890123456789012"), nil)
 	if err != nil {
 		t.Fatalf("newMCPGraphQLSchema() error = %v", err)
 	}
