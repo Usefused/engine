@@ -18,8 +18,13 @@ type appTokenInsertTx struct {
 	sql string
 }
 
-// Exec captures the authoritative insert without requiring a live database for classification tests.
+// Exec lets the expired-token purge succeed unconditionally and applies the
+// configured tag/error only to the authoritative insert, so classification
+// tests exercise insert-result handling rather than the preceding purge.
 func (tx *appTokenInsertTx) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+	if strings.Contains(sql, "DELETE FROM fused_app_tokens") {
+		return pgconn.NewCommandTag("DELETE 0"), nil
+	}
 	tx.sql = sql
 	return tx.tag, tx.err
 }
