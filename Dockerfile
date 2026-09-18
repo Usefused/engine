@@ -43,7 +43,12 @@ ARG COMMIT=dev
 # dist file from entering either image variant.
 FROM engine-base AS engine-source
 
+# Both embedded MCP runtime artifacts must land here: bundle.js (the Node
+# server runtime) and metadata-bundle.js (the browser-side catalogue/tool
+# declarations embed). Missing either one fails the go:embed directives in
+# runtime/embed.go during the later builder stages.
 COPY --from=mcp-runtime-builder /app/runtime/mcp/dist/bundle.js /app/runtime/mcp/dist/bundle.js
+COPY --from=mcp-runtime-builder /app/runtime/mcp/dist/metadata-bundle.js /app/runtime/mcp/dist/metadata-bundle.js
 
 FROM engine-source AS engine-headless-builder
 
