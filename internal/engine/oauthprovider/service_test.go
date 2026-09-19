@@ -48,14 +48,8 @@ type fakeOAuthStore struct {
 	revokeAppRev     int64
 	revokeAppErr     error
 
-	registrationKeySubject uuid.UUID
-	registrationKeyErr     error
-	registerErr            error
-	recordedRegister       store.OAuthClientRegistration
-	setKeySubject          uuid.UUID
-	revokeKeyErr           error
-	hasKey                 bool
-	hasKeyErr              error
+	registerErr      error
+	recordedRegister store.OAuthClientRegistration
 }
 
 func (f *fakeOAuthStore) CreateOAuthClient(_ context.Context, input store.OAuthClientRegistration) (store.OAuthClientMutationResult, error) {
@@ -119,26 +113,6 @@ func (f *fakeOAuthStore) RegisterOAuthClient(_ context.Context, input store.OAut
 		ID: uuid.New(), ClientID: input.ClientID, Name: input.Name, ClientType: input.ClientType,
 		RedirectURIs: input.RedirectURIs, AllowedScopes: input.AllowedScopes, ExpiresAt: input.ExpiresAt,
 	}}, nil
-}
-
-func (f *fakeOAuthStore) SetOAuthRegistrationKey(_ context.Context, subjectID uuid.UUID, _ string, _ store.MutationActor) (store.OAuthRegistrationKey, error) {
-	f.setKeySubject = subjectID
-	return store.OAuthRegistrationKey{ID: uuid.New(), SubjectID: subjectID}, nil
-}
-
-func (f *fakeOAuthStore) RevokeOAuthRegistrationKey(_ context.Context, _ uuid.UUID, _ store.MutationActor) error {
-	return f.revokeKeyErr
-}
-
-func (f *fakeOAuthStore) GetOAuthRegistrationKeySubject(_ context.Context, _ string) (uuid.UUID, error) {
-	if f.registrationKeyErr != nil {
-		return uuid.Nil, f.registrationKeyErr
-	}
-	return f.registrationKeySubject, nil
-}
-
-func (f *fakeOAuthStore) HasOAuthRegistrationKey(_ context.Context, _ uuid.UUID) (bool, error) {
-	return f.hasKey, f.hasKeyErr
 }
 
 var _ store.OAuthClientStore = (*fakeOAuthStore)(nil)
@@ -543,67 +517,89 @@ func TestIsOAuthClientActorMatchesOnlyDelegatedTokens(t *testing.T) {
 	}
 }
 
-func TestRegisterClientMintsEphemeralPublicClientWithLoopbackRedirect(t *testing.T) {
-	repository := &fakeOAuthStore{registrationKeySubject: uuid.New()}
+// TestRegisterClientMintsTemporaryPair verifies anonymous issuance and hash-only storage.
+func TestRegisterClientMintsTemporaryPair(t *testing.T) {
+	repository := &fakeOAuthStore{}
 	service, _ := newTestService(t, repository)
+	now := time.Now().UTC()
+	// Fix the clock so the one-hour credential lifetime is exact.
+	service.now = func() time.Time { return now }
 	result, err := service.RegisterClient(t.Context(), RegisterClientRequest{
-		RegistrationKey: "frk_test", RedirectURI: "http://localhost:4321/callback", Scopes: []string{"app.read"},
+		RedirectURI: "http://localhost:4321/callback", Scopes: []string{"app.read"},
 	})
+	// Registration must succeed with no prior key or workspace identity.
 	if err != nil {
 		t.Fatalf("RegisterClient: %v", err)
 	}
-	if result.ClientID == "" || !strings.HasPrefix(result.ClientID, clientIDPrefix) {
-		t.Fatalf("client id = %q", result.ClientID)
-	}
-	if result.ClientIDExpiresAt.IsZero() {
-		t.Fatal("client expiry missing")
+	// Require independent credentials with the established Engine prefixes.
+	if !strings.HasPrefix(result.ClientID, clientIDPrefix) || !strings.HasPrefix(result.ClientSecret, clientSecretPrefix) {
+		t.Fatal("temporary client credentials missing")
 	}
 	recorded := repository.recordedRegister
-	if recorded.ClientType != store.OAuthClientPublic || recorded.ClientSecretHash != "" {
-		t.Fatalf("registered client type/secret = %q/%q", recorded.ClientType, recorded.ClientSecretHash)
+	// The secret must be usable for client authentication without persisting plaintext.
+	if recorded.ClientType != store.OAuthClientConfidential || recorded.ClientSecretHash != hashSecret(result.ClientSecret) {
+		t.Fatal("temporary client secret was not hashed")
 	}
-	if recorded.ExpiresAt == nil || !recorded.ExpiresAt.After(time.Now()) {
-		t.Fatal("registered client has no future expiry")
+	// Both credentials share the existing bounded client lifetime.
+	if recorded.ExpiresAt == nil || !recorded.ExpiresAt.Equal(now.Add(ephemeralClientTTL)) || !result.ClientIDExpiresAt.Equal(*recorded.ExpiresAt) {
+		t.Fatal("temporary client expiry mismatch")
 	}
-	if recorded.Actor.SubjectID != repository.registrationKeySubject {
-		t.Fatal("registered client was not attributed to the key subject")
+	// Registration must not impersonate any workspace user.
+	if recorded.Actor.SubjectID != uuid.Nil {
+		t.Fatal("anonymous registration has a subject")
+	}
+	repository.client = store.OAuthClient{ClientID: result.ClientID, ClientType: recorded.ClientType}
+	repository.clientSecret = recorded.ClientSecretHash
+	// Prove the returned secret can authenticate its registered client.
+	if _, err := service.authenticateClient(t.Context(), result.ClientID, result.ClientSecret); err != nil {
+		t.Fatalf("authenticate registered client: %v", err)
+	}
+	// Client identity alone must never authenticate a confidential client.
+	if _, err := service.authenticateClient(t.Context(), result.ClientID, ""); !errors.Is(err, ErrUnauthorizedClient) {
+		t.Fatalf("missing secret: %v", err)
+	}
+	// A different caller's secret must not authenticate the pair.
+	if _, err := service.authenticateClient(t.Context(), result.ClientID, "wrong"); !errors.Is(err, ErrUnauthorizedClient) {
+		t.Fatalf("wrong secret: %v", err)
 	}
 }
 
-func TestRegisterClientRejectsUnknownRegistrationKey(t *testing.T) {
-	repository := &fakeOAuthStore{registrationKeyErr: store.ErrOAuthRegistrationKeyNotFound}
-	service, _ := newTestService(t, repository)
-	_, err := service.RegisterClient(t.Context(), RegisterClientRequest{
-		RegistrationKey: "frk_bad", RedirectURI: "http://localhost:4321/callback", Scopes: []string{"app.read"},
-	})
-	if !errors.Is(err, ErrUnauthorizedClient) {
-		t.Fatalf("err = %v, want ErrUnauthorizedClient", err)
-	}
-}
-
+// TestRegisterClientRejectsNonLoopbackRedirect preserves the local callback boundary.
 func TestRegisterClientRejectsNonLoopbackRedirect(t *testing.T) {
-	repository := &fakeOAuthStore{registrationKeySubject: uuid.New()}
-	service, _ := newTestService(t, repository)
-	_, err := service.RegisterClient(t.Context(), RegisterClientRequest{
-		RegistrationKey: "frk_test", RedirectURI: "https://evil.example.com/callback", Scopes: []string{"app.read"},
-	})
-	if !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("err = %v, want ErrInvalidRequest", err)
-	}
-}
-
-func TestSetRegistrationKeyReturnsPrefixedRawKeyForCaller(t *testing.T) {
 	repository := &fakeOAuthStore{}
 	service, _ := newTestService(t, repository)
-	actor := browserActor(t)
-	rawKey, err := service.SetRegistrationKey(t.Context(), actor)
-	if err != nil {
-		t.Fatalf("SetRegistrationKey: %v", err)
+	_, err := service.RegisterClient(t.Context(), RegisterClientRequest{
+		RedirectURI: "https://example.com/callback", Scopes: []string{"app.read"},
+	})
+	// Reject before persisting any client credentials.
+	if !errors.Is(err, ErrInvalidRequest) || repository.recordedRegister.ClientID != "" {
+		t.Fatalf("unexpected registration outcome: %v", err)
 	}
-	if !strings.HasPrefix(rawKey, registrationKeyPrefix) {
-		t.Fatalf("key = %q", rawKey)
+}
+
+// TestRegisterClientRejectsInvalidMetadata returns a protocol error for invalid scopes or names.
+func TestRegisterClientRejectsInvalidMetadata(t *testing.T) {
+	repository := &fakeOAuthStore{registerErr: store.ErrInvalidOAuthClient}
+	service, _ := newTestService(t, repository)
+	result, err := service.RegisterClient(t.Context(), RegisterClientRequest{RedirectURI: "http://localhost/callback"})
+	// Failed registration must expose no credentials.
+	if !errors.Is(err, ErrInvalidRequest) || result.ClientSecret != "" || result.ClientID != "" {
+		t.Fatalf("invalid metadata outcome: %v", err)
 	}
-	if repository.setKeySubject != actor.SubjectID {
-		t.Fatal("key was not bound to the caller's subject")
+}
+
+// TestTokenResponseUsesPersistedDeadline prevents clients from assuming a fresh hour after refresh.
+func TestTokenResponseUsesPersistedDeadline(t *testing.T) {
+	now := time.Now().UTC()
+	metadata := store.OAuthTokenMetadata{AccessExpiresAt: now.Add(7 * time.Minute)}
+	response := tokenResponse(metadata, "access", "refresh", now)
+	// Advertise only the time remaining on the stored token.
+	if response.ExpiresIn != 420 {
+		t.Fatalf("expires_in=%d", response.ExpiresIn)
+	}
+	metadata.AccessExpiresAt = now.Add(-time.Second)
+	// A token expiring during response serialization cannot advertise negative time.
+	if tokenResponse(metadata, "access", "refresh", now).ExpiresIn != 0 {
+		t.Fatal("negative token lifetime")
 	}
 }

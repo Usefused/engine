@@ -39,25 +39,35 @@ func (s *postgresStore) CreateOAuthClient(ctx context.Context, input OAuthClient
 	return OAuthClientMutationResult{Client: client, AuthorizationRevision: revision}, nil
 }
 
+// RegisterOAuthClient records anonymous registration without granting user access.
 func (s *postgresStore) RegisterOAuthClient(ctx context.Context, input OAuthClientRegistration) (OAuthClientMutationResult, error) {
+	// Reject invalid client metadata before opening a transaction.
 	if err := validateOAuthClientRegistration(input); err != nil {
 		return OAuthClientMutationResult{}, err
 	}
-	// Dynamic registration authenticates via the registration key, not a live
-	// control credential, so this path skips beginAccessMutation and uses the
-	// key's subject as the mutation actor.
+	// Anonymous registration must never create permanent or overlong credentials.
+	now := time.Now().UTC()
+	if input.ExpiresAt == nil || !input.ExpiresAt.After(now) || input.ExpiresAt.After(now.Add(OAuthDynamicClientMaxTTL)) {
+		return OAuthClientMutationResult{}, fmt.Errorf("%w: dynamic clients must expire within one hour", ErrInvalidOAuthClient)
+	}
+
+	// Registration precedes user login, so it cannot require a control credential.
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
+	// No client may be written unless its audit can share the transaction.
 	if err != nil {
 		return OAuthClientMutationResult{}, fmt.Errorf("begin OAuth client registration: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	client, err := createOAuthClientTx(ctx, tx, input)
+	// Roll back the transaction when the client cannot be persisted.
 	if err != nil {
 		return OAuthClientMutationResult{}, err
 	}
+	// A client identity must never outlive a failed registration audit.
 	if err := auditOAuthClientMutation(ctx, tx, input.Actor, "oauth.client.register", client.ID, 0); err != nil {
 		return OAuthClientMutationResult{}, err
 	}
+	// Return credentials only after both client and audit are committed.
 	if err := tx.Commit(ctx); err != nil {
 		return OAuthClientMutationResult{}, fmt.Errorf("commit OAuth client registration: %w", err)
 	}
@@ -145,6 +155,7 @@ func (s *postgresStore) RevokeOAuthClient(ctx context.Context, id uuid.UUID, act
 	return revision, nil
 }
 
+// auditOAuthClientMutation preserves attribution, using NULL before user login.
 func auditOAuthClientMutation(ctx context.Context, tx pgx.Tx, actor MutationActor, action string, clientID uuid.UUID, revision int64) error {
 	command, err := tx.Exec(ctx, `
 		INSERT INTO fused_audit_events (
@@ -154,10 +165,12 @@ func auditOAuthClientMutation(ctx context.Context, tx pgx.Tx, actor MutationActo
 		SELECT $1, $2, $3, 'workspace', workspace.id, $4, $5, 'succeeded',
 			jsonb_build_object('oauth_client_id', $6::text, 'authorization_revision', $7::bigint)
 		FROM fused_workspaces workspace WHERE workspace.singleton_key = 1
-	`, actor.SubjectID, nullableUUID(actor.CredentialID), action, actor.RequestID, actor.TraceID, clientID, revision)
+	`, nullableUUID(actor.SubjectID), nullableUUID(actor.CredentialID), action, actor.RequestID, actor.TraceID, clientID, revision)
+	// Propagate audit failures so the caller rolls back the credential mutation.
 	if err != nil {
 		return fmt.Errorf("audit OAuth client mutation: %w", err)
 	}
+	// A registration without a workspace cannot have a valid audit record.
 	if command.RowsAffected() != 1 {
 		return ErrInvalidOAuthClient
 	}
@@ -215,6 +228,11 @@ func (s *postgresStore) RecordOAuthConsentAndIssueCode(ctx context.Context, cons
 		return fmt.Errorf("begin OAuth consent: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Serialize each user's grants so concurrent approvals cannot exceed the cap.
+	if err := enforceOAuthDynamicClientLimit(ctx, tx, consent); err != nil {
+		return err
+	}
+
 	_, err = tx.Exec(ctx, `
 		INSERT INTO fused_oauth_user_consents (client_id, subject_id, granted_scope)
 		VALUES ($1, $2, $3)
@@ -238,6 +256,57 @@ func (s *postgresStore) RecordOAuthConsentAndIssueCode(ctx context.Context, cons
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit OAuth consent: %w", err)
+	}
+	return nil
+}
+
+// enforceOAuthDynamicClientLimit holds the user's row lock until consent commits.
+// Counting consents excludes anonymous registrations and lets disconnect release a slot.
+func enforceOAuthDynamicClientLimit(ctx context.Context, tx pgx.Tx, consent OAuthConsentGrant) error {
+	var subjectID uuid.UUID
+	err := tx.QueryRow(ctx, `
+		SELECT id FROM fused_subjects
+		WHERE id = $1 AND status = 'active' FOR UPDATE
+	`, consent.SubjectID).Scan(&subjectID)
+	// Consent cannot create grants for missing or inactive users.
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrOAuthGrantDenied
+	}
+	// A failed lock must not fall back to an unprotected count.
+	if err != nil {
+		return fmt.Errorf("lock OAuth consent subject: %w", err)
+	}
+	var expiresAt *time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT expires_at FROM fused_oauth_clients WHERE id = $1 AND revoked_at IS NULL
+			AND (expires_at IS NULL OR expires_at > clock_timestamp())
+	`, consent.ClientID).Scan(&expiresAt)
+	// Re-check liveness after waiting for the user lock.
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrOAuthGrantDenied
+	}
+	// Storage errors cannot allow a grant to bypass its policy.
+	if err != nil {
+		return fmt.Errorf("check OAuth consent client: %w", err)
+	}
+	// Admin-managed integrations are outside the dynamic-client quota.
+	if expiresAt == nil {
+		return nil
+	}
+	var count int
+	err = tx.QueryRow(ctx, `
+		SELECT COUNT(*) FROM fused_oauth_user_consents consent
+		JOIN fused_oauth_clients client ON client.id = consent.client_id
+		WHERE consent.subject_id = $1 AND consent.client_id <> $2
+			AND client.revoked_at IS NULL AND client.expires_at > clock_timestamp()
+	`, consent.SubjectID, consent.ClientID).Scan(&count)
+	// Keep the quota closed if its authoritative count is unavailable.
+	if err != nil {
+		return fmt.Errorf("count active dynamic OAuth clients: %w", err)
+	}
+	// Reauthorizing the same client takes no extra slot; a new eleventh one is denied.
+	if count >= MaxActiveOAuthDynamicClientsPerUser {
+		return ErrOAuthDynamicClientLimit
 	}
 	return nil
 }
@@ -477,19 +546,29 @@ func revokeOAuthTokenFamily(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, 
 	return nil
 }
 
+// insertOAuthTokenPair bounds both token lifetimes by the live client deadline.
 func insertOAuthTokenPair(ctx context.Context, tx pgx.Tx, clientID, subjectID, tokenFamilyID uuid.UUID, scope []string, issue OAuthTokenIssue) (OAuthTokenMetadata, error) {
 	var metadata OAuthTokenMetadata
 	err := tx.QueryRow(ctx, `
 		INSERT INTO fused_oauth_tokens (
 			client_id, subject_id, token_family_id, access_token_hash, refresh_token_hash,
 			scope, access_expires_at, refresh_expires_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		) SELECT $1, $2, $3, $4, $5, $6,
+			LEAST($7::timestamptz, client.expires_at), LEAST($8::timestamptz, client.expires_at)
+		FROM fused_oauth_clients client
+		WHERE client.id = $1 AND client.revoked_at IS NULL
+			AND (client.expires_at IS NULL OR client.expires_at > clock_timestamp())
 		RETURNING id, client_id, subject_id, token_family_id, scope, access_expires_at, refresh_expires_at
 	`, clientID, subjectID, tokenFamilyID, issue.AccessTokenHash, issue.RefreshTokenHash,
 		nonNilStrings(scope), issue.AccessExpiresAt, issue.RefreshExpiresAt).Scan(
 		&metadata.ID, &metadata.ClientID, &metadata.SubjectID, &metadata.TokenFamilyID,
 		&metadata.Scope, &metadata.AccessExpiresAt, &metadata.RefreshExpiresAt,
 	)
+	// Expiry or revocation racing the exchange must not issue another token.
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OAuthTokenMetadata{}, ErrOAuthGrantDenied
+	}
+	// The grant transaction rolls back if credential persistence fails.
 	if err != nil {
 		return OAuthTokenMetadata{}, fmt.Errorf("issue OAuth token pair: %w", err)
 	}
@@ -507,12 +586,13 @@ func auditOAuthTokenLifecycle(ctx context.Context, tx pgx.Tx, clientID, subjectI
 	return nil
 }
 
+// ListOAuthConnectedApps hides expired clients immediately so their quota slots appear free.
 func (s *postgresStore) ListOAuthConnectedApps(ctx context.Context, subjectID uuid.UUID) ([]OAuthConnectedApp, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT consent.client_id, client.name, consent.granted_scope, consent.granted_at
 		FROM fused_oauth_user_consents consent
 		JOIN fused_oauth_clients client ON client.id = consent.client_id AND client.revoked_at IS NULL
-		WHERE consent.subject_id = $1
+		WHERE consent.subject_id = $1 AND (client.expires_at IS NULL OR client.expires_at > NOW())
 		ORDER BY consent.granted_at DESC
 	`, subjectID)
 	if err != nil {
@@ -649,115 +729,6 @@ func (s *postgresStore) ExpireOAuthArtifacts(ctx context.Context, at time.Time, 
 		return 0, fmt.Errorf("expire OAuth artifacts: %w", err)
 	}
 	return expiredCodes + expiredTokens + expiredClients, nil
-}
-
-func (s *postgresStore) SetOAuthRegistrationKey(ctx context.Context, subjectID uuid.UUID, keyHash string, actor MutationActor) (OAuthRegistrationKey, error) {
-	if keyHash == "" {
-		return OAuthRegistrationKey{}, errors.New("OAuth registration key hash is required")
-	}
-	tx, err := s.beginAccessMutation(ctx, actor)
-	if err != nil {
-		return OAuthRegistrationKey{}, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	// Rotation is one transaction: the prior active key is revoked before the
-	// new one is inserted, so there is never a window with two live keys.
-	if _, err := tx.Exec(ctx, `
-		UPDATE fused_oauth_registration_keys SET revoked_at = NOW()
-		WHERE subject_id = $1 AND revoked_at IS NULL
-	`, subjectID); err != nil {
-		return OAuthRegistrationKey{}, fmt.Errorf("revoke prior OAuth registration key: %w", err)
-	}
-	var key OAuthRegistrationKey
-	err = tx.QueryRow(ctx, `
-		INSERT INTO fused_oauth_registration_keys (subject_id, key_hash)
-		VALUES ($1, $2)
-		RETURNING id, subject_id, created_at, revoked_at
-	`, subjectID, keyHash).Scan(&key.ID, &key.SubjectID, &key.CreatedAt, &key.RevokedAt)
-	if err != nil {
-		return OAuthRegistrationKey{}, fmt.Errorf("create OAuth registration key: %w", err)
-	}
-	if err := auditOAuthRegistrationKeyMutation(ctx, tx, actor, "oauth.registration_key.set", key.ID); err != nil {
-		return OAuthRegistrationKey{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return OAuthRegistrationKey{}, fmt.Errorf("commit OAuth registration key set: %w", err)
-	}
-	return key, nil
-}
-
-func (s *postgresStore) RevokeOAuthRegistrationKey(ctx context.Context, subjectID uuid.UUID, actor MutationActor) error {
-	tx, err := s.beginAccessMutation(ctx, actor)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	var id uuid.UUID
-	err = tx.QueryRow(ctx, `
-		UPDATE fused_oauth_registration_keys SET revoked_at = NOW()
-		WHERE subject_id = $1 AND revoked_at IS NULL
-		RETURNING id
-	`, subjectID).Scan(&id)
-	// Revoking when no active key exists is an idempotent success, not an error.
-	if errors.Is(err, pgx.ErrNoRows) {
-		_ = tx.Commit(ctx)
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("revoke OAuth registration key: %w", err)
-	}
-	if err := auditOAuthRegistrationKeyMutation(ctx, tx, actor, "oauth.registration_key.revoke", id); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-func (s *postgresStore) GetOAuthRegistrationKeySubject(ctx context.Context, keyHash string) (uuid.UUID, error) {
-	var subjectID uuid.UUID
-	err := s.db.QueryRow(ctx, `
-		SELECT subject_id FROM fused_oauth_registration_keys
-		WHERE key_hash = $1 AND revoked_at IS NULL
-	`, keyHash).Scan(&subjectID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, ErrOAuthRegistrationKeyNotFound
-	}
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("get OAuth registration key subject: %w", err)
-	}
-	return subjectID, nil
-}
-
-func (s *postgresStore) HasOAuthRegistrationKey(ctx context.Context, subjectID uuid.UUID) (bool, error) {
-	var exists bool
-	err := s.db.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM fused_oauth_registration_keys
-			WHERE subject_id = $1 AND revoked_at IS NULL
-		)
-	`, subjectID).Scan(&exists)
-	if err != nil {
-		return false, fmt.Errorf("check OAuth registration key: %w", err)
-	}
-	return exists, nil
-}
-
-func auditOAuthRegistrationKeyMutation(ctx context.Context, tx pgx.Tx, actor MutationActor, action string, keyID uuid.UUID) error {
-	command, err := tx.Exec(ctx, `
-		INSERT INTO fused_audit_events (
-			actor_subject_id, actor_credential_id, action, resource_type, resource_id,
-			request_id, trace_id, outcome, metadata
-		)
-		SELECT $1, $2, $3, 'workspace', workspace.id, $4, $5, 'succeeded',
-			jsonb_build_object('oauth_registration_key_id', $6::text)
-		FROM fused_workspaces workspace WHERE workspace.singleton_key = 1
-	`, actor.SubjectID, actor.CredentialID, action, actor.RequestID, actor.TraceID, keyID)
-	if err != nil {
-		return fmt.Errorf("audit OAuth registration key mutation: %w", err)
-	}
-	if command.RowsAffected() != 1 {
-		return fmt.Errorf("audit OAuth registration key mutation: workspace row missing")
-	}
-	return nil
 }
 
 var _ OAuthClientStore = (*postgresStore)(nil)

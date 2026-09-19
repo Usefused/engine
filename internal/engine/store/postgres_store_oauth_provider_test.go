@@ -406,3 +406,57 @@ func TestPostgresOAuthAuditNeverLeaksSecretMaterial(t *testing.T) {
 		t.Fatal("no OAuth audit events were recorded to check")
 	}
 }
+
+// TestPostgresAnonymousOAuthRegistration verifies nullable audit attribution, consent, and expiry against PostgreSQL.
+func TestPostgresAnonymousOAuthRegistration(t *testing.T) {
+	ctx, cancel, pool, repository := accessControlTestRepository(t)
+	defer cancel()
+	defer pool.Close()
+	_, owner, _ := bootstrapUserTest(t, ctx, repository, "oauth-anonymous-registration")
+	expiresAt := time.Now().UTC().Add(10 * time.Minute)
+	result, err := repository.RegisterOAuthClient(ctx, OAuthClientRegistration{
+		Name: "Local client", ClientType: OAuthClientConfidential, ClientID: "foc_" + uuid.NewString(),
+		ClientSecretHash: accesscontrol.HashControlCredential("test-client-secret"),
+		RedirectURIs:     []string{"http://localhost:4321/callback"}, AllowedScopes: []string{"service.read"}, ExpiresAt: &expiresAt,
+	})
+	// Anonymous registration must not fail the subject foreign key or audit transaction.
+	if err != nil {
+		t.Fatalf("RegisterOAuthClient: %v", err)
+	}
+	var anonymousAudit bool
+	err = pool.QueryRow(ctx, `SELECT actor_subject_id IS NULL AND actor_credential_id IS NULL FROM fused_audit_events WHERE action = 'oauth.client.register' AND metadata->>'oauth_client_id' = $1`, result.Client.ID.String()).Scan(&anonymousAudit)
+	// A pre-login request must never be falsely attributed to an Engine user.
+	if err != nil || !anonymousAudit {
+		t.Fatalf("anonymous registration audit: %v", err)
+	}
+	_, secretHash, err := repository.GetOAuthClientByPublicID(ctx, result.Client.ClientID)
+	// The persisted hash must match the client's proof while the pair is live.
+	if err != nil || secretHash != accesscontrol.HashControlCredential("test-client-secret") {
+		t.Fatalf("client lookup: %v", err)
+	}
+	_, consentExists, err := repository.GetOAuthUserConsent(ctx, result.Client.ID, owner.SubjectID)
+	// Issuing a client identity must not create a user grant.
+	if err != nil || consentExists {
+		t.Fatalf("registration unexpectedly granted consent: %v", err)
+	}
+	now := time.Now().UTC()
+	code, verifier := oauthTestCode(t, ctx, repository, result.Client, owner.SubjectID, "http://localhost:4321/callback", []string{"service.read"}, now.Add(time.Minute))
+	issue, _, _ := oauthTestTokenIssue(now)
+	grant, err := repository.ExchangeOAuthAuthorizationCode(ctx, OAuthCodeExchange{
+		CodeHash: accesscontrol.HashControlCredential(code), ClientID: result.Client.ID,
+		RedirectURI: "http://localhost:4321/callback", CodeVerifier: verifier, Issue: issue,
+	}, now)
+	// Only explicit user consent may bind the anonymous client to a subject.
+	if err != nil || grant.SubjectID != owner.SubjectID {
+		t.Fatalf("consented code exchange: %v", err)
+	}
+	// Move the deadline into the past without waiting for real time to pass.
+	if _, err := pool.Exec(ctx, `UPDATE fused_oauth_clients SET expires_at = NOW() - INTERVAL '1 second' WHERE id = $1`, result.Client.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = repository.GetOAuthClientByPublicID(ctx, result.Client.ClientID)
+	// Expired credentials must fail even before the cleanup worker runs.
+	if !errors.Is(err, ErrOAuthClientNotFound) {
+		t.Fatalf("expired client lookup: %v", err)
+	}
+}

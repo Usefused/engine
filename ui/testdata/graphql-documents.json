@@ -1,6 +1,6 @@
 {
-  "call_count": 84,
-  "document_count": 102,
+  "call_count": 88,
+  "document_count": 106,
   "calls": [
     {
       "endpoint": "engine",
@@ -276,6 +276,30 @@
       "endpoint": "engine",
       "file": "app/lib/current-actor-access.ts",
       "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/oauth-clients.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/oauth-clients.ts",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/oauth-clients.ts",
+      "call": 3,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/oauth-clients.ts",
+      "call": 4,
       "document_count": 1
     },
     {
@@ -829,6 +853,34 @@
       "call": 1,
       "variant": 1,
       "document": "query CurrentActorAccess {\n  currentActorAccess {\n    subject_id\n    workspace_id\n    kind\n    authorization_revision\n    grants { permission resource_type resource_id }\n  }\n}"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/oauth-clients.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "\n    query OAuthScopeCatalog {\n      oauthScopeCatalog { value label }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/oauth-clients.ts",
+      "call": 2,
+      "variant": 1,
+      "document": "\n    query OAuthClients {\n      oauthClients { \n  id name client_id client_type redirect_uris allowed_scopes has_secret created_at revoked_at\n }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/oauth-clients.ts",
+      "call": 3,
+      "variant": 1,
+      "document": "\n    mutation CreateOAuthClient($input: CreateOAuthClientInput!) {\n      createOAuthClient(input: $input) {\n        client { \n  id name client_id client_type redirect_uris allowed_scopes has_secret created_at revoked_at\n }\n        client_secret\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/oauth-clients.ts",
+      "call": 4,
+      "variant": 1,
+      "document": "\n    mutation RevokeOAuthClient($id: ID!) {\n      revokeOAuthClient(id: $id)\n    }\n  "
     },
     {
       "endpoint": "engine",

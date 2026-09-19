@@ -60,17 +60,17 @@ test("keeps the Registry repo-boundary manifest synchronized when present", (t) 
   }
 });
 
-// Exact UI transport totals cover the shared Apps catalogue without counting its legacy MCP redirect.
+// Exact UI transport totals cover the shared Apps catalogue and the remaining OAuth client management calls.
 test("accounts for every current UI GraphQL call and document variant", () => {
   const scan = scanCurrentUI();
   // Exact totals ensure every static query remains represented in schema validation.
-  assert.equal(scan.call_count, 84);
-  assert.equal(scan.calls.length, 84);
-  assert.equal(scan.document_count, 102);
-  assert.equal(scan.documents.length, 102);
+  assert.equal(scan.call_count, 88);
+  assert.equal(scan.calls.length, 88);
+  assert.equal(scan.document_count, 106);
+  assert.equal(scan.documents.length, 106);
   assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 19);
-  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 83);
-  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 102);
+  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 87);
+  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 106);
 });
 
 test("resolves imported fragments and expands conditional and map variants", () => {

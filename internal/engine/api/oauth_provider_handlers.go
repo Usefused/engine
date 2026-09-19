@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -31,9 +32,6 @@ type OAuthProviderService interface {
 	Token(ctx context.Context, req oauthprovider.TokenRequest) (oauthprovider.TokenResponse, error)
 	Revoke(ctx context.Context, req oauthprovider.RevokeRequest) error
 	RegisterClient(ctx context.Context, req oauthprovider.RegisterClientRequest) (oauthprovider.RegisterClientResult, error)
-	SetRegistrationKey(ctx context.Context, actor accesscontrol.Actor) (string, error)
-	RevokeRegistrationKey(ctx context.Context, actor accesscontrol.Actor) error
-	HasRegistrationKey(ctx context.Context, actor accesscontrol.Actor) (bool, error)
 	ListConnectedApps(ctx context.Context, actor accesscontrol.Actor) ([]store.OAuthConnectedApp, error)
 	RevokeConnectedApp(ctx context.Context, actor accesscontrol.Actor, clientID uuid.UUID) error
 }
@@ -63,6 +61,7 @@ func MountOAuthProviderRoutes(router chi.Router, service OAuthProviderService, s
 
 // -- GET /oauth/authorize --
 
+// oauthAuthorizeHandler starts consent or reports a policy denial in the browser.
 func oauthAuthorizeHandler(service OAuthProviderService, s store.Store, sessions BrowserSessionService, cookies *browserauth.CookieManager, loginPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setOAuthResponseHeaders(w)
@@ -82,7 +81,7 @@ func oauthAuthorizeHandler(service OAuthProviderService, s store.Store, sessions
 				http.Redirect(w, r, target, http.StatusFound)
 				return
 			}
-			renderOAuthErrorPage(r, s, w, http.StatusBadRequest, "This connection request could not be verified. Return to the application and try again.")
+			renderOAuthErrorPage(r, s, w, http.StatusBadRequest, oauthConsentFailureMessage(err))
 			return
 		}
 		if !result.RequiresConsent {
@@ -171,6 +170,7 @@ func oauthErrorCode(err error) string {
 
 // -- POST /oauth/authorize/consent --
 
+// oauthConsentHandler authorizes a browser-approved grant and explains quota failures.
 func oauthConsentHandler(service OAuthProviderService, s store.Store, sessions BrowserSessionService, cookies *browserauth.CookieManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setOAuthResponseHeaders(w)
@@ -212,11 +212,20 @@ func oauthConsentHandler(service OAuthProviderService, s store.Store, sessions B
 		}
 		redirectURL, err := service.Consent(r.Context(), actor, req)
 		if err != nil {
-			renderOAuthErrorPage(r, s, w, http.StatusBadRequest, "The connection could not be authorized. Return to the application and try again.")
+			renderOAuthErrorPage(r, s, w, http.StatusBadRequest, oauthConsentFailureMessage(err))
 			return
 		}
 		http.Redirect(w, r, redirectURL, http.StatusFound)
 	}
+}
+
+// oauthConsentFailureMessage gives users a way to free capacity without exposing internal errors.
+func oauthConsentFailureMessage(err error) string {
+	// A full quota is actionable through the user's existing Connected Apps page.
+	if errors.Is(err, store.ErrOAuthDynamicClientLimit) {
+		return fmt.Sprintf("You already have %d active temporary OAuth clients. Disconnect one in Access → Connected Apps, or wait for it to expire, then try again.", store.MaxActiveOAuthDynamicClientsPerUser)
+	}
+	return "The connection could not be authorized. Return to the application and try again."
 }
 
 // -- Consent page rendering (server-rendered, mirrors connect_input_handlers.go) --
@@ -418,9 +427,11 @@ type oauthRegisterRequest struct {
 
 // -- POST /oauth/register (dynamic client registration) --
 
+// oauthRegisterHandler issues temporary credentials before user login and consent.
 func oauthRegisterHandler(service OAuthProviderService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setOAuthResponseHeaders(w)
+		// Unconfigured Engines cannot issue credentials.
 		if service == nil {
 			writeOAuthTokenError(w, http.StatusServiceUnavailable, "server_error")
 			return
@@ -432,35 +443,20 @@ func oauthRegisterHandler(service OAuthProviderService) http.HandlerFunc {
 			writeOAuthTokenError(w, http.StatusBadRequest, "invalid_request")
 			return
 		}
-		// The registration key is a Bearer credential; a missing or malformed
-		// header must fail before registration, never mint an anonymous client.
-		key := oauthRegistrationKey(r)
-		if key == "" {
-			writeOAuthTokenError(w, http.StatusUnauthorized, "invalid_client")
-			return
-		}
 		result, err := service.RegisterClient(r.Context(), oauthprovider.RegisterClientRequest{
-			RegistrationKey: key, RedirectURI: body.RedirectURI, Scopes: body.Scopes, Name: body.Name,
+			RedirectURI: body.RedirectURI, Scopes: body.Scopes, Name: body.Name,
 		})
+		// Return protocol errors without leaking persistence details.
 		if err != nil {
 			writeOAuthTokenError(w, oauthTokenErrorStatus(err), oauthTokenErrorCode(err))
 			return
 		}
 		writeOAuthJSON(w, http.StatusCreated, map[string]any{
 			"client_id":            result.ClientID,
+			"client_secret":        result.ClientSecret,
 			"client_id_expires_at": result.ClientIDExpiresAt.Format(time.RFC3339),
 		})
 	}
-}
-
-// oauthRegistrationKey extracts the Bearer registration key from a request.
-func oauthRegistrationKey(r *http.Request) string {
-	const prefix = "Bearer "
-	header := strings.TrimSpace(r.Header.Get("Authorization"))
-	if strings.HasPrefix(header, prefix) {
-		return strings.TrimSpace(strings.TrimPrefix(header, prefix))
-	}
-	return ""
 }
 
 // -- POST /oauth/revoke (RFC 7009) --

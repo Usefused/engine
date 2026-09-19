@@ -108,13 +108,16 @@ func (s *postgresStore) loadControlCredentialPrincipal(ctx context.Context, cred
 // never authorizes anything beyond what its consent covered, even if the
 // authorizing user's own permissions have since grown.
 func (s *postgresStore) loadOAuthTokenPrincipal(ctx context.Context, credentialHash string) (accesscontrol.ControlPrincipal, error) {
+	// Enforce client expiry on every lookup and propagate it into the identity cache.
 	query := `
 		WITH candidate AS (
-			SELECT w.id AS workspace_id, w.account_id, t.id AS credential_id, t.subject_id, t.access_expires_at,
+			SELECT w.id AS workspace_id, w.account_id, t.id AS credential_id, t.subject_id,
+				LEAST(t.access_expires_at, client.expires_at) AS access_expires_at,
 				'oauth_client'::text AS source, 'oauth2'::text AS auth_method,
 				s.kind, s.display_name, COALESCE(user_row.email_display, '') AS email_display,
 				state.revision, t.scope AS token_scope
 			FROM fused_oauth_tokens t
+			JOIN fused_oauth_clients client ON client.id = t.client_id AND client.revoked_at IS NULL
 			JOIN fused_subjects s ON s.id = t.subject_id
 			LEFT JOIN fused_users user_row ON user_row.subject_id = s.id
 			JOIN fused_workspaces w ON w.singleton_key = 1
@@ -122,6 +125,7 @@ func (s *postgresStore) loadOAuthTokenPrincipal(ctx context.Context, credentialH
 			WHERE t.access_token_hash = $1
 				AND t.revoked_at IS NULL
 				AND t.access_expires_at > NOW()
+				AND (client.expires_at IS NULL OR client.expires_at > NOW())
 				AND s.status = 'active'
 		), principals(subject_type, subject_id) AS (
 			SELECT 'subject'::text, subject_id FROM candidate

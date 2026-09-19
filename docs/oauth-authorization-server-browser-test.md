@@ -26,6 +26,44 @@ telemetry evidence. Redact them in any pasted output.
   code_verifier: `printf '%s' "$VERIFIER" | openssl dgst -sha256 -binary | \
   openssl base64 | tr '+/' '-_' | tr -d '='`.
 
+## Request a temporary client pair (local applications)
+
+Local applications can call `POST /oauth/register` without a bearer token,
+registration key, or browser session. Send JSON with `name`, `redirect_uri`
+(an HTTP loopback URL), and `scopes` (permission names), for example:
+
+```json
+{"name":"Local app","redirect_uri":"http://localhost:4321/callback","scopes":["service.read"]}
+```
+
+The `201` response contains `client_id`, `client_secret`, and
+`client_id_expires_at` (RFC 3339). Both credentials expire one hour after
+registration; keep the secret in the local application's memory. The response
+is non-cacheable and Engine stores only the secret hash. Registering a client
+does not grant access to any user or workspace.
+
+Each user may consent to at most **10 active dynamic clients** at a time.
+The limit is checked atomically at consent, when the user is known. Reauthorizing
+an existing client consumes no additional slot. Disconnecting it, revoking it,
+or reaching its expiry frees the slot. Admin-managed permanent clients do not
+count toward this limit. Anonymous registrations are not yet user-owned and
+remain protected by the registration endpoint's rate limits.
+
+Access and refresh tokens cannot outlive their client, including after refresh.
+The token response reports the remaining lifetime. Expiry blocks consent, token
+exchange, refresh, and Engine access immediately, without waiting for cleanup.
+
+Use that pair for the browser login, consent, and Authorization Code + S256
+PKCE walkthrough below. Send the secret at the token endpoint using HTTP Basic
+or `client_secret` in the form body; never put it in the authorize URL. Missing
+or incorrect secrets must fail. After the client expires, authorization and
+token requests must fail and the application must reconnect with a fresh pair.
+
+Confirm **Access** no longer contains **Registration Key** and the former key
+creation/status/revocation GraphQL operations are unavailable. Existing stored
+registration-key rows are unused; upgrading does not delete historical data.
+Admin registration below remains available for long-lived integrations.
+
 ## Register an OAuth client (admin)
 
 1. Sign in as the admin user and open **Access → OAuth Clients**

@@ -138,9 +138,6 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		// form; gate it the same as oauthClients so it's reachable wherever that
 		// page is, and never through a delegated OAuth token.
 		"oauthScopeCatalog": excludeDelegatedClients(permissions(accesscontrol.PermissionAccessRead)),
-		// Registration keys are user-owned credentials; viewing status needs
-		// access.read and is excluded from delegated OAuth tokens.
-		"oauthRegistrationKey": excludeDelegatedClients(permissions(accesscontrol.PermissionAccessRead)),
 	},
 	mutationRoots: map[string]graphQLFieldPolicy{
 		// User/team identity and access management, and credential issuance,
@@ -188,10 +185,6 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		// delegated OAuth token must never carry, regardless of its scope.
 		"createOAuthClient": excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
 		"revokeOAuthClient": excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
-		// Minting/rotating/revoking a registration key is a credential mutation
-		// and therefore excluded from delegated OAuth tokens too.
-		"createOAuthRegistrationKey": excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
-		"revokeOAuthRegistrationKey": excludeDelegatedClients(permissions(accesscontrol.PermissionAccessManage)),
 	},
 	protected: map[string]graphQLFieldPolicy{
 		// An MCP execution token is a credential, even when reached through a

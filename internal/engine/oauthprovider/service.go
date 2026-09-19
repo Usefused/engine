@@ -40,8 +40,7 @@ const (
 	accessTokenPrefix  = "foat_"
 	refreshTokenPrefix = "fort_"
 
-	registrationKeyPrefix = "frk_"
-	ephemeralClientTTL    = 10 * time.Minute
+	ephemeralClientTTL = store.OAuthDynamicClientMaxTTL
 )
 
 var (
@@ -136,91 +135,62 @@ func (s *Service) ListClients(ctx context.Context) ([]store.OAuthClient, error) 
 	return s.store.ListOAuthClients(ctx)
 }
 
-// RegisterClientRequest is the inbound dynamic-registration request: the caller
-// proves possession of a per-user registration key and asks for one ephemeral
-// public client bound to a single loopback redirect URI.
+// RegisterClientRequest asks for temporary credentials without identifying a
+// workspace user; only browser login and consent can authorize Engine access.
 type RegisterClientRequest struct {
-	RegistrationKey string
-	RedirectURI     string
-	Scopes          []string
-	// Name labels the ephemeral client in consent and audit. An empty name falls
-	// back to a fixed label because the registering system may not provide one.
-	Name string
+	RedirectURI string
+	Scopes      []string
+	Name        string
 }
 
-// RegisterClientResult is the one-time output of dynamic registration. The
-// client id must be used promptly, before ClientIDExpiresAt.
+// RegisterClientResult returns the secret once, alongside the shared expiry.
 type RegisterClientResult struct {
 	ClientID          string
+	ClientSecret      string
 	ClientIDExpiresAt time.Time
 }
 
-// RegisterClient validates a registration key and mints one ephemeral public
-// (PKCE) client whose redirect URI is a single loopback address and whose
-// lifetime is bounded by ephemeralClientTTL. The client is inert until a user
-// consents to it.
+// RegisterClient mints a short-lived client pair bound to a loopback callback.
+// Registration grants no user permissions; consent and PKCE remain mandatory.
 func (s *Service) RegisterClient(ctx context.Context, req RegisterClientRequest) (RegisterClientResult, error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.identity.oauth.client.register")
 	defer span.End()
-	subjectID, err := s.store.GetOAuthRegistrationKeySubject(ctx, hashSecret(req.RegistrationKey))
-	if err != nil {
-		if errors.Is(err, store.ErrOAuthRegistrationKeyNotFound) {
-			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			return RegisterClientResult{}, ErrUnauthorizedClient
-		}
-		span.SetAttributes(attribute.String("outcome", "failed"))
-		return RegisterClientResult{}, err
-	}
+	// A local callback keeps this self-service flow on the user's machine.
 	if err := validateLoopbackRedirectURI(req.RedirectURI); err != nil {
 		return RegisterClientResult{}, err
 	}
 	clientID, err := randomIdentifier(clientIDPrefix, 16)
+	// Entropy failure must never produce a predictable client identity.
+	if err != nil {
+		return RegisterClientResult{}, err
+	}
+	rawSecret, err := randomIdentifier(clientSecretPrefix, 32)
+	// A confidential client must always have independently generated proof.
 	if err != nil {
 		return RegisterClientResult{}, err
 	}
 	name := strings.TrimSpace(req.Name)
+	// Give consent a readable label when the client omits its display name.
 	if name == "" {
 		name = "Dynamic client"
 	}
 	expiresAt := s.now().Add(ephemeralClientTTL)
+	// Persist only the hash and never attribute anonymous registration to a user.
 	if _, err := s.store.RegisterOAuthClient(ctx, store.OAuthClientRegistration{
-		Name:          name,
-		ClientType:    store.OAuthClientPublic,
-		ClientID:      clientID,
-		RedirectURIs:  []string{req.RedirectURI},
-		AllowedScopes: req.Scopes,
-		ExpiresAt:     &expiresAt,
-		Actor:         store.MutationActor{SubjectID: subjectID},
+		Name: name, ClientType: store.OAuthClientConfidential, ClientID: clientID,
+		ClientSecretHash: hashSecret(rawSecret), RedirectURIs: []string{req.RedirectURI},
+		AllowedScopes: req.Scopes, ExpiresAt: &expiresAt,
+		Actor: mutationActor(ctx, accesscontrol.Actor{}),
 	}); err != nil {
 		span.SetAttributes(attribute.String("outcome", "failed"))
+		// Invalid metadata is a caller error, not an Engine failure.
+		if errors.Is(err, store.ErrInvalidOAuthClient) {
+			return RegisterClientResult{}, fmt.Errorf("%w: invalid client metadata", ErrInvalidRequest)
+		}
 		return RegisterClientResult{}, err
 	}
 	span.SetAttributes(attribute.String("outcome", "created"), attribute.String("oauth.client_id", clientID))
-	return RegisterClientResult{ClientID: clientID, ClientIDExpiresAt: expiresAt}, nil
-}
-
-// SetRegistrationKey mints (or rotates) the caller's registration key and
-// returns the raw value exactly once; any prior key is revoked in the same
-// transaction.
-func (s *Service) SetRegistrationKey(ctx context.Context, actor accesscontrol.Actor) (string, error) {
-	rawKey, err := randomIdentifier(registrationKeyPrefix, 32)
-	if err != nil {
-		return "", err
-	}
-	if _, err := s.store.SetOAuthRegistrationKey(ctx, actor.SubjectID, hashSecret(rawKey), mutationActor(ctx, actor)); err != nil {
-		return "", err
-	}
-	return rawKey, nil
-}
-
-// RevokeRegistrationKey deactivates the caller's active registration key, if any.
-func (s *Service) RevokeRegistrationKey(ctx context.Context, actor accesscontrol.Actor) error {
-	return s.store.RevokeOAuthRegistrationKey(ctx, actor.SubjectID, mutationActor(ctx, actor))
-}
-
-// HasRegistrationKey reports whether the caller currently holds an active key.
-func (s *Service) HasRegistrationKey(ctx context.Context, actor accesscontrol.Actor) (bool, error) {
-	return s.store.HasOAuthRegistrationKey(ctx, actor.SubjectID)
+	return RegisterClientResult{ClientID: clientID, ClientSecret: rawSecret, ClientIDExpiresAt: expiresAt}, nil
 }
 
 // validateLoopbackRedirectURI admits only explicit HTTP loopback redirects for
@@ -515,6 +485,7 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (TokenResponse, e
 	return response, nil
 }
 
+// exchangeAuthorizationCode reports the persisted lifetime, including the client deadline.
 func (s *Service) exchangeAuthorizationCode(ctx context.Context, client store.OAuthClient, req TokenRequest) (TokenResponse, error) {
 	if req.Code == "" || req.RedirectURI == "" || req.CodeVerifier == "" {
 		return TokenResponse{}, ErrInvalidRequest
@@ -531,9 +502,10 @@ func (s *Service) exchangeAuthorizationCode(ctx context.Context, client store.OA
 		return TokenResponse{}, translateGrantError(err)
 	}
 	s.revisions.SetRevision(metadata.AuthorizationRevision)
-	return tokenResponse(metadata, rawAccess, rawRefresh, s.accessTTL), nil
+	return tokenResponse(metadata, rawAccess, rawRefresh, s.now().UTC()), nil
 }
 
+// exchangeRefreshToken rotates credentials without extending a temporary client deadline.
 func (s *Service) exchangeRefreshToken(ctx context.Context, client store.OAuthClient, req TokenRequest) (TokenResponse, error) {
 	if req.RefreshToken == "" {
 		return TokenResponse{}, ErrInvalidRequest
@@ -553,13 +525,14 @@ func (s *Service) exchangeRefreshToken(ctx context.Context, client store.OAuthCl
 		return TokenResponse{}, translateGrantError(err)
 	}
 	s.revisions.SetRevision(metadata.AuthorizationRevision)
-	return tokenResponse(metadata, rawAccess, rawRefresh, s.accessTTL), nil
+	return tokenResponse(metadata, rawAccess, rawRefresh, s.now().UTC()), nil
 }
 
-func tokenResponse(metadata store.OAuthTokenMetadata, rawAccess, rawRefresh string, accessTTL time.Duration) TokenResponse {
+// tokenResponse reports only the remaining persisted lifetime so clients reconnect on expiry.
+func tokenResponse(metadata store.OAuthTokenMetadata, rawAccess, rawRefresh string, now time.Time) TokenResponse {
 	return TokenResponse{
 		AccessToken: rawAccess, RefreshToken: rawRefresh, TokenType: "Bearer",
-		ExpiresIn: int64(accessTTL.Seconds()), Scope: metadata.Scope,
+		ExpiresIn: max(0, int64(metadata.AccessExpiresAt.Sub(now).Seconds())), Scope: metadata.Scope,
 	}
 }
 

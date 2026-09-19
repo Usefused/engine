@@ -1767,9 +1767,9 @@ func engineSchemaQueries() []string {
 }
 
 // oauthProviderSchemaQueries declares Engine's own OAuth2 authorization-server
-// tables: third-party clients registered by a workspace Owner/Admin obtain a
-// delegated, scope-limited token for one Fused user via Authorization Code +
-// PKCE. This is the inverse of the existing hosted-connect flow, where Fused
+// tables: admin-managed or anonymous temporary clients obtain a delegated,
+// scope-limited token only after a Fused user authorizes them with consent and
+// Authorization Code + PKCE. This is the inverse of the existing hosted-connect flow, where Fused
 // brokers a workspace's OAuth connection TO a third-party provider.
 func oauthProviderSchemaQueries() []string {
 	return []string{
@@ -1797,7 +1797,7 @@ func oauthProviderSchemaQueries() []string {
 		`CREATE INDEX IF NOT EXISTS idx_fused_oauth_clients_active ON fused_oauth_clients(created_at DESC) WHERE revoked_at IS NULL;`,
 
 		// Ephemeral clients minted by POST /oauth/register carry an absolute
-		// expiry so a registration-key holder cannot leave dormant clients.
+		// expiry so unauthenticated registration cannot create permanent credentials.
 		`ALTER TABLE fused_oauth_clients ADD COLUMN IF NOT EXISTS expires_at timestamptz;`,
 
 		// A code is single-use and short-lived; consumed_at is set atomically by
@@ -1856,21 +1856,6 @@ func oauthProviderSchemaQueries() []string {
 			PRIMARY KEY (client_id, subject_id)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_oauth_user_consents_subject ON fused_oauth_user_consents(subject_id);`,
-
-		// A per-user registration key gates POST /oauth/register. Only its hash
-		// is stored; the raw value is shown once at mint/rotation, matching every
-		// other credential in Engine. The partial unique index enforces at most
-		// one active key per subject.
-		`CREATE TABLE IF NOT EXISTS fused_oauth_registration_keys (
-			id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-			subject_id  uuid NOT NULL REFERENCES fused_subjects(id) ON DELETE CASCADE,
-			key_hash    text NOT NULL,
-			created_at  timestamptz NOT NULL DEFAULT NOW(),
-			revoked_at  timestamptz,
-			CONSTRAINT chk_fused_oauth_registration_keys_hash CHECK (key_hash <> '')
-		);`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_oauth_registration_keys_hash ON fused_oauth_registration_keys(key_hash);`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_oauth_registration_keys_active ON fused_oauth_registration_keys(subject_id) WHERE revoked_at IS NULL;`,
 	}
 }
 

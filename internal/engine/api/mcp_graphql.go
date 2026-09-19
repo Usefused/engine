@@ -476,7 +476,6 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"connectionResources":         connectionResourcesGraphQLField(s),
 			"oauthClients":                oauthClientsGraphQLField(oauthProvider),
 			"oauthScopeCatalog":           oauthScopeCatalogGraphQLField(),
-			"oauthRegistrationKey":        oauthRegistrationKeyGraphQLField(oauthProvider),
 		},
 	})
 	mutation := graphql.NewObject(graphql.ObjectConfig{
@@ -520,8 +519,6 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"refreshMissingServiceContracts":    refreshMissingServiceContractsGraphQLField(s, registryBatchRuntimeContractFetcher(registryClient)),
 			"createOAuthClient":                 createOAuthClientGraphQLField(oauthProvider),
 			"revokeOAuthClient":                 revokeOAuthClientGraphQLField(oauthProvider),
-			"createOAuthRegistrationKey":        createOAuthRegistrationKeyGraphQLField(oauthProvider),
-			"revokeOAuthRegistrationKey":        revokeOAuthRegistrationKeyGraphQLField(oauthProvider),
 		},
 	})
 	schema, err := graphql.NewSchema(graphql.SchemaConfig{Query: query, Mutation: mutation})
