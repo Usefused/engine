@@ -1,3 +1,4 @@
+import { hasAnyAppPermission } from "~/lib/current-actor-access";
 import { useState, type ComponentType } from "react";
 import { Link, useLocation, useNavigate } from "@remix-run/react";
 import { Logo } from "~/components/Logo";
@@ -40,7 +41,8 @@ const AUTH_NAV_ITEMS: SidebarItem[] = [
     Icon: Boxes,
     // Transport-specific detail routes still belong to the single Apps navigation destination.
     isActive: (pathname) => pathname.startsWith("/integrations/sdks") || pathname.startsWith("/integrations/mcp"),
-    visible: (access) => hasAnyPermission(access, "app.read"),
+    // Builders may create a permitted type before they have any app to read.
+    visible: (access) => hasAnyAppPermission(access, "read") || ["sdk", "mcp", "api"].some((kind) => hasWorkspacePermission(access, `app.${kind}.create`)),
   },
   {
     to: "/integrations/buckets",
@@ -83,6 +85,7 @@ function navClassName(isCollapsed: boolean, isActive: boolean): string {
   return `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-semibold transition-colors duration-200 ${activeClass} ${collapsedClass}`;
 }
 
+/** Keeps app navigation available to readers and creators while preserving typed action gates. */
 export function IntegrationsSidebar({ isAuth, handleSignOut }: IntegrationsSidebarProps) {
   const navigate = useNavigate();
   const [isCollapsed, setIsCollapsed] = useState(false);

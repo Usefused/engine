@@ -36,6 +36,7 @@ func workspacePlanRequiredPermissions(ctx context.Context, actions json.RawMessa
 	return marshalPlanRequiredPermissions(requirements, displayNames, err)
 }
 
+// configPlanRequiredPermissionsWithBuckets persists exact app type and dependency authority for apply.
 func configPlanRequiredPermissionsWithBuckets(
 	ctx context.Context,
 	s store.Store,
@@ -43,6 +44,7 @@ func configPlanRequiredPermissionsWithBuckets(
 	serviceNames map[uuid.UUID]string,
 	buckets []store.Bucket,
 	configName string,
+	appType string,
 ) (json.RawMessage, int, error) {
 	workspaceID, err := requiredPermissionWorkspaceID(ctx)
 	if err != nil {
@@ -52,7 +54,7 @@ func configPlanRequiredPermissionsWithBuckets(
 	if err != nil {
 		return nil, 0, err
 	}
-	requirements := configMutationRequirements(workspaceID, current, familyID)
+	requirements := configMutationRequirements(workspaceID, current, familyID, appType)
 	displayNames := map[accesscontrol.ResourceRef]string{
 		{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}: "workspace",
 	}
@@ -62,6 +64,7 @@ func configPlanRequiredPermissionsWithBuckets(
 	}
 	requirements = append(requirements, serviceRequirements...)
 	mergeResourceDisplayNames(displayNames, serviceDisplayNames)
+	// A durable family keeps management scoped across immutable versions.
 	if familyID != uuid.Nil {
 		displayNames[accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID}] = configName
 	}
@@ -130,23 +133,25 @@ func currentAppFamilyID(ctx context.Context, s store.Store, current *store.Confi
 	return app.AppFamilyID, nil
 }
 
-func configMutationRequirements(workspaceID uuid.UUID, current *store.ConfigState, familyID uuid.UUID) []accesscontrol.Requirement {
+// configMutationRequirements keeps create workspace-scoped and existing app management family-scoped.
+func configMutationRequirements(workspaceID uuid.UUID, current *store.ConfigState, familyID uuid.UUID, appType string) []accesscontrol.Requirement {
 	// New apps require create at workspace scope. Once a version exists, the
 	// family is the stable boundary so one grant consistently covers every version.
 	if current == nil {
 		return []accesscontrol.Requirement{{
-			Permission: accesscontrol.PermissionAppCreate,
+			Permission: accesscontrol.AppPermission(appType, accesscontrol.PermissionAppCreate),
 			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
 		}}
 	}
+	// A durable family keeps management scoped across immutable versions.
 	if familyID != uuid.Nil {
 		return []accesscontrol.Requirement{{
-			Permission: accesscontrol.PermissionAppManage,
+			Permission: accesscontrol.AppPermission(appType, accesscontrol.PermissionAppManage),
 			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID},
 		}}
 	}
 	return []accesscontrol.Requirement{{
-		Permission: accesscontrol.PermissionAppManage,
+		Permission: accesscontrol.AppPermission(appType, accesscontrol.PermissionAppManage),
 		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
 	}}
 }

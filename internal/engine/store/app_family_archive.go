@@ -139,12 +139,17 @@ func revokeArchivedFamilyTokens(ctx context.Context, tx pgx.Tx, appFamilyID uuid
 // auditAppFamilyArchive records the destructive user action without app configuration or credential material.
 func auditAppFamilyArchive(ctx context.Context, tx pgx.Tx, appFamilyID uuid.UUID, revision int64) error {
 	actor, _ := accesscontrol.ActorFromContext(ctx)
-	_, err := tx.Exec(ctx, `
+	permission, err := appPermissionForAudit(ctx, tx, appFamilyID, accesscontrol.PermissionAppManage)
+	// Audit must identify the actual app type before persisting the mutation.
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO fused_audit_events (actor_subject_id, actor_credential_id, action, permission,
 			resource_type, resource_id, trace_id, outcome, metadata)
 		VALUES ($1, $2, 'app.family.archive', $3, 'app', $4, $5, 'succeeded',
 			jsonb_build_object('authorization_revision', $6::bigint, 'changed', true))
-	`, nullableUUID(actor.SubjectID), nullableUUID(actor.CredentialID), accesscontrol.PermissionAppManage,
+	`, nullableUUID(actor.SubjectID), nullableUUID(actor.CredentialID), permission,
 		appFamilyID, trace.SpanFromContext(ctx).SpanContext().TraceID().String(), revision)
 	// Missing audit evidence blocks the family mutation from committing.
 	if err != nil {

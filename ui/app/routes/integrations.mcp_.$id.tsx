@@ -182,8 +182,8 @@ export default function McpServerDetails() {
   const [deletingVersionId, setDeletingVersionId] = useState("");
   const state = useMcpServerDetail(id);
 
-  const canReadActivity = Boolean(state.server) && hasResourcePermission(access, "app.read", "APP", state.server?.app_family_id ?? "") && hasWorkspacePermission(access, "audit.read");
-  const canManageVersions = Boolean(state.server) && hasResourcePermission(access, "app.manage", "APP", state.server?.app_family_id ?? "");
+  const canReadActivity = Boolean(state.server) && hasResourcePermission(access, "app.mcp.read", "APP", state.server?.app_family_id ?? "") && hasWorkspacePermission(access, "audit.read");
+  const canManageVersions = Boolean(state.server) && hasResourcePermission(access, "app.mcp.manage", "APP", state.server?.app_family_id ?? "");
   const requestedTab = mcpDetailTab(searchParams.get("tab"));
   const activeTab = requestedTab === "activity" && !canReadActivity ? "overview" : requestedTab;
   const setActiveTab = (tab: McpDetailTab) => setSearchParams((current) => updateMcpDetailTab(current, tab), { replace: true });

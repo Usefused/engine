@@ -365,8 +365,9 @@ func (s *Service) resolveAuthorizingClient(ctx context.Context, req AuthorizeReq
 // only decides what a fresh consent may grant.
 func (s *Service) resolveGrantableScope(ctx context.Context, actor accesscontrol.Actor, client store.OAuthClient, requested []string) ([]string, error) {
 	scope := requested
+	// Omitted scope must never consent to all client-registered permissions.
 	if len(scope) == 0 {
-		scope = client.AllowedScopes
+		return nil, fmt.Errorf("%w: explicit scope is required", ErrInvalidScope)
 	}
 	allowed := make(map[string]struct{}, len(client.AllowedScopes))
 	for _, item := range client.AllowedScopes {

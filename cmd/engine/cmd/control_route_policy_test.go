@@ -651,9 +651,10 @@ func policyQuery(policy controlRoutePolicy) url.Values {
 	return query
 }
 
+// actorWithGrants expands trusted fixture shorthand without accepting generic grants in production.
 func actorWithGrants(t *testing.T, workspaceID uuid.UUID, grants ...accesscontrol.Grant) accesscontrol.Actor {
 	t.Helper()
-	snapshot, err := accesscontrol.NewAuthorizationSnapshot(1, grants...)
+	snapshot, err := appPermissionTestSnapshot(1, grants...)
 	if err != nil {
 		t.Fatalf("NewAuthorizationSnapshot: %v", err)
 	}

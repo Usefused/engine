@@ -297,7 +297,7 @@ func webhookPlanPermissionSnapshot(ctx context.Context, s store.Store, current *
 	for serviceName, service := range resolved {
 		serviceNames[service.ServiceID] = serviceName
 	}
-	required, count, err := configPlanRequiredPermissionsWithBuckets(ctx, s, current, serviceNames, secretBuckets, document.Name)
+	required, count, err := configPlanRequiredPermissionsWithBuckets(ctx, s, current, serviceNames, secretBuckets, document.Name, "webhook")
 	if err != nil {
 		return nil, nil, 0, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to compute required permissions"}
 	}

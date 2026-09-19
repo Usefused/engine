@@ -161,21 +161,26 @@ function permissionDeniedMessage(
     .join("; ")}.`;
 }
 
+/** Names the concrete app type while keeping IDs in advanced diagnostics. */
 function productPermissionRequirementLabel(
   requirement: PermissionRequirement
 ): string {
   const displayName = requirement.display_name?.trim();
-  const resourceType = requirement.resource_type.trim();
+  const rawType = requirement.resource_type.trim();
+  const appLabels: Record<string, string> = { sdk: "SDK", mcp: "MCP server", api: "REST API", webhook: "webhook" };
+  // The permission identifies delivery type; it does not change the resource ID boundary.
+  const resourceType = rawType === "app" ? appLabels[requirement.permission.split(".")[1]] ?? rawType : rawType;
   const resource = displayName
     ? `${resourceType} "${displayName}"`
     : resourceType === "workspace"
       ? "this workspace"
-      : ["service", "bucket", "app"].includes(resourceType)
+      : ["service", "bucket", "app"].includes(rawType)
         ? `the selected ${resourceType}`
         : "the requested resource";
   return `${productPermissionAction(requirement.permission)} ${resource}`;
 }
 
+/** Uses exact scope names so remediation never suggests broader app authority. */
 function productPermissionAction(permission: string): string {
   const actions: Record<string, string> = {
     "workspace.read": "view",
@@ -187,10 +192,24 @@ function productPermissionAction(permission: string): string {
     "bucket.values.read": "view",
     "bucket.use": "use",
     "bucket.manage": "manage",
-    "app.read": "view",
-    "app.create": "create an SDK or MCP server in",
-    "app.manage": "manage",
-    "app.tokens.manage": "manage",
+    "app.sdk.read": "view",
+    "app.sdk.use": "use",
+    "app.sdk.create": "create SDKs in",
+    "app.sdk.manage": "manage",
+    "app.sdk.tokens.manage": "manage execution tokens for",
+    "app.mcp.read": "view",
+    "app.mcp.use": "use",
+    "app.mcp.create": "create MCP servers in",
+    "app.mcp.manage": "manage",
+    "app.mcp.tokens.manage": "manage execution tokens for",
+    "app.api.read": "view",
+    "app.api.use": "use",
+    "app.api.create": "create REST APIs in",
+    "app.api.manage": "manage",
+    "app.api.tokens.manage": "manage execution tokens for",
+    "app.webhook.read": "view",
+    "app.webhook.create": "create webhooks in",
+    "app.webhook.manage": "manage",
     "connection.read": "view connections in",
     "connection.manage": "manage connections in",
     "audit.read": "view access activity for",

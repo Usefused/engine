@@ -892,7 +892,7 @@ func createSDKConfigPlan(
 	}
 	notifications := sdkPlanNotifications(ctx, configStore, registryClient, call, definition.resolvedServices, definition.noop)
 	requiredPermissions, requiredCount, err := configPlanRequiredPermissionsWithBuckets(
-		ctx, s, appPermissionState(currentState, appID), serviceNamesFromResolved(definition.resolvedServices), definition.buckets.distinct(), call.document.Name,
+		ctx, s, appPermissionState(currentState, appID), serviceNamesFromResolved(definition.resolvedServices), definition.buckets.distinct(), call.document.Name, string(sdkConfigDeliveryMode(call.document)),
 	)
 	// A retained contract grants no additional control-plane permissions.
 	if err != nil {

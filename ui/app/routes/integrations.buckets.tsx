@@ -1,3 +1,4 @@
+import { hasAnyAppPermission } from "~/lib/current-actor-access";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams, type MetaFunction } from "@remix-run/react";
 import { BucketCreateModal } from "~/components/buckets/BucketCreateModal";
@@ -118,7 +119,7 @@ export default function BucketsPage() {
         "BUCKET",
         selectedBucketId
       ),
-      apps: hasAnyPermission(access, "app.read"),
+      apps: hasAnyAppPermission(access, "read"),
       services: hasAnyPermission(access, "service.read"),
     }),
     [access, selectedBucketId]

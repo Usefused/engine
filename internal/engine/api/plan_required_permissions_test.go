@@ -17,7 +17,8 @@ import (
 )
 
 // TestMCPConfigPlanResponseIncludesExactApplyPermissions keeps plan authorization explicit after server metadata admission.
-func TestMCPConfigPlanResponseIncludesExactApplyPermissions(t *testing.T) {	serviceID := uuid.New()
+func TestMCPConfigPlanResponseIncludesExactApplyPermissions(t *testing.T) {
+	serviceID := uuid.New()
 	serviceVersionID := uuid.New()
 	s := &workspaceTestStore{
 		accountID: uuid.New(),
@@ -168,6 +169,7 @@ func TestConfigPlanActionsFailuresUseStructuredMutationEnvelope(t *testing.T) {
 	}
 }
 
+// TestAppPlanUpdateRequiresFamilyManage keeps a stored update bound to the existing family’s typed management permission.
 func TestAppPlanUpdateRequiresFamilyManage(t *testing.T) {
 	accountID, workspaceID := uuid.New(), uuid.New()
 	appID, familyID := uuid.New(), uuid.New()
@@ -181,7 +183,7 @@ func TestAppPlanUpdateRequiresFamilyManage(t *testing.T) {
 		AccountID: accountID, WorkspaceID: workspaceID, SubjectID: uuid.New(),
 	})
 	raw, count, err := configPlanRequiredPermissionsWithBuckets(
-		ctx, s, &store.ConfigState{LatestResourceID: &appID}, nil, nil, "Security SDK",
+		ctx, s, &store.ConfigState{LatestResourceID: &appID}, nil, nil, "Security SDK", "sdk",
 	)
 	if err != nil {
 		t.Fatalf("required permissions: %v", err)
@@ -191,7 +193,7 @@ func TestAppPlanUpdateRequiresFamilyManage(t *testing.T) {
 		t.Fatalf("decode required permissions: %v", err)
 	}
 	want := accesscontrol.Requirement{
-		Permission: accesscontrol.PermissionAppManage,
+		Permission: accesscontrol.PermissionAppSDKManage,
 		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID},
 	}
 	if count != 1 || len(requirements) != 1 || requirements[0] != want {

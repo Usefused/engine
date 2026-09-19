@@ -1,3 +1,4 @@
+import { hasAnyAppPermission } from "~/lib/current-actor-access";
 import { useState, useEffect } from "react";
 import { useNavigate, useSearchParams, type MetaFunction } from "@remix-run/react";
 
@@ -585,13 +586,16 @@ export default function SdkHistory() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isDeactivatingMultiple, setIsDeactivatingMultiple] = useState(false);
   const navigate = useNavigate();
-  const canCreate = hasWorkspacePermission(access, "app.create");
+  const canRead = hasAnyAppPermission(access, "read");
+  const canCreate = ["sdk", "mcp", "api"].some((kind) => hasWorkspacePermission(access, `app.${kind}.create`));
 
   /** Checks lifecycle management for the exact family represented by one catalogue row. */
-  const canManage = (sdk: SdkListItem) => hasResourcePermission(access, "app.manage", "APP", sdk.app_family_id);
+  const canManage = (sdk: SdkListItem) => hasResourcePermission(access, `app.${appTargetType(sdk)}.manage`, "APP", sdk.app_family_id);
 
   /** Loads one list or search page through the same paged contract. */
   const fetchSdks = (search: string, pageNumber: number) => {
+    // Creation does not imply read; an empty catalogue keeps permitted creation available.
+    if (!canRead) { setSdks([]); setTotal(0); setLoading(false); setSearching(false); return Promise.resolve(); }
     const isSearch = Boolean(search.trim());
     setLoading(!isSearch);
     setSearching(isSearch);
@@ -647,7 +651,7 @@ export default function SdkHistory() {
     }
     const id = setTimeout(() => fetchSdks(query, page), 400);
     return () => clearTimeout(id);
-	}, [page, query, state]);
+	}, [page, query, state, canRead]);
 
 	/** Switches between live apps and retained deletion history without changing the adapter tab. */
 	function selectState(nextState: AppCatalogueState) {

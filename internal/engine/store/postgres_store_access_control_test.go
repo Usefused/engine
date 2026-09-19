@@ -248,6 +248,7 @@ func TestResolveAppFamilyAccessIncludesTombstonesAndScopesAccount(t *testing.T) 
 	}
 }
 
+// TestPostgresWorkspaceShareGrantsUsersAndOwningTeamsBoundedUse verifies shared resource grants cannot become administrative authority.
 func TestPostgresWorkspaceShareGrantsUsersAndOwningTeamsBoundedUse(t *testing.T) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -293,7 +294,7 @@ func TestPostgresWorkspaceShareGrantsUsersAndOwningTeamsBoundedUse(t *testing.T)
 		t.Fatalf("CreateBucket: %v", err)
 	}
 	requirements := []accesscontrol.Requirement{
-		{Permission: accesscontrol.PermissionAppCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
+		{Permission: accesscontrol.PermissionAppSDKCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
 		{Permission: accesscontrol.PermissionBucketUse, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: bucket.ID}},
 	}
 	before, err := repository.PreflightAppOwnership(ctx, AppOwnershipPreflight{ActorSubjectID: userResult.User.ID, OwnerTeamID: teamResult.Team.ID, Requirements: requirements})

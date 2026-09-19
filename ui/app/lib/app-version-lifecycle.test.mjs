@@ -17,7 +17,7 @@ test("SDK and REST Changes use the shared exact-version delete control", () => {
   assert.match(sdkDetails, /<AppChangesBody/);
   assert.match(sdkDetails, /sdk\.delivery_mode === "api" \? "REST API" : "SDK"/);
   assert.match(sdkDetails, /api\.sdks\.deactivate\(version\.id\)/);
-  assert.match(sdkDetails, /hasResourcePermission\(access, "app\.manage", "APP", sdk\.app_family_id\)/);
+  assert.ok(sdkDetails.includes('hasResourcePermission(access, `app.${sdk.delivery_mode === "api" ? "api" : "sdk"}.manage`, "APP", sdk.app_family_id)'));
   assert.match(sdkDetails, /remaining\[0\]\.id\}\?tab=changes/);
 });
 

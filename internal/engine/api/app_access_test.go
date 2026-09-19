@@ -88,11 +88,12 @@ func TestPreflightAppOwnershipReturnsStructuredServerDerivedDenial(t *testing.T)
 	}
 }
 
+// TestPreflightAppOwnershipHidesMembershipReasonBehindAccessManage prevents ownership preflight from leaking team membership to unauthorized actors.
 func TestPreflightAppOwnershipHidesMembershipReasonBehindAccessManage(t *testing.T) {
 	actor := controlTestOwnerActor(uuid.New())
-	actor.Authorization, _ = accesscontrol.NewAuthorizationSnapshot(1)
+	actor.Authorization, _ = appPermissionTestSnapshot(1)
 	workspaceRequirement := accesscontrol.Requirement{
-		Permission: accesscontrol.PermissionAppCreate,
+		Permission: accesscontrol.PermissionAppSDKCreate,
 		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: actor.WorkspaceID},
 	}
 	raw, _ := accesscontrol.MarshalRequiredPermissions([]accesscontrol.Requirement{workspaceRequirement})
@@ -105,11 +106,12 @@ func TestPreflightAppOwnershipHidesMembershipReasonBehindAccessManage(t *testing
 	}
 }
 
+// TestPreflightSubjectConfigOwnershipBindsPendingCreateToOwner prevents another creator from taking over a pending configuration.
 func TestPreflightSubjectConfigOwnershipBindsPendingCreateToOwner(t *testing.T) {
 	ownerSubjectID := uuid.New()
 	actor := controlTestOwnerActor(uuid.New())
 	requirement := accesscontrol.Requirement{
-		Permission: accesscontrol.PermissionAppCreate,
+		Permission: accesscontrol.PermissionAppSDKCreate,
 		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: actor.WorkspaceID},
 	}
 	raw, err := accesscontrol.MarshalRequiredPermissions([]accesscontrol.Requirement{requirement})
@@ -125,6 +127,7 @@ func TestPreflightSubjectConfigOwnershipBindsPendingCreateToOwner(t *testing.T) 
 	}
 }
 
+// TestPreflightSubjectConfigOwnershipAllowsExplicitManagerUpdate requires explicit management authority to update an existing app.
 func TestPreflightSubjectConfigOwnershipAllowsExplicitManagerUpdate(t *testing.T) {
 	ownerSubjectID, appID, familyID := uuid.New(), uuid.New(), uuid.New()
 	actor := controlTestOwnerActor(uuid.New())
@@ -135,7 +138,7 @@ func TestPreflightSubjectConfigOwnershipAllowsExplicitManagerUpdate(t *testing.T
 		Permission: accesscontrol.PermissionAppManage,
 		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID},
 	}}
-	actor.Authorization, _ = accesscontrol.NewAuthorizationSnapshot(1,
+	actor.Authorization, _ = appPermissionTestSnapshot(1,
 		accesscontrol.Grant{Permission: requirements[0].Permission, Resource: requirements[0].Resource},
 		accesscontrol.Grant{Permission: requirements[1].Permission, Resource: requirements[1].Resource},
 	)

@@ -170,7 +170,15 @@ func BuiltInRoles() []RoleDefinition {
 	roles := make([]RoleDefinition, len(builtInRoles))
 	for i, role := range builtInRoles {
 		roles[i] = role
-		roles[i].Permissions = append([]Permission(nil), role.Permissions...)
+		roles[i].Permissions = nil
+		for _, permission := range role.Permissions {
+			// Role conveniences enumerate concrete app types; the generic template is never persisted.
+			if IsAppAction(permission) {
+				roles[i].Permissions = append(roles[i].Permissions, AppPermissions(permission)...)
+			} else {
+				roles[i].Permissions = append(roles[i].Permissions, permission)
+			}
+		}
 	}
 	return roles
 }

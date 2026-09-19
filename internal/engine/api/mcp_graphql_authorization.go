@@ -83,8 +83,8 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"mcpAppOperations":            appArgumentPermissions("app_id", accesscontrol.PermissionAppRead),
 		"accessExplanation":           permissions(accesscontrol.PermissionAccessRead),
 		"auditEvents":                 permissions(accesscontrol.PermissionAuditRead),
-		"appBuildSelectors":           permissions(accesscontrol.PermissionAppCreate),
-		"appOwningTeams":              permissions(accesscontrol.PermissionAppCreate),
+		"appBuildSelectors":           collectionPermissions(accesscontrol.ResourceWorkspace, accesscontrol.PermissionAppCreate),
+		"appOwningTeams":              collectionPermissions(accesscontrol.ResourceWorkspace, accesscontrol.PermissionAppCreate),
 		"users":                       permissions(accesscontrol.PermissionAccessRead),
 		"user":                        permissions(accesscontrol.PermissionAccessRead),
 		"userEffectiveAccess":         permissions(accesscontrol.PermissionAccessRead),
@@ -99,7 +99,7 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"workspaceConnectionProfile":  argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead),
 		"workspaceConnectionProfiles": permissions(accesscontrol.PermissionServiceRead),
 		"mcpServers":                  collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
-		"mcpServerByName":             permissions(accesscontrol.PermissionAppRead),
+		"mcpServerByName":             permissions(accesscontrol.PermissionAppMCPRead),
 		"mcpAnalytics":                appArgumentPermissions("app_id", accesscontrol.PermissionAppRead, accesscontrol.PermissionAuditRead),
 		"mcpSessions":                 appArgumentPermissions("app_id", accesscontrol.PermissionAppRead, accesscontrol.PermissionAuditRead),
 		"bucketSummaries":             collectionPermissions(accesscontrol.ResourceBucket, accesscontrol.PermissionBucketRead),
@@ -189,7 +189,7 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 	protected: map[string]graphQLFieldPolicy{
 		// An MCP execution token is a credential, even when reached through a
 		// read-only root or a fragment, so selecting it requires token management.
-		"MCPServer.execution_token": excludeDelegatedClients(permissions(accesscontrol.PermissionAppTokensManage)),
+		"MCPServer.execution_token": excludeDelegatedClients(permissions(accesscontrol.PermissionAppMCPTokensManage)),
 		"BucketValue.value":         permissions(accesscontrol.PermissionBucketValuesRead),
 		// Literal connection bindings can contain configuration values that are
 		// more sensitive than the surrounding connection-profile metadata.
@@ -305,6 +305,7 @@ func validateRootPolicies(root *graphql.Object, policies map[string]graphQLField
 	return nil
 }
 
+// validateFieldPolicy validates trusted shared-app templates before a GraphQL schema is mounted.
 func validateFieldPolicy(path string, policy graphQLFieldPolicy) error {
 	if policy.authenticated {
 		if len(policy.permissions) != 0 || policy.scope != graphQLScopeWorkspace {
@@ -316,7 +317,7 @@ func validateFieldPolicy(path string, policy graphQLFieldPolicy) error {
 		return fmt.Errorf("%w: %s has no permission", errGraphQLPolicyMissing, path)
 	}
 	for _, permission := range policy.permissions {
-		if err := accesscontrol.ValidatePermission(permission); err != nil {
+		if err := accesscontrol.ValidatePolicyPermission(permission); err != nil {
 			return fmt.Errorf("%w: %s: %v", errGraphQLPolicyMissing, path, err)
 		}
 	}
@@ -344,12 +345,13 @@ func validateRelatedArgumentPolicy(path string, policy graphQLFieldPolicy) error
 		return fmt.Errorf("%w: %s has an invalid related argument resource", errGraphQLPolicyMissing, path)
 	}
 	// An invalid secondary capability must fail schema construction before the route mounts.
-	if err := accesscontrol.ValidatePermission(policy.relatedPermission); err != nil {
+	if err := accesscontrol.ValidatePolicyPermission(policy.relatedPermission); err != nil {
 		return fmt.Errorf("%w: %s has an invalid related argument permission: %v", errGraphQLPolicyMissing, path, err)
 	}
 	return nil
 }
 
+// validateProtectedValuePolicy ensures sensitive field policies remain valid before requests can execute.
 func validateProtectedValuePolicy(path string, policy graphQLFieldPolicy) error {
 	configured := policy.protectedArgument != "" || policy.protectedValue != "" || policy.protectedPermission != ""
 	if !configured {
@@ -358,7 +360,7 @@ func validateProtectedValuePolicy(path string, policy graphQLFieldPolicy) error 
 	if policy.protectedArgument == "" || policy.protectedValue == "" {
 		return fmt.Errorf("%w: %s has an incomplete protected value policy", errGraphQLPolicyMissing, path)
 	}
-	if err := accesscontrol.ValidatePermission(policy.protectedPermission); err != nil {
+	if err := accesscontrol.ValidatePolicyPermission(policy.protectedPermission); err != nil {
 		return fmt.Errorf("%w: %s has an invalid protected permission: %v", errGraphQLPolicyMissing, path, err)
 	}
 	return nil
@@ -379,7 +381,12 @@ func validatePolicyScope(path string, policy graphQLFieldPolicy) error {
 	}
 }
 
+// validateCollectionPolicyScope permits a read-only any-type creation gate for builder discovery.
 func validateCollectionPolicyScope(path string, policy graphQLFieldPolicy) error {
+	// These selectors disclose no app rows and need any explicit workspace create grant.
+	if (path == "EngineQuery.appBuildSelectors" || path == "EngineQuery.appOwningTeams") && policy.resource == accesscontrol.ResourceWorkspace && len(policy.permissions) == 1 && policy.permissions[0] == accesscontrol.PermissionAppCreate {
+		return nil
+	}
 	if accesscontrol.ValidateResourceType(policy.resource) != nil || policy.resource == accesscontrol.ResourceWorkspace {
 		return fmt.Errorf("%w: %s has an invalid collection scope", errGraphQLPolicyMissing, path)
 	}
@@ -393,11 +400,12 @@ func validateArgumentPolicyScope(path string, policy graphQLFieldPolicy) error {
 	return nil
 }
 
+// validateRelatedPolicyScope validates both sides of a related-resource authorization boundary.
 func validateRelatedPolicyScope(path string, policy graphQLFieldPolicy) error {
 	if policy.argument == "" || accesscontrol.ValidateResourceType(policy.resource) != nil || accesscontrol.ValidateResourceType(policy.relatedResource) != nil {
 		return fmt.Errorf("%w: %s has an invalid related scope", errGraphQLPolicyMissing, path)
 	}
-	if err := accesscontrol.ValidatePermission(policy.relatedPermission); err != nil {
+	if err := accesscontrol.ValidatePolicyPermission(policy.relatedPermission); err != nil {
 		return fmt.Errorf("%w: %s has invalid related permission: %v", errGraphQLPolicyMissing, path, err)
 	}
 	return nil

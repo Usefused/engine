@@ -11,19 +11,20 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
+// TestCheckAllRequiresEveryUniqueRequirement prevents one satisfied permission from bypassing another required capability.
 func TestCheckAllRequiresEveryUniqueRequirement(t *testing.T) {
 	workspaceID := uuid.New()
 	allowedServiceID := uuid.New()
 	deniedBucketID := uuid.New()
 	snapshot := mustSnapshot(t,
-		Grant{Permission: PermissionAppCreate, Resource: ResourceRef{Type: ResourceWorkspace, ID: workspaceID}},
+		Grant{Permission: PermissionAppSDKCreate, Resource: ResourceRef{Type: ResourceWorkspace, ID: workspaceID}},
 		Grant{Permission: PermissionServiceConsume, Resource: ResourceRef{Type: ResourceService, ID: allowedServiceID}},
 	)
 	actor := Actor{Authorization: snapshot}
 	authorizer := SnapshotAuthorizer{}
 
 	requirements := []Requirement{
-		{Permission: PermissionAppCreate, Resource: ResourceRef{Type: ResourceWorkspace, ID: workspaceID}},
+		{Permission: PermissionAppSDKCreate, Resource: ResourceRef{Type: ResourceWorkspace, ID: workspaceID}},
 		{Permission: PermissionServiceConsume, Resource: ResourceRef{Type: ResourceService, ID: allowedServiceID}},
 		{Permission: PermissionBucketUse, Resource: ResourceRef{Type: ResourceBucket, ID: deniedBucketID}},
 		{Permission: PermissionBucketUse, Resource: ResourceRef{Type: ResourceBucket, ID: deniedBucketID}},

@@ -548,6 +548,10 @@ func revokeOAuthTokenFamily(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, 
 
 // insertOAuthTokenPair bounds both token lifetimes by the live client deadline.
 func insertOAuthTokenPair(ctx context.Context, tx pgx.Tx, clientID, subjectID, tokenFamilyID uuid.UUID, scope []string, issue OAuthTokenIssue) (OAuthTokenMetadata, error) {
+	// Auth-code and refresh exchanges must not revive retired or unknown scopes.
+	if validateOAuthScopes(scope) != nil {
+		return OAuthTokenMetadata{}, ErrOAuthGrantDenied
+	}
 	var metadata OAuthTokenMetadata
 	err := tx.QueryRow(ctx, `
 		INSERT INTO fused_oauth_tokens (

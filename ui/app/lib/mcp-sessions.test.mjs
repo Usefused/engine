@@ -226,7 +226,7 @@ test("stale responses are discarded and failed cursor reads can be retried safel
 // The route's existing exact app/audit gate must precede all session metadata reads.
 test("the permission-gated sessions tab mounts cursor history, not a latest-ten preview", () => {
   const route = readFileSync(new URL("../routes/integrations.mcp_.$id.analytics.tsx", import.meta.url), "utf8");
-  assert.match(route, /hasResourcePermission\(access, "app\.read", "APP", appFamilyId\) && hasWorkspacePermission\(access, "audit\.read"\)/);
+  assert.match(route, /hasResourcePermission\(access, "app\.mcp\.read", "APP", appFamilyId\) && hasWorkspacePermission\(access, "audit\.read"\)/);
   assert.match(route, /if \(!canReadRequests\) return/);
   assert.match(route, /<McpSessionsPanel key=\{id\} appId=\{id\}/);
   assert.doesNotMatch(route, /recent_sessions/);

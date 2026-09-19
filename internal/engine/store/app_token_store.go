@@ -399,14 +399,19 @@ func optionalUUIDPointer(value uuid.UUID) *uuid.UUID {
 }
 
 func auditAppTokenMutation(ctx context.Context, tx pgx.Tx, issue AppTokenIssue, action string, bindingCount int) error {
-	_, err := tx.Exec(ctx, `
+	permission, err := appPermissionForAudit(ctx, tx, issue.AppFamilyID, accesscontrol.PermissionAppTokensManage)
+	// Audit must identify the actual app type before persisting the mutation.
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO fused_audit_events (
 			actor_subject_id, actor_credential_id, action, permission,
 			resource_type, resource_id, trace_id, outcome, metadata)
 		VALUES ($1, $2, $3, $4, 'app', $5, $6, 'succeeded',
 		        jsonb_build_object('binding_count', $7::int, 'changed', true))
 	`, issue.IssuedBySubjectID, issue.IssuedByCredentialID, action,
-		accesscontrol.PermissionAppTokensManage, issue.AppFamilyID,
+		permission, issue.AppFamilyID,
 		trace.SpanFromContext(ctx).SpanContext().TraceID().String(), bindingCount)
 	if err != nil {
 		return fmt.Errorf("audit app token mutation: %w", err)

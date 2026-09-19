@@ -295,7 +295,7 @@ func newConcurrentArtifactApplyFixture(t *testing.T, configType ConfigType) conc
 	repository := NewPostgresConfigRepository(pool).(*postgresConfigRepository)
 	configKey := string(configType) + ":concurrent:" + uuid.NewString()
 	required, err := accesscontrol.MarshalRequiredPermissions([]accesscontrol.Requirement{{
-		Permission: accesscontrol.PermissionAppCreate,
+		Permission: accesscontrol.AppPermission(string(configType), accesscontrol.PermissionAppCreate),
 		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: uuid.New()},
 	}})
 	if err != nil {

@@ -108,11 +108,17 @@ func NewAuthorizationSnapshot(revision int64, grants ...Grant) (AuthorizationSna
 	return snapshot, nil
 }
 
+// CheckAll resolves shared app policies before comparing exact typed permissions.
 func (SnapshotAuthorizer) CheckAll(ctx context.Context, actor Actor, requirements ...Requirement) error {
 	started := time.Now()
 	outcome := "invalid"
 	defer func() { recordAuthorizationDuration(ctx, started, outcome) }()
-	unique, err := uniqueRequirements(requirements)
+	resolved, err := ResolveAppRequirements(ctx, actor, requirements)
+	// A shared policy cannot authorize an unresolved app identity.
+	if err != nil {
+		return err
+	}
+	unique, err := uniqueRequirements(resolved)
 	if err != nil {
 		recordAuthorizationCheck(ctx, len(requirements), 0, "invalid")
 		return err
@@ -134,10 +140,15 @@ func (SnapshotAuthorizer) CheckAll(ctx context.Context, actor Actor, requirement
 	return nil
 }
 
+// Scope preserves type boundaries when shared app collections request an internal action.
 func (SnapshotAuthorizer) Scope(ctx context.Context, actor Actor, permission Permission, resourceType ResourceType) (AuthorizedScope, error) {
 	started := time.Now()
 	outcome := "invalid"
 	defer func() { recordAuthorizationDuration(ctx, started, outcome) }()
+	// Shared app discovery expands only identities of permitted app types.
+	if IsAppAction(permission) {
+		return appScope(ctx, actor, permission, resourceType)
+	}
 	if err := ValidatePermission(permission); err != nil {
 		return AuthorizedScope{}, fmt.Errorf("%w: %v", ErrInvalidRequirement, err)
 	}
@@ -220,8 +231,9 @@ func uniqueRequirements(requirements []Requirement) ([]Requirement, error) {
 	return unique, nil
 }
 
+// validateRequirement accepts trusted templates for later identity resolution.
 func validateRequirement(requirement Requirement) error {
-	if err := ValidatePermission(requirement.Permission); err != nil {
+	if err := ValidatePolicyPermission(requirement.Permission); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRequirement, err)
 	}
 	if err := ValidateResourceType(requirement.Resource.Type); err != nil {
@@ -233,7 +245,12 @@ func validateRequirement(requirement Requirement) error {
 	return nil
 }
 
+// validateGrant rejects retired broad app permissions even though internal policies may name them.
 func validateGrant(grant Grant) error {
+	// Stored grants and credentials must carry a concrete app type.
+	if err := ValidatePermission(grant.Permission); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRequirement, err)
+	}
 	return validateRequirement(Requirement(grant))
 }
 

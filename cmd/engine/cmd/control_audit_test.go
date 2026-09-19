@@ -698,10 +698,11 @@ func TestWebhookServerUsesBoundedTimeouts(t *testing.T) {
 	}
 }
 
+// controlAuditTestActor uses concrete app grants so audit tests exercise production permission validation.
 func controlAuditTestActor(t *testing.T) accesscontrol.Actor {
 	t.Helper()
 	principal := controlTestPrincipal()
-	snapshot, err := accesscontrol.NewAuthorizationSnapshot(principal.Revision, principal.EffectiveGrants...)
+	snapshot, err := appPermissionTestSnapshot(principal.Revision, principal.EffectiveGrants...)
 	if err != nil {
 		t.Fatal(err)
 	}

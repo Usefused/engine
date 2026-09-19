@@ -17,6 +17,7 @@ const (
 )
 
 type Actor struct {
+	AppPermissions       AppPermissionResolver
 	AccountID            uuid.UUID
 	WorkspaceID          uuid.UUID
 	SubjectID            uuid.UUID

@@ -248,7 +248,7 @@ var controlRESTPolicies = []controlRoutePolicy{
 	}},
 	{http.MethodPost, "/integrations/{service_id}/generate", false, []routeRequirement{
 		pathRequirement(accesscontrol.PermissionServiceConsume, accesscontrol.ResourceService, "service_id"),
-		workspaceRequirement(accesscontrol.PermissionAppCreate),
+		workspaceRequirement(accesscontrol.PermissionAppSDKCreate),
 	}},
 	{http.MethodGet, "/account", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionAccountRead),
@@ -272,11 +272,11 @@ var controlRESTPolicies = []controlRoutePolicy{
 		workspaceRequirement(accesscontrol.PermissionAccountManage),
 	}},
 	{http.MethodPost, "/sdks/generate", false, []routeRequirement{
-		workspaceRequirement(accesscontrol.PermissionAppCreate),
+		workspaceRequirement(accesscontrol.PermissionAppSDKCreate),
 	}},
 	{http.MethodGet, "/sdks/{app_id}/download", false, nil},
 	{http.MethodGet, "/sdks/job/{job_id}/stream", false, []routeRequirement{
-		workspaceRequirement(accesscontrol.PermissionAppRead),
+		workspaceRequirement(accesscontrol.PermissionAppSDKRead),
 	}},
 }
 
@@ -304,6 +304,10 @@ func serveControlAuthorizationRequest(w http.ResponseWriter, r *http.Request, ne
 		return
 	}
 	requirements, policy, resolutionErr := resolveControlRESTPolicyWithError(r, resolver)
+	// Audit, errors, and downstream plan capture must all use the same concrete permissions.
+	if resolutionErr == nil {
+		requirements, resolutionErr = accesscontrol.ResolveAppRequirements(r.Context(), actor, requirements)
+	}
 	// Unknown policies and unreviewed failures retain the existing fail-closed response.
 	if !diagnosableControlResolution(resolutionErr) || authorizer == nil {
 		denyUnclassifiedControlRequest(w, r, recorder, actor, policy, started)
@@ -570,12 +574,16 @@ func isStreamingControlRequest(path string) bool {
 	return strings.HasSuffix(strings.TrimSuffix(path, "/"), "/stream")
 }
 
+// requiresSensitiveReadAudit includes each supported app token type in the sensitive-read audit boundary.
 func requiresSensitiveReadAudit(requirements []accesscontrol.Requirement) bool {
 	for _, requirement := range requirements {
 		switch requirement.Permission {
 		case accesscontrol.PermissionBucketValuesRead,
 			accesscontrol.PermissionCredentialsMetadataRead,
 			accesscontrol.PermissionAppTokensManage,
+			accesscontrol.PermissionAppSDKTokensManage,
+			accesscontrol.PermissionAppMCPTokensManage,
+			accesscontrol.PermissionAppAPITokensManage,
 			accesscontrol.PermissionConnectionRead,
 			accesscontrol.PermissionAccountRead,
 			accesscontrol.PermissionBillingRead,
@@ -818,8 +826,9 @@ func validateRouteRequirements(policy controlRoutePolicy) error {
 	return nil
 }
 
+// validateRouteRequirement accepts trusted app action templates while rejecting malformed route policies.
 func validateRouteRequirement(pattern string, requirement routeRequirement) error {
-	if err := accesscontrol.ValidatePermission(requirement.permission); err != nil {
+	if err := accesscontrol.ValidatePolicyPermission(requirement.permission); err != nil {
 		return err
 	}
 	if err := accesscontrol.ValidateResourceType(requirement.resourceType); err != nil {

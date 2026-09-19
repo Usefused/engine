@@ -624,6 +624,7 @@ func teamSpanAttribute(attributes []attribute.KeyValue, name string) string {
 	return ""
 }
 
+// actorWithTeamPermissions constructs typed fixture permissions for team access checks.
 func actorWithTeamPermissions(t *testing.T, permissions ...accesscontrol.Permission) accesscontrol.Actor {
 	t.Helper()
 	workspaceID := uuid.New()
@@ -631,7 +632,7 @@ func actorWithTeamPermissions(t *testing.T, permissions ...accesscontrol.Permiss
 	for _, permission := range permissions {
 		grants = append(grants, accesscontrol.Grant{Permission: permission, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}})
 	}
-	snapshot, err := accesscontrol.NewAuthorizationSnapshot(1, grants...)
+	snapshot, err := appPermissionTestSnapshot(1, grants...)
 	if err != nil {
 		t.Fatal(err)
 	}

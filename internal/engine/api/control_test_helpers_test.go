@@ -34,6 +34,7 @@ func controlTestContext(ctx context.Context, accountID uuid.UUID) context.Contex
 	return ContextWithAuthorizedPlanRevision(ctx, 1)
 }
 
+// controlTestOwnerActor constructs explicit Owner grants for control-plane integration fixtures.
 func controlTestOwnerActor(accountID uuid.UUID) accesscontrol.Actor {
 	workspaceID := uuid.New()
 	grants := make([]accesscontrol.Grant, 0, len(accesscontrol.AllPermissions()))
@@ -43,7 +44,7 @@ func controlTestOwnerActor(accountID uuid.UUID) accesscontrol.Actor {
 			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
 		})
 	}
-	snapshot, err := accesscontrol.NewAuthorizationSnapshot(1, grants...)
+	snapshot, err := appPermissionTestSnapshot(1, grants...)
 	if err != nil {
 		panic(err)
 	}

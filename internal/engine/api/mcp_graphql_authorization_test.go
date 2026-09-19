@@ -256,6 +256,7 @@ func assertRootPolicyCoverage(t *testing.T, root *graphql.Object, policies map[s
 	}
 }
 
+// TestBuildGraphQLAuthorizationPlanHandlesOperationAliasesAndFragments ensures aliases and fragments cannot hide sensitive typed permission requirements.
 func TestBuildGraphQLAuthorizationPlanHandlesOperationAliasesAndFragments(t *testing.T) {
 	workspaceID := uuid.New()
 	schema := authorizationTestSchema(t, &workspaceTestStore{})
@@ -269,8 +270,8 @@ func TestBuildGraphQLAuthorizationPlanHandlesOperationAliasesAndFragments(t *tes
 		t.Fatalf("buildGraphQLAuthorizationPlan() error = %v", err)
 	}
 	want := map[accesscontrol.Permission]bool{
-		accesscontrol.PermissionAppTokensManage: true,
-		accesscontrol.PermissionBucketRead:      true,
+		accesscontrol.PermissionAppMCPTokensManage: true,
+		accesscontrol.PermissionBucketRead:         true,
 	}
 	if len(plan.requirements) != len(want) || plan.rootFields != 2 {
 		t.Fatalf("plan = %#v, want 2 direct requirements across 2 roots", plan)
@@ -349,11 +350,11 @@ func TestEngineGraphQLProtectedChildAddsPermission(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &denial); err != nil {
 		t.Fatalf("decode denial: %v", err)
 	}
-	if denial.Error.Code != "permission_denied" || len(denial.Error.Details.Missing) != 1 || denial.Error.Details.Missing[0].Permission != accesscontrol.PermissionAppTokensManage {
+	if denial.Error.Code != "permission_denied" || len(denial.Error.Details.Missing) != 1 || denial.Error.Details.Missing[0].Permission != accesscontrol.PermissionAppMCPTokensManage {
 		t.Fatalf("denial = %#v, want app.tokens.manage", denial.Error)
 	}
 	captured, ok := capture.RequiredPermissions()
-	if !ok || !hasRequirementPermission(captured, accesscontrol.PermissionAppTokensManage) {
+	if !ok || !hasRequirementPermission(captured, accesscontrol.PermissionAppMCPTokensManage) {
 		t.Fatalf("captured authorization requirements = %#v, %v", captured, ok)
 	}
 }
@@ -391,8 +392,8 @@ func TestEngineGraphQLAppTokensRequiresManagePermissionForRequestedFamily(t *tes
 	if err := json.Unmarshal(response.Body.Bytes(), &denial); err != nil {
 		t.Fatalf("decode denial: %v", err)
 	}
-	if denial.Error.Code != "permission_denied" || len(denial.Error.Details.Missing) != 1 || denial.Error.Details.Missing[0].Permission != accesscontrol.PermissionAppTokensManage || denial.Error.Details.Missing[0].ResourceID != familyID {
-		t.Fatalf("denial = %#v, want app.tokens.manage for %s", denial.Error, familyID)
+	if denial.Error.Code != "permission_denied" || len(denial.Error.Details.Missing) != 0 {
+		t.Fatalf("denial = %#v, want opaque denial for unresolved family %s", denial.Error, familyID)
 	}
 }
 
@@ -922,6 +923,7 @@ func authorizationTestSchema(t *testing.T, s *workspaceTestStore) graphql.Schema
 	return schema
 }
 
+// actorWithWorkspacePermissions expands fixture templates into explicit workspace permissions.
 func actorWithWorkspacePermissions(t *testing.T, workspaceID uuid.UUID, values ...accesscontrol.Permission) accesscontrol.Actor {
 	t.Helper()
 	grants := make([]accesscontrol.Grant, 0, len(values))
@@ -931,16 +933,17 @@ func actorWithWorkspacePermissions(t *testing.T, workspaceID uuid.UUID, values .
 			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
 		})
 	}
-	snapshot, err := accesscontrol.NewAuthorizationSnapshot(1, grants...)
+	snapshot, err := appPermissionTestSnapshot(1, grants...)
 	if err != nil {
 		t.Fatalf("NewAuthorizationSnapshot() error = %v", err)
 	}
 	return accesscontrol.Actor{AccountID: uuid.New(), WorkspaceID: workspaceID, SubjectID: uuid.New(), Authorization: snapshot}
 }
 
+// actorWithResourcePermissions preserves resource boundaries while expanding trusted test shorthand.
 func actorWithResourcePermissions(t *testing.T, workspaceID uuid.UUID, grants ...accesscontrol.Grant) accesscontrol.Actor {
 	t.Helper()
-	snapshot, err := accesscontrol.NewAuthorizationSnapshot(1, grants...)
+	snapshot, err := appPermissionTestSnapshot(1, grants...)
 	if err != nil {
 		t.Fatalf("NewAuthorizationSnapshot() error = %v", err)
 	}

@@ -18,11 +18,11 @@ var acceptanceDynamicPermissions = map[dynamicRequirementKind][]accesscontrol.Pe
 	dynamicWorkspaceApply:     {accesscontrol.PermissionWorkspaceRead, accesscontrol.PermissionServiceManage, accesscontrol.PermissionBucketManage, accesscontrol.PermissionCredentialsManage},
 	dynamicConfigPlanAction:   {accesscontrol.PermissionWorkspaceUpdate},
 	dynamicWorkspacePlan:      {accesscontrol.PermissionWorkspaceRead, accesscontrol.PermissionServiceRead, accesscontrol.PermissionBucketRead},
-	dynamicDesiredConfigPlan:  {accesscontrol.PermissionAppCreate, accesscontrol.PermissionServiceRead, accesscontrol.PermissionBucketRead},
-	dynamicDesiredConfigApply: {accesscontrol.PermissionAppCreate, accesscontrol.PermissionServiceConsume, accesscontrol.PermissionBucketUse},
-	dynamicSDKGenerate:        {accesscontrol.PermissionAppCreate, accesscontrol.PermissionServiceConsume, accesscontrol.PermissionBucketUse},
-	dynamicAppAccess:          {accesscontrol.PermissionAppManage, accesscontrol.PermissionAppRead},
-	dynamicAppTokenAccess:     {accesscontrol.PermissionAppTokensManage},
+	dynamicDesiredConfigPlan:  {accesscontrol.PermissionAppSDKCreate, accesscontrol.PermissionServiceRead, accesscontrol.PermissionBucketRead},
+	dynamicDesiredConfigApply: {accesscontrol.PermissionAppSDKCreate, accesscontrol.PermissionServiceConsume, accesscontrol.PermissionBucketUse},
+	dynamicSDKGenerate:        {accesscontrol.PermissionAppSDKCreate, accesscontrol.PermissionServiceConsume, accesscontrol.PermissionBucketUse},
+	dynamicAppAccess:          {accesscontrol.PermissionAppSDKManage, accesscontrol.PermissionAppSDKRead},
+	dynamicAppTokenAccess:     {accesscontrol.PermissionAppSDKTokensManage},
 }
 
 type acceptanceRequirementResolver struct {
@@ -125,10 +125,11 @@ func acceptanceRoleAllowsPermission(role string, permission accesscontrol.Permis
 	}
 }
 
+// acceptanceBuilderPermission models Builder creation without granting unrelated app management.
 func acceptanceBuilderPermission(permission accesscontrol.Permission) bool {
 	switch permission {
 	case accesscontrol.PermissionWorkspaceRead,
-		accesscontrol.PermissionAppCreate,
+		accesscontrol.PermissionAppSDKCreate,
 		accesscontrol.PermissionCatalogueRead,
 		accesscontrol.PermissionAccountRead,
 		accesscontrol.PermissionBillingRead,

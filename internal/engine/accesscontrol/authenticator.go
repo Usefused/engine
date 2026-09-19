@@ -19,6 +19,7 @@ import (
 var ErrStaleAuthorizationRevision = errors.New("stale authorization revision")
 
 type ControlPrincipal struct {
+	AppPermissions       AppPermissionResolver
 	AccountID            uuid.UUID
 	WorkspaceID          uuid.UUID
 	SubjectID            uuid.UUID
@@ -56,6 +57,7 @@ type Authenticator struct {
 }
 
 type cachedCredential struct {
+	AppPermissions       AppPermissionResolver
 	AccountID            uuid.UUID
 	WorkspaceID          uuid.UUID
 	SubjectID            uuid.UUID
@@ -223,6 +225,7 @@ func (a *Authenticator) CurrentRevision() int64 {
 	return a.revision.Load()
 }
 
+// cachedActor pairs identity with the same credential’s effective permission snapshot.
 func (a *Authenticator) cachedActor(credentialHash string) (Actor, bool) {
 	a.revisionMu.RLock()
 	defer a.revisionMu.RUnlock()
@@ -232,13 +235,14 @@ func (a *Authenticator) cachedActor(credentialHash string) (Actor, bool) {
 	}
 	// Snapshot keys include the current revision so a cached identity can never
 	// be paired with grants loaded before the latest invalidation.
-	snapshot, ok := a.snapshotCache.get(snapshotCacheKey(identity.SubjectID, a.revision.Load()))
+	snapshot, ok := a.snapshotCache.get(snapshotCacheKey(identity.CredentialID, a.revision.Load()))
 	if !ok {
 		return Actor{}, false
 	}
 	return actorFromCached(identity, snapshot), true
 }
 
+// cachePrincipal publishes credential-isolated grants under a consistent authorization revision.
 func (a *Authenticator) cachePrincipal(credentialHash string, principal ControlPrincipal) (Actor, error) {
 	if credentialExpired(principal.ExpiresAt, a.now()) {
 		return Actor{}, ErrAuthenticationRequired
@@ -263,6 +267,7 @@ func (a *Authenticator) cachePrincipal(credentialHash string, principal ControlP
 		return Actor{}, err
 	}
 	identity := cachedCredential{
+		AppPermissions:       principal.AppPermissions,
 		AccountID:            principal.AccountID,
 		WorkspaceID:          principal.WorkspaceID,
 		SubjectID:            principal.SubjectID,
@@ -275,12 +280,14 @@ func (a *Authenticator) cachePrincipal(credentialHash string, principal ControlP
 		ExpiresAt:            principal.ExpiresAt,
 	}
 	a.credentialCache.set(credentialHash, identity)
-	a.snapshotCache.set(snapshotCacheKey(principal.SubjectID, principal.Revision), snapshot)
+	a.snapshotCache.set(snapshotCacheKey(principal.CredentialID, principal.Revision), snapshot)
 	return actorFromCached(identity, snapshot), nil
 }
 
+// actorFromCached retains the trusted resource resolver alongside cached identity and grants.
 func actorFromCached(identity cachedCredential, snapshot AuthorizationSnapshot) Actor {
 	return Actor{
+		AppPermissions:       identity.AppPermissions,
 		AccountID:            identity.AccountID,
 		WorkspaceID:          identity.WorkspaceID,
 		SubjectID:            identity.SubjectID,
@@ -299,6 +306,7 @@ func credentialExpired(expiresAt *time.Time, now time.Time) bool {
 	return expiresAt != nil && !expiresAt.After(now)
 }
 
-func snapshotCacheKey(subjectID uuid.UUID, revision int64) string {
-	return subjectID.String() + ":" + strconv.FormatInt(revision, 10)
+// snapshotCacheKey isolates credential-specific OAuth scopes even for the same subject and revision.
+func snapshotCacheKey(credentialID uuid.UUID, revision int64) string {
+	return credentialID.String() + ":" + strconv.FormatInt(revision, 10)
 }

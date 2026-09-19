@@ -145,10 +145,11 @@ func TestInspectionGraphQLPolicyTraversesFragmentsAndMultipleRoots(t *testing.T)
 	}
 }
 
+// TestCurrentActorAccessUsesAuthenticatedSnapshotWithoutRepositoryReads preserves credential-specific effective grants in access inspection.
 func TestCurrentActorAccessUsesAuthenticatedSnapshotWithoutRepositoryReads(t *testing.T) {
 	workspaceID := uuid.New()
 	serviceID := uuid.New()
-	snapshot, err := accesscontrol.NewAuthorizationSnapshot(17,
+	snapshot, err := appPermissionTestSnapshot(17,
 		accesscontrol.Grant{Permission: accesscontrol.PermissionWorkspaceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}},
 		accesscontrol.Grant{Permission: accesscontrol.PermissionServiceRead, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceService, ID: serviceID}},
 	)
@@ -173,6 +174,7 @@ func TestCurrentActorAccessUsesAuthenticatedSnapshotWithoutRepositoryReads(t *te
 	}
 }
 
+// TestCurrentActorAccessPolicyRequiresAuthenticationButNoBusinessPermission keeps self-inspection available to narrowly scoped actors.
 func TestCurrentActorAccessPolicyRequiresAuthenticationButNoBusinessPermission(t *testing.T) {
 	workspaceID := uuid.New()
 	schema, err := newMCPGraphQLSchema(nil, &accessInspectionGraphQLStore{}, nil, nil, nil, nil)
@@ -195,7 +197,7 @@ func TestCurrentActorAccessPolicyRequiresAuthenticationButNoBusinessPermission(t
 		t.Fatalf("anonymous status = %d, want 401", response.Code)
 	}
 
-	snapshot, err := accesscontrol.NewAuthorizationSnapshot(3)
+	snapshot, err := appPermissionTestSnapshot(3)
 	if err != nil {
 		t.Fatalf("empty snapshot: %v", err)
 	}

@@ -285,6 +285,7 @@ func TestProxyResponseCacheIsBounded(t *testing.T) {
 	}
 }
 
+// graphQLProxyTestActor keeps proxy fixtures aligned with the strict permission catalogue.
 func graphQLProxyTestActor(t *testing.T, accountID, subjectID uuid.UUID, revision int64) accesscontrol.Actor {
 	t.Helper()
 	workspaceID := uuid.New()
@@ -295,7 +296,7 @@ func graphQLProxyTestActor(t *testing.T, accountID, subjectID uuid.UUID, revisio
 			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
 		})
 	}
-	snapshot, err := accesscontrol.NewAuthorizationSnapshot(revision, grants...)
+	snapshot, err := appPermissionTestSnapshot(revision, grants...)
 	if err != nil {
 		t.Fatal(err)
 	}

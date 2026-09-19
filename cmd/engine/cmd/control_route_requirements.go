@@ -154,6 +154,7 @@ func (r *storeBackedControlRequirementResolver) appAccessRequirements(ctx contex
 	return r.appFamilyRequirement(ctx, actor.AccountID, appID, permission)
 }
 
+// appTokenAccessRequirements derives concrete type-specific authority from the trusted app configuration or family.
 func (r *storeBackedControlRequirementResolver) appTokenAccessRequirements(ctx context.Context, actor accesscontrol.Actor, request *http.Request) ([]accesscontrol.Requirement, error) {
 	familyID, err := uuid.Parse(request.URL.Query().Get("app_family_id"))
 	if err != nil {
@@ -167,11 +168,12 @@ func (r *storeBackedControlRequirementResolver) appTokenAccessRequirements(ctx c
 		return nil, accesscontrol.ErrPolicyDenied
 	}
 	return []accesscontrol.Requirement{{
-		Permission: accesscontrol.PermissionAppTokensManage,
+		Permission: accesscontrol.AppPermission(store.AppPermissionType(family), accesscontrol.PermissionAppTokensManage),
 		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID},
 	}}, nil
 }
 
+// appFamilyRequirement derives concrete type-specific authority from the trusted app configuration or family.
 func (r *storeBackedControlRequirementResolver) appFamilyRequirement(ctx context.Context, accountID, appID uuid.UUID, permission accesscontrol.Permission) ([]accesscontrol.Requirement, error) {
 	if r.store == nil {
 		return nil, accesscontrol.ErrPolicyDenied
@@ -180,8 +182,13 @@ func (r *storeBackedControlRequirementResolver) appFamilyRequirement(ctx context
 	if err != nil || app == nil || accountID != uuid.Nil && app.AccountID != accountID {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
+	family, err := r.store.GetAppFamily(ctx, app.AppFamilyID)
+	// A version never supplies its own permission kind; the family is authoritative.
+	if err != nil || family == nil || family.AccountID != app.AccountID {
+		return nil, accesscontrol.ErrPolicyDenied
+	}
 	return []accesscontrol.Requirement{{
-		Permission: permission,
+		Permission: accesscontrol.AppPermission(store.AppPermissionType(family), permission),
 		Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: app.AppFamilyID},
 	}}, nil
 }
@@ -373,7 +380,13 @@ func (r *storeBackedControlRequirementResolver) desiredConfigPlanRequestRequirem
 	if err := decodeAndRestoreAuthorizationBody(request, &envelope); err != nil {
 		return nil, err
 	}
-	mutation, err := r.desiredConfigPlanMutationRequirement(ctx, actor.WorkspaceID, envelope.ConfigKey)
+	configType := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/"), "-config/plan")
+	appType, err := accesscontrol.AppTypeFromConfig(configType, envelope.Config)
+	// Reject mismatched route/document types before looking up resources.
+	if err != nil {
+		return nil, err
+	}
+	mutation, err := r.desiredConfigPlanMutationRequirement(ctx, actor.WorkspaceID, envelope.ConfigKey, appType)
 	// App ownership must resolve before selection diagnostics are considered.
 	if err != nil {
 		return nil, err
@@ -382,7 +395,8 @@ func (r *storeBackedControlRequirementResolver) desiredConfigPlanRequestRequirem
 	return append(mutation, selections...), err
 }
 
-func (r *storeBackedControlRequirementResolver) desiredConfigPlanMutationRequirement(ctx context.Context, workspaceID uuid.UUID, configKey string) ([]accesscontrol.Requirement, error) {
+// desiredConfigPlanMutationRequirement derives concrete type-specific authority from the trusted app configuration or family.
+func (r *storeBackedControlRequirementResolver) desiredConfigPlanMutationRequirement(ctx context.Context, workspaceID uuid.UUID, configKey string, appType string) ([]accesscontrol.Requirement, error) {
 	if r.configStore == nil || strings.TrimSpace(configKey) == "" {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
@@ -394,12 +408,12 @@ func (r *storeBackedControlRequirementResolver) desiredConfigPlanMutationRequire
 	// a create or update. The handler repeats this distinction during ownership
 	// preflight before persisting a plan.
 	if state == nil {
-		return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.PermissionAppCreate)}, nil
+		return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.AppPermission(appType, accesscontrol.PermissionAppCreate))}, nil
 	}
 	if state.LatestResourceID != nil && *state.LatestResourceID != uuid.Nil {
 		return r.appFamilyRequirement(ctx, uuid.Nil, *state.LatestResourceID, accesscontrol.PermissionAppManage)
 	}
-	return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.PermissionAppManage)}, nil
+	return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.AppPermission(appType, accesscontrol.PermissionAppManage))}, nil
 }
 
 func (r *storeBackedControlRequirementResolver) workspacePlanRequirements(ctx context.Context, actor accesscontrol.Actor, request *http.Request) ([]accesscontrol.Requirement, error) {
@@ -837,9 +851,15 @@ func requestMatchesConfigType(path string, configType store.ConfigType) bool {
 	}
 }
 
+// desiredConfigPlanRequirements derives concrete type-specific authority from the trusted app configuration or family.
 func (r *storeBackedControlRequirementResolver) desiredConfigPlanRequirements(ctx context.Context, workspaceID uuid.UUID, plan *store.ConfigPlan) ([]accesscontrol.Requirement, error) {
+	appType, err := accesscontrol.AppTypeFromConfig(string(plan.ConfigType), plan.DesiredState)
+	// Apply uses the immutable stored document rather than a caller-supplied type.
+	if err != nil {
+		return nil, err
+	}
 	if plan.BaseGeneration == 0 {
-		return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.PermissionAppCreate)}, nil
+		return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.AppPermission(appType, accesscontrol.PermissionAppCreate))}, nil
 	}
 	if r.configStore == nil {
 		return nil, accesscontrol.ErrPolicyDenied
@@ -849,7 +869,7 @@ func (r *storeBackedControlRequirementResolver) desiredConfigPlanRequirements(ct
 		return nil, accesscontrol.ErrPolicyDenied
 	}
 	if state.LatestResourceID == nil || *state.LatestResourceID == uuid.Nil {
-		return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.PermissionAppManage)}, nil
+		return []accesscontrol.Requirement{workspaceAccessRequirement(workspaceID, accesscontrol.AppPermission(appType, accesscontrol.PermissionAppManage))}, nil
 	}
 	return r.appFamilyRequirement(ctx, uuid.Nil, *state.LatestResourceID, accesscontrol.PermissionAppManage)
 }

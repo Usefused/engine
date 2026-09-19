@@ -284,7 +284,7 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	}
 	resolvedPayload, _ := json.Marshal(payload)
 	requiredPermissions, requiredCount, err := configPlanRequiredPermissionsWithBuckets(
-		ctx, s, current, serviceNamesFromResolved(resolved), buckets.distinct(), call.document.Name,
+		ctx, s, current, serviceNamesFromResolved(resolved), buckets.distinct(), call.document.Name, "mcp",
 	)
 	// Required permissions remain attached to the plan regardless of contract storage location.
 	if err != nil {

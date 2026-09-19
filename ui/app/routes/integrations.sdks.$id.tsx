@@ -80,14 +80,14 @@ function sdkSelectionsMatchNotification(sdk: Sdk, item: WorkspaceNotification, c
 /** Combines app-family read access with workspace audit access. */
 function canReadSdkActivity(access: CurrentActorAccess | null, sdk: Sdk | null): boolean {
   if (!sdk) return false;
-  return hasResourcePermission(access, "app.read", "APP", sdk.app_family_id) && hasWorkspacePermission(access, "audit.read");
+  return hasResourcePermission(access, `app.${sdk.delivery_mode === "api" ? "api" : "sdk"}.read`, "APP", sdk.app_family_id) && hasWorkspacePermission(access, "audit.read");
 }
 
 /** Checks exact family management without adding permission branches to the detail controller. */
 function canManageAppVersions(access: CurrentActorAccess | null, sdk: Sdk | null): boolean {
   // Version deletion cannot be authorized until the loaded app establishes its family identity.
   if (!sdk) return false;
-  return hasResourcePermission(access, "app.manage", "APP", sdk.app_family_id);
+  return hasResourcePermission(access, `app.${sdk.delivery_mode === "api" ? "api" : "sdk"}.manage`, "APP", sdk.app_family_id);
 }
 
 /** Resolves permission-safe detail tabs without mounting execution views for lifecycle-only managers. */
@@ -353,7 +353,7 @@ export default function SdkDetails() {
   useEffect(() => {
     if (!sdk) return;
     if (!hasAnyPermission(access, "bucket.read")) return;
-    if (!hasResourcePermission(access, "app.read", "APP", sdk.app_family_id)) return;
+    if (!hasResourcePermission(access, `app.${sdk.delivery_mode === "api" ? "api" : "sdk"}.read`, "APP", sdk.app_family_id)) return;
     readBucketsForSDK(sdk.app_family_id).then(state => {
       if (state.sdkBuckets.length > 0) setBucket(state.sdkBuckets[0]);
       else setBucket(state.buckets.find(candidate => candidate.is_default) ?? null);

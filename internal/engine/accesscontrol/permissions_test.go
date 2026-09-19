@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// TestPermissionCatalogueContainsUniqueValidNames keeps the public scope catalogue explicit and free of retired broad aliases.
 func TestPermissionCatalogueContainsUniqueValidNames(t *testing.T) {
 	permissions := AllPermissions()
 	seen := make(map[Permission]struct{}, len(permissions))
@@ -17,8 +18,9 @@ func TestPermissionCatalogueContainsUniqueValidNames(t *testing.T) {
 		}
 		seen[permission] = struct{}{}
 	}
-	if len(permissions) != 29 {
-		t.Fatalf("permission catalogue contains %d entries, want 29", len(permissions))
+	// Typed app scopes replace the five broad entries without dropping unrelated permissions.
+	if len(permissions) != 42 {
+		t.Fatalf("permission catalogue contains %d entries, want 42", len(permissions))
 	}
 }
 

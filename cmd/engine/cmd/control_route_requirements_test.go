@@ -36,6 +36,7 @@ type controlRequirementStoreStub struct {
 	families          map[uuid.UUID]store.AppFamily
 }
 
+// TestAppAccessRequirementsUseFamilyBoundary ensures version routes require the persisted family’s concrete permission.
 func TestAppAccessRequirementsUseFamilyBoundary(t *testing.T) {
 	accountID, appID, familyID := uuid.New(), uuid.New(), uuid.New()
 	stores := &controlRequirementStoreStub{apps: map[uuid.UUID]store.App{
@@ -49,9 +50,9 @@ func TestAppAccessRequirementsUseFamilyBoundary(t *testing.T) {
 		path       string
 		permission accesscontrol.Permission
 	}{
-		{method: http.MethodPost, path: "/apps/" + appID.String() + "/deprecate", permission: accesscontrol.PermissionAppManage},
-		{method: http.MethodGet, path: "/sdks/" + appID.String() + "/download", permission: accesscontrol.PermissionAppRead},
-		{method: http.MethodGet, path: "/apps/" + appID.String() + "/openapi", permission: accesscontrol.PermissionAppRead},
+		{method: http.MethodPost, path: "/apps/" + appID.String() + "/deprecate", permission: accesscontrol.PermissionAppSDKManage},
+		{method: http.MethodGet, path: "/sdks/" + appID.String() + "/download", permission: accesscontrol.PermissionAppSDKRead},
+		{method: http.MethodGet, path: "/apps/" + appID.String() + "/openapi", permission: accesscontrol.PermissionAppSDKRead},
 	}
 	for _, test := range tests {
 		request := httptest.NewRequest(test.method, test.path, nil)
@@ -67,6 +68,7 @@ func TestAppAccessRequirementsUseFamilyBoundary(t *testing.T) {
 	}
 }
 
+// TestAppTokenAccessRequirementsUseFamilyBoundary keeps token management tied to the family rather than a version identifier.
 func TestAppTokenAccessRequirementsUseFamilyBoundary(t *testing.T) {
 	accountID, familyID := uuid.New(), uuid.New()
 	stores := &controlRequirementStoreStub{families: map[uuid.UUID]store.AppFamily{
@@ -76,16 +78,27 @@ func TestAppTokenAccessRequirementsUseFamilyBoundary(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/workspace/app-tokens?app_family_id="+familyID.String(), nil)
 	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), accesscontrol.Actor{AccountID: accountID}))
 	requirements, _, ok := resolveControlRESTPolicy(request, resolver)
-	want := accesscontrol.Requirement{Permission: accesscontrol.PermissionAppTokensManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID}}
+	want := accesscontrol.Requirement{Permission: accesscontrol.PermissionAppSDKTokensManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID}}
 	if !ok || len(requirements) != 1 || requirements[0] != want {
 		t.Fatalf("requirements = %#v, ok=%v, want %#v", requirements, ok, want)
 	}
 }
 
+// GetAppFamily provides durable SDK identity for older fixtures that only declared versions.
 func (s *controlRequirementStoreStub) GetAppFamily(_ context.Context, familyID uuid.UUID) (*store.AppFamily, error) {
 	if family, ok := s.families[familyID]; ok {
 		copy := family
+		// Historical fixtures omitted the adapter; those fixtures represent generated SDKs.
+		if copy.Kind == "" {
+			copy.Kind = store.AppKindSDK
+		}
 		return &copy, nil
+	}
+	for _, app := range s.apps {
+		// Materialize only the family explicitly referenced by a fixture version.
+		if app.AppFamilyID == familyID {
+			return &store.AppFamily{AppFamilyID: familyID, AccountID: app.AccountID, Kind: store.AppKindSDK}, nil
+		}
 	}
 	return nil, store.ErrAppFamilyNotFound
 }
@@ -323,6 +336,7 @@ func TestDynamicWorkspaceApplyScopesCredentialMaterialsToBucket(t *testing.T) {
 	}
 }
 
+// TestDynamicDesiredConfigApplyChoosesCreateOrManage checks that stored plan state selects the correct typed mutation permission.
 func TestDynamicDesiredConfigApplyChoosesCreateOrManage(t *testing.T) {
 	workspaceID := uuid.New()
 	appID := uuid.New()
@@ -337,8 +351,8 @@ func TestDynamicDesiredConfigApplyChoosesCreateOrManage(t *testing.T) {
 		resource   accesscontrol.ResourceType
 		stateLoads int
 	}{
-		{name: "create", permission: accesscontrol.PermissionAppCreate, resource: accesscontrol.ResourceWorkspace},
-		{name: "manage", generation: 2, state: &store.ConfigState{LatestResourceID: &appID}, permission: accesscontrol.PermissionAppManage, resource: accesscontrol.ResourceApp, stateLoads: 1},
+		{name: "create", permission: accesscontrol.PermissionAppSDKCreate, resource: accesscontrol.ResourceWorkspace},
+		{name: "manage", generation: 2, state: &store.ConfigState{LatestResourceID: &appID}, permission: accesscontrol.PermissionAppSDKManage, resource: accesscontrol.ResourceApp, stateLoads: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

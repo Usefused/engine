@@ -231,13 +231,15 @@ func deploymentRequirements(workspaceID uuid.UUID, documents []sdkConfigDocument
 	return sortedRequirements(requirements), nil
 }
 
+// addDeploymentAppRequirement requires MCP-specific creation or management for GraphQL deployments.
 func addDeploymentAppRequirement(requirements map[accesscontrol.Requirement]struct{}, workspaceID uuid.UUID, document sdkConfigDocument, states map[string]store.ConfigState) {
 	state, exists := states[fmt.Sprintf("mcp:%s:%s", document.Name, document.Version)]
 	if exists && state.LatestResourceID != nil && *state.LatestResourceID != uuid.Nil {
-		requirements[accesscontrol.Requirement{Permission: accesscontrol.PermissionAppManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: *state.LatestResourceID}}] = struct{}{}
+		// Existing deployments retain family management authority across MCP versions.
+		requirements[accesscontrol.Requirement{Permission: accesscontrol.PermissionAppMCPManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: *state.LatestResourceID}}] = struct{}{}
 		return
 	}
-	requirements[accesscontrol.Requirement{Permission: accesscontrol.PermissionAppCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}}] = struct{}{}
+	requirements[accesscontrol.Requirement{Permission: accesscontrol.PermissionAppMCPCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}}] = struct{}{}
 }
 
 func sortedRequirements(values map[accesscontrol.Requirement]struct{}) []accesscontrol.Requirement {

@@ -35,7 +35,7 @@ export default function McpAnalyticsRedirect() {
 /** Loads exact-app MCP activity only after family and audit access are both known. */
 export function McpActivitySection({ appId, appFamilyId, serverName }: McpActivitySectionProps) {
   const { access, loading: accessLoading } = useCurrentActorAccess();
-  const canReadOverview = hasResourcePermission(access, "app.read", "APP", appFamilyId) && hasWorkspacePermission(access, "audit.read");
+  const canReadOverview = hasResourcePermission(access, "app.mcp.read", "APP", appFamilyId) && hasWorkspacePermission(access, "audit.read");
   const canReadRequests = canReadOverview;
   const [data, setData] = useState<McpAnalyticsData | null>(null);
   const [loading, setLoading] = useState(true);

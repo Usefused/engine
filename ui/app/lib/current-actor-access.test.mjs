@@ -5,6 +5,7 @@ import { URL } from "node:url";
 
 import {
   hasAnyPermission,
+  hasAnyAppPermission,
   hasResourcePermission,
   hasWorkspacePermission,
 } from "./current-actor-permissions.ts";
@@ -66,7 +67,7 @@ test("credential and lifecycle surfaces gate protected queries and actions", () 
   assert.match(buckets, /canCreateBucket = hasWorkspacePermission\(access, "bucket\.manage"\)/);
   assert.match(bucketQueries, /buckets: bucketSummaries/);
   assert.doesNotMatch(bucketQueries, /query \{\s*buckets \{/);
-  assert.match(apps, /hasResourcePermission\(access, "app\.manage", "APP", sdk\.app_family_id\)/);
+  assert.ok(apps.includes('hasResourcePermission(access, `app.${appTargetType(sdk)}.manage`, "APP", sdk.app_family_id)'));
   assert.match(profile, /if \(!canRead\)/);
   assert.match(profile, /\{canManage && \(/);
   assert.match(notifications, /canMutateNotification\(item\.source, canUpdate\) && <NotificationActions/);
@@ -114,3 +115,19 @@ test("restricted access navigation is permission-aware and direct denial is expl
 function source(relativePath) {
   return readFileSync(new URL(relativePath, import.meta.url), "utf8");
 }
+
+// A permission for one app type must not enable a sibling type's creation controls.
+test("app permissions keep creation and resource access type-specific", () => {
+  const narrow = { ...access, grants: [
+    { permission: "app.mcp.create", resource_type: "WORKSPACE", resource_id: "workspace-1" },
+    { permission: "app.mcp.read", resource_type: "APP", resource_id: "mcp-1" },
+  ] };
+  assert.equal(hasWorkspacePermission(narrow, "app.mcp.create"), true);
+  for (const type of ["sdk", "api", "webhook"]) {
+    assert.equal(hasWorkspacePermission(narrow, `app.${type}.create`), false);
+    assert.equal(hasResourcePermission(narrow, `app.${type}.read`, "APP", "mcp-1"), false);
+  }
+  assert.equal(hasAnyAppPermission(narrow, "read"), true);
+  assert.equal(hasAnyAppPermission(narrow, "manage"), false);
+  assert.equal(hasWorkspacePermission(narrow, "app.create"), false);
+});

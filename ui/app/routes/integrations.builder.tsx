@@ -1,3 +1,5 @@
+import { hasWorkspacePermission } from "~/lib/current-actor-access";
+import { hasAnyAppPermission } from "~/lib/current-actor-access";
 import { useState, useEffect, type FormEvent } from "react";
 import { useSearchParams, useLoaderData, type MetaFunction } from "@remix-run/react";
 import { redirect } from "@remix-run/react";
@@ -36,7 +38,8 @@ import {
   type ConsumerGenerationPanelProps,
 } from "~/components/consumer/ConsumerGenerationPanel";
 import type { McpTransportEndpointData } from "~/components/mcp/McpTransportEndpoints";
-import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
+import { WorkspacePermissionGate, useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
+import { apiErrorMessage } from "~/lib/authorization-error";
 import { hasAnyPermission } from "~/lib/current-actor-access";
 import { CREATE_APP_OPTIONS } from "~/components/apps/CreateAppMenu";
 
@@ -1270,7 +1273,7 @@ function BuilderPage({ generationMode, error, loading, selection, generation }: 
 }
 
 /** Requests an explicit immutable delivery adapter when the builder URL omitted one. */
-function BuilderModeSelectionPage({ onSelect }: { onSelect: (mode: GenerationMode) => void }) {
+function BuilderModeSelectionPage({ onSelect, allowedModes }: { onSelect: (mode: GenerationMode) => void; allowedModes: GenerationMode[] }) {
   return (
     <div className="mx-auto flex h-full max-w-4xl flex-col justify-center px-4 py-10">
       <div className="mb-8 text-center">
@@ -1278,7 +1281,7 @@ function BuilderModeSelectionPage({ onSelect }: { onSelect: (mode: GenerationMod
         <p className="mt-2 text-slate-500">Choose how this app will expose its selected services and operations.</p>
       </div>
       <div role="group" aria-label="App type" className="grid gap-4 md:grid-cols-3">
-        {CREATE_APP_OPTIONS.map((option) => {
+        {CREATE_APP_OPTIONS.filter((option) => allowedModes.includes(option.mode)).map((option) => {
           const Icon = option.icon;
           return (
             <button
@@ -1310,7 +1313,7 @@ function initialBuilderServiceId(searchParams: URLSearchParams, services: Servic
 // SdkBuilder assembles exact-version service selections into an app contract.
 export default function SdkBuilder() {
   const { access } = useCurrentActorAccess();
-  const canReadApps = hasAnyPermission(access, "app.read");
+  const canReadApps = hasAnyAppPermission(access, "read");
   const canReadServices = hasAnyPermission(access, "service.read");
   const toast = useToast();
   const loaderData = useLoaderData<typeof clientLoader>();
@@ -1379,6 +1382,8 @@ export default function SdkBuilder() {
   const requestedGenerationMode = appCreationModeFromSearch(searchParams);
   // Internal builder state stays fully typed, but the UI does not expose it until the user makes an explicit choice.
   const generationMode: GenerationMode = requestedGenerationMode ?? "sdk";
+  // Creation choices reflect explicit workspace grants for each delivery type.
+  const allowedModes = (["sdk", "mcp", "api"] as GenerationMode[]).filter((mode) => hasWorkspacePermission(access, `app.${mode}.create`));
   const [language, setLanguage] = useState<"typescript" | "python">("typescript");
 
   useEffect(() => {
@@ -1932,6 +1937,15 @@ export default function SdkBuilder() {
 
   // handleGenerate validates, plans, applies, and reports one app build.
   const handleGenerate = async (e: FormEvent) => {
+    // Direct links and stale UI state cannot select an ungranted app type.
+    if (!allowedModes.includes(generationMode)) {
+      e.preventDefault();
+      setError(apiErrorMessage(403, {
+        code: "permission_denied",
+        missing: [{ permission: `app.${generationMode}.create`, resource_type: "workspace", resource_id: access?.workspace_id ?? "" }],
+      }));
+      return;
+    }
     e.preventDefault();
     const selectionPayload = buildAppSelections(data, {
       selections,
@@ -2085,16 +2099,18 @@ export default function SdkBuilder() {
 
   // An untyped entry must ask before SDK language or MCP/REST-specific fields are shown.
   if (!requestedGenerationMode) {
-    return <BuilderModeSelectionPage onSelect={selectGenerationMode} />;
+    return <BuilderModeSelectionPage onSelect={selectGenerationMode} allowedModes={allowedModes} />;
   }
 
   return (
-    <BuilderPage
-      generationMode={generationMode}
-      error={error}
-      loading={loading}
-      selection={selection}
-      generation={generation}
-    />
+    <WorkspacePermissionGate permission={`app.${generationMode}.create`} area="these app creation controls">
+      <BuilderPage
+        generationMode={generationMode}
+        error={error}
+        loading={loading}
+        selection={selection}
+        generation={generation}
+      />
+    </WorkspacePermissionGate>
   );
 }

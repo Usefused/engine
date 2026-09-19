@@ -24,22 +24,42 @@ const (
 	PermissionCredentialsManage       Permission = "credentials.manage"
 	PermissionConnectionRead          Permission = "connection.read"
 	PermissionConnectionManage        Permission = "connection.manage"
-	PermissionAppRead                 Permission = "app.read"
-	PermissionAppUse                  Permission = "app.use"
-	PermissionAppCreate               Permission = "app.create"
-	PermissionAppManage               Permission = "app.manage"
-	PermissionAppTokensManage         Permission = "app.tokens.manage"
-	PermissionCatalogueRead           Permission = "catalogue.read"
-	PermissionCatalogueImport         Permission = "catalogue.import"
-	PermissionCatalogueManage         Permission = "catalogue.manage"
-	PermissionAccountRead             Permission = "account.read"
-	PermissionAccountManage           Permission = "account.manage"
-	PermissionBillingRead             Permission = "billing.read"
-	PermissionBillingManage           Permission = "billing.manage"
-	PermissionNotificationUpdate      Permission = "notification.update"
-	PermissionAuditRead               Permission = "audit.read"
-	PermissionAccessRead              Permission = "access.read"
-	PermissionAccessManage            Permission = "access.manage"
+	// Generic app actions are internal dispatch templates, never grantable OAuth scopes.
+	PermissionAppRead         Permission = "app.read"
+	PermissionAppUse          Permission = "app.use"
+	PermissionAppCreate       Permission = "app.create"
+	PermissionAppManage       Permission = "app.manage"
+	PermissionAppTokensManage Permission = "app.tokens.manage"
+
+	PermissionAppSDKRead         Permission = "app.sdk.read"
+	PermissionAppSDKUse          Permission = "app.sdk.use"
+	PermissionAppSDKCreate       Permission = "app.sdk.create"
+	PermissionAppSDKManage       Permission = "app.sdk.manage"
+	PermissionAppSDKTokensManage Permission = "app.sdk.tokens.manage"
+	PermissionAppMCPRead         Permission = "app.mcp.read"
+	PermissionAppMCPUse          Permission = "app.mcp.use"
+	PermissionAppMCPCreate       Permission = "app.mcp.create"
+	PermissionAppMCPManage       Permission = "app.mcp.manage"
+	PermissionAppMCPTokensManage Permission = "app.mcp.tokens.manage"
+	PermissionAppAPIRead         Permission = "app.api.read"
+	PermissionAppAPIUse          Permission = "app.api.use"
+	PermissionAppAPICreate       Permission = "app.api.create"
+	PermissionAppAPIManage       Permission = "app.api.manage"
+	PermissionAppAPITokensManage Permission = "app.api.tokens.manage"
+	PermissionAppWebhookRead     Permission = "app.webhook.read"
+	PermissionAppWebhookCreate   Permission = "app.webhook.create"
+	PermissionAppWebhookManage   Permission = "app.webhook.manage"
+	PermissionCatalogueRead      Permission = "catalogue.read"
+	PermissionCatalogueImport    Permission = "catalogue.import"
+	PermissionCatalogueManage    Permission = "catalogue.manage"
+	PermissionAccountRead        Permission = "account.read"
+	PermissionAccountManage      Permission = "account.manage"
+	PermissionBillingRead        Permission = "billing.read"
+	PermissionBillingManage      Permission = "billing.manage"
+	PermissionNotificationUpdate Permission = "notification.update"
+	PermissionAuditRead          Permission = "audit.read"
+	PermissionAccessRead         Permission = "access.read"
+	PermissionAccessManage       Permission = "access.manage"
 )
 
 var (
@@ -59,11 +79,24 @@ var (
 		PermissionCredentialsManage,
 		PermissionConnectionRead,
 		PermissionConnectionManage,
-		PermissionAppRead,
-		PermissionAppUse,
-		PermissionAppCreate,
-		PermissionAppManage,
-		PermissionAppTokensManage,
+		PermissionAppSDKRead,
+		PermissionAppSDKUse,
+		PermissionAppSDKCreate,
+		PermissionAppSDKManage,
+		PermissionAppSDKTokensManage,
+		PermissionAppMCPRead,
+		PermissionAppMCPUse,
+		PermissionAppMCPCreate,
+		PermissionAppMCPManage,
+		PermissionAppMCPTokensManage,
+		PermissionAppAPIRead,
+		PermissionAppAPIUse,
+		PermissionAppAPICreate,
+		PermissionAppAPIManage,
+		PermissionAppAPITokensManage,
+		PermissionAppWebhookRead,
+		PermissionAppWebhookCreate,
+		PermissionAppWebhookManage,
 		PermissionCatalogueRead,
 		PermissionCatalogueImport,
 		PermissionCatalogueManage,

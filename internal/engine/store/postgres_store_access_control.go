@@ -98,6 +98,8 @@ func (s *postgresStore) loadControlCredentialPrincipal(ctx context.Context, cred
 	if !found {
 		return accesscontrol.ControlPrincipal{}, accesscontrol.ErrAuthenticationRequired
 	}
+	// The authenticated store owns app-kind resolution for this account.
+	principal.AppPermissions = s
 	return principal, nil
 }
 
@@ -124,6 +126,8 @@ func (s *postgresStore) loadOAuthTokenPrincipal(ctx context.Context, credentialH
 			JOIN fused_authorization_state state ON state.singleton_key = 1
 			WHERE t.access_token_hash = $1
 				AND t.revoked_at IS NULL
+				-- Retired broad app scopes require fresh, type-specific consent.
+				AND NOT (t.scope && ARRAY['app.read','app.use','app.create','app.manage','app.tokens.manage']::text[])
 				AND t.access_expires_at > NOW()
 				AND (client.expires_at IS NULL OR client.expires_at > NOW())
 				AND s.status = 'active'
@@ -171,6 +175,8 @@ func (s *postgresStore) loadOAuthTokenPrincipal(ctx context.Context, credentialH
 	if !found {
 		return accesscontrol.ControlPrincipal{}, accesscontrol.ErrAuthenticationRequired
 	}
+	// The authenticated store owns app-kind resolution for this account.
+	principal.AppPermissions = s
 	return principal, nil
 }
 

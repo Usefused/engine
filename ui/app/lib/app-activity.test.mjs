@@ -92,7 +92,7 @@ test("reads grouped app families and exact detail versions from the Engine catal
   assert.match(mcpDetail, /operation_names/);
   assert.match(mcpDetail, /appConnectedServiceSelections\(result\.app\.selections, result\.appServices\)/);
   assert.match(mcpDetail, /result\.app\.kind !== "mcp"/);
-  assert.match(mcpActivity, /hasResourcePermission\(access, "app\.read", "APP", appFamilyId\)/);
+  assert.match(mcpActivity, /hasResourcePermission\(access, "app\.mcp\.read", "APP", appFamilyId\)/);
   assert.doesNotMatch(appRoute, /artifactSnapshot|sdkAnalytics|sdkSelectionResources/);
   assert.match(runtimeStatus, /status === "deprecated"/);
   assert.match(runtimeStatus, /Deprecated/);

@@ -293,9 +293,10 @@ func graphQLBucketQueryBody(tb testing.TB, bucketID uuid.UUID, fieldCount int) [
 	return body
 }
 
+// benchmarkActor uses concrete grants so benchmark authorization matches production validation.
 func benchmarkActor(tb testing.TB, workspaceID uuid.UUID, grants ...accesscontrol.Grant) accesscontrol.Actor {
 	tb.Helper()
-	snapshot, err := accesscontrol.NewAuthorizationSnapshot(1, grants...)
+	snapshot, err := appPermissionTestSnapshot(1, grants...)
 	if err != nil {
 		tb.Fatalf("create authorization snapshot: %v", err)
 	}

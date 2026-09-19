@@ -185,6 +185,7 @@ func setEngineGraphQLServerTiming(header http.Header, timing engineGraphQLTiming
 	header.Set("Server-Timing", strings.Join(parts, ", "))
 }
 
+// authorizeEngineGraphQL resolves trusted app identity before enforcing and auditing concrete permissions.
 func authorizeEngineGraphQL(r *http.Request, schema *graphql.Schema, actor accesscontrol.Actor, resources graphQLAuthorizationResources, allowIntrospection bool) (graphQLAuthorizationPlan, error) {
 	ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.graphql.authorization")
 	defer span.End()
@@ -206,6 +207,10 @@ func authorizeEngineGraphQL(r *http.Request, schema *graphql.Schema, actor acces
 	}
 	if err == nil {
 		err = resolveDynamicGraphQLResources(ctx, &plan, resources, actor.AccountID, actor.WorkspaceID, r.Header.Get("X-API-Key"))
+		// Capture only resolved permissions so audit and denial output identify the app type.
+		if err == nil {
+			plan.requirements, err = accesscontrol.ResolveAppRequirements(ctx, actor, plan.requirements)
+		}
 	}
 	if err == nil {
 		if limitErr := accesscontrol.ValidateAuditableRequirementCount(plan.requirements); limitErr != nil {
@@ -254,6 +259,7 @@ func firstGraphQLAuthorizationResources(values []graphQLAuthorizationResources) 
 	return values[0]
 }
 
+// authorizeGraphQLPlan separates collection discovery gates from exact resource mutation authority.
 func authorizeGraphQLPlan(ctx context.Context, actor accesscontrol.Actor, plan graphQLAuthorizationPlan) error {
 	// A delegated OAuth token's scope is drawn from the same permission
 	// catalogue as every other grant, so a permission check alone cannot
@@ -266,6 +272,14 @@ func authorizeGraphQLPlan(ctx context.Context, actor accesscontrol.Actor, plan g
 		return err
 	}
 	for _, request := range plan.scopes {
+		// Discovery authority and matching rows are distinct: a narrow scope may own an empty catalogue.
+		if accesscontrol.IsAppAction(request.permission) {
+			// Absent discovery grants deny the query even when its result would be empty.
+			if !accesscontrol.HasAnyAppPermission(actor, request.permission, request.resource) {
+				return accesscontrol.ErrPolicyDenied
+			}
+			continue
+		}
 		scope, err := authorizer.Scope(ctx, actor, request.permission, request.resource)
 		if err != nil {
 			return err

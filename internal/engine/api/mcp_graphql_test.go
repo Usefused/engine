@@ -236,7 +236,7 @@ func withGraphQLTestOwner(t *testing.T, s store.Store, next http.HandlerFunc) ht
 			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
 		})
 	}
-	snapshot, err := accesscontrol.NewAuthorizationSnapshot(1, grants...)
+	snapshot, err := appPermissionTestSnapshot(1, grants...)
 	if err != nil {
 		t.Fatalf("build test authorization snapshot: %v", err)
 	}

@@ -27,7 +27,7 @@ const (
 
 	maxOAuthClientNameLength  = 200
 	maxOAuthRedirectURIs      = 10
-	maxOAuthScopeCount        = 32
+	maxOAuthScopeCount        = 64
 	oauthAuthorizationCodeTTL = 60 * time.Second
 )
 

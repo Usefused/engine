@@ -74,9 +74,9 @@ test("scoped Activity data is hidden when audit access is absent", () => {
   assert.match(sdkRoute, /tabs\.push\(\{ value: "changes", label: "Changes" \}\)/);
   assert.match(sdkRoute, /sdkActivityOptions\(canReadActivity\)/);
   assert.match(sdkRoute, /canReadActivity && activitySection === "overview"/);
-  assert.match(mcpDetail, /hasResourcePermission\(access, "app\.read", "APP", state\.server\?\.app_family_id/);
+  assert.match(mcpDetail, /hasResourcePermission\(access, "app\.mcp\.read", "APP", state\.server\?\.app_family_id/);
   assert.match(mcpDetail, /requestedTab === "activity" && !canReadActivity \? "overview"/);
   assert.match(mcpDetail, /if \(canReadActivity\) tabs\.push\(\{ value: "activity", label: "Activity" \}\)/);
-  assert.match(mcpActivity, /hasResourcePermission\(access, "app\.read", "APP", appFamilyId\) && hasWorkspacePermission\(access, "audit\.read"\)/);
-  assert.doesNotMatch(mcpActivity, /hasAnyPermission\(access, "app\.read"\)/);
+  assert.match(mcpActivity, /hasResourcePermission\(access, "app\.mcp\.read", "APP", appFamilyId\) && hasWorkspacePermission\(access, "audit\.read"\)/);
+  assert.doesNotMatch(mcpActivity, /hasAnyPermission\(access, "app\.mcp\.read"\)/);
 });

@@ -1,3 +1,5 @@
+import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
+import { hasWorkspacePermission } from "~/lib/current-actor-access";
 import { useEffect, useId, useRef, useState, type ComponentType } from "react";
 import { Link } from "@remix-run/react";
 import { ChevronDown, Code2, Globe2, Plus, TerminalSquare, type LucideProps } from "lucide-react";
@@ -41,6 +43,9 @@ export const CREATE_APP_OPTIONS: CreateAppOption[] = [
 
 /** Presents delivery choices without splitting the shared app catalogue. */
 export function CreateAppMenu({ className = "" }: CreateAppMenuProps) {
+  const { access } = useCurrentActorAccess();
+  // A workspace creation grant unlocks only its corresponding delivery option.
+  const options = CREATE_APP_OPTIONS.filter((option) => hasWorkspacePermission(access, `app.${option.mode}.create`));
   const [open, setOpen] = useState(false);
   const menuId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -110,7 +115,7 @@ export function CreateAppMenu({ className = "" }: CreateAppMenuProps) {
           aria-label="Choose app type"
           className="absolute right-0 top-full z-30 mt-2 w-72 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 text-left shadow-xl"
         >
-          {CREATE_APP_OPTIONS.map((option, index) => {
+          {options.map((option, index) => {
             const Icon = option.icon;
             return (
               <Link

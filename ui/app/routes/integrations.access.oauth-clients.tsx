@@ -68,7 +68,9 @@ function OAuthClientsManager({ canManage }: { canManage: boolean }) {
         .filter((grant) => grant.resource_type === "WORKSPACE" && grant.resource_id === access.workspace_id)
         .map((grant) => grant.permission)
     );
+    // Retired or unknown grants must not reappear as selectable OAuth scopes.
     return Array.from(granted)
+      .filter((value) => labels.has(value))
       .map((value) => ({ value, label: labels.get(value) ?? value }))
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [access, scopeCatalog]);

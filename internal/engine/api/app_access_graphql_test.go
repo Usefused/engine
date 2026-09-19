@@ -192,8 +192,9 @@ func TestAppAccessGraphQLPolicyTraversesFragmentsAndMultipleRoots(t *testing.T) 
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
-	want := accesscontrol.Requirement{Permission: accesscontrol.PermissionAppCreate, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}}
-	if len(plan.requirements) != 1 || plan.requirements[0] != want || plan.rootFields != 2 {
+	want := graphQLScopeRequest{permission: accesscontrol.PermissionAppCreate, resource: accesscontrol.ResourceWorkspace}
+	// Discovery checks any explicit creation scope without granting a mutation.
+	if len(plan.requirements) != 0 || len(plan.scopes) != 1 || plan.scopes[0] != want || plan.rootFields != 2 {
 		t.Fatalf("plan = requirements %#v/root fields %d", plan.requirements, plan.rootFields)
 	}
 }

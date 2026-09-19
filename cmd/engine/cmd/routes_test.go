@@ -62,6 +62,7 @@ func newTestEngineAndRegistry(t *testing.T) (engineURL string, gotPath, gotAPIKe
 	return engine.URL, gotPath, gotAPIKey
 }
 
+// ownerTestActor represents an explicitly privileged fixture using the current permission catalogue.
 func ownerTestActor(t *testing.T) accesscontrol.Actor {
 	t.Helper()
 	workspaceID := uuid.New()
@@ -72,7 +73,7 @@ func ownerTestActor(t *testing.T) accesscontrol.Actor {
 			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
 		})
 	}
-	snapshot, err := accesscontrol.NewAuthorizationSnapshot(1, grants...)
+	snapshot, err := appPermissionTestSnapshot(1, grants...)
 	if err != nil {
 		t.Fatalf("owner authorization snapshot: %v", err)
 	}

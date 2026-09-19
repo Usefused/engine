@@ -61,6 +61,7 @@ func TestAdminCannotManageAccountOrBilling(t *testing.T) {
 	}
 }
 
+// TestWorkspaceShareRolesCannotManageSharedResources keeps resource sharing separate from resource administration.
 func TestWorkspaceShareRolesCannotManageSharedResources(t *testing.T) {
 	tests := []struct {
 		role      string
@@ -68,7 +69,7 @@ func TestWorkspaceShareRolesCannotManageSharedResources(t *testing.T) {
 		forbidden []Permission
 	}{
 		{role: RoleBucketUser, allows: PermissionBucketUse, forbidden: []Permission{PermissionBucketManage, PermissionCredentialsManage}},
-		{role: RoleAppUser, allows: PermissionAppUse, forbidden: []Permission{PermissionAppManage, PermissionAppTokensManage}},
+		{role: RoleAppUser, allows: PermissionAppSDKUse, forbidden: []Permission{PermissionAppSDKManage, PermissionAppSDKTokensManage}},
 	}
 	for _, test := range tests {
 		role := roleBySlug(t, test.role)

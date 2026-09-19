@@ -362,7 +362,7 @@ func TestValidateConnectAuditSDKRejectsUntrustedAttribution(t *testing.T) {
 	// An MCP Version ID cannot be recorded through the CLI's SDK-only audit selector.
 	assertConnectAuditSDKDenied(t, validateConnectAuditSDK(ownerContext, fixture.store, appID))
 	fixture.store.appRuntimes[appID].Kind = store.AppKindSDK
-	unauthorized, err := accesscontrol.NewAuthorizationSnapshot(1)
+	unauthorized, err := appPermissionTestSnapshot(1)
 	// An empty valid snapshot models a caller with no app-family visibility.
 	if err != nil {
 		t.Fatalf("create empty authorization snapshot: %v", err)
