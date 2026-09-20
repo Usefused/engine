@@ -14,6 +14,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/engine/webhookrelay"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/secretref"
 	"github.com/Usefused/engine/internal/shared/signaturepolicy"
@@ -39,13 +40,15 @@ type webhookConfigDocument struct {
 }
 
 type webhookConfigServiceDoc struct {
-	Secret string `json:"secret,omitempty"`
+	Relay  *webhookrelay.Config `json:"relay,omitempty"`
+	Secret string               `json:"secret,omitempty"`
 }
 
 // webhookResolvedService is one service's fully-resolved registration
 // target, computed once per plan/apply call (resolveWebhookServices) and
 // reused by every step after -- never re-queried per step.
 type webhookResolvedService struct {
+	Relay            *webhookrelay.Config
 	ServiceID        uuid.UUID
 	ServiceVersionID uuid.UUID
 	Version          string
@@ -101,7 +104,7 @@ func WebhookConfigPlanHandler(configStore store.ConfigRepository, s store.Store,
 			return
 		}
 		span.SetAttributes(attribute.String("config_key", req.ConfigKey), attribute.String("webhook.name", doc.Name))
-		plan, summary, err := createWebhookConfigPlan(ctx, configStore, s, registryClient, webhookPlanCall{
+		plan, summary, err := createWebhookConfigPlan(ctx, configStore, s, verifier, registryClient, webhookPlanCall{
 			apiKey: r.Header.Get("X-API-Key"), accountID: actor.AccountID, actor: actor,
 			request: req, document: doc,
 		})
@@ -228,7 +231,11 @@ func validateWebhookConfigDocument(doc webhookConfigDocument) error {
 	if len(doc.Services) == 0 {
 		return fmt.Errorf("webhook config %q requires at least one service", doc.Name)
 	}
+	// Validate every explicit source before resolving any credential-bearing bucket.
 	for svcName, svcDoc := range doc.Services {
+		if err := validateWebhookRelayConfig(svcDoc); err != nil {
+			return err
+		}
 		if strings.TrimSpace(svcDoc.Secret) == "" {
 			continue
 		}
@@ -237,6 +244,10 @@ func validateWebhookConfigDocument(doc webhookConfigDocument) error {
 			return fmt.Errorf("webhook config %q service %q secret reference is invalid", doc.Name, svcName)
 		}
 	}
+	// Signedness of the predictable default registration is validated against
+	// the resolved auth shape at plan time (createWebhookConfigPlan), not here:
+	// structured signature_policy services carry their secret_ref inside the
+	// imported policy rather than the document's legacy secret field.
 	return nil
 }
 
@@ -244,7 +255,7 @@ func validateWebhookConfigDocument(doc webhookConfigDocument) error {
 // apply never has to infer activation state, and rejects a (service, name)
 // conflict at plan time rather than letting a user discover it only at
 // apply.
-func createWebhookConfigPlan(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call webhookPlanCall) (*store.ConfigPlan, map[string]any, error) {
+func createWebhookConfigPlan(ctx context.Context, configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, call webhookPlanCall) (*store.ConfigPlan, map[string]any, error) {
 	current, err := configStore.GetConfigState(ctx, call.request.ConfigKey)
 	if err != nil {
 		return nil, nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to fetch config state"}
@@ -260,6 +271,16 @@ func createWebhookConfigPlan(ctx context.Context, configStore store.ConfigReposi
 	}
 	if err := ensureWebhookNameAvailable(ctx, s, call.request.ConfigKey, call.document.Name, resolved); err != nil {
 		return nil, nil, err
+	}
+	// The default registration is reachable at the predictable
+	// /webhook/svc/{service} URL, so each service must resolve to a signed
+	// contract. This consults the resolved auth shape (not the document), so
+	// structured signature_policy services whose secret_ref lives inside the
+	// imported policy are not wrongly rejected.
+	if call.document.Name == store.DefaultWebhookLabel {
+		if err := ensureDefaultWebhookSigned(ctx, s, verifier, call.document, resolved); err != nil {
+			return nil, nil, err
+		}
 	}
 	desiredState, requiredPermissions, requiredCount, err := webhookPlanPermissionSnapshot(ctx, s, current, call.document, resolved)
 	if err != nil {
@@ -341,34 +362,32 @@ func loadResolvedWebhookApply(ctx context.Context, configStore store.ConfigRepos
 	return plan, doc, resolved, nil
 }
 
+// prepareWebhookRegistrations preserves atomic desired-config application for local and remote sources.
 func prepareWebhookRegistrations(ctx context.Context, s store.Store, verifier ServiceVerifier, configKey string, requiredPermissions json.RawMessage, doc webhookConfigDocument, resolved map[string]webhookResolvedService, names []string) ([]store.WorkspaceWebhook, []uuid.UUID, error) {
 	registrations := make([]store.WorkspaceWebhook, 0, len(names))
 	keepServiceIDs := make([]uuid.UUID, 0, len(names))
 	secretBindings, _, err := resolveWebhookSecretBindings(ctx, s, doc.Name, resolved, names)
+	// Registration preparation must fail before any partial apply.
 	if err != nil {
 		return nil, nil, err
 	}
+	// Registration preparation must fail before any partial apply.
 	if err := validateWebhookSecretBindingPermissions(requiredPermissions, secretBindings); err != nil {
 		return nil, nil, err
 	}
 	authShapes, err := resolveWebhookAuthShapes(ctx, s, verifier, resolved, names)
+	// Registration preparation must fail before any partial apply.
 	if err != nil {
 		return nil, nil, err
 	}
+	// Prepare the validated batch without mutating stored registrations.
 	for _, name := range names {
 		r := resolved[name]
 		keepServiceIDs = append(keepServiceIDs, r.ServiceID)
 		shape := authShapes[name]
 		binding := secretBindings[name]
-		if err := validateSignaturePolicyBinding(shape.Auth.SignaturePolicy, binding.Reference, doc.CallbackBaseURL); err != nil {
-			return nil, nil, err
-		}
-		var bucketID *uuid.UUID
-		if binding.BucketID != uuid.Nil {
-			id := binding.BucketID
-			bucketID = &id
-		}
-		registration, err := prepareWorkspaceWebhookRegistration(r.ServiceID, r.ServiceVersionID, doc.Name, binding.Reference, bucketID, shape.Auth, shape.EventExtractionPath, configKey, doc.CallbackBaseURL)
+		registration, err := prepareRelayAwareWebhookRegistration(r, doc, binding, shape, configKey)
+		// A failed registration cannot leave an incomplete reconciliation batch.
 		if err != nil {
 			return nil, nil, err
 		}
@@ -414,7 +433,8 @@ func recipeUsesCallbackURL(recipe *signaturepolicy.SignatureVerification) bool {
 	return false
 }
 
-func resolveWebhookSecretBindings(ctx context.Context, s store.Store, label string, resolved map[string]webhookResolvedService, names []string) (map[string]webhookSecretBinding, []store.Bucket, error) {
+// resolveLocalWebhookSecretBindings retains local signing-secret resolution without remote provider material.
+func resolveLocalWebhookSecretBindings(ctx context.Context, s store.Store, label string, resolved map[string]webhookResolvedService, names []string) (map[string]webhookSecretBinding, []store.Bucket, error) {
 	refs, bucketNames, err := parseWebhookSecretRefs(label, resolved, names)
 	if err != nil || len(bucketNames) == 0 {
 		return webhookBindingsWithoutBuckets(refs), nil, err
@@ -521,6 +541,34 @@ func parseWebhookSecretRefs(label string, resolved map[string]webhookResolvedSer
 type webhookAuthShape struct {
 	Auth                fusedobject.IncomingWebhookConfig
 	EventExtractionPath string
+}
+
+// ensureDefaultWebhookSigned rejects a default registration whose resolved auth
+// shape has no signature verification, since its predictable URL would accept
+// unsigned payloads. It uses the resolved shape rather than the document so
+// structured signature_policy services (secret_ref inside the policy) pass.
+func ensureDefaultWebhookSigned(ctx context.Context, s store.Store, verifier ServiceVerifier, doc webhookConfigDocument, resolved map[string]webhookResolvedService) error {
+	names := sortedWebhookServiceNames(resolved)
+	shapes, err := resolveWebhookAuthShapes(ctx, s, verifier, resolved, names)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		if !incomingWebhookConfigVerifiesSignature(shapes[name].Auth) {
+			return fmt.Errorf("default webhook config %q service %q declares no inbound webhook signature; a predictable URL must be signature-verified", doc.Name, name)
+		}
+	}
+	return nil
+}
+
+// incomingWebhookConfigVerifiesSignature mirrors the runtime ingress gate: a
+// registration verifies signatures when it has a structured policy or a
+// non-"none" legacy auth type.
+func incomingWebhookConfigVerifiesSignature(auth fusedobject.IncomingWebhookConfig) bool {
+	if auth.SignaturePolicy != nil {
+		return true
+	}
+	return strings.TrimSpace(auth.AuthType) != "" && auth.AuthType != "none"
 }
 
 type webhookMetadataBatchVerifier interface {
@@ -700,7 +748,7 @@ func buildResolvedWebhookServices(doc webhookConfigDocument, keys []string, serv
 		}
 		resolved[name] = webhookResolvedService{
 			ServiceID: activation.ServiceID, ServiceVersionID: version.ServiceVersionID,
-			Version: version.Version, Secret: svcDoc.Secret,
+			Version: version.Version, Secret: svcDoc.Secret, Relay: svcDoc.Relay,
 		}
 	}
 	return resolved, nil

@@ -588,7 +588,7 @@ func newRESTPhysicalServer(runtime *restRuntimeTestDouble) (*EngineGRPCServer, u
 		Kind: store.AppKindSDK, Status: store.AppStatusActive, TokenPolicy: store.AppTokenPolicy{AllowAll: true},
 	}
 	runtimeStore := &grpcRuntimeStore{Store: &workspaceTestStore{}, accountID: accountID, appID: appID, scope: scope}
-	server := NewEngineGRPCServer(runtimeStore, nil, nil, nil, nil, unifiedTestValidator{identity: identity})
+	server := NewEngineGRPCServer(runtimeStore, nil, nil, nil, nil, unifiedTestValidator{identity: identity}, nil)
 	server.restRuntime, server.unifiedRuntime = runtime, runtime
 	return server, appID
 }

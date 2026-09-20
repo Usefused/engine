@@ -723,7 +723,7 @@ func (m *mockVerifier) FetchServiceVisibility(_ context.Context, serviceIDs []uu
 func buildWorkspaceRouter(s *workspaceTestStore, verifier ServiceVerifier) http.Handler {
 	r := newControlTestRouter(s.accountID)
 	dummyMasterKey := []byte("12345678901234567890123456789012")
-	r.Mount("/workspace", WorkspaceHandler(s, verifier, dummyMasterKey, s))
+	r.Mount("/workspace", WorkspaceHandler(s, verifier, dummyMasterKey, s, nil))
 	return r
 }
 
@@ -955,6 +955,10 @@ func (s *workspaceTestStore) RemoveWorkspaceServices(_ context.Context, serviceI
 }
 
 func (s *workspaceTestStore) GetWorkspaceWebhookBySlug(ctx context.Context, slug string) (*store.WorkspaceWebhook, error) {
+	return nil, store.ErrWorkspaceWebhookNotFound
+}
+
+func (s *workspaceTestStore) GetWorkspaceWebhookByServiceAndLabel(ctx context.Context, serviceSlug, label string) (*store.WorkspaceWebhook, error) {
 	return nil, store.ErrWorkspaceWebhookNotFound
 }
 

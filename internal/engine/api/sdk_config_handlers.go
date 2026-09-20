@@ -760,15 +760,35 @@ func validateAppAuthReferenceIntent(serviceName string, auth *sdkAppAuthDoc) err
 type appAuthReference struct {
 	ServiceKey string
 	AuthName   string
+	// Managed is true only for the reserved Fused-owned bucket namespace
+	// (${fused.bucket.auth.<service>.<authName>}), which routes consent and
+	// refresh through the managed-auth broker. It is never inferred from a
+	// missing local credential; the reference must appear verbatim in config.
+	Managed bool
 }
 
-// parseAppAuthReference admits one whole same-bucket credential-family reference with dot-free identities.
+// parseAppAuthReference admits one whole credential-family reference with
+// dot-free identities. Two forms are accepted:
+//
+//	${bucket.auth.<service>.<authName>}       another workspace service's app pair
+//	${fused.bucket.auth.<service>.<authName>} Fused's own managed app (via broker)
 func parseAppAuthReference(value string) (appAuthReference, error) {
-	const prefix = "${bucket.auth."
+	const localPrefix = "${bucket.auth."
+	const managedPrefix = "${fused.bucket.auth."
 	trimmed := strings.TrimSpace(value)
 	// Requiring the complete interpolation prevents surrounding text from changing credential identity.
-	if value != trimmed || !strings.HasPrefix(value, prefix) || !strings.HasSuffix(value, "}") {
-		return appAuthReference{}, errors.New("must use ${bucket.auth.<service>.<authName>}")
+	if value != trimmed || !strings.HasSuffix(value, "}") {
+		return appAuthReference{}, errors.New("must use ${bucket.auth.<service>.<authName>} or ${fused.bucket.auth.<service>.<authName>}")
+	}
+	// The reserved Fused-owned namespace selects a managed app and is never a
+	// fallback; the plain bucket namespace keeps its existing local meaning.
+	prefix := localPrefix
+	managed := false
+	if strings.HasPrefix(value, managedPrefix) {
+		prefix = managedPrefix
+		managed = true
+	} else if !strings.HasPrefix(value, localPrefix) {
+		return appAuthReference{}, errors.New("must use ${bucket.auth.<service>.<authName>} or ${fused.bucket.auth.<service>.<authName>}")
 	}
 	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(value, prefix), "}"), ".")
 	// Exact arity keeps service and auth-scheme lookup deterministic.
@@ -779,7 +799,7 @@ func parseAppAuthReference(value string) (appAuthReference, error) {
 	if strings.ContainsAny(parts[0]+parts[1], " \t\r\n{}$") {
 		return appAuthReference{}, errors.New("must name one service and auth scheme")
 	}
-	return appAuthReference{ServiceKey: parts[0], AuthName: parts[1]}, nil
+	return appAuthReference{ServiceKey: parts[0], AuthName: parts[1], Managed: managed}, nil
 }
 
 // validateAppInjectionDocs reserves host-template binding for non-secret
@@ -1469,6 +1489,11 @@ func appAuthSourceContractSelections(doc sdkConfigDocument, workspaceServices ma
 		if err != nil {
 			return nil, err
 		}
+		// A Fused Managed App reference has no local source contract to read;
+		// the broker owns that registration, so only the target batch applies.
+		if ref.Managed {
+			continue
+		}
 		source, ok := workspaceServices[ref.ServiceKey]
 		// References cannot float to Registry services that are not enabled locally.
 		if !ok || source.ServiceID == uuid.Nil || strings.TrimSpace(source.Version) == "" {
@@ -1525,6 +1550,25 @@ func resolveAppAuthReferenceSelection(selection *models.SDKSelection, auth *sdkA
 	// Policy resolution must have selected the exact OAuth/OIDC target authored by the app.
 	if selection.AuthType != strings.ToLower(strings.TrimSpace(auth.Type)) || selection.AuthName != strings.TrimSpace(auth.Name) || !selectionRequiresAuth(*selection, selection.AuthType, selection.AuthName) {
 		return errors.New("target auth scheme is not required by the selected operations")
+	}
+	// A Fused Managed App reference routes through the broker and carries no
+	// local bucket pair, version, or contract snapshot to validate. The source
+	// service key still resolves to a local identity so the broker lookup is
+	// one exact (service, authName), and the scheme must match the target.
+	if parsed.Managed {
+		source, ok := workspaceServices[parsed.ServiceKey]
+		if !ok || source.ServiceID == uuid.Nil {
+			return fmt.Errorf("managed auth source service %q is not enabled in the workspace", parsed.ServiceKey)
+		}
+		if parsed.AuthName != selection.AuthName {
+			return fmt.Errorf("managed auth reference scheme %q does not match target %q", parsed.AuthName, selection.AuthName)
+		}
+		selection.CredentialSourceServiceID = source.ServiceID
+		selection.CredentialSourceAuthType = selection.AuthType
+		selection.CredentialSourceAuthName = parsed.AuthName
+		selection.ManagedAuth = true
+		selection.AuthRef = "${fused.bucket.auth." + parsed.ServiceKey + "." + parsed.AuthName + "}"
+		return nil
 	}
 	source, ok := workspaceServices[parsed.ServiceKey]
 	// The source must be enabled locally, but selecting its operations would grant unrelated app capability.
@@ -3616,6 +3660,10 @@ func inspectAppBucketReadiness(ctx context.Context, s store.Store, buckets appBu
 	grouped := make(map[uuid.UUID][]models.SDKSelection)
 	bucketsByID := make(map[uuid.UUID]store.Bucket)
 	for _, selection := range selections {
+		// A managed selection's credential lives on the broker, not this bucket.
+		if selection.ManagedAuth {
+			continue
+		}
 		bucket := buckets.forService(selection.ServiceID)
 		grouped[bucket.ID] = append(grouped[bucket.ID], selection)
 		bucketsByID[bucket.ID] = bucket

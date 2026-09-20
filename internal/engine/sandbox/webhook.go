@@ -38,6 +38,9 @@ import (
 // than threading a full store.Store through the HTTP handler chain.
 type webhookConfigStore interface {
 	GetWorkspaceWebhookBySlug(ctx context.Context, slug string) (*store.WorkspaceWebhook, error)
+	// GetWorkspaceWebhookByServiceAndLabel resolves the predictable default
+	// registration by workspace service slug + label instead of opaque token.
+	GetWorkspaceWebhookByServiceAndLabel(ctx context.Context, serviceSlug, label string) (*store.WorkspaceWebhook, error)
 }
 
 var globalWebhookConfigStore webhookConfigStore
@@ -81,7 +84,8 @@ type webhookConfig struct {
 	Label string
 }
 
-// webhookIngressHandler processes incoming webhook requests.
+// webhookIngressHandler processes inbound requests routed by an opaque
+// random-token slug (the isolated registration form).
 //
 // An OTEL thread is opened for every inbound request because each webhook
 // represents an externally-triggered execution (provider → Fused → customer).
@@ -109,38 +113,120 @@ func webhookIngressHandler(w http.ResponseWriter, r *http.Request) {
 		urlSlug = urlSlug[:webhookid.SlugLength]
 	}
 
-	// Open an OTEL span for the full ingress lifecycle.
-	ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.webhook.ingest", trace.WithAttributes(
-		attribute.Bool("webhook.registration.present", true),
-	))
+	ctx, span := startWebhookIngestSpan(r, "token")
 	defer span.End()
 
-	rawBody, err := captureWebhookBody(r)
-	if err != nil {
-		span.SetStatus(codes.Error, "payload_capture_failed")
-		writeError(w, http.StatusBadRequest, "invalid request payload")
-		return
-	}
-	body, err := parseWebhookPayload(r, rawBody)
-	if err != nil {
-		span.SetStatus(codes.Error, "payload_parse_failed")
-		writeError(w, http.StatusBadRequest, "invalid request payload")
+	rawBody, body, ok := captureWebhookRequest(w, span, r)
+	if !ok {
 		return
 	}
 
 	config, err := fetchWebhookConfig(ctx, urlSlug)
 	if err != nil {
-		if errors.Is(err, store.ErrWorkspaceWebhookNotFound) {
-			span.SetStatus(codes.Error, "webhook not found")
-			writeError(w, http.StatusNotFound, "webhook not found")
-			return
-		}
-		// Database errors can include statement values, so keep ingress telemetry
-		// useful without copying the underlying error into stdout or span data.
-		span.SetStatus(codes.Error, "config fetch failed")
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeWebhookConfigFetchError(w, span, err)
 		return
 	}
+
+	ingestResolvedWebhook(w, r, span, ctx, config, urlSlug, rawBody, body)
+}
+
+// predictableWebhookIngressHandler processes inbound requests routed by the
+// guessable default URL (/webhook/svc/{service}). Because the path is derivable
+// from a service slug, it must always resolve a signed registration; an
+// unsigned predictable URL would be a forgery hole.
+func predictableWebhookIngressHandler(w http.ResponseWriter, r *http.Request) {
+	if !entitlement.LiveEntitlement.Load().WebhookIngestionEnabled {
+		writeError(w, http.StatusPaymentRequired, "webhook ingestion not enabled on current plan")
+		return
+	}
+
+	serviceSlug := chi.URLParam(r, "service")
+	if serviceSlug == "" {
+		writeError(w, http.StatusBadRequest, "service required")
+		return
+	}
+
+	ctx, span := startWebhookIngestSpan(r, "default")
+	defer span.End()
+
+	rawBody, body, ok := captureWebhookRequest(w, span, r)
+	if !ok {
+		return
+	}
+
+	config, err := fetchWebhookConfigByServiceAndLabel(ctx, serviceSlug, store.DefaultWebhookLabel)
+	if err != nil {
+		writeWebhookConfigFetchError(w, span, err)
+		return
+	}
+
+	// Predictable URLs are guessable, so they may never accept unsigned payloads.
+	if !webhookConfigVerifiesSignature(config) {
+		span.SetStatus(codes.Error, "unsigned default webhook rejected")
+		writeError(w, http.StatusForbidden, "default webhook URLs require a signing secret")
+		return
+	}
+
+	ingestResolvedWebhook(w, r, span, ctx, config, serviceSlug, rawBody, body)
+}
+
+// startWebhookIngestSpan opens the lifecycle span shared by both ingress forms.
+func startWebhookIngestSpan(r *http.Request, route string) (context.Context, trace.Span) {
+	return otel.Tracer("engine").Start(r.Context(), "engine.webhook.ingest", trace.WithAttributes(
+		attribute.Bool("webhook.registration.present", true),
+		attribute.String("webhook.route", route),
+	))
+}
+
+// captureWebhookRequest reads and normalises the inbound payload, reporting a
+// capture/parse failure as a 400 without continuing into verification.
+func captureWebhookRequest(w http.ResponseWriter, span trace.Span, r *http.Request) ([]byte, []byte, bool) {
+	rawBody, err := captureWebhookBody(r)
+	if err != nil {
+		span.SetStatus(codes.Error, "payload_capture_failed")
+		writeError(w, http.StatusBadRequest, "invalid request payload")
+		return nil, nil, false
+	}
+	body, err := parseWebhookPayload(r, rawBody)
+	if err != nil {
+		span.SetStatus(codes.Error, "payload_parse_failed")
+		writeError(w, http.StatusBadRequest, "invalid request payload")
+		return nil, nil, false
+	}
+	return rawBody, body, true
+}
+
+// writeWebhookConfigFetchError maps a config-resolution failure to its HTTP
+// response while keeping database error detail out of ingress output.
+func writeWebhookConfigFetchError(w http.ResponseWriter, span trace.Span, err error) {
+	if errors.Is(err, store.ErrWorkspaceWebhookNotFound) {
+		span.SetStatus(codes.Error, "webhook not found")
+		writeError(w, http.StatusNotFound, "webhook not found")
+		return
+	}
+	// Database errors can include statement values, so keep ingress telemetry
+	// useful without copying the underlying error into stdout or span data.
+	span.SetStatus(codes.Error, "config fetch failed")
+	writeError(w, http.StatusInternalServerError, "internal server error")
+}
+
+// webhookConfigVerifiesSignature reports whether the resolved registration has
+// any signature verification configured (structured policy or legacy auth).
+func webhookConfigVerifiesSignature(config *webhookConfig) bool {
+	if config.SignaturePolicy != nil {
+		return true
+	}
+	return strings.TrimSpace(config.AuthType) != "" && config.AuthType != "none"
+}
+
+// ingestResolvedWebhook runs the shared post-resolution tail: attach identity
+// attributes, verify the signature, extract the event, and publish.
+func ingestResolvedWebhook(w http.ResponseWriter, r *http.Request, span trace.Span, ctx context.Context, config *webhookConfig, urlSlug string, rawBody, body []byte) {
+ // Delegated input is accepted only by the authenticated outbound pull adapter.
+ if config.AuthType == "fused_remote" {
+  writeError(w,http.StatusForbidden,"remote webhook registration has no public ingress")
+  return
+ }
 
 	// Attach account/service identifiers once the config is resolved.
 	span.SetAttributes(
@@ -237,6 +323,25 @@ func fetchWebhookConfig(ctx context.Context, urlSlug string) (*webhookConfig, er
 	if err != nil {
 		return nil, err
 	}
+	return webhookConfigFromRow(ww), nil
+}
+
+// fetchWebhookConfigByServiceAndLabel resolves the predictable default
+// registration by workspace service slug + label instead of opaque token.
+func fetchWebhookConfigByServiceAndLabel(ctx context.Context, serviceSlug, label string) (*webhookConfig, error) {
+	if globalWebhookConfigStore == nil {
+		return nil, fmt.Errorf("webhook store not configured")
+	}
+	ww, err := globalWebhookConfigStore.GetWorkspaceWebhookByServiceAndLabel(ctx, serviceSlug, label)
+	if err != nil {
+		return nil, err
+	}
+	return webhookConfigFromRow(ww), nil
+}
+
+// webhookConfigFromRow denormalizes one persisted registration row into the
+// runtime config used by verification and publish.
+func webhookConfigFromRow(ww *store.WorkspaceWebhook) *webhookConfig {
 	var secretBucketID uuid.UUID
 	if ww.SecretBucketID != nil {
 		secretBucketID = *ww.SecretBucketID
@@ -257,7 +362,7 @@ func fetchWebhookConfig(ctx context.Context, urlSlug string) (*webhookConfig, er
 		SecretBucketID:      secretBucketID,
 		SecretRef:           ww.SecretRef,
 		Label:               ww.Label,
-	}, nil
+	}
 }
 
 // validateWebhookAuth delegates signature verification to the webhookverify

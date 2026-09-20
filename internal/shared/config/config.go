@@ -62,6 +62,16 @@ type EngineConfig struct {
 	// ConnectedAuthRefreshWorkers is the exact bounded OAuth refresh pool size
 	// selected by the Engine operator.
 	ConnectedAuthRefreshWorkers int `yaml:"connected_auth_refresh_workers"`
+	// ManagedAuthBrokerEnabled mounts the managed-auth broker endpoints that
+	// let a *remote* customer Engine enroll and obtain Fused's pre-registered
+	// OAuth app credentials. Only Fused's own hosted Engine should ever set
+	// this; an ordinary customer Engine has no other installations to vouch
+	// for, so it defaults to false.
+	ManagedAuthBrokerEnabled bool `yaml:"managed_auth_broker_enabled"`
+	// ManagedAuthBrokerAdminKey gates catalogue registration (which OAuth
+	// apps Fused has pre-registered with which providers) to Fused's own
+	// operators; it is unrelated to any customer or installation credential.
+	ManagedAuthBrokerAdminKey string `yaml:"-"`
 }
 
 const (
@@ -208,6 +218,19 @@ func applyEnvironment(cfg *Config) error {
 	}
 	if publicGRPCURL := os.Getenv("FUSED_ENGINE_PUBLIC_GRPC_URL"); publicGRPCURL != "" {
 		cfg.Engine.PublicGRPCURL = publicGRPCURL
+	}
+	// An unparseable value falls back to disabled rather than failing startup,
+	// consistent with this Engine's other soft env overrides -- accidentally
+	// becoming the managed-auth broker is the wrong failure mode to prefer.
+	if rawBrokerEnabled := os.Getenv("FUSED_MANAGED_AUTH_BROKER_ENABLED"); rawBrokerEnabled != "" {
+		if brokerEnabled, err := strconv.ParseBool(rawBrokerEnabled); err == nil {
+			cfg.Engine.ManagedAuthBrokerEnabled = brokerEnabled
+		}
+	}
+	// Deliberately env-only (yaml:"-" above): this is a bearer secret, not a
+	// deployment setting that belongs in a checked-in or mounted YAML file.
+	if adminKey := os.Getenv("FUSED_MANAGED_AUTH_BROKER_ADMIN_KEY"); adminKey != "" {
+		cfg.Engine.ManagedAuthBrokerAdminKey = adminKey
 	}
 	if rawWorkers := os.Getenv("FUSED_ENGINE_CONNECTED_AUTH_REFRESH_WORKERS"); rawWorkers != "" {
 		workers, err := strconv.Atoi(rawWorkers)

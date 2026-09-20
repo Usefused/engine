@@ -34,6 +34,11 @@ type ApplicationCredentialSource struct {
 	ServiceID uuid.UUID
 	AuthType  string
 	AuthName  string
+	// Managed marks a Fused Managed App source (${fused.bucket.auth...}). A
+	// managed source has no local client_id/secret to resolve; consent and
+	// refresh route through the managed-auth broker instead. It is only ever
+	// set from an explicit config reference, never from a lookup miss.
+	Managed bool
 }
 
 // NewApplicationCredentialResolver fixes shared dependencies without exposing credential values to adapters.
@@ -48,7 +53,13 @@ func (r *ApplicationCredentialResolver) Resolve(ctx context.Context, bucketID, t
 	if applicationResolverUnavailable(r) || applicationCredentialIdentityMissing(bucketID, targetServiceID) || authType == "" {
 		return ClientCredentials{}, ErrApplicationCredentialsUnavailable
 	}
-	alternative, clientIDKey, clientSecretKey, ok := applicationCredentialAlternative(authType, authName, firstApplicationCredentialSource(sources))
+	source := firstApplicationCredentialSource(sources)
+	// A managed source has no local registration by definition; the caller
+	// must route through the broker, never fall through to bucket secrets.
+	if source.Managed {
+		return ClientCredentials{}, ErrApplicationCredentialsUnavailable
+	}
+	alternative, clientIDKey, clientSecretKey, ok := applicationCredentialAlternative(authType, authName, source)
 	// An exact named family is required for deterministic direct and referenced lookup.
 	if !ok {
 		return ClientCredentials{}, ErrApplicationCredentialsUnavailable

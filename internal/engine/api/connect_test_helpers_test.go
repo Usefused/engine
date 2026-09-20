@@ -146,7 +146,7 @@ func newConnectAdminFixture() connectAdminFixture {
 // buildConnectAdminRouter mounts current workspace credential and consent routes for handler tests.
 func buildConnectAdminRouter(s store.Store, accountID uuid.UUID, masterKey []byte) http.Handler {
 	router := newControlTestRouter(accountID)
-	router.Mount("/workspace", WorkspaceHandler(s, &mockVerifier{}, masterKey, s, "https://engine.example.com/workspace/connect/callback"))
+	router.Mount("/workspace", WorkspaceHandler(s, &mockVerifier{}, masterKey, s, nil, "https://engine.example.com/workspace/connect/callback"))
 	return router
 }
 

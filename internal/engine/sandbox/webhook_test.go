@@ -51,6 +51,16 @@ func (s *stubWebhookConfigStore) GetWorkspaceWebhookBySlug(_ context.Context, sl
 	return ww, nil
 }
 
+func (s *stubWebhookConfigStore) GetWorkspaceWebhookByServiceAndLabel(_ context.Context, serviceSlug, label string) (*store.WorkspaceWebhook, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ww, ok := s.byLabel[serviceSlug+"/"+label]
+	if !ok {
+		return nil, store.ErrWorkspaceWebhookNotFound
+	}
+	return ww, nil
+}
+
 func (s *stubWebhookConfigStore) set(slug string, ww *store.WorkspaceWebhook) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -58,6 +68,11 @@ func (s *stubWebhookConfigStore) set(slug string, ww *store.WorkspaceWebhook) {
 		s.byLabel = make(map[string]*store.WorkspaceWebhook)
 	}
 	s.byLabel[slug] = ww
+}
+
+// setByServiceLabel seeds the predictable-default lookup key.
+func (s *stubWebhookConfigStore) setByServiceLabel(serviceSlug, label string, ww *store.WorkspaceWebhook) {
+	s.set(serviceSlug+"/"+label, ww)
 }
 
 var testWebhookConfigStore = &stubWebhookConfigStore{}
@@ -337,5 +352,104 @@ func TestShouldObserveWebhookSchemaUsesDeploymentMode(t *testing.T) {
 	t.Setenv("FUSED_ENV", "production")
 	if !shouldObserveWebhookSchema() {
 		t.Fatal("production engines should publish schema observations")
+	}
+}
+
+// makePredictableWebhookRequest constructs a chi-routed request for the
+// /webhook/svc/{service} predictable-default route.
+func makePredictableWebhookRequest(method, service, body string, headers map[string]string) *http.Request {
+	req := httptest.NewRequest(method, "/webhook/svc/"+service, bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("service", service)
+	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+}
+
+// seedDefaultConfig seeds the predictable-default lookup key with a
+// store.DefaultWebhookLabel registration.
+func seedDefaultConfig(serviceSlug string, cfg *webhookConfig, signingSecret string) {
+	accID := uuid.New()
+	svcID := uuid.New()
+	const secretRef = "${bucket.default.secret.default-signing}"
+	secretBucketID := uuid.New()
+	ww := &store.WorkspaceWebhook{
+		AccountID:           accID,
+		ServiceID:           svcID,
+		Label:               store.DefaultWebhookLabel,
+		EventExtractionPath: cfg.EventExtractionPath,
+		AuthType:            cfg.AuthType,
+		AuthLocation:        cfg.AuthLocation,
+		AuthKeyName:         cfg.AuthKeyName,
+		SignatureHeader:     cfg.SignatureHeader,
+		VerificationHeaders: cfg.VerificationHeaders,
+		SignaturePolicy:     cfg.SignaturePolicy,
+		CallbackURL:         cfg.CallbackURL,
+	}
+	if signingSecret != "" {
+		ww.SecretRef = secretRef
+		ww.SecretBucketID = &secretBucketID
+		testSecretResolver.secrets[accID.String()+":"+secretBucketID.String()+":"+secretRef] = signingSecret
+	}
+	testWebhookConfigStore.setByServiceLabel(serviceSlug, store.DefaultWebhookLabel, ww)
+}
+
+// TestWebhookHandler_PredictableDefault_UnsignedRejected proves the guessable
+// default URL never accepts a registration without signature verification.
+func TestWebhookHandler_PredictableDefault_UnsignedRejected(t *testing.T) {
+	withEntitlement(t, models.RuntimeEntitlement{WebhookIngestionEnabled: true})
+	seedDefaultConfig("github", &webhookConfig{}, "")
+	w := httptest.NewRecorder()
+	predictableWebhookIngressHandler(w, makePredictableWebhookRequest(http.MethodPost, "github", `{}`, nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for unsigned default webhook, got %d", w.Code)
+	}
+}
+
+// TestWebhookHandler_PredictableDefault_SignedPublishes proves a signed default
+// registration ingests through the shared verification/publish path.
+func TestWebhookHandler_PredictableDefault_SignedPublishes(t *testing.T) {
+	withEntitlement(t, models.RuntimeEntitlement{WebhookIngestionEnabled: true})
+	const body = `{"event":"charge.succeeded"}`
+	sig := hmacBodySig("real-secret", body)
+	seedDefaultConfig("github", &webhookConfig{
+		AuthType:        "hmac_signature",
+		SignatureHeader: "X-Signature",
+	}, "real-secret")
+
+	var published int
+	orig := webhookPublishFunc
+	webhookPublishFunc = func(_ *nats.Msg) error { published++; return nil }
+	defer func() { webhookPublishFunc = orig }()
+
+	w := httptest.NewRecorder()
+	predictableWebhookIngressHandler(w, makePredictableWebhookRequest(http.MethodPost, "github", body, map[string]string{"X-Signature": sig}))
+	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
+		t.Fatalf("expected signed default webhook to publish, got %d: %s", w.Code, w.Body.String())
+	}
+	if published != 1 {
+		t.Fatalf("expected publish once, got %d", published)
+	}
+}
+
+// TestWebhookRoutesPredictableDefaultTakesPrecedence proves /webhook/svc/{service}
+// routes to the predictable-default handler rather than the two-segment token
+// route (urlSlug="svc", eventName="{service}"), which would 404 on slug "svc".
+func TestWebhookRoutesPredictableDefaultTakesPrecedence(t *testing.T) {
+	withEntitlement(t, models.RuntimeEntitlement{WebhookIngestionEnabled: true})
+	seedDefaultConfig("github", &webhookConfig{}, "")
+
+	r := chi.NewRouter()
+	InitWebhookRoutes(r)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/svc/github", bytes.NewBufferString(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	// The predictable handler rejects the unsigned default with 403; a token
+	// route misroute would look up slug "svc" and return 404 instead.
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected predictable default route (403), got %d", w.Code)
 	}
 }

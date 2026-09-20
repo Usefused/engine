@@ -33,6 +33,7 @@ const (
 	ExecutionCapabilityQuotaMultidimensionalV3       = "quota.multidimensional.v3"
 	ExecutionCapabilityRetryPolicyV3                 = "retry.policy.v3"
 	ExecutionCapabilityWebhookSignatureRecipesV1     = "webhook.signature.recipes.v1"
+	ExecutionCapabilityWebhookSignatureRecipesV2     = "webhook.signature.recipes.v2"
 	ExecutionCapabilityHTTPUploadWorkflowV1          = "http.upload.workflow.v1"
 	ExecutionCapabilityConnectionResourceDiscoveryV1 = "connection.resource_discovery.v1"
 )
@@ -64,6 +65,7 @@ var supportedExecutionCapabilityOrder = []string{
 	ExecutionCapabilityQuotaMultidimensionalV3,
 	ExecutionCapabilityRetryPolicyV3,
 	ExecutionCapabilityWebhookSignatureRecipesV1,
+	ExecutionCapabilityWebhookSignatureRecipesV2,
 }
 
 var supportedExecutionCapabilities = executionCapabilitySet(supportedExecutionCapabilityOrder)

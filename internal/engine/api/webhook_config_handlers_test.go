@@ -15,7 +15,9 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/signaturepolicy"
 )
 
 // ─── workspaceTestStore additions for kind: webhook ────────────────────────
@@ -99,6 +101,36 @@ func TestValidateWebhookConfigDocument_AllowsMissingSecret(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("expected no error for a service with no secret, got %v", err)
+	}
+}
+
+// TestValidateWebhookConfigDocument_DefaultNameSignednessDeferred proves the
+// document decoder no longer requires the legacy secret field on a default
+// config: signedness is checked against the resolved auth shape at plan time.
+func TestValidateWebhookConfigDocument_DefaultNameSignednessDeferred(t *testing.T) {
+	err := validateWebhookConfigDocument(webhookConfigDocument{
+		APIVersion: "fused/v1", Kind: "webhook", Name: store.DefaultWebhookLabel,
+		Services: map[string]webhookConfigServiceDoc{"github": {}},
+	})
+	if err != nil {
+		t.Fatalf("expected document-level default config to validate, got %v", err)
+	}
+}
+
+// TestIncomingWebhookConfigVerifiesSignature mirrors the runtime ingress gate
+// the predictable default URL depends on.
+func TestIncomingWebhookConfigVerifiesSignature(t *testing.T) {
+	if incomingWebhookConfigVerifiesSignature(fusedobject.IncomingWebhookConfig{}) {
+		t.Fatal("empty config must not verify")
+	}
+	if !incomingWebhookConfigVerifiesSignature(fusedobject.IncomingWebhookConfig{AuthType: "hmac_signature"}) {
+		t.Fatal("legacy auth type must verify")
+	}
+	if incomingWebhookConfigVerifiesSignature(fusedobject.IncomingWebhookConfig{AuthType: "none"}) {
+		t.Fatal("auth_type none must not verify")
+	}
+	if !incomingWebhookConfigVerifiesSignature(fusedobject.IncomingWebhookConfig{SignaturePolicy: &signaturepolicy.Config{}}) {
+		t.Fatal("structured signature policy must verify")
 	}
 }
 

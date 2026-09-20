@@ -216,12 +216,13 @@ type publicInsightReportResponse struct {
 }
 
 type EngineHandshakeResult struct {
-	AccountID     string
-	EngineID      string
-	WorkspaceName string
-	OwnerEmail    string
-	Entitlements  models.RuntimeEntitlement
-	Identity      ManagedIdentityCapability
+	AccountID            string
+	EngineID             string
+	WorkspaceName        string
+	OwnerEmail           string
+	Entitlements         models.RuntimeEntitlement
+	Identity             ManagedIdentityCapability
+	ManagedAuthBrokerURL string
 }
 
 type ManagedIdentityCapability struct {
@@ -1478,6 +1479,7 @@ func (c *HTTPRegistryClient) fetchServiceMetadataBatch(ctx context.Context, refs
 	return decodeServiceMetadataBatch(resp.Body, refs)
 }
 
+// buildServiceMetadataBatchRequest retains signed-challenge and freshness semantics when loading ingress metadata.
 func (c *HTTPRegistryClient) buildServiceMetadataBatchRequest(ctx context.Context, refs []ServiceMetadataRef) (*http.Request, error) {
 	versionRefs := make([]ServiceVersionRef, 0, len(refs))
 	for _, ref := range refs {
@@ -1486,7 +1488,7 @@ func (c *HTTPRegistryClient) buildServiceMetadataBatchRequest(ctx context.Contex
 	payload, err := json.Marshal(graphqlQuery{Query: `query WebhookMetadata($refs: [ServiceVersionRefInput!]!) {
 		serviceWebhookMetadata(refs: $refs) {
 			service_id version service_version_id name event_extraction_path
-			incoming_webhook_config { auth_type auth_location auth_key_name signature_header verification_headers }
+			incoming_webhook_config { auth_type auth_location auth_key_name signature_header verification_headers signature_policy {` + registrySignaturePolicyGraphQLFields + `} }
 		}
 	}`, Variables: map[string]interface{}{"refs": versionRefs}})
 	if err != nil {
@@ -1839,24 +1841,26 @@ func (c *HTTPRegistryClient) HandshakeWithEntitlements(ctx context.Context) (Eng
 	}
 
 	var result struct {
-		AccountID     string                    `json:"account_id"`
-		EngineID      string                    `json:"engine_id"`
-		WorkspaceName string                    `json:"workspace_name"`
-		OwnerEmail    string                    `json:"owner_email"`
-		Entitlements  *rawRuntimeEntitlement    `json:"entitlements"`
-		Identity      ManagedIdentityCapability `json:"identity"`
+		AccountID            string                    `json:"account_id"`
+		EngineID             string                    `json:"engine_id"`
+		WorkspaceName        string                    `json:"workspace_name"`
+		OwnerEmail           string                    `json:"owner_email"`
+		Entitlements         *rawRuntimeEntitlement    `json:"entitlements"`
+		Identity             ManagedIdentityCapability `json:"identity"`
+		ManagedAuthBrokerURL string                    `json:"managed_auth_broker_url"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return EngineHandshakeResult{}, fmt.Errorf("failed to decode handshake response: %w", err)
 	}
 
 	return EngineHandshakeResult{
-		AccountID:     result.AccountID,
-		EngineID:      result.EngineID,
-		WorkspaceName: result.WorkspaceName,
-		OwnerEmail:    result.OwnerEmail,
-		Entitlements:  RuntimeEntitlementFromHandshake(result.Entitlements),
-		Identity:      result.Identity,
+		AccountID:            result.AccountID,
+		EngineID:             result.EngineID,
+		WorkspaceName:        result.WorkspaceName,
+		OwnerEmail:           result.OwnerEmail,
+		Entitlements:         RuntimeEntitlementFromHandshake(result.Entitlements),
+		Identity:             result.Identity,
+		ManagedAuthBrokerURL: result.ManagedAuthBrokerURL,
 	}, nil
 }
 
@@ -1878,6 +1882,18 @@ func (c *HTTPRegistryClient) ExchangeManagedLoginTransaction(ctx context.Context
 	var assertion ManagedIdentityAssertion
 	err := c.postManagedIdentityJSON(ctx, "/api/engine/identity/transactions/"+id.String()+"/exchange", request, &assertion)
 	return assertion, err
+}
+
+// MintManagedAuthEnrollmentTicket proves this Engine's own license identity
+// to Registry (via the standard c.do license attachment) and asks for one
+// single-use ticket to redeem at the managed-auth broker. The ticket is
+// consumed on its very next hop, so only the raw value is meaningful here.
+func (c *HTTPRegistryClient) MintManagedAuthEnrollmentTicket(ctx context.Context) (string, error) {
+	var result struct {
+		Ticket string `json:"ticket"`
+	}
+	err := c.postManagedIdentityJSON(ctx, "/api/engine/managed-auth/enrollment-ticket", struct{}{}, &result)
+	return result.Ticket, err
 }
 
 func (c *HTTPRegistryClient) StartManagedLogout(ctx context.Context, logoutToken, returnURL string) (string, error) {
@@ -2279,6 +2295,7 @@ func RuntimeEntitlementFromHandshake(raw *rawRuntimeEntitlement) models.RuntimeE
 	return entitlement.Normalized()
 }
 
+// buildServiceMetadataRequest includes the complete verification policy so exact-version metadata cannot weaken ingress.
 func (c *HTTPRegistryClient) buildServiceMetadataRequest(ctx context.Context, serviceID string, version string) (*http.Request, error) {
 	query := `
 		query GetService($serviceId: String!, $version: String!) {
@@ -2316,6 +2333,7 @@ func (c *HTTPRegistryClient) buildServiceMetadataRequest(ctx context.Context, se
 					auth_key_name
 					signature_header
 					verification_headers
+					signature_policy {` + registrySignaturePolicyGraphQLFields + `}
 				}
 				documentation
 			}
@@ -2817,3 +2835,25 @@ func (w serviceChangelogEntryWire) toModel() (models.ServiceChangelogEntry, erro
 	}
 	return entry, nil
 }
+
+// registrySignaturePolicyGraphQLFields keeps the complete verifier policy at both metadata boundaries.
+const registrySignaturePolicyGraphQLFields = `
+	version
+	rules {
+		name kind
+		response { value { location name path } body_field status_code }
+		predicates { source { location name path } operator value }
+		verification {
+			kind
+			signature {
+				secret_ref
+				signature { location name path }
+				components { value kind names join algorithm encoding }
+				timestamp { header max_age_ms max_future_ms }
+				algorithm encoding comparison prefix component_separator
+			}
+			jwt { secret_ref token { location name path } algorithms issuer audience clock_skew_ms }
+			challenge { value { location name path } body_field status_code }
+		}
+	}
+`

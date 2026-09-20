@@ -1,6 +1,10 @@
 package api
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -31,6 +35,28 @@ func TestParseAppAuthReferenceEnforcesClosedGrammar(t *testing.T) {
 		if _, err := parseAppAuthReference(value); err == nil {
 			t.Fatalf("expected reference %q to fail", strings.ReplaceAll(value, "\n", "\\n"))
 		}
+	}
+}
+
+// TestParseAppAuthReferenceFusedNamespace keeps the reserved Fused-owned
+// namespace distinct from the plain bucket namespace: only the fused form is
+// marked managed, so a missing local credential can never silently select it.
+func TestParseAppAuthReferenceFusedNamespace(t *testing.T) {
+	managed, err := parseAppAuthReference("${fused.bucket.auth.gmail.oauth2}")
+	if err != nil || !managed.Managed || managed.ServiceKey != "gmail" || managed.AuthName != "oauth2" {
+		t.Fatalf("managed reference = %#v, %v", managed, err)
+	}
+	// The plain bucket form must stay unmanaged and keep its local meaning.
+	local, err := parseAppAuthReference("${bucket.auth.gmail.oauth2}")
+	if err != nil || local.Managed || local.ServiceKey != "gmail" || local.AuthName != "oauth2" {
+		t.Fatalf("local reference = %#v, %v", local, err)
+	}
+	// A fused-like spelling without the exact prefix is not a managed reference.
+	if _, err := parseAppAuthReference("${fused.bucket.auth.gmail.oauth2}extra"); err == nil {
+		t.Fatal("expected trailing text to fail")
+	}
+	if _, err := parseAppAuthReference("${bucket.fused.auth.gmail.oauth2}"); err == nil {
+		t.Fatal("expected reordered namespace to fail")
 	}
 }
 
@@ -122,6 +148,111 @@ func TestResolveAppAuthReferenceSelectionRejectsCrossBucketSource(t *testing.T) 
 	sameBucket := appBucketSet{Default: defaultBucket, Overrides: map[uuid.UUID]store.Bucket{sourceID: defaultBucket}}
 	if err := resolveAppAuthReferenceSelection(&selection, auth, services, contracts, sameBucket); err != nil {
 		t.Fatalf("expected same-bucket auth.ref to succeed once buckets align: %v", err)
+	}
+}
+
+// TestResolveAppAuthReferenceSelectionPinsManagedSource proves the
+// ${fused.bucket.auth...} form self-references the connecting service
+// (unlike the plain form, which rejects that as pointless), needs no local
+// bucket contract snapshot at all (the credential lives on the broker, not
+// this bucket), and is exempt from the same-bucket invariant that only
+// makes sense for a locally-stored credential. This is the exact function
+// both SDK and MCP config apply share (createMCPConfigPlan calls the same
+// resolveSDKSelections pipeline as SDK), so this one test covers both.
+func TestResolveAppAuthReferenceSelectionPinsManagedSource(t *testing.T) {
+	targetID := uuid.New()
+	selection := models.SDKSelection{
+		ServiceID: targetID, AuthType: "oauth", AuthName: "jiraOAuth",
+		RequiredAuth: []models.SDKRequiredAuth{{AuthType: "oauth", AuthName: "jiraOAuth"}},
+	}
+	auth := &sdkAppAuthDoc{Type: "oauth", Name: "jiraOAuth", Ref: "${fused.bucket.auth.jira.jiraOAuth}"}
+	services := map[string]store.WorkspaceService{"jira": {ServiceID: targetID, Version: "v1"}}
+	// No contracts entry for targetID: a managed reference must not require
+	// the local auth-contract snapshot the plain form needs to validate a
+	// source's declared scheme.
+	buckets := appBucketSet{Default: store.Bucket{ID: uuid.New(), Name: "default"}}
+	if err := resolveAppAuthReferenceSelection(&selection, auth, services, nil, buckets); err != nil {
+		t.Fatalf("resolve managed app auth reference: %v", err)
+	}
+	if !selection.ManagedAuth || selection.AuthRef != auth.Ref || selection.CredentialSourceServiceID != targetID ||
+		selection.CredentialSourceAuthType != "oauth" || selection.CredentialSourceAuthName != "jiraOAuth" {
+		t.Fatalf("resolved managed selection = %#v", selection)
+	}
+
+	// A scheme mismatch between the reference and the target must still be
+	// rejected -- "managed" changes where the secret comes from, not whether
+	// the reference has to name the right scheme.
+	mismatched := selection
+	mismatched.ManagedAuth, mismatched.CredentialSourceServiceID = false, uuid.Nil
+	mismatchedAuth := &sdkAppAuthDoc{Type: "oauth", Name: "jiraOAuth", Ref: "${fused.bucket.auth.jira.otherScheme}"}
+	if err := resolveAppAuthReferenceSelection(&mismatched, mismatchedAuth, services, nil, buckets); err == nil {
+		t.Fatal("expected mismatched managed auth scheme to be rejected")
+	}
+
+	// A managed reference to a service the workspace has not enabled must be
+	// rejected the same way an unmanaged one is.
+	unknownAuth := &sdkAppAuthDoc{Type: "oauth", Name: "jiraOAuth", Ref: "${fused.bucket.auth.notenabled.jiraOAuth}"}
+	if err := resolveAppAuthReferenceSelection(&selection, unknownAuth, map[string]store.WorkspaceService{}, nil, buckets); err == nil {
+		t.Fatal("expected managed reference to a disabled service to be rejected")
+	}
+}
+
+// TestManagedAuthReferencePlanReachesSDKAndMCPHTTP proves createMCPConfigPlan's
+// claim ("MCP shares SDK selection/auth decisions rather than implementing an
+// alternate planner") actually holds for ${fused.bucket.auth...}: both real
+// HTTP plan handlers must pin the same managed selection from the same config
+// shape, not just the unit-level resolver above.
+func TestManagedAuthReferencePlanReachesSDKAndMCPHTTP(t *testing.T) {
+	for _, test := range []struct{ kind, language, descriptionField string }{
+		{"sdk", "typescript", ""},
+		{"mcp", "", `,"description":"Find and manage Jira work."`},
+	} {
+		t.Run(test.kind, func(t *testing.T) {
+			serviceID, versionID := uuid.New(), uuid.New()
+			s := &workspaceTestStore{accountID: uuid.New(),
+				workspaceServices:        []store.WorkspaceService{{ServiceID: serviceID, ServiceName: "Jira", Version: "v1"}},
+				workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{serviceID: {{ServiceID: serviceID, ServiceVersionID: versionID, Version: "v1"}}},
+			}
+			registry := &appAuthMismatchRegistry{mockRegistryClient: &mockRegistryClient{
+				slugIDs: map[string]uuid.UUID{"jira": serviceID},
+				contractRevisions: map[string]sandbox.ServiceVersionRevision{
+					serviceID.String() + "|v1": {ServiceID: serviceID, ServiceVersionID: versionID, Version: "v1", Revision: 1},
+				},
+			}, contracts: []sandbox.ServiceVersionExecutionAuthContract{executionAuthContract(serviceID,
+				fusedobject.AuthConfigs{artifactOAuth("read")}, securedOperation("readIssue", "oauthAuth"))}}
+			configStore := &mockConfigStore{}
+			router := newControlTestRouter(s.accountID)
+			router.Post("/sdk-config/plan", SDKConfigPlanHandler(configStore, s, registry))
+			router.Post("/mcp-config/plan", MCPConfigPlanHandler(configStore, s, registry))
+			body := fmt.Sprintf(`{"source_hash":"fixture","config_key":"%s:fixture:1.0.0","config":{"apiVersion":"fused/v1","kind":%q,"name":"fixture","version":"1.0.0"%s,"language":%q,"bucket":"default","services":{"jira":{"version":"v1","operations":["readIssue"],"auth":{"type":"oauth","name":"oauthAuth","ref":"${fused.bucket.auth.jira.oauthAuth}"}}}}}`, test.kind, test.kind, test.descriptionField, test.language)
+			request := httptest.NewRequest(http.MethodPost, "/"+test.kind+"-config/plan", strings.NewReader(body))
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			// A managed reference needs no bucket credential at all, so this must
+			// plan clean -- no auth error, no "missing credential" readiness warning.
+			if response.Code != http.StatusOK || configStore.createdPlan == nil {
+				t.Fatalf("plan response = %d %s", response.Code, response.Body.String())
+			}
+			var payload struct {
+				CredentialReadiness *appCredentialReadiness `json:"credential_readiness"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode plan response: %v", err)
+			}
+			if payload.CredentialReadiness != nil && len(payload.CredentialReadiness.MissingCredentials) != 0 {
+				t.Fatalf("managed reference must not report missing local credentials: %#v", payload.CredentialReadiness)
+			}
+			var resolved struct {
+				Selections []models.SDKSelection `json:"selections"`
+			}
+			if err := json.Unmarshal(configStore.createdPlan.ResolvedPayload, &resolved); err != nil || len(resolved.Selections) != 1 {
+				t.Fatalf("resolved payload = %s / %v", configStore.createdPlan.ResolvedPayload, err)
+			}
+			selection := resolved.Selections[0]
+			if !selection.ManagedAuth || selection.CredentialSourceServiceID != serviceID || selection.CredentialSourceAuthName != "oauthAuth" {
+				t.Fatalf("%s: pinned selection = %#v", test.kind, selection)
+			}
+		})
 	}
 }
 

@@ -20,15 +20,22 @@ func NormalizeAndValidate(config *Config) error {
 	return Validate(config)
 }
 
+// normalizeRule canonicalizes metadata without changing authenticated literal bytes.
 func normalizeRule(rule *Rule) {
 	rule.Name = strings.TrimSpace(rule.Name)
 	rule.Kind = RuleKind(strings.ToLower(strings.TrimSpace(string(rule.Kind))))
+	// Canonical empty collections retain one deterministic policy representation.
 	if rule.Predicates == nil {
 		rule.Predicates = []Predicate{}
 	}
 	for index := range rule.Predicates {
 		normalizeSource(&rule.Predicates[index].Source)
 		rule.Predicates[index].Operator = PredicateOperator(strings.ToLower(strings.TrimSpace(string(rule.Predicates[index].Operator))))
+	}
+	// Response normalization preserves the value path while canonicalizing its source.
+	if rule.Response != nil {
+		normalizeSource(&rule.Response.Value)
+		rule.Response.BodyField = strings.TrimSpace(rule.Response.BodyField)
 	}
 	normalizeVerification(&rule.Verification)
 }
@@ -51,7 +58,12 @@ func normalizeVerification(verification *Verification) {
 	}
 }
 
+// normalizeSignature canonicalizes metadata without changing authenticated literal bytes.
 func normalizeSignature(signature *SignatureVerification) {
+	// Header spelling is normalized without changing signed constant values.
+	if signature.Timestamp != nil {
+		signature.Timestamp.Header = strings.TrimSpace(signature.Timestamp.Header)
+	}
 	signature.SecretRef = normalizeSecretRef(signature.SecretRef)
 	normalizeSource(&signature.Signature)
 	signature.Algorithm = Algorithm(strings.ToLower(strings.TrimSpace(string(signature.Algorithm))))
@@ -63,6 +75,7 @@ func normalizeSignature(signature *SignatureVerification) {
 		component.Join = ComponentJoin(strings.ToLower(strings.TrimSpace(string(component.Join))))
 		component.Algorithm = Algorithm(strings.ToLower(strings.TrimSpace(string(component.Algorithm))))
 		component.Encoding = Encoding(strings.ToLower(strings.TrimSpace(string(component.Encoding))))
+		// Canonical empty collections retain one deterministic policy representation.
 		if component.Names == nil {
 			component.Names = []string{}
 		}

@@ -916,9 +916,9 @@ func TestBuildGraphQLAuthorizationPlanFailsClosed(t *testing.T) {
 
 func authorizationTestSchema(t *testing.T, s *workspaceTestStore) graphql.Schema {
 	t.Helper()
-	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"), nil)
+	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"), nil, nil)
 	if err != nil {
-		t.Fatalf("newMCPGraphQLSchema() error = %v", err)
+		t.Fatalf("newMCPGraphQLSchema(, nil) error = %v", err)
 	}
 	return schema
 }

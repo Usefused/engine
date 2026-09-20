@@ -150,11 +150,18 @@ export interface ConnectBranding extends ConnectBrandingInput {
   updated_at?: string;
 }
 
-export interface OAuthConnectedApp {
-  client_id: string;
-  client_name: string;
-  scope: string[];
-  granted_at: string;
+// ManagedAuthStatusValue mirrors managedauthclient.Status
+// (internal/engine/managedauthclient/service.go), including saved opt-out
+// and temporary unavailability while broker authority cannot be renewed.
+export type ManagedAuthStatusValue =
+  | "disabled"
+  | "ready"
+  | "enrollment_required"
+  | "temporarily_unavailable";
+
+export interface ManagedAuthStatus {
+  status: ManagedAuthStatusValue;
+  revocation_pending: boolean;
 }
 
 export interface CreditBundle {
@@ -1302,15 +1309,21 @@ export const api = {
       }),
   },
 
-  connectedApps: {
-    // Every signed-in user manages only their own OAuth consents; Engine
-    // scopes both of these to the caller's own subject, no workspace RBAC involved.
-    list: () => req<{ connected_apps: OAuthConnectedApp[] }>("/oauth/connected-apps"),
-    revoke: (clientId: string) => req<void>(`/oauth/connected-apps/${clientId}`, { method: "DELETE" }),
-  },
-
   credits: {
     getPricing: () => req<CreditsPricing>("/credits/pricing"),
+  },
+
+  managedAuth: {
+    // get reports this installation's current enrollment state with the
+    // Fused-hosted managed-auth broker: "ready", "enrollment_required", or
+    // "temporarily_unavailable" (internal/engine/managedauthclient).
+    get: () => req<ManagedAuthStatus>("/workspace/managed-auth"),
+    // enable is the one explicit opt-in action; it blocks for one enrollment
+    // round trip rather than returning "pending" and requiring a poll.
+    enable: () =>
+      req<ManagedAuthStatus>("/workspace/managed-auth", { method: "PUT" }),
+    // Disable persists opt-out while the Engine retries any outstanding broker revocation.
+    disable: () => req<ManagedAuthStatus>("/workspace/managed-auth", { method: "DELETE" }),
   },
 
   // GraphQL freshness uses the shared credentialed transport without permitting a different method or body.

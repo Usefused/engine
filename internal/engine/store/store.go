@@ -736,8 +736,12 @@ type AuthConnection struct {
 	CredentialSourceServiceID uuid.UUID
 	CredentialSourceAuthType  string
 	CredentialSourceAuthName  string
-	EncryptedDEK              string
-	EncryptedAccessToken      string
+	// ManagedAuth is true only when the connecting app's config explicitly
+	// referenced ${fused.bucket.auth.<service>.<authName>} -- never set as
+	// a fallback when no local application credentials exist.
+	ManagedAuth           bool
+	EncryptedDEK          string
+	EncryptedAccessToken  string
 	EncryptedRefreshToken     string
 	EncryptedIDToken          string
 	TokenType                 string
@@ -792,6 +796,7 @@ type ConnectSession struct {
 	CredentialSourceServiceID uuid.UUID
 	CredentialSourceAuthType  string
 	CredentialSourceAuthName  string
+	ManagedAuth               bool
 	RedirectURI               string
 	EndUserRef                string
 	StateHash                 string
@@ -820,6 +825,7 @@ type ConnectInputSession struct {
 	CredentialSourceServiceID uuid.UUID
 	CredentialSourceAuthType  string
 	CredentialSourceAuthName  string
+	ManagedAuth               bool
 	ContractHash              string
 	EndUserRef                string
 	TokenHash                 string
@@ -1065,6 +1071,10 @@ type Store interface {
 
 	// GetWorkspaceWebhookBySlug is the Engine's indexed webhook ingress lookup.
 	GetWorkspaceWebhookBySlug(ctx context.Context, slug string) (*WorkspaceWebhook, error)
+	// GetWorkspaceWebhookByServiceAndLabel resolves the predictable default
+	// registration by workspace service slug + label (the /webhook/svc/{service}
+	// ingress), joining fused_workspace_services for the slug→service_id hop.
+	GetWorkspaceWebhookByServiceAndLabel(ctx context.Context, serviceSlug, label string) (*WorkspaceWebhook, error)
 	// ListWorkspaceWebhooks returns every registration a workspace holds for
 	// one service, for CLI/visibility output.
 	ListWorkspaceWebhooks(ctx context.Context, serviceID uuid.UUID) ([]WorkspaceWebhook, error)

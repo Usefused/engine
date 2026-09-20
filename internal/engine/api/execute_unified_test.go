@@ -398,7 +398,7 @@ func newUnifiedRuntimeServerFromFixture(t *testing.T, fixture unifiedCompileFixt
 		AccountID: accountID, AppFamilyID: uuid.New(), AppID: appID, AppVersion: "1.0.0",
 		Kind: store.AppKindSDK, Status: store.AppStatusActive, TokenPolicy: policy,
 	}
-	server := NewEngineGRPCServer(runtimeStore, nil, nil, nil, nil, unifiedTestValidator{identity: identity})
+	server := NewEngineGRPCServer(runtimeStore, nil, nil, nil, nil, unifiedTestValidator{identity: identity}, nil)
 	runtime := &unifiedRuntimeTestDouble{}
 	server.unifiedRuntime = runtime
 	return server, runtime, appID

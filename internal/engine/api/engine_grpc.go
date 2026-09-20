@@ -8,6 +8,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/auth"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
+	"github.com/Usefused/engine/internal/engine/managedauthclient"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/engine/webhookstream"
@@ -30,6 +31,7 @@ type EngineGRPCServer struct {
 	verifier       ServiceVerifier
 	masterKey      []byte
 	redirectURI    string
+	managedConnect *managedauthclient.ConnectClient
 	// configStore and natsClient are only needed by SubscribeWebhooks
 	// (webhook_grpc_handler.go) -- resolving a connecting SDK/MCP's
 	// webhook_attachment label and bridging to the NATS JetStream durable
@@ -42,12 +44,12 @@ type EngineGRPCServer struct {
 
 // NewEngineGRPCServer requires the process-shared validator so SDK execution,
 // MCP execution, and revocation can never accidentally use separate caches.
-func NewEngineGRPCServer(s store.Store, verifier ServiceVerifier, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator, redirectURIs ...string) *EngineGRPCServer {
-	return NewEngineGRPCServerWithWebhookStreams(s, verifier, masterKey, configStore, natsClient, tokenValidator, webhookstream.NewRegistry(), redirectURIs...)
+func NewEngineGRPCServer(s store.Store, verifier ServiceVerifier, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator, managedConnect *managedauthclient.ConnectClient, redirectURIs ...string) *EngineGRPCServer {
+	return NewEngineGRPCServerWithWebhookStreams(s, verifier, masterKey, configStore, natsClient, tokenValidator, webhookstream.NewRegistry(), managedConnect, redirectURIs...)
 }
 
 // NewEngineGRPCServerWithWebhookStreams injects the process-shared live receiver registry used by revocation and app invalidation.
-func NewEngineGRPCServerWithWebhookStreams(s store.Store, verifier ServiceVerifier, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator, webhookStreams *webhookstream.Registry, redirectURIs ...string) *EngineGRPCServer {
+func NewEngineGRPCServerWithWebhookStreams(s store.Store, verifier ServiceVerifier, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator, webhookStreams *webhookstream.Registry, managedConnect *managedauthclient.ConnectClient, redirectURIs ...string) *EngineGRPCServer {
 	runtime := sandbox.NewEngineGRPCServer()
 	// A nil optional registry still fails closed through a private registry rather than leaving streams untracked.
 	if webhookStreams == nil {
@@ -61,6 +63,7 @@ func NewEngineGRPCServerWithWebhookStreams(s store.Store, verifier ServiceVerifi
 		verifier:       verifier,
 		masterKey:      masterKey,
 		redirectURI:    firstRedirectURI(redirectURIs),
+		managedConnect: managedConnect,
 		configStore:    configStore,
 		natsClient:     natsClient,
 		tokenValidator: tokenValidator,
@@ -121,7 +124,7 @@ func (s *EngineGRPCServer) StartConnectSession(ctx context.Context, req *enginev
 	if returnURL != "" && !isAbsoluteHTTPURL(returnURL) {
 		return nil, status.Error(codes.InvalidArgument, "return_url must be an absolute http or https URL")
 	}
-	resolved, err := resolveConnectRuntimeConfig(ctx, s.store, s.verifier, call, s.masterKey, s.redirectURI)
+	resolved, err := resolveConnectRuntimeConfig(ctx, s.store, s.verifier, call, s.masterKey, s.managedConnect, s.redirectURI)
 	if err != nil {
 		return nil, grpcConnectError(err)
 	}

@@ -13,7 +13,7 @@ import (
 
 const authConnectionColumns = `
 	id,  bucket_id, service_id, service_version_id, end_user_ref, created_by_app_id,
-	auth_type, auth_name, credential_source_service_id, credential_source_auth_type, credential_source_auth_name,
+	auth_type, auth_name, credential_source_service_id, credential_source_auth_type, credential_source_auth_name, is_managed_auth,
 	encrypted_dek, access_token, refresh_token, id_token, token_type,
 	scopes, scope_source, issuer, subject, identity_claims, expires_at, refresh_token_expires_at, last_used_at,
 	last_refresh_attempt_at, last_refreshed_at, refresh_retry_not_before, refresh_state,
@@ -21,12 +21,12 @@ const authConnectionColumns = `
 
 const connectSessionColumns = `
 	id,  bucket_id, service_id, service_version_id, auth_type, auth_name,
-	credential_source_service_id, credential_source_auth_type, credential_source_auth_name, end_user_ref, state_hash,
+	credential_source_service_id, credential_source_auth_type, credential_source_auth_name, is_managed_auth, end_user_ref, state_hash,
 	nonce_hash, encrypted_dek, pkce_verifier, redirect_uri, created_by_app_id, return_url, resource_input, requested_scopes, expires_at, used_at, created_at`
 
 const connectInputSessionColumns = `
 	id, bucket_id, service_id, auth_type, auth_name,
-	credential_source_service_id, credential_source_auth_type, credential_source_auth_name, contract_hash, end_user_ref, token_hash,
+	credential_source_service_id, credential_source_auth_type, credential_source_auth_name, is_managed_auth, contract_hash, end_user_ref, token_hash,
 	created_by_app_id, return_url, resource_input, requested_scopes, expires_at, used_at, created_at`
 
 // prefixedAuthConnectionColumns qualifies the canonical credential projection
@@ -88,13 +88,13 @@ func upsertAuthConnectionRow(ctx context.Context, querier authConnectionRowQueri
 	query := `
 		INSERT INTO fused_auth_connections (
 			bucket_id, service_id, service_version_id, end_user_ref, created_by_app_id,
-			auth_type, auth_name, credential_source_service_id, credential_source_auth_type, credential_source_auth_name,
+			auth_type, auth_name, credential_source_service_id, credential_source_auth_type, credential_source_auth_name, is_managed_auth,
 			encrypted_dek, access_token, refresh_token, id_token,
 			token_type, scopes, scope_source, issuer, subject, identity_claims, expires_at, refresh_token_expires_at,
 			refresh_state, last_failure_code, last_failure_at, last_failure_trace_id
 		)
-		SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21, $22,
-		       $23, $24, $25, $26
+		SELECT b.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21::jsonb, $22, $23,
+		       $24, $25, $26, $27
 		FROM fused_buckets b
 		WHERE b.id = $1
 		ON CONFLICT ON CONSTRAINT uq_fused_auth_connections
@@ -106,6 +106,7 @@ func upsertAuthConnectionRow(ctx context.Context, querier authConnectionRowQueri
 			credential_source_service_id = EXCLUDED.credential_source_service_id,
 			credential_source_auth_type = EXCLUDED.credential_source_auth_type,
 			credential_source_auth_name = EXCLUDED.credential_source_auth_name,
+			is_managed_auth = EXCLUDED.is_managed_auth,
 			encrypted_dek = EXCLUDED.encrypted_dek,
 			access_token = EXCLUDED.access_token,
 			refresh_token = EXCLUDED.refresh_token,
@@ -129,7 +130,7 @@ func upsertAuthConnectionRow(ctx context.Context, querier authConnectionRowQueri
 		RETURNING ` + authConnectionColumns
 	return scanAuthConnection(querier.QueryRow(ctx, query,
 		conn.BucketID, conn.ServiceID, conn.ServiceVersionID, conn.EndUserRef, uuidOrNil(conn.CreatedByAppID),
-		conn.AuthType, conn.AuthName, conn.CredentialSourceServiceID, conn.CredentialSourceAuthType, conn.CredentialSourceAuthName,
+		conn.AuthType, conn.AuthName, conn.CredentialSourceServiceID, conn.CredentialSourceAuthType, conn.CredentialSourceAuthName, conn.ManagedAuth,
 		conn.EncryptedDEK, conn.EncryptedAccessToken, emptyStringOrNil(conn.EncryptedRefreshToken), emptyStringOrNil(conn.EncryptedIDToken),
 		defaultString(conn.TokenType, "Bearer"), nonNilStrings(conn.Scopes), defaultString(conn.ScopeSource, "none"), conn.Issuer, conn.Subject,
 		jsonObjectBytes(conn.IdentityClaims), conn.ExpiresAt, conn.RefreshTokenExpiresAt, defaultString(conn.RefreshState, "ok"),
@@ -448,16 +449,16 @@ func insertConnectSession(ctx context.Context, db connectQueryRower, session Con
 	query := `
 		INSERT INTO fused_connect_sessions (
 			id, bucket_id, service_id, service_version_id, auth_type, auth_name,
-			credential_source_service_id, credential_source_auth_type, credential_source_auth_name, end_user_ref, state_hash,
+			credential_source_service_id, credential_source_auth_type, credential_source_auth_name, is_managed_auth, end_user_ref, state_hash,
 			nonce_hash, encrypted_dek, pkce_verifier, redirect_uri, created_by_app_id, return_url, resource_input, requested_scopes, expires_at
 			)
-			SELECT $1, b.id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+			SELECT $1, b.id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
 			FROM fused_buckets b
 			WHERE b.id = $2
 			RETURNING ` + connectSessionColumns
 	return scanConnectSession(db.QueryRow(ctx, query,
 		session.ID, session.BucketID, session.ServiceID, session.ServiceVersionID, session.AuthType, session.AuthName,
-		session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName, session.EndUserRef,
+		session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName, session.ManagedAuth, session.EndUserRef,
 		session.StateHash, session.NonceHash, session.EncryptedDEK, session.EncryptedPKCEVerifier, session.RedirectURI,
 		uuidOrNil(session.CreatedByAppID), session.ReturnURL, jsonObjectBytes(session.ResourceInputJSON), session.RequestedScopes, session.ExpiresAt,
 	))
@@ -498,16 +499,16 @@ func (s *postgresStore) CreateConnectInputSession(ctx context.Context, session C
 	query := `
 		INSERT INTO fused_connect_input_sessions (
 			id, bucket_id, service_id, auth_type, auth_name,
-			credential_source_service_id, credential_source_auth_type, credential_source_auth_name, contract_hash, end_user_ref, token_hash,
+			credential_source_service_id, credential_source_auth_type, credential_source_auth_name, is_managed_auth, contract_hash, end_user_ref, token_hash,
 			created_by_app_id, return_url, resource_input, requested_scopes, expires_at
 			)
-		SELECT $1, b.id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+		SELECT $1, b.id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
 		FROM fused_buckets b
 		WHERE b.id = $2
 		RETURNING ` + connectInputSessionColumns
 	return scanConnectInputSession(s.db.QueryRow(ctx, query,
 		session.ID, session.BucketID, session.ServiceID, session.AuthType, session.AuthName,
-		session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName, session.ContractHash,
+		session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName, session.ManagedAuth, session.ContractHash,
 		session.EndUserRef, session.TokenHash, uuidOrNil(session.CreatedByAppID),
 		session.ReturnURL, jsonObjectBytes(session.ResourceInputJSON), session.RequestedScopes, session.ExpiresAt,
 	))
@@ -555,14 +556,15 @@ func (s *postgresStore) CompleteConnectInputSession(ctx context.Context, tokenHa
 		  AND credential_source_service_id = $7
 		  AND credential_source_auth_type = $8
 		  AND credential_source_auth_name = $9
-		  AND end_user_ref = $10
-		  AND created_by_app_id IS NOT DISTINCT FROM $11
-		  AND return_url = $12
-		  AND requested_scopes = $13
-		  AND contract_hash = $14
-		  AND id = $15`,
+		  AND is_managed_auth = $10
+		  AND end_user_ref = $11
+		  AND created_by_app_id IS NOT DISTINCT FROM $12
+		  AND return_url = $13
+		  AND requested_scopes = $14
+		  AND contract_hash = $15
+		  AND id = $16`,
 		tokenHash, usedAt, session.BucketID, session.ServiceID, session.AuthType,
-		session.AuthName, session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName,
+		session.AuthName, session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName, session.ManagedAuth,
 		session.EndUserRef, uuidOrNil(session.CreatedByAppID),
 		session.ReturnURL, session.RequestedScopes, contractHash, session.ID,
 	)
@@ -624,7 +626,7 @@ func scanAuthConnectionWithSuffix(row rowScanner, suffix ...any) (*AuthConnectio
 	var refreshToken, idToken *string
 	targets := []any{
 		&conn.ID, &conn.BucketID, &conn.ServiceID, &conn.ServiceVersionID, &conn.EndUserRef, &createdBy,
-		&conn.AuthType, &conn.AuthName, &conn.CredentialSourceServiceID, &conn.CredentialSourceAuthType, &conn.CredentialSourceAuthName,
+		&conn.AuthType, &conn.AuthName, &conn.CredentialSourceServiceID, &conn.CredentialSourceAuthType, &conn.CredentialSourceAuthName, &conn.ManagedAuth,
 		&conn.EncryptedDEK, &conn.EncryptedAccessToken, &refreshToken, &idToken, &conn.TokenType,
 		&conn.Scopes, &conn.ScopeSource, &conn.Issuer, &conn.Subject, &conn.IdentityClaims, &conn.ExpiresAt, &conn.RefreshTokenExpiresAt, &conn.LastUsedAt,
 		&conn.LastRefreshAttemptAt, &conn.LastRefreshedAt, &conn.RefreshRetryNotBefore,
@@ -691,7 +693,7 @@ func scanConnectSession(row rowScanner) (*ConnectSession, error) {
 	var createdBy *uuid.UUID
 	err := row.Scan(
 		&session.ID, &session.BucketID, &session.ServiceID, &session.ServiceVersionID, &session.AuthType, &session.AuthName,
-		&session.CredentialSourceServiceID, &session.CredentialSourceAuthType, &session.CredentialSourceAuthName, &session.EndUserRef,
+		&session.CredentialSourceServiceID, &session.CredentialSourceAuthType, &session.CredentialSourceAuthName, &session.ManagedAuth, &session.EndUserRef,
 		&session.StateHash, &session.NonceHash, &session.EncryptedDEK, &session.EncryptedPKCEVerifier, &session.RedirectURI, &createdBy,
 		&session.ReturnURL, &session.ResourceInputJSON, &session.RequestedScopes, &session.ExpiresAt, &session.UsedAt, &session.CreatedAt,
 	)
@@ -709,7 +711,7 @@ func scanConnectInputSession(row rowScanner) (*ConnectInputSession, error) {
 	var createdBy *uuid.UUID
 	err := row.Scan(
 		&session.ID, &session.BucketID, &session.ServiceID, &session.AuthType, &session.AuthName,
-		&session.CredentialSourceServiceID, &session.CredentialSourceAuthType, &session.CredentialSourceAuthName, &session.ContractHash,
+		&session.CredentialSourceServiceID, &session.CredentialSourceAuthType, &session.CredentialSourceAuthName, &session.ManagedAuth, &session.ContractHash,
 		&session.EndUserRef, &session.TokenHash, &createdBy, &session.ReturnURL,
 		&session.ResourceInputJSON, &session.RequestedScopes, &session.ExpiresAt, &session.UsedAt, &session.CreatedAt,
 	)

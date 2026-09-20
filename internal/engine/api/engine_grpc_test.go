@@ -159,7 +159,7 @@ func newConnectGRPCTestServer(fixture connectRuntimeFixture) (*EngineGRPCServer,
 	}
 	// Connect metadata RPCs do not touch the webhook-only configuration or NATS
 	// dependencies, so nil keeps this fixture scoped to its actual boundary.
-	server := NewEngineGRPCServer(runtimeStore, fixture.verifier, fixture.masterKey, nil, nil, auth.NewTokenValidator(runtimeStore), "https://engine.example.com/workspace/connect/callback")
+	server := NewEngineGRPCServer(runtimeStore, fixture.verifier, fixture.masterKey, nil, nil, auth.NewTokenValidator(runtimeStore), nil, "https://engine.example.com/workspace/connect/callback")
 	return server, appID
 }
 
@@ -212,7 +212,7 @@ func TestEngineGRPCGetConnectionReturnsMetadataOnly(t *testing.T) {
 	}
 	// configStore/natsClient are nil -- see the identical note above; this
 	// test only exercises GetConnection.
-	srv := NewEngineGRPCServer(runtimeStore, &mockVerifier{}, []byte("12345678901234567890123456789012"), nil, nil, auth.NewTokenValidator(runtimeStore))
+	srv := NewEngineGRPCServer(runtimeStore, &mockVerifier{}, []byte("12345678901234567890123456789012"), nil, nil, auth.NewTokenValidator(runtimeStore), nil)
 
 	resp, err := srv.GetConnection(grpcTestContext(appID), &enginev1.GetConnectionRequest{ConnectionId: connectionID.String()})
 	if err != nil {
@@ -268,7 +268,7 @@ func TestEngineGRPCRejectsRemovedSelectionField(t *testing.T) {
 			Selections: []byte(`[{"service_id":"` + uuid.NewString() + `","service_version_id":"` + uuid.NewString() + `","definition_schema_version":3}]`),
 		},
 	}
-	server := NewEngineGRPCServer(runtimeStore, &mockVerifier{}, nil, nil, nil, auth.NewTokenValidator(runtimeStore))
+	server := NewEngineGRPCServer(runtimeStore, &mockVerifier{}, nil, nil, nil, auth.NewTokenValidator(runtimeStore), nil)
 
 	_, err := server.GetConnection(grpcTestContext(appID), &enginev1.GetConnectionRequest{ConnectionId: uuid.NewString()})
 	if status.Code(err) != codes.PermissionDenied {

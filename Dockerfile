@@ -24,7 +24,8 @@ COPY runtime/mcp/tsconfig.json runtime/mcp/tsconfig.build.json ./
 COPY runtime/mcp/src ./src
 RUN npm run build
 
-FROM golang:1.25-alpine AS engine-base
+# Build with the patched standard library required by go.mod.
+FROM golang:1.26.6-alpine AS engine-base
 
 WORKDIR /app
 

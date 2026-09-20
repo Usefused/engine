@@ -1126,6 +1126,10 @@ type SDKSelection struct {
 	CredentialSourceServiceID uuid.UUID            `json:"credential_source_service_id,omitempty"`
 	CredentialSourceAuthType  string               `json:"credential_source_auth_type,omitempty"`
 	CredentialSourceAuthName  string               `json:"credential_source_auth_name,omitempty"`
+	// ManagedAuth is true only when the app's config explicitly referenced
+	// ${fused.bucket.auth.<service>.<authName>}; consent and refresh then route
+	// through the managed-auth broker instead of a bucket-owned app pair.
+	ManagedAuth bool `json:"managed_auth,omitempty"`
 	RequiredAuth              []SDKRequiredAuth    `json:"required_auth,omitempty"`
 	ConnectScopes             []string             `json:"connect_scopes,omitempty"`
 	Injections                []SDKInjectionConfig `json:"injections,omitempty"`

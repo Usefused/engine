@@ -133,6 +133,16 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodPut, "/workspace/connect-branding", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionWorkspaceUpdate),
 	}},
+	{http.MethodGet, "/workspace/managed-auth", false, []routeRequirement{
+		workspaceRequirement(accesscontrol.PermissionWorkspaceRead),
+	}},
+	{http.MethodPut, "/workspace/managed-auth", false, []routeRequirement{
+		workspaceRequirement(accesscontrol.PermissionWorkspaceUpdate),
+	}},
+	// Disabling delegation changes workspace authorization and needs the same permission as enabling it.
+	{http.MethodDelete, "/workspace/managed-auth", false, []routeRequirement{
+		workspaceRequirement(accesscontrol.PermissionWorkspaceUpdate),
+	}},
 	{http.MethodPut, "/workspace/buckets/{bucket_id}/values", false, []routeRequirement{
 		pathRequirement(accesscontrol.PermissionBucketManage, accesscontrol.ResourceBucket, "bucket_id"),
 	}},

@@ -15,6 +15,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/connectresource"
 	"github.com/Usefused/engine/internal/engine/executionevent"
+	"github.com/Usefused/engine/internal/engine/managedauthclient"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -1814,7 +1815,7 @@ func upsertSecretsGraphQLField(s store.Store, masterKey []byte) *graphql.Field {
 
 // startConnectSessionGraphQLField reuses the runtime connect flow so provider
 // metadata, PKCE, and encrypted session state stay centralized in Engine.
-func startConnectSessionGraphQLField(s store.Store, verifier ServiceVerifier, masterKey []byte, redirectURIs ...string) *graphql.Field {
+func startConnectSessionGraphQLField(s store.Store, verifier ServiceVerifier, masterKey []byte, managedConnect *managedauthclient.ConnectClient, redirectURIs ...string) *graphql.Field {
 	return &graphql.Field{
 		Type: connectSessionGraphQLType,
 		Args: connectSessionMutationArgs(),
@@ -1841,7 +1842,7 @@ func startConnectSessionGraphQLField(s store.Store, verifier ServiceVerifier, ma
 			if err := validateConnectAuditSDK(ctx, s, optionalUUIDValueOrNil(createdByAppID)); err != nil {
 				return nil, err
 			}
-			resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey, firstRedirectURI(redirectURIs))
+			resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey, managedConnect, firstRedirectURI(redirectURIs))
 			if err != nil {
 				return nil, err
 			}
@@ -2224,7 +2225,7 @@ func connectAdminCallFromArgs(p graphql.ResolveParams, s store.Store) (connectAd
 	// Closed reference grammar prevents GraphQL clients from supplying field interpolation or partial source identity.
 	if authRef != "" {
 		if _, err := parseAppAuthReference(authRef); err != nil {
-			return connectAdminCall{}, errors.New("auth_ref must use ${bucket.auth.<service>.<authName>}")
+			return connectAdminCall{}, errors.New("auth_ref must use ${bucket.auth.<service>.<authName>} or ${fused.bucket.auth.<service>.<authName>}")
 		}
 	}
 	return connectAdminCall{bucketID: bucketID, serviceID: serviceID, authType: authType, authName: authName, authRef: authRef}, nil

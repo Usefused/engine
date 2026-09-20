@@ -23,6 +23,7 @@ import (
 // so ingress resolves a request with one indexed read instead of a call out
 // to fetch the service's auth shape.
 type WorkspaceWebhook struct {
+	RelayConfig         json.RawMessage
 	ID                  uuid.UUID
 	ServiceID           uuid.UUID
 	ServiceVersionID    uuid.UUID
@@ -66,11 +67,17 @@ var (
 	ErrWorkspaceWebhookDuplicate     = errors.New("workspace webhook batch contains a duplicate service identity")
 )
 
+// DefaultWebhookLabel is the reserved kind: webhook config name whose
+// registrations are reachable at the predictable /webhook/svc/{service} URL and
+// must therefore always carry signature verification.
+const DefaultWebhookLabel = "default"
+
 type workspaceWebhookQueryer interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
 type workspaceWebhookBatchRow struct {
+	RelayConfig         json.RawMessage         `json:"relay_config"`
 	ServiceID           uuid.UUID               `json:"service_id"`
 	ServiceVersionID    uuid.UUID               `json:"service_version_id"`
 	Label               string                  `json:"label"`
@@ -124,15 +131,18 @@ func upsertWorkspaceWebhooks(ctx context.Context, q workspaceWebhookQueryer, reg
 	return saved, nil
 }
 
+// marshalWorkspaceWebhookBatch preserves relay policy in the same atomic registration write as signature policy.
 func marshalWorkspaceWebhookBatch(registrations []WorkspaceWebhook) ([]byte, error) {
 	batch := make([]workspaceWebhookBatchRow, len(registrations))
+	// Each reviewed registration carries its explicit transport policy through the batch.
 	for i, registration := range registrations {
 		headers := registration.VerificationHeaders
+		// PostgreSQL expects an array rather than a JSON null.
 		if headers == nil {
 			headers = []string{}
 		}
 		batch[i] = workspaceWebhookBatchRow{
-			ServiceID: registration.ServiceID, ServiceVersionID: registration.ServiceVersionID,
+			RelayConfig: registration.RelayConfig, ServiceID: registration.ServiceID, ServiceVersionID: registration.ServiceVersionID,
 			Label: registration.Label, Slug: registration.Slug,
 			AuthType: registration.AuthType, AuthLocation: registration.AuthLocation,
 			AuthKeyName: registration.AuthKeyName, SignatureHeader: registration.SignatureHeader,
@@ -158,6 +168,22 @@ func (s *postgresStore) GetWorkspaceWebhookBySlug(ctx context.Context, slug stri
 	}
 	if err != nil {
 		return nil, fmt.Errorf("GetWorkspaceWebhookBySlug: %w", err)
+	}
+	return &webhook, nil
+}
+
+// GetWorkspaceWebhookByServiceAndLabel resolves the predictable default
+// registration by workspace service slug + label, joining
+// fused_workspace_services to translate the human slug into the service_id
+// the webhook row is keyed on (plus the usual workspace join for AccountID).
+func (s *postgresStore) GetWorkspaceWebhookByServiceAndLabel(ctx context.Context, serviceSlug, label string) (*WorkspaceWebhook, error) {
+	row := s.db.QueryRow(ctx, selectWorkspaceWebhookByServiceAndLabelSQL, serviceSlug, label)
+	webhook, err := scanWorkspaceWebhookWithAccount(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("GetWorkspaceWebhookByServiceAndLabel: %w", ErrWorkspaceWebhookNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("GetWorkspaceWebhookByServiceAndLabel: %w", err)
 	}
 	return &webhook, nil
 }
@@ -220,6 +246,7 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+// scanWorkspaceWebhookRows retains transport policy alongside the canonical ingress registration.
 func scanWorkspaceWebhookRows(row rowScanner) (WorkspaceWebhook, error) {
 	var w WorkspaceWebhook
 	var signaturePolicy []byte
@@ -229,7 +256,7 @@ func scanWorkspaceWebhookRows(row rowScanner) (WorkspaceWebhook, error) {
 		&w.SignatureHeader, &w.VerificationHeaders, &w.EventExtractionPath,
 		&signaturePolicy, &w.CallbackURL,
 		&w.SecretRef, &w.SecretBucketID, &w.OwningConfigKey,
-		&w.CreatedAt, &w.UpdatedAt,
+		&w.CreatedAt, &w.UpdatedAt, &w.RelayConfig,
 	)
 	return w, scanSignaturePolicy(signaturePolicy, err, &w)
 }
@@ -245,7 +272,7 @@ func scanWorkspaceWebhookWithAccount(row rowScanner) (WorkspaceWebhook, error) {
 		&w.SignatureHeader, &w.VerificationHeaders, &w.EventExtractionPath,
 		&signaturePolicy, &w.CallbackURL,
 		&w.SecretRef, &w.SecretBucketID, &w.OwningConfigKey,
-		&w.CreatedAt, &w.UpdatedAt, &w.AccountID,
+		&w.CreatedAt, &w.UpdatedAt, &w.RelayConfig, &w.AccountID,
 	)
 	return w, scanSignaturePolicy(signaturePolicy, err, &w)
 }
@@ -264,7 +291,7 @@ const workspaceWebhookColumns = `
 	signature_header, verification_headers, event_extraction_path,
 	signature_policy, callback_url,
 	secret_ref, secret_bucket_id, owning_config_key,
-	created_at, updated_at`
+	created_at, updated_at, relay_config`
 
 const selectWorkspaceWebhookSQL = `SELECT` + workspaceWebhookColumns + ` FROM fused_workspace_webhooks`
 
@@ -281,11 +308,29 @@ const selectWorkspaceWebhookBySlugSQL = `SELECT
 		w.signature_header, w.verification_headers, w.event_extraction_path,
 		w.signature_policy, w.callback_url,
 		w.secret_ref, w.secret_bucket_id, w.owning_config_key,
-		w.created_at, w.updated_at,
+		w.created_at, w.updated_at, w.relay_config,
 		fused_workspaces.account_id
 	FROM fused_workspace_webhooks w
 	CROSS JOIN fused_workspaces
 	WHERE w.slug = $1`
+
+// selectWorkspaceWebhookByServiceAndLabelSQL is the predictable-default
+// ingress variant: same columns plus the workspace-service join needed to
+// translate a human service slug into the service_id the webhook row is keyed
+// on. The lower() match keeps lookup case-insensitive like the slug index.
+const selectWorkspaceWebhookByServiceAndLabelSQL = `SELECT
+		w.id, w.service_id, w.service_version_id,
+		w.label, w.slug,
+		w.auth_type, w.auth_location, w.auth_key_name,
+		w.signature_header, w.verification_headers, w.event_extraction_path,
+		w.signature_policy, w.callback_url,
+		w.secret_ref, w.secret_bucket_id, w.owning_config_key,
+		w.created_at, w.updated_at, w.relay_config,
+		fused_workspaces.account_id
+	FROM fused_workspace_webhooks w
+	CROSS JOIN fused_workspaces
+	JOIN fused_workspace_services svc ON svc.service_id = w.service_id
+	WHERE lower(svc.service_slug) = lower($1) AND w.label = $2`
 
 // upsertWorkspaceWebhooksSQL expands one JSON parameter inside PostgreSQL,
 // preserving immutable ownership; rows owned by a different config are
@@ -307,7 +352,8 @@ const upsertWorkspaceWebhooksSQL = `
 			entry.value->>'callback_url' AS callback_url,
 			entry.value->>'secret_ref' AS secret_ref,
 			(entry.value->>'secret_bucket_id')::uuid AS secret_bucket_id,
-			entry.value->>'owning_config_key' AS owning_config_key
+			entry.value->>'owning_config_key' AS owning_config_key,
+            entry.value->'relay_config' AS relay_config
 		FROM jsonb_array_elements($1::jsonb) WITH ORDINALITY AS entry(value, ordinality)
 	), ranked AS (
 		SELECT input.*,
@@ -335,12 +381,12 @@ const upsertWorkspaceWebhooksSQL = `
 			service_id, service_version_id, label, slug,
 			auth_type, auth_location, auth_key_name, signature_header, verification_headers, event_extraction_path,
 			signature_policy, callback_url,
-			secret_ref, secret_bucket_id, owning_config_key
+			secret_ref, secret_bucket_id, owning_config_key, relay_config
 		)
 		SELECT service_id, service_version_id, label, first_slug,
 			auth_type, auth_location, auth_key_name, signature_header, verification_headers, event_extraction_path,
 			signature_policy, callback_url,
-			secret_ref, secret_bucket_id, owning_config_key
+			secret_ref, secret_bucket_id, owning_config_key, relay_config
 		FROM candidates
 		WHERE NOT EXISTS (SELECT 1 FROM ownership_conflict)
 		ORDER BY ordinality
@@ -356,6 +402,7 @@ const upsertWorkspaceWebhooksSQL = `
 			callback_url = EXCLUDED.callback_url,
 			secret_ref = EXCLUDED.secret_ref,
 			secret_bucket_id = EXCLUDED.secret_bucket_id,
+            relay_config = EXCLUDED.relay_config,
 			updated_at = NOW()
 		WHERE fused_workspace_webhooks.owning_config_key = EXCLUDED.owning_config_key
 		RETURNING ` + workspaceWebhookColumns + `
@@ -366,7 +413,7 @@ const upsertWorkspaceWebhooksSQL = `
 		input.signature_header, input.verification_headers, input.event_extraction_path,
 		input.signature_policy, input.callback_url,
 		input.secret_ref, input.secret_bucket_id, input.owning_config_key,
-		upserted.created_at, upserted.updated_at
+		upserted.created_at, upserted.updated_at, input.relay_config
 	FROM upserted
 	JOIN input USING (service_id, label)
 	ORDER BY input.ordinality`

@@ -59,7 +59,7 @@ type connectClientCredentials = connectauth.ClientCredentials
 
 // StartConnectSessionHandler is the team/CLI-facing entry point; it creates a
 // short-lived browser session without exposing OAuth client material.
-func StartConnectSessionHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, redirectURIs ...string) http.HandlerFunc {
+func StartConnectSessionHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, managedConnect connectauth.DelegatedOAuth, redirectURIs ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.connect.session.start")
 		defer span.End()
@@ -82,7 +82,7 @@ func StartConnectSessionHandler(s store.Store, verifier ServiceVerifier, masterK
 		}
 		// Control-plane app identity is audit attribution only; explicit auth_ref owns reusable credential routing.
 		call.authType, call.authName, call.authRef = req.AuthType, req.AuthName, req.AuthRef
-		resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey, firstRedirectURI(redirectURIs))
+		resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey, managedConnect, firstRedirectURI(redirectURIs))
 		// Resolution failures occur before any one-time connect session can be persisted.
 		if err != nil {
 			writeConnectRuntimeError(w, ctx, err, "connect_resolution", "not_committed")
@@ -154,7 +154,7 @@ func connectAuditSDKUnavailableError() error {
 
 // ConnectCallbackHandler owns the browser-return leg so provider tokens are
 // exchanged and encrypted by Engine, never by generated SDK or CLI code.
-func ConnectCallbackHandler(s store.Store, verifier ServiceVerifier, masterKey []byte) http.HandlerFunc {
+func ConnectCallbackHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, managedConnect connectauth.DelegatedOAuth) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.connect.callback")
 		defer span.End()
@@ -186,6 +186,7 @@ func ConnectCallbackHandler(s store.Store, verifier ServiceVerifier, masterKey [
 				session.CredentialSourceServiceID,
 				session.CredentialSourceAuthType,
 				session.CredentialSourceAuthName,
+				session.ManagedAuth,
 			),
 		}
 		span.SetAttributes(connectAdminAttrs("connect.callback", call)...)
@@ -193,7 +194,7 @@ func ConnectCallbackHandler(s store.Store, verifier ServiceVerifier, masterKey [
 			writeConnectCallbackFailure(ctx, s, w, r, session, err)
 			return
 		}
-		resolved, err := resolveConnectRuntimeConfigForVersion(ctx, s, verifier, call, session.ServiceVersionID, masterKey, session.RedirectURI)
+		resolved, err := resolveConnectRuntimeConfigForVersion(ctx, s, verifier, call, session.ServiceVersionID, masterKey, managedConnect, session.RedirectURI)
 		if err != nil {
 			writeConnectCallbackFailure(ctx, s, w, r, session, err)
 			return
@@ -259,6 +260,7 @@ type connectRuntimeConfig struct {
 	auth             fusedobject.AuthConfig
 	flow             fusedobject.OAuth2FlowContract
 	credentials      connectClientCredentials
+	grant            connectauth.OAuthGrant
 	credentialSource connectauth.ApplicationCredentialSource
 	metadata         *fusedobject.ServiceMetadata
 }
@@ -294,7 +296,7 @@ func decodeConnectSessionStartRequest(w http.ResponseWriter, r *http.Request, ct
 	// A malformed reference is rejected at admission before any bucket or provider metadata can be inferred from it.
 	if req.AuthRef != "" {
 		if _, err := parseAppAuthReference(req.AuthRef); err != nil {
-			writeConnectRuntimeError(w, ctx, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "invalid_connect_auth_ref", message: "auth_ref must use ${bucket.auth.<service>.<authName>}"}, "request_admission", "not_committed")
+			writeConnectRuntimeError(w, ctx, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "invalid_connect_auth_ref", message: "auth_ref must use ${bucket.auth.<service>.<authName>} or ${fused.bucket.auth.<service>.<authName>}"}, "request_admission", "not_committed")
 			return req, uuid.Nil, false
 		}
 	}
@@ -330,13 +332,13 @@ func isAbsoluteHTTPURL(raw string) bool {
 // resolveConnectRuntimeConfig ties a connect attempt to the bucket-enabled
 // service version, which prevents onboarding against auth metadata the
 // workspace will not use at runtime.
-func resolveConnectRuntimeConfig(ctx context.Context, s store.Store, verifier ServiceVerifier, call connectAdminCall, masterKey []byte, redirectURI ...string) (connectRuntimeConfig, error) {
-	return resolveConnectRuntimeConfigForVersion(ctx, s, verifier, call, uuid.Nil, masterKey, firstRedirectURI(redirectURI))
+func resolveConnectRuntimeConfig(ctx context.Context, s store.Store, verifier ServiceVerifier, call connectAdminCall, masterKey []byte, managedConnect connectauth.DelegatedOAuth, redirectURI ...string) (connectRuntimeConfig, error) {
+	return resolveConnectRuntimeConfigForVersion(ctx, s, verifier, call, uuid.Nil, masterKey, managedConnect, firstRedirectURI(redirectURI))
 }
 
 // resolveConnectRuntimeConfigForVersion resolves either the latest start-time
 // version or the exact immutable version pinned on a callback session.
-func resolveConnectRuntimeConfigForVersion(ctx context.Context, s store.Store, verifier ServiceVerifier, call connectAdminCall, serviceVersionID uuid.UUID, masterKey []byte, redirectURI ...string) (connectRuntimeConfig, error) {
+func resolveConnectRuntimeConfigForVersion(ctx context.Context, s store.Store, verifier ServiceVerifier, call connectAdminCall, serviceVersionID uuid.UUID, masterKey []byte, managedConnect connectauth.DelegatedOAuth, redirectURI ...string) (connectRuntimeConfig, error) {
 	callbackURI := firstRedirectURI(redirectURI)
 	// Consent cannot safely begin without the operator-controlled callback origin, but unrelated Engine work remains available.
 	if callbackURI == "" {
@@ -374,17 +376,23 @@ func resolveConnectRuntimeConfigForVersion(ctx context.Context, s store.Store, v
 		}
 		call.credentialSource = source
 	}
+	// The shared resolver chooses local or delegated OAuth once while preserving the same connection lifecycle.
 	resolver := connectauth.NewApplicationCredentialResolver(s, masterKey, callbackURI)
-	creds, err := resolver.Resolve(ctx, call.bucketID, call.serviceID, authType, authName, call.credentialSource)
-	// Missing application registration is operator-remediable before any
-	// provider session exists, so return the exact value-free secret command.
+	creds, grant, err := resolver.ResolveApplication(ctx, connectauth.ApplicationRequest{BucketID: call.bucketID, ServiceID: call.serviceID, AuthType: authType, AuthName: authName, Source: call.credentialSource, Auth: auth, Flow: flow}, http.DefaultClient, managedConnect)
+	// Both sources fail closed rather than switching registration on a lookup miss.
 	if err != nil {
-		return connectRuntimeConfig{}, connectRuntimeHTTPError{
-			status: http.StatusNotFound, message: "OAuth application credentials not found",
-			remediation: connectApplicationCredentialRemediation(call, authType, authName),
-		}
+		return connectRuntimeConfig{}, connectRegistrationUnavailable(call, authType, authName)
 	}
-	return connectRuntimeConfig{authType: authType, authName: authName, auth: auth, flow: flow, credentials: creds, credentialSource: call.credentialSource, metadata: metadata}, nil
+	return connectRuntimeConfig{authType: authType, authName: authName, auth: auth, flow: flow, credentials: creds, grant: grant, credentialSource: call.credentialSource, metadata: metadata}, nil
+}
+
+// connectRegistrationUnavailable preserves local remediation while keeping delegated failures out of local credential setup.
+func connectRegistrationUnavailable(call connectAdminCall, authType, authName string) error {
+	// Source-specific wording belongs at the presentation boundary, not in token exchange or refresh orchestration.
+	if call.credentialSource.Managed {
+		return connectRuntimeHTTPError{status: http.StatusNotFound, message: "Fused Managed App is unavailable for this service", remediation: "Check this Engine's enrollment and the published OAuth registration on the broker."}
+	}
+	return connectRuntimeHTTPError{status: http.StatusNotFound, message: "OAuth application credentials not found", remediation: connectApplicationCredentialRemediation(call, authType, authName)}
 }
 
 // connectApplicationCredentialRemediation targets the direct or referenced
@@ -415,10 +423,11 @@ func resolveExplicitConnectCredentialSource(ctx context.Context, s store.Store, 
 	parsed, err := parseAppAuthReference(call.authRef)
 	// Invalid syntax must stop before any workspace identity can be resolved from its segments.
 	if err != nil {
-		return connectauth.ApplicationCredentialSource{}, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "invalid_connect_auth_ref", message: "auth_ref must use ${bucket.auth.<service>.<authName>}"}
+		return connectauth.ApplicationCredentialSource{}, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "invalid_connect_auth_ref", message: "auth_ref must use ${bucket.auth.<service>.<authName>} or ${fused.bucket.auth.<service>.<authName>}"}
 	}
 	contracts, err := connectGenerationContractStore(s)
-	// Standalone reuse cannot bypass a missing local planning snapshot capability.
+	// Both reference forms resolve their service key against the local planning
+	// snapshot before any identity is persisted on consent state.
 	if err != nil {
 		return connectauth.ApplicationCredentialSource{}, err
 	}
@@ -426,6 +435,16 @@ func resolveExplicitConnectCredentialSource(ctx context.Context, s store.Store, 
 	// Preserve the bounded identity-resolution error returned by the shared local lookup.
 	if err != nil {
 		return connectauth.ApplicationCredentialSource{}, err
+	}
+	// A Fused Managed App reference has no local bucket pair to rebase onto:
+	// the broker owns the registration, so local version/bucket compatibility
+	// checks do not apply. The managed scheme must match the target scheme so
+	// the broker lookup is one exact (service, authName) key.
+	if parsed.Managed {
+		if parsed.AuthName != call.authName {
+			return connectauth.ApplicationCredentialSource{}, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "connect_auth_ref_incompatible", message: "managed auth reference scheme does not match the target auth scheme"}
+		}
+		return connectauth.ApplicationCredentialSource{ServiceID: sourceID, AuthType: call.authType, AuthName: parsed.AuthName, Managed: true}, nil
 	}
 	version, err := resolveConnectCredentialSourceVersion(ctx, s, sourceID)
 	// A source without one pinned workspace version cannot authorize credential reuse.
@@ -541,6 +560,7 @@ func applicationCredentialSourceForSelection(selection models.SDKSelection) (con
 		ServiceID: selection.CredentialSourceServiceID,
 		AuthType:  canonicalConnectAuthType(selection.CredentialSourceAuthType),
 		AuthName:  strings.TrimSpace(selection.CredentialSourceAuthName),
+		Managed:   selection.ManagedAuth,
 	}
 	// References may change service and scheme name, but never the OAuth/OIDC family selected for the target.
 	if source.AuthType != target.AuthType || source.AuthType == "" {
@@ -550,11 +570,14 @@ func applicationCredentialSourceForSelection(selection models.SDKSelection) (con
 }
 
 // persistedApplicationCredentialSource reconstructs the immutable routing identity carried by browser sessions and grants.
-func persistedApplicationCredentialSource(serviceID uuid.UUID, authType, authName string) connectauth.ApplicationCredentialSource {
+// The managed flag is persisted separately (is_managed_auth) so a callback can
+// re-resolve through the broker without the original auth.ref string.
+func persistedApplicationCredentialSource(serviceID uuid.UUID, authType, authName string, managed bool) connectauth.ApplicationCredentialSource {
 	return connectauth.ApplicationCredentialSource{
 		ServiceID: serviceID,
 		AuthType:  canonicalConnectAuthType(authType),
 		AuthName:  strings.TrimSpace(authName),
+		Managed:   managed,
 	}
 }
 
@@ -789,6 +812,7 @@ func createConnectInputSession(ctx context.Context, s store.Store, call connectA
 		CredentialSourceServiceID: source.ServiceID,
 		CredentialSourceAuthType:  source.AuthType,
 		CredentialSourceAuthName:  source.AuthName,
+		ManagedAuth:               source.Managed,
 		EndUserRef:                endUserRef, TokenHash: connectHash(token), CreatedByAppID: createdByAppID,
 		ReturnURL: returnURL, ResourceInputJSON: canonical, RequestedScopes: scopes, ExpiresAt: expiresAt,
 	}); err != nil {
@@ -860,6 +884,7 @@ func buildProviderConnectSession(call connectAdminCall, endUserRef string, creat
 		CredentialSourceServiceID: source.ServiceID,
 		CredentialSourceAuthType:  source.AuthType,
 		CredentialSourceAuthName:  source.AuthName,
+		ManagedAuth:               source.Managed,
 		RedirectURI:               resolved.credentials.RedirectURI,
 		EndUserRef:                endUserRef,
 		StateHash:                 connectHash(state),
@@ -1159,7 +1184,9 @@ func exchangeConnectCallbackToken(ctx context.Context, r *http.Request, session 
 	if err != nil {
 		return oauthTokenResponse{}, fmt.Errorf("decrypt PKCE verifier: %w", err)
 	}
-	token, err := exchangeOAuthCode(ctx, http.DefaultClient, resolved.auth, resolved.flow, resolved.credentials, r.URL.Query().Get("code"), verifier)
+	code := r.URL.Query().Get("code")
+	// Source selection already bound the exact registration; lifecycle code does not branch on a product flag.
+	token, err := resolved.grant.Exchange(ctx, code, verifier)
 	if err != nil {
 		return oauthTokenResponse{}, connectRuntimeHTTPError{status: http.StatusBadGateway, message: "token exchange failed"}
 	}
@@ -1304,6 +1331,7 @@ func encryptAuthConnectionFromToken(session *store.ConnectSession, resolved conn
 		CredentialSourceServiceID: session.CredentialSourceServiceID,
 		CredentialSourceAuthType:  session.CredentialSourceAuthType,
 		CredentialSourceAuthName:  session.CredentialSourceAuthName,
+		ManagedAuth:               session.ManagedAuth,
 		EncryptedDEK:              wrappedDEK,
 		EncryptedAccessToken:      access,
 		EncryptedRefreshToken:     refresh,

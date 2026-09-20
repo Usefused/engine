@@ -24,15 +24,23 @@ var (
 	jsonPathPattern   = regexp.MustCompile(`^\$(?:\.[A-Za-z0-9_-]+)+$`)
 )
 
+// Validate admits only bounded, versioned signature semantics.
 func Validate(config *Config) error {
+	// An omitted policy belongs to legacy auth handling; a present policy must validate completely.
 	if config == nil {
 		return nil
 	}
-	if config.Version != Version {
-		return fmt.Errorf("signature_policy version must be %d", Version)
+	// Older policy versions must not silently ignore security-bearing extensions.
+	if config.Version != Version && config.Version != VersionAuthenticated {
+		return errors.New("signature_policy version must be 1 or 2")
 	}
+	// Bounded rule count limits work at the public ingress boundary.
 	if len(config.Rules) < 1 || len(config.Rules) > MaxRules {
 		return fmt.Errorf("signature_policy rules must contain between 1 and %d entries", MaxRules)
+	}
+	// New verification semantics must never be silently interpreted as a v1 recipe.
+	if err := validatePolicyVersion(config); err != nil {
+		return err
 	}
 	return validateRules(config.Rules)
 }
@@ -51,22 +59,27 @@ func validateRules(rules []Rule) error {
 	return nil
 }
 
+// validateRule checks identity, predicates and authenticated response shape.
 func validateRule(rule *Rule) error {
+	// Stable bounded rule names keep persisted policy identity unambiguous.
 	if !identifierPattern.MatchString(rule.Name) {
 		return errors.New("name is invalid")
 	}
+	// Unknown rule kinds cannot acquire event or response behavior implicitly.
 	if rule.Kind != RuleChallenge && rule.Kind != RuleEvent {
 		return fmt.Errorf("kind %q is unsupported", rule.Kind)
 	}
+	// Predicate fan-out is bounded independently of the number of rules.
 	if len(rule.Predicates) > MaxPredicates {
 		return fmt.Errorf("predicates may contain at most %d entries", MaxPredicates)
 	}
 	for index := range rule.Predicates {
+		// A malformed matcher could accidentally select a more permissive verification branch.
 		if err := validatePredicate(rule.Predicates[index]); err != nil {
 			return fmt.Errorf("predicates[%d]: %w", index, err)
 		}
 	}
-	return validateVerification(rule.Kind, &rule.Verification)
+	return validateRuleVerification(rule)
 }
 
 func validatePredicate(predicate Predicate) error {
@@ -123,17 +136,26 @@ func verificationBranchCount(verification *Verification) int {
 	return count
 }
 
+// validateSignature binds the secret reference, signed inputs and freshness policy.
 func validateSignature(signature *SignatureVerification) error {
+	// Selecting signature verification requires a complete recipe, never an empty branch.
 	if signature == nil {
 		return errors.New("signature branch is required")
 	}
+	// Only a bucket reference may identify key material in a published policy.
 	if err := validateSecretRef(signature.SecretRef); err != nil {
 		return err
 	}
+	// A declared signature source must be understood before input reconstruction.
 	if err := validateSource(signature.Signature); err != nil {
 		return fmt.Errorf("signature source: %w", err)
 	}
+	// Unsupported digest or serialization settings cannot fall back to defaults.
 	if err := validateSignatureOptions(signature); err != nil {
+		return err
+	}
+	// Freshness checks must authenticate the same timestamp bytes used in the HMAC.
+	if err := validateSignatureTimestamp(signature); err != nil {
 		return err
 	}
 	return validateComponents(signature.Components)
@@ -167,8 +189,16 @@ func validateComponents(components []InputComponent) error {
 	return nil
 }
 
+// validateComponent rejects fields unrelated to the selected signed input.
 func validateComponent(component InputComponent) error {
+	// Literal values belong only to constant components; ignored values would hide malformed recipes.
+	if component.Kind != ComponentConstant && component.Value != "" {
+		return errors.New("only constant components accept value")
+	}
+	// Each signed input admits only its own fields so ignored metadata cannot change perceived coverage.
 	switch component.Kind {
+	case ComponentConstant:
+		return validateConstantComponent(component)
 	case ComponentSelectedHeaders:
 		return validateSelectedComponent(component, true)
 	case ComponentSelectedQuery:
@@ -358,4 +388,106 @@ func optionalText(value string) bool { return value == "" || validText(value) }
 
 func validBoundedFragment(value string, maximum int) bool {
 	return len(value) <= maximum && !strings.ContainsAny(value, "\r\n\x00")
+}
+
+// validatePolicyVersion prevents older runtimes from silently dropping security-bearing v2 fields.
+func validatePolicyVersion(config *Config) error {
+	// Version two explicitly negotiates the extended recipe contract.
+	if config.Version == VersionAuthenticated {
+		return nil
+	}
+	for _, rule := range config.Rules {
+		// A response after verification changes the challenge trust boundary.
+		if rule.Response != nil {
+			return errors.New("authenticated responses require signature policy v2")
+		}
+		// Rules without an HMAC recipe cannot contain new signature fields.
+		if rule.Verification.Signature == nil {
+			continue
+		}
+		signature := rule.Verification.Signature
+		// A v1 timestamp field must not imply freshness protection on an older Engine.
+		if signature.Timestamp != nil {
+			return errors.New("signature timestamps require signature policy v2")
+		}
+		for _, component := range signature.Components {
+			// Constants alter the bytes authenticated by the provider.
+			if component.Kind == ComponentConstant {
+				return errors.New("constant inputs require signature policy v2")
+			}
+		}
+	}
+	return nil
+}
+
+// validateRuleVerification makes challenge authentication and response emission one explicit rule.
+func validateRuleVerification(rule *Rule) error {
+	// Existing standalone challenge rules preserve their original v1 semantics.
+	if rule.Response == nil {
+		return validateVerification(rule.Kind, &rule.Verification)
+	}
+	// Authenticated response bodies must be covered by the signature over the raw request.
+	if rule.Kind != RuleChallenge || rule.Verification.Kind != VerificationSignature || rule.Response.Value.Location != LocationBody {
+		return errors.New("authenticated challenge requires a body value and signature verification")
+	}
+	// Event validation enforces exactly one signature branch without allowing challenge bypass.
+	if err := validateVerification(RuleEvent, &rule.Verification); err != nil {
+		return err
+	}
+	// Challenge content must come from bytes protected by this same request signature.
+	if !signatureHasRawBody(rule.Verification.Signature) {
+		return errors.New("authenticated challenge requires signed raw body")
+	}
+	return validateChallenge(rule.Response)
+}
+
+// signatureHasRawBody establishes that a challenge value is covered by the authenticated message.
+func signatureHasRawBody(signature *SignatureVerification) bool {
+	for _, component := range signature.Components {
+		// Raw bytes cover every body field independently of JSON parsing order.
+		if component.Kind == ComponentRawBody {
+			return true
+		}
+	}
+	return false
+}
+
+// validateConstantComponent keeps provider version literals bounded and free of unrelated input fields.
+func validateConstantComponent(component InputComponent) error {
+	// Empty or unbounded literals are malformed rather than implicit empty components.
+	if component.Value == "" || !validBoundedFragment(component.Value, MaxText) {
+		return errors.New("constant requires a bounded value")
+	}
+	return validateBareComponent(component)
+}
+
+// validateSignatureTimestamp limits freshness checks to one authenticated header and a five-minute maximum window.
+func validateSignatureTimestamp(signature *SignatureVerification) error {
+	stamp := signature.Timestamp
+	// Recipes without timestamp requirements retain their established semantics.
+	if stamp == nil {
+		return nil
+	}
+	// Positive bounded age and bounded future skew avoid disabled checks and duration overflow.
+	if !headerPattern.MatchString(stamp.Header) || stamp.MaxAgeMs < 1 || stamp.MaxAgeMs > MaxClockSkewMs || stamp.MaxFutureMs < 0 || stamp.MaxFutureMs > MaxClockSkewMs {
+		return errors.New("signature timestamp window or header is invalid")
+	}
+	return validateSignedTimestampHeader(signature.Components, stamp.Header)
+}
+
+// validateSignedTimestampHeader rejects freshness checks over data absent from the signed message.
+func validateSignedTimestampHeader(components []InputComponent, header string) error {
+	for _, component := range components {
+		// The exact header value must occur in the signed message, not only in an unsigned policy check.
+		if component.Kind != ComponentSelectedHeaders {
+			continue
+		}
+		for _, name := range component.Names {
+			// HTTP header names are case-insensitive at both verification and validation boundaries.
+			if strings.EqualFold(name, header) {
+				return nil
+			}
+		}
+	}
+	return errors.New("signature timestamp header must be signed")
 }

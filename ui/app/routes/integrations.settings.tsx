@@ -13,6 +13,7 @@ export const meta: MetaFunction = ({ matches }) => {
 import { api, Account } from "~/lib/api";
 import { useToast } from "~/components/Toast";
 import { ConnectBrandingCard } from "~/components/settings/ConnectBrandingCard";
+import { ManagedAuthCard } from "~/components/settings/ManagedAuthCard";
 import { SettingsDisclosureCard } from "~/components/settings/SettingsDisclosureCard";
 
 // readEngineEndpoints resolves the operator's public Engine addresses from the browser runtime.
@@ -169,6 +170,8 @@ export default function SettingsPage() {
       </div>
 
       <ConnectBrandingCard />
+
+      <ManagedAuthCard />
 
       <SettingsDisclosureCard
         id="account-details-settings"

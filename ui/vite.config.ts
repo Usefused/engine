@@ -45,6 +45,8 @@ export default defineConfig({
     remix({
       ssr: false,
       future: {
+        // Single Fetch serialization is unused in SPA mode and remains disabled for GHSA-rxv8-25v2-qmq8.
+        v3_singleFetch: false,
         v3_fetcherPersist: true,
         v3_relativeSplatPath: true,
         v3_throwAbortReason: true,

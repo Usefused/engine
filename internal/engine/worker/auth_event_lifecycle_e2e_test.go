@@ -401,7 +401,7 @@ func startAuthLifecycleE2EReceiver(
 	t.Helper()
 	server := api.NewEngineGRPCServer(
 		fixture.repository, nil, nil, store.NewPostgresConfigRepository(pool), natsClient,
-		auth.NewTokenValidator(fixture.repository),
+		auth.NewTokenValidator(fixture.repository), nil,
 	)
 	grpcServer := grpc.NewServer()
 	enginev1.RegisterEngineServiceServer(grpcServer, server)

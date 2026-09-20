@@ -123,6 +123,10 @@ func (m *mockCacheDB) GetWorkspaceWebhookBySlug(ctx context.Context, slug string
 	return nil, store.ErrWorkspaceWebhookNotFound
 }
 
+func (m *mockCacheDB) GetWorkspaceWebhookByServiceAndLabel(ctx context.Context, serviceSlug, label string) (*store.WorkspaceWebhook, error) {
+	return nil, store.ErrWorkspaceWebhookNotFound
+}
+
 func (m *mockCacheDB) ListWorkspaceWebhooks(ctx context.Context, serviceID uuid.UUID) ([]store.WorkspaceWebhook, error) {
 	return nil, nil
 }

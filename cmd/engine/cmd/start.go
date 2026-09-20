@@ -33,11 +33,14 @@ import (
 	"github.com/Usefused/engine/internal/engine/executionevent"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/managedauth"
+	"github.com/Usefused/engine/internal/engine/managedauthbroker"
+	"github.com/Usefused/engine/internal/engine/managedauthclient"
 	enginemiddleware "github.com/Usefused/engine/internal/engine/middleware"
 	"github.com/Usefused/engine/internal/engine/oauthprovider"
 	"github.com/Usefused/engine/internal/engine/ratelimitcoordinator"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/engine/webhookrelay"
 	"github.com/Usefused/engine/internal/engine/webhookstream"
 	"github.com/Usefused/engine/internal/engine/worker"
 	"github.com/Usefused/engine/internal/shared/config"
@@ -163,7 +166,7 @@ func runEngine() {
 		os.Exit(1)
 	}
 
-	entitlement, authorizationRevision := bootstrapRegistryIdentity(ctx, engineStore, registryClient, envLicense)
+	entitlement, authorizationRevision, managedAuthBrokerURL := bootstrapRegistryIdentity(ctx, engineStore, registryClient, envLicense)
 	// Load the persisted entitlement into the in-memory cache so runtime limit checks
 	// (sandbox concurrency, bucket creation, service limits) read from memory instead
 	// of the database on every request.
@@ -232,7 +235,11 @@ func runEngine() {
 			slog.String("error_code", "connected_auth_refresh_store_unavailable"))
 		os.Exit(1)
 	}
-	authRefreshCoordinator := sandbox.NewAuthRefreshCoordinator(engineStore, masterKey)
+	// Constructed before the refresh coordinator so a connection whose
+	// application credentials came from a Fused Managed App can refresh
+	// through the broker the same way it was originally exchanged.
+	managedAuthClientDependencies := newManagedAuthClientDeps(ctx, database, masterKey, managedAuthBrokerURL, registryClient)
+	authRefreshCoordinator := sandbox.NewAuthRefreshCoordinator(engineStore, masterKey, sandbox.WithAuthRefreshManagedConnect(managedAuthClientDependencies.connect))
 	engineWorkers.connectedAuthRefresh, err = startConnectedAuthRefreshWorker(
 		ctx, authRefreshStore, authRefreshCoordinator, cfg.Engine.ConnectedAuthRefreshWorkers,
 	)
@@ -247,31 +254,41 @@ func runEngine() {
 	managedLoginService := newManagedLoginService(ctx, engineStore, registryClient, controlAuthenticator, masterKey)
 	cliLoginService := newCLILoginService(ctx, engineStore, controlAuthenticator)
 	oauthProviderService := newOAuthProviderService(ctx, engineStore, controlAuthenticator)
+	managedAuthBroker := newManagedAuthBrokerDeps(ctx, database, masterKey, cfg)
+	managedWebhookBroker := startWebhookRelay(ctx, database, natsClient, masterKey, managedAuthBroker, managedAuthClientDependencies, managedAuthBrokerURL)
 
 	r := buildEngineRouter(engineRouterDeps{
-		cfg:                cfg,
-		natsClient:         natsClient,
-		engineStore:        engineStore,
-		registryClient:     registryClient,
-		registryProxy:      registryProxy,
-		localObjectCache:   localObjectCache,
-		configStore:        configStore,
-		masterKey:          masterKey,
-		connectRedirectURI: connectRedirectURI,
-		controlAuth:        controlAuthenticator,
-		managedLogin:       managedLoginService,
-		cliLogin:           cliLoginService,
-		browserSession:     browserSessionService,
-		browserCookies:     browserCookies,
-		providerRateLimits: rateLimits,
-		tokenValidator:     tokenValidator,
-		appTokenRevoker:    tokenRevoker,
-		oauthProvider:      oauthProviderService,
+		cfg:                      cfg,
+		natsClient:               natsClient,
+		engineStore:              engineStore,
+		registryClient:           registryClient,
+		registryProxy:            registryProxy,
+		localObjectCache:         localObjectCache,
+		configStore:              configStore,
+		masterKey:                masterKey,
+		connectRedirectURI:       connectRedirectURI,
+		controlAuth:              controlAuthenticator,
+		managedLogin:             managedLoginService,
+		cliLogin:                 cliLoginService,
+		browserSession:           browserSessionService,
+		browserCookies:           browserCookies,
+		providerRateLimits:       rateLimits,
+		tokenValidator:           tokenValidator,
+		appTokenRevoker:          tokenRevoker,
+		oauthProvider:            oauthProviderService,
+		managedWebhookBroker:     managedWebhookBroker,
+		managedAuthBroker:        managedAuthBroker.service,
+		managedAuthConnect:       managedAuthBroker.connect,
+		managedAuthCatalog:       managedAuthBroker.catalog,
+		managedAuthInstalls:      managedAuthBroker.installs,
+		managedAuthAdminKey:      cfg.Engine.ManagedAuthBrokerAdminKey,
+		managedAuthClient:        managedAuthClientDependencies.service,
+		managedAuthConnectClient: managedAuthClientDependencies.connect,
 	})
 
 	webhookSrv := startWebhookServer(ctx, r)
 	srv := startEngineHTTPServer(ctx, r)
-	grpcServer := startEngineGRPCServer(ctx, engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator, webhookStreams, connectRedirectURI)
+	grpcServer := startEngineGRPCServer(ctx, engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator, webhookStreams, managedAuthClientDependencies.connect, connectRedirectURI)
 
 	waitForEngineShutdown(ctx, cancel, srv, webhookSrv, grpcServer)
 }
@@ -626,7 +643,7 @@ func startConnectedAuthRefreshWorker(ctx context.Context, refreshStore worker.Co
 	return refreshWorker, nil
 }
 
-func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, envLicense string) (models.RuntimeEntitlement, int64) {
+func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, envLicense string) (models.RuntimeEntitlement, int64, string) {
 	slog.InfoContext(ctx, "FUSED_LICENSE_KEY present. Attempting Registry Handshake...")
 	handshake, err := registryClient.HandshakeWithEntitlements(ctx)
 	if err != nil {
@@ -684,7 +701,7 @@ func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, reg
 		slog.Int("owned_services_restored", ownedServices.Activated),
 		slog.Int("owned_services_already_active", ownedServices.AlreadyActive),
 	)
-	return entitlement, accessBootstrap.Revision
+	return entitlement, accessBootstrap.Revision, handshake.ManagedAuthBrokerURL
 }
 
 func newControlAuthenticator(ctx context.Context, engineStore store.Store, revision int64) *accesscontrol.Authenticator {
@@ -907,24 +924,32 @@ func loadMasterKey(ctx context.Context) []byte {
 }
 
 type engineRouterDeps struct {
-	cfg                *config.Config
-	natsClient         *messaging.NATSClient
-	engineStore        store.Store
-	registryClient     *sandbox.HTTPRegistryClient
-	registryProxy      api.Forwarder
-	localObjectCache   sandbox.ObjectCache
-	configStore        store.ConfigRepository
-	masterKey          []byte
-	connectRedirectURI string
-	controlAuth        *accesscontrol.Authenticator
-	managedLogin       api.ManagedLoginService
-	cliLogin           api.CLILoginService
-	browserSession     api.BrowserSessionService
-	browserCookies     *browserauth.CookieManager
-	providerRateLimits store.ProviderRateLimitStore
-	tokenValidator     auth.TokenValidator
-	appTokenRevoker    api.AppTokenRevoker
-	oauthProvider      api.OAuthProviderService
+	cfg                      *config.Config
+	natsClient               *messaging.NATSClient
+	engineStore              store.Store
+	registryClient           *sandbox.HTTPRegistryClient
+	registryProxy            api.Forwarder
+	localObjectCache         sandbox.ObjectCache
+	configStore              store.ConfigRepository
+	masterKey                []byte
+	connectRedirectURI       string
+	controlAuth              *accesscontrol.Authenticator
+	managedLogin             api.ManagedLoginService
+	cliLogin                 api.CLILoginService
+	browserSession           api.BrowserSessionService
+	browserCookies           *browserauth.CookieManager
+	providerRateLimits       store.ProviderRateLimitStore
+	tokenValidator           auth.TokenValidator
+	appTokenRevoker          api.AppTokenRevoker
+	oauthProvider            api.OAuthProviderService
+	managedAuthBroker        *managedauthbroker.Service
+	managedAuthConnect       *managedauthbroker.ConnectService
+	managedAuthCatalog       *managedauthbroker.CatalogStore
+	managedAuthAdminKey      string
+	managedAuthInstalls      *managedauthbroker.Store
+	managedAuthClient        *managedauthclient.Service
+	managedAuthConnectClient *managedauthclient.ConnectClient
+	managedWebhookBroker     *webhookrelay.Broker
 }
 
 // buildEngineRouter serves API and embedded UI on one origin, so cross-origin
@@ -957,6 +982,15 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	api.MountManagedIdentityRoutes(r, deps.managedLogin, deps.browserCookies)
 	api.MountCLILoginRoutes(r, deps.cliLogin, deps.browserSession)
 	api.MountOAuthProviderRoutes(r, deps.oauthProvider, deps.engineStore, deps.browserSession, deps.browserCookies, "/login", deps.cfg.Engine.PublicURL)
+	if deps.managedAuthBroker != nil {
+		managedauthbroker.MountRoutes(r, deps.managedAuthBroker)
+		managedauthbroker.MountConnectRoutes(r, deps.managedAuthConnect, deps.managedAuthInstalls)
+		mountWebhookRelayRoutes(r, deps)
+		managedauthbroker.MountAdminRoutes(r, deps.managedAuthCatalog, deps.masterKey, deps.managedAuthAdminKey)
+	}
+	if deps.managedAuthClient != nil {
+		managedauthclient.MountRoutes(r, deps.managedAuthClient)
+	}
 
 	// Exact Engine-owned control routes must be registered before Registry
 	// prefix mounts so /sdks/{app_id}/download resolves locally while generation
@@ -986,7 +1020,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// One server instance owns REST and MCP Unified adapters so both call the
 	// same preflight, scheduler, physical runtime, and token validator.
 	executionServer := api.NewEngineGRPCServer(
-		deps.engineStore, deps.registryClient, deps.masterKey, deps.configStore, deps.natsClient, deps.tokenValidator, deps.connectRedirectURI,
+		deps.engineStore, deps.registryClient, deps.masterKey, deps.configStore, deps.natsClient, deps.tokenValidator, deps.managedAuthConnectClient, deps.connectRedirectURI,
 	)
 	sandbox.InitSandbox(
 		r, deps.natsClient, deps.cfg, deps.localObjectCache, deps.tokenValidator, deps.engineStore, deps.engineStore, deps.configStore, secretResolver,
@@ -999,7 +1033,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// Engine-native MCP GraphQL surface (list/deploy/kill/reactivate/delete +
 	// analytics) -- a distinct endpoint from POST /graphql, which is a pure
 	// Registry forward-proxy with no resolvers of its own (graphql_proxy.go).
-	if err := api.MountMCPGraphQLRoute(r, deps.configStore, deps.engineStore, deps.registryClient, deps.registryClient, deps.masterKey, deps.connectRedirectURI, deps.oauthProvider, deps.controlAuth); err != nil {
+	if err := api.MountMCPGraphQLRoute(r, deps.configStore, deps.engineStore, deps.registryClient, deps.registryClient, deps.masterKey, deps.connectRedirectURI, deps.oauthProvider, deps.managedAuthConnectClient, deps.controlAuth); err != nil {
 		slog.Error("failed to mount mcp graphql route", slog.Any("error", err))
 		os.Exit(1)
 	}
@@ -1096,6 +1130,67 @@ func newOAuthProviderService(
 	return service
 }
 
+// managedAuthBrokerDeps bundles the pieces buildEngineRouter needs to mount
+// the broker's enrollment and connect-proxy routes. Every field is nil
+// unless this Engine is explicitly configured as Fused's managed-auth
+// broker (EngineConfig.ManagedAuthBrokerEnabled); buildEngineRouter treats a
+// nil managedAuthBroker service as "do not mount any of these routes."
+type managedAuthBrokerDeps struct {
+	service  *managedauthbroker.Service
+	connect  *managedauthbroker.ConnectService
+	catalog  *managedauthbroker.CatalogStore
+	installs *managedauthbroker.Store
+}
+
+func newManagedAuthBrokerDeps(ctx context.Context, database *pgxpool.Pool, masterKey []byte, cfg *config.Config) managedAuthBrokerDeps {
+	if !cfg.Engine.ManagedAuthBrokerEnabled {
+		return managedAuthBrokerDeps{}
+	}
+	installs := managedauthbroker.NewStore(database)
+	verifier := managedauthbroker.NewRegistryTicketVerifier(cfg.Engine.RegistryEndpoint, nil)
+	service, err := managedauthbroker.NewService(installs, verifier)
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: managed-auth broker service is unavailable despite being enabled", slog.Any("error", err))
+		os.Exit(1)
+	}
+	catalog := managedauthbroker.NewCatalogStore(database)
+	connect, err := managedauthbroker.NewConnectService(catalog, masterKey, nil)
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: managed-auth connect service is unavailable despite being enabled", slog.Any("error", err))
+		os.Exit(1)
+	}
+	return managedAuthBrokerDeps{service: service, connect: connect, catalog: catalog, installs: installs}
+}
+
+// managedAuthClientDeps bundles this installation's managed-auth *client*
+// pieces: nil (service and connect both) unless Registry announced a broker
+// for this deployment in the handshake -- an Engine carries no managed-auth
+// config of its own. It does not enroll synchronously here: a broker outage
+// at boot must not block Engine startup, so the background worker reuses the existing credential
+// and retries enrollment or refresh failures on its own interval.
+type managedAuthClientDeps struct {
+	service *managedauthclient.Service
+	connect *managedauthclient.ConnectClient
+}
+
+// newManagedAuthClientDeps wires the advertised broker and starts idempotent enrollment reconciliation.
+func newManagedAuthClientDeps(ctx context.Context, database *pgxpool.Pool, masterKey []byte, brokerURL string, registryClient *sandbox.HTTPRegistryClient) managedAuthClientDeps {
+	// Only Registry-advertised capability enables automatic enrollment.
+	if brokerURL == "" {
+		return managedAuthClientDeps{}
+	}
+	store := managedauthclient.NewStore(database)
+	broker := managedauthclient.NewHTTPBrokerClient(brokerURL, nil)
+	service, err := managedauthclient.NewService(store, registryClient, broker, masterKey)
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: managed-auth client service is unavailable despite Registry announcing a broker", slog.Any("error", err))
+		os.Exit(1)
+	}
+	service.StartRefreshWorker(ctx, 30*time.Second)
+	connect := managedauthclient.NewConnectClient(brokerURL, service, nil)
+	return managedAuthClientDeps{service: service, connect: connect}
+}
+
 // Request IDs are audit identifiers, so they must be generated inside Engine
 // rather than copied from a caller-controlled header that may contain secrets.
 func discardInboundRequestID(next http.Handler) http.Handler {
@@ -1154,7 +1249,7 @@ func serveHTTPServer(ctx context.Context, srv *http.Server, startMessage string,
 }
 
 // startEngineGRPCServer injects the same canonical callback identity used by HTTP and GraphQL consent flows.
-func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator, webhookStreams *webhookstream.Registry, redirectURI string) *grpc.Server {
+func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator, webhookStreams *webhookstream.Registry, managedConnect *managedauthclient.ConnectClient, redirectURI string) *grpc.Server {
 	listenAddress := engineGRPCListenAddress(grpcHost, grpcPort)
 	lis, err := net.Listen("tcp", listenAddress)
 	if err != nil {
@@ -1169,7 +1264,7 @@ func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registr
 	)
 	// SubscribeWebhooks needs both dependencies to resolve the configured
 	// attachment and bridge its durable JetStream consumer to the gRPC stream.
-	enginev1.RegisterEngineServiceServer(grpcServer, api.NewEngineGRPCServerWithWebhookStreams(engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator, webhookStreams, redirectURI))
+	enginev1.RegisterEngineServiceServer(grpcServer, api.NewEngineGRPCServerWithWebhookStreams(engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator, webhookStreams, managedConnect, redirectURI))
 
 	go serveGRPCServer(ctx, grpcServer, lis, listenAddress)
 	return grpcServer

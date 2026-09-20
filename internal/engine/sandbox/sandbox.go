@@ -250,6 +250,14 @@ func InitWebhookRoutes(r chi.Router) {
 	r.Get("/webhook/{urlSlug}/{eventName}", webhookIngressHandler)
 	r.Post("/webhook/{urlSlug}", webhookIngressHandler)
 	r.Post("/webhook/{urlSlug}/{eventName}", webhookIngressHandler)
+
+	// Predictable default registration: the "svc" literal segment takes routing
+	// precedence over the two-segment {urlSlug}/{eventName} route, and unlike a
+	// token path this one must always verify a signature.
+	r.Get("/webhook/svc/{service}", predictableWebhookIngressHandler)
+	r.Get("/webhook/svc/{service}/{eventName}", predictableWebhookIngressHandler)
+	r.Post("/webhook/svc/{service}", predictableWebhookIngressHandler)
+	r.Post("/webhook/svc/{service}/{eventName}", predictableWebhookIngressHandler)
 }
 
 // observabilityStartFunc is the injectable factory for execution threads.

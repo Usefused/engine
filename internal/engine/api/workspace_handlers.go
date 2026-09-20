@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/Usefused/engine/internal/engine/managedauthclient"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -56,7 +57,7 @@ type ServiceVerifier interface {
 //
 // Workspace membership lives in the Engine's own DB. Proxying it to the Registry would
 // serve stale or wrong data; the Engine is the authoritative source here.
-func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, tokenRevoker AppTokenRevoker, redirectURIs ...string) http.Handler {
+func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, tokenRevoker AppTokenRevoker, managedConnect *managedauthclient.ConnectClient, redirectURIs ...string) http.Handler {
 	r := chi.NewRouter()
 	redirectURI := firstRedirectURI(redirectURIs)
 	r.Post("/services", addServiceHandler(s, verifier))
@@ -73,14 +74,14 @@ func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte,
 	// Generic secrets are bucket-scoped by the route and never infer a provider service.
 	r.Put("/buckets/{id}/secrets", UpsertBucketSecretHandler(s, masterKey))
 
-	r.Post("/buckets/{bucket_id}/services/{service_id}/connect/sessions", StartConnectSessionHandler(s, verifier, masterKey, redirectURI))
+	r.Post("/buckets/{bucket_id}/services/{service_id}/connect/sessions", StartConnectSessionHandler(s, verifier, masterKey, managedConnect, redirectURI))
 	// These token-authenticated browser routes stay beside the provider callback
 	// because they are runtime handoffs, not control-plane form mutations.
-	r.Get("/connect/input", ConnectInputPageHandler(s, verifier, masterKey, redirectURI))
-	r.Post("/connect/input", ConnectInputSubmitHandler(s, verifier, masterKey, redirectURI))
+	r.Get("/connect/input", ConnectInputPageHandler(s, verifier, masterKey, managedConnect, redirectURI))
+	r.Post("/connect/input", ConnectInputSubmitHandler(s, verifier, masterKey, managedConnect, redirectURI))
 	r.Delete("/buckets/{bucket_id}/auth/connections/{connection_id}", DeleteAuthConnectionHandler(s))
 	// Callback exchange uses the URI pinned in the session, never mutable process configuration.
-	r.Get("/connect/callback", ConnectCallbackHandler(s, verifier, masterKey))
+	r.Get("/connect/callback", ConnectCallbackHandler(s, verifier, masterKey, managedConnect))
 
 	r.Put("/secrets", UpsertSecretHandler(s, masterKey))
 	r.Put("/secrets/bulk", UpsertSecretsHandler(s, masterKey))

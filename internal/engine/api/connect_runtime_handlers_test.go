@@ -119,7 +119,7 @@ func TestStartConnectSessionRequiresConfiguredPublicURL(t *testing.T) {
 	response := httptest.NewRecorder()
 	// The real control router supplies the actor while omitting a callback to model a non-OAuth deployment.
 	router := newControlTestRouter(fixture.store.accountID)
-	router.Mount("/workspace", WorkspaceHandler(fixture.store, fixture.verifier, fixture.masterKey, fixture.store))
+	router.Mount("/workspace", WorkspaceHandler(fixture.store, fixture.verifier, fixture.masterKey, fixture.store, nil))
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("missing public URL status = %d, want 503: %s", response.Code, response.Body.String())
@@ -1088,7 +1088,7 @@ func setRuntimeApplicationCredentialIdentity(fixture *connectRuntimeFixture, aut
 // chi params and auth middleware behavior, not just handler internals.
 func buildConnectRuntimeRouter(f connectRuntimeFixture) http.Handler {
 	r := newControlTestRouter(f.store.accountID)
-	r.Mount("/workspace", WorkspaceHandler(f.store, f.verifier, f.masterKey, f.store, "https://engine.example.com/workspace/connect/callback"))
+	r.Mount("/workspace", WorkspaceHandler(f.store, f.verifier, f.masterKey, f.store, nil, "https://engine.example.com/workspace/connect/callback"))
 	return r
 }
 

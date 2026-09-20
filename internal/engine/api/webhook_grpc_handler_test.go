@@ -60,7 +60,7 @@ func (s *webhookAuthTestStore) AuthorizeApp(ctx context.Context, appID uuid.UUID
 }
 
 func newWebhookAuthTestServer(s *webhookAuthTestStore) *EngineGRPCServer {
-	return NewEngineGRPCServer(s, nil, nil, nil, nil, auth.NewTokenValidator(s))
+	return NewEngineGRPCServer(s, nil, nil, nil, nil, auth.NewTokenValidator(s), nil)
 }
 
 // TestAuthenticateWebhookSubscribe_ReadsAppIDAndTokenFromMetadata is the

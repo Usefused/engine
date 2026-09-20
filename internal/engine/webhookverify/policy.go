@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,20 +53,37 @@ type PolicyResult struct {
 // VerifyPolicy executes the first matching rule so challenge traffic cannot
 // fall through into an event recipe.
 func VerifyPolicy(ctx context.Context, policy *signaturepolicy.Config, input PolicyInput) PolicyResult {
-	if signaturepolicy.Validate(policy) != nil || input.Request == nil || len(input.RawBody) > maxSignatureBodyBytes {
+	// Invalid policy or oversized input cannot reach either response or event handling.
+	if policy == nil || signaturepolicy.Validate(policy) != nil || input.Request == nil || len(input.RawBody) > maxSignatureBodyBytes {
 		return policyFail(CodePolicyInvalid, "webhook signature policy is invalid")
 	}
 	rule := firstMatchingRule(policy.Rules, input)
+	// First-match semantics must not fall through to an unrelated permissive recipe.
 	if rule == nil {
 		return policyFail(CodeRuleUnmatched, "no webhook verification rule matched")
 	}
+	result := verifyRule(ctx, rule, input)
+	// Authenticated challenge responses are emitted only after the selected signature succeeds.
+	if result.OK && rule.Response != nil {
+		return challengeResult(rule.Response, input)
+	}
+	return result
+}
+
+// verifyRule executes only the declared verification branch before any optional response.
+func verifyRule(ctx context.Context, rule *signaturepolicy.Rule, input PolicyInput) PolicyResult {
+	// Each branch has different trust inputs; no provider-name inference is allowed.
 	switch rule.Verification.Kind {
+	// Standalone challenges remain an explicit legacy contract choice.
 	case signaturepolicy.VerificationChallenge:
 		return challengeResult(rule.Verification.Challenge, input)
+	// Signature verification covers raw request content and optional timestamp freshness.
 	case signaturepolicy.VerificationSignature:
 		return verifyRecipe(ctx, rule.Verification.Signature, input)
+	// JWT verification retains its existing issuer/audience validation.
 	case signaturepolicy.VerificationJWT:
 		return verifyJWT(ctx, rule.Verification.JWT, input)
+	// Unknown verification never produces a challenge response or publishes an event.
 	default:
 		return policyFail(CodePolicyInvalid, "webhook verification kind is unsupported")
 	}
@@ -144,31 +162,101 @@ func challengeResult(challenge *signaturepolicy.ChallengeResponse, input PolicyI
 	return PolicyResult{VerifyResult: VerifyResult{OK: true, Code: CodeChallengeResponded}, ChallengeBody: body, StatusCode: challenge.StatusCode}
 }
 
+// verifyRecipe authenticates the exact signed bytes and rejects ambiguous credentials before responding.
 func verifyRecipe(ctx context.Context, recipe *signaturepolicy.SignatureVerification, input PolicyInput) PolicyResult {
+	// A missing resolver is never an unsigned verification mode.
 	if recipe == nil || input.Resolve == nil {
 		return policyFail(CodePolicyInvalid, "signature recipe is invalid")
 	}
+	// The timestamp must be present, singular and recent before processing its signed request.
+	if !validSignatureTime(recipe.Timestamp, input) {
+		return policyFail("timestamp_invalid", "signature timestamp is invalid or outside its allowed window")
+	}
 	secret, err := input.Resolve(ctx, recipe.SecretRef)
+	// Unavailable key material cannot be replaced with an empty HMAC key.
 	if err != nil || secret == "" {
 		return policyFail(CodeSecretUnavailable, "signature secret is unavailable")
 	}
-	provided, present := sourceValue(recipe.Signature, input)
+	provided, present := singleSignatureValue(recipe.Signature, input)
+	// Multiple signature headers or query values are ambiguous and fail closed.
 	if !present {
-		return policyFail(CodeCredentialMissing, "signature is missing")
+		return policyFail(CodeCredentialMissing, "signature is missing or ambiguous")
 	}
+	// Prefixes are part of the provider protocol, not optional text to strip if convenient.
+	if !strings.HasPrefix(provided, recipe.Prefix) {
+		return policyFail(CodeCredentialInvalid, "signature prefix is invalid")
+	}
+	return compareRecipeSignature(recipe, input, secret, strings.TrimPrefix(provided, recipe.Prefix))
+}
+
+// compareRecipeSignature reconstructs and compares the exact provider digest after credential checks.
+func compareRecipeSignature(recipe *signaturepolicy.SignatureVerification, input PolicyInput, secret, provided string) PolicyResult {
 	message, err := signatureMessage(recipe, input)
+	// Invalid signed-input reconstruction must never fall back to signing the body alone.
 	if err != nil {
 		return policyFail(CodePolicyInvalid, "signature input is invalid")
 	}
 	expected, err := encodedHMAC(recipe.Algorithm, recipe.Encoding, secret, message)
+	// Unsupported algorithms remain a policy error rather than a comparison bypass.
 	if err != nil {
 		return policyFail(CodePolicyInvalid, "signature algorithm is unsupported")
 	}
-	provided = strings.TrimPrefix(provided, recipe.Prefix)
+	// Constant-time equality accepts exactly the expected digest bytes.
 	if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
 		return policyFail(CodeCredentialInvalid, "signature is invalid")
 	}
 	return PolicyResult{VerifyResult: ok()}
+}
+
+// singleSignatureValue rejects repeated credentials instead of trusting parser-specific first-value selection.
+func singleSignatureValue(source signaturepolicy.ValueSource, input PolicyInput) (string, bool) {
+	// Body sources retain the bounded JSON-path semantics of the existing recipe engine.
+	switch source.Location {
+	// HTTP signatures must have one unambiguous header value.
+	case signaturepolicy.LocationHeader:
+		values := input.Request.Header.Values(source.Name)
+		return singularValue(values)
+	// Query signatures also reject duplicate parameter values.
+	case signaturepolicy.LocationQuery:
+		return singularValue(input.Request.URL.Query()[source.Name])
+	// Existing body-valued signature recipes continue to use the shared extractor.
+	default:
+		return sourceValue(source, input)
+	}
+}
+
+// singularValue rejects missing, repeated and empty credential fields.
+func singularValue(values []string) (string, bool) {
+	// Only a single nonempty value can represent the provider's signed credential.
+	if len(values) != 1 || values[0] == "" {
+		return "", false
+	}
+	return values[0], true
+}
+
+// validSignatureTime compares the signed Unix-seconds header against bounded age and future skew.
+func validSignatureTime(policy *signaturepolicy.SignatureTimestamp, input PolicyInput) bool {
+	// Timestamp checking is required only when explicitly declared by the provider contract.
+	if policy == nil {
+		return true
+	}
+	raw, ok := singularValue(input.Request.Header.Values(policy.Header))
+	// A malformed or duplicated timestamp is rejected before parsing.
+	if !ok || len(raw) > 20 {
+		return false
+	}
+	seconds, err := strconv.ParseInt(raw, 10, 64)
+	// Canonical decimal seconds prevent permissive parser spellings and out-of-range values.
+	if err != nil || strconv.FormatInt(seconds, 10) != raw {
+		return false
+	}
+	now := input.Now
+	// Production uses the real clock; tests may inject an exact instant for boundary checks.
+	if now.IsZero() {
+		now = time.Now()
+	}
+	stamp := time.Unix(seconds, 0)
+	return now.Sub(stamp) <= time.Duration(policy.MaxAgeMs)*time.Millisecond && stamp.Sub(now) <= time.Duration(policy.MaxFutureMs)*time.Millisecond
 }
 
 func signatureMessage(recipe *signaturepolicy.SignatureVerification, input PolicyInput) ([]byte, error) {
@@ -183,11 +271,17 @@ func signatureMessage(recipe *signaturepolicy.SignatureVerification, input Polic
 	return []byte(strings.Join(parts, recipe.ComponentSeparator)), nil
 }
 
+// componentValue resolves one ordered signature input without provider-specific branching.
 func componentValue(component signaturepolicy.InputComponent, input PolicyInput) (string, error) {
+	// Each component uses its declared source so the reconstructed message matches provider bytes.
 	switch component.Kind {
+	// Literal protocol versions are contract data, not mutable request headers.
+	case signaturepolicy.ComponentConstant:
+		return component.Value, nil
 	case signaturepolicy.ComponentRawBody:
 		return string(input.RawBody), nil
 	case signaturepolicy.ComponentExactCallbackURL:
+		// A caller-controlled Host must never substitute for the registered callback.
 		if input.CallbackURL == "" {
 			return "", errors.New("trusted callback URL is missing")
 		}

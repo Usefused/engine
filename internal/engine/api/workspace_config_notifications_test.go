@@ -238,9 +238,9 @@ func TestWorkspaceNotificationsE2E_QueryAcknowledgeDismissRoundTrip(t *testing.T
 // tests need to act on.
 func buildNotificationGraphQLHandler(t *testing.T, s store.Store, configStore store.ConfigRepository) http.HandlerFunc {
 	t.Helper()
-	schema, err := newMCPGraphQLSchema(configStore, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"), nil)
+	schema, err := newMCPGraphQLSchema(configStore, s, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"), nil, nil)
 	if err != nil {
-		t.Fatalf("newMCPGraphQLSchema() error = %v", err)
+		t.Fatalf("newMCPGraphQLSchema(, nil) error = %v", err)
 	}
 	return withGraphQLTestOwner(t, s, mcpGraphQLHandler(schema))
 }

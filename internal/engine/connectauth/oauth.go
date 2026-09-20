@@ -29,15 +29,16 @@ type ClientCredentials struct {
 }
 
 // TokenResponse is the subset of OAuth/OIDC token responses Engine persists or
-// dispatches with; unknown provider fields are deliberately ignored.
+// dispatches with. RawResponse is ephemeral broker proof material and never crosses the wire.
 type TokenResponse struct {
-	AccessToken           string `json:"access_token"`
-	RefreshToken          string `json:"refresh_token,omitempty"`
-	IDToken               string `json:"id_token,omitempty"`
-	TokenType             string `json:"token_type,omitempty"`
-	Scope                 string `json:"scope,omitempty"`
-	ExpiresIn             int64  `json:"expires_in,omitempty"`
-	RefreshTokenExpiresIn int64  `json:"refresh_token_expires_in,omitempty"`
+	RawResponse           json.RawMessage `json:"-"`
+	AccessToken           string          `json:"access_token"`
+	RefreshToken          string          `json:"refresh_token,omitempty"`
+	IDToken               string          `json:"id_token,omitempty"`
+	TokenType             string          `json:"token_type,omitempty"`
+	Scope                 string          `json:"scope,omitempty"`
+	ExpiresIn             int64           `json:"expires_in,omitempty"`
+	RefreshTokenExpiresIn int64           `json:"refresh_token_expires_in,omitempty"`
 }
 
 // TokenEndpointError preserves the provider's OAuth error code without
@@ -409,12 +410,16 @@ func decodeFormTokenEndpointError(body []byte) (string, string) {
 
 // decodeTokenResponse prefers JSON but accepts OAuth form bodies because a
 // provider's response format should not decide whether valid credentials land.
+// decodeTokenResponse retains the bounded provider response only for local verified-claim extraction.
 func decodeTokenResponse(contentType string, body []byte) (TokenResponse, error) {
+	// Form responses retain their established decoding; relay proof currently requires JSON objects.
 	if strings.Contains(strings.ToLower(contentType), "application/x-www-form-urlencoded") {
 		return decodeFormTokenResponse(body)
 	}
 	var token TokenResponse
+	// Only a successfully decoded provider response may supply ownership proof.
 	if err := json.Unmarshal(body, &token); err == nil {
+		token.RawResponse = append(json.RawMessage(nil), body...)
 		return token, nil
 	}
 	// Some OAuth providers omit Content-Type on token responses; retrying as a

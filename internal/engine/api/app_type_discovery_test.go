@@ -20,7 +20,7 @@ func TestNarrowAppReadCanListAnEmptyCatalogue(t *testing.T) {
 	}
 	actor := accesscontrol.Actor{AccountID: uuid.New(), WorkspaceID: workspaceID, SubjectID: uuid.New(), Authorization: snapshot}
 	repository := &artifactReferenceGraphQLTestStore{workspaceTestStore: &workspaceTestStore{accountID: actor.AccountID}}
-	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, repository, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"), nil)
+	schema, err := newMCPGraphQLSchema(&mockConfigStore{}, repository, &mockVerifier{}, &mockRegistryClient{}, []byte("12345678901234567890123456789012"), nil, nil)
 	// The catalogue fixture must implement the same read repository as production.
 	if err != nil {
 		t.Fatal(err)

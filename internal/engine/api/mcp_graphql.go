@@ -22,6 +22,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/applifecycle"
+	"github.com/Usefused/engine/internal/engine/managedauthclient"
 	"github.com/Usefused/engine/internal/engine/oauthprovider"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
@@ -79,8 +80,8 @@ func requestFromContext(ctx context.Context) *http.Request {
 // MountMCPGraphQLRoute registers the Engine-native MCP GraphQL endpoint.
 func MountMCPGraphQLRoute(mux interface {
 	Post(pattern string, handlerFn http.HandlerFunc)
-}, configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, masterKey []byte, redirectURI string, oauthProvider OAuthProviderService, revisionSinks ...authorizationRevisionSink) error {
-	schema, err := newMCPGraphQLSchema(configStore, s, verifier, registryClient, masterKey, oauthProvider, redirectURI)
+}, configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, masterKey []byte, redirectURI string, oauthProvider OAuthProviderService, managedConnect *managedauthclient.ConnectClient, revisionSinks ...authorizationRevisionSink) error {
+	schema, err := newMCPGraphQLSchema(configStore, s, verifier, registryClient, masterKey, oauthProvider, managedConnect, redirectURI)
 	// Do not mount a route whose authorization policy schema could not be constructed.
 	if err != nil {
 		return fmt.Errorf("build mcp graphql schema: %w", err)
@@ -420,7 +421,7 @@ var mcpAnalyticsDashboardType = graphql.NewObject(graphql.ObjectConfig{
 })
 
 // newMCPGraphQLSchema keeps session history and execution Activity behind the shared Engine authorization surface.
-func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, masterKey []byte, oauthProvider OAuthProviderService, redirectURIs ...string) (graphql.Schema, error) {
+func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, masterKey []byte, oauthProvider OAuthProviderService, managedConnect *managedauthclient.ConnectClient, redirectURIs ...string) (graphql.Schema, error) {
 	publicInsightReader := newPublicInsightReader(registryClient)
 	packageDownloads, _ := registryClient.(sandbox.SDKPackageDownloadCountClient)
 	query := graphql.NewObject(graphql.ObjectConfig{
@@ -526,7 +527,7 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"deactivateApp":                     deactivateAppGraphQLField(s),
 			"upsertSecrets":                     upsertSecretsGraphQLField(s, masterKey),
 			"deleteSecrets":                     deleteSecretsGraphQLField(s),
-			"startConnectSession":               startConnectSessionGraphQLField(s, verifier, masterKey, firstRedirectURI(redirectURIs)),
+			"startConnectSession":               startConnectSessionGraphQLField(s, verifier, masterKey, managedConnect, firstRedirectURI(redirectURIs)),
 			"deleteAuthConnection":              deleteAuthConnectionGraphQLField(s),
 			"setDefaultConnectionResource":      setDefaultConnectionResourceGraphQLField(s),
 			"rediscoverConnectionResources":     rediscoverConnectionResourcesGraphQLField(s, verifier, masterKey),

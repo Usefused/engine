@@ -71,6 +71,7 @@ type AuthRefreshCoordinator struct {
 	refreshStore           store.AuthConnectionRefreshStore
 	masterKey              []byte
 	applicationCredentials *connectauth.ApplicationCredentialResolver
+	managedConnect         connectauth.DelegatedOAuth
 	httpClient             *http.Client
 	now                    func() time.Time
 	foregroundLease        time.Duration
@@ -86,12 +87,9 @@ type authRefreshAttempt struct {
 	err        error
 }
 
-// authRefreshContract contains the exact immutable provider contract and the
-// decrypted workspace client registration needed for one token exchange.
+// authRefreshContract holds the grant adapter selected from the exact contract and persisted source.
 type authRefreshContract struct {
-	auth  fusedobject.AuthConfig
-	flow  fusedobject.OAuth2FlowContract
-	creds connectauth.ClientCredentials
+	grant connectauth.OAuthGrant
 }
 
 // authRefreshContractStore keeps refresh metadata reads narrower than the full
@@ -126,6 +124,19 @@ func WithAuthRefreshHTTPClient(client *http.Client) AuthRefreshCoordinatorOption
 		if client != nil {
 			coordinator.httpClient = client
 		}
+	}
+}
+
+// WithAuthRefreshManagedConnect lets a connection whose application
+// credentials came from a Fused Managed App (see connect_runtime_handlers.go)
+// refresh through the managed-auth broker instead of the provider directly,
+// the same way it was originally exchanged. Nil (the default) means this
+// installation has no managed-auth enrollment, so such connections simply
+// cannot refresh -- the same failure mode as today for any connection whose
+// application credentials go missing.
+func WithAuthRefreshManagedConnect(managedConnect connectauth.DelegatedOAuth) AuthRefreshCoordinatorOption {
+	return func(coordinator *AuthRefreshCoordinator) {
+		coordinator.managedConnect = managedConnect
 	}
 }
 
@@ -294,7 +305,8 @@ func (c *AuthRefreshCoordinator) refreshClaimedConnection(ctx context.Context, c
 		// and still leave a bounded persistence window before lease expiry.
 		return c.releaseClaim(finalizeCtx, claim, AuthRefreshOutcomeTransientFailure, "refresh_lease_budget_exhausted", defaultTransientRefreshRetryDelay, ErrAuthRefreshFailed)
 	}
-	token, err := connectauth.RefreshAccessToken(workCtx, c.httpClient, contract.auth, contract.flow, contract.creds, refreshToken)
+	// The existing connection lease covers either grant adapter without introducing another refresh scheduler.
+	token, err := contract.grant.Refresh(workCtx, refreshToken)
 	completedAt := c.now().UTC()
 	if err != nil {
 		return c.handleProviderRefreshError(finalizeCtx, claim, completedAt, err)
@@ -407,12 +419,15 @@ func (c *AuthRefreshCoordinator) loadAuthRefreshContract(ctx context.Context, co
 		ServiceID: conn.CredentialSourceServiceID,
 		AuthType:  conn.CredentialSourceAuthType,
 		AuthName:  conn.CredentialSourceAuthName,
+		Managed:   conn.ManagedAuth,
 	}
-	creds, err := c.applicationCredentials.Resolve(ctx, conn.BucketID, conn.ServiceID, conn.AuthType, conn.AuthName, source)
+	// Resolve the persisted source once; remote grants use the source identity instead of the target service.
+	_, grant, err := c.applicationCredentials.ResolveApplication(ctx, connectauth.ApplicationRequest{BucketID: conn.BucketID, ServiceID: conn.ServiceID, AuthType: conn.AuthType, AuthName: conn.AuthName, Source: source, Auth: auth, Flow: flow}, c.httpClient, c.managedConnect)
+	// Neither missing bucket material nor a remote outage permits source substitution.
 	if err != nil {
 		return authRefreshContract{}, ErrAuthRefreshContractUnavailable
 	}
-	return authRefreshContract{auth: auth, flow: flow, creds: creds}, nil
+	return authRefreshContract{grant: grant}, nil
 }
 
 // refreshAuthMatchesConnection prevents a same-name auth definition from a

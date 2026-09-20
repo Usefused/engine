@@ -446,6 +446,11 @@ func engineSchemaQueries() []string {
 		      ('oauth', 'oauth2', 'oauth2_authorization_code', 'oidc', 'openidconnect', 'open_id_connect');`,
 		// The clean-schema boundary rejects retained unversioned grants instead of preserving an ambiguous refresh path.
 		`ALTER TABLE fused_auth_connections ALTER COLUMN service_version_id SET NOT NULL;`,
+		// Set only when the connecting app's config explicitly referenced
+		// ${fused.bucket.auth.<service>.<authName>} -- never inferred from
+		// missing local credentials. Refresh reads this persisted flag to
+		// route through the managed-auth broker instead of re-deriving it.
+		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS is_managed_auth boolean NOT NULL DEFAULT false;`,
 
 		// Provider resources carry routing context only. Keeping them separate
 		// from token rows lets one connection own several tenant endpoints without
@@ -508,6 +513,10 @@ func engineSchemaQueries() []string {
 			);`,
 		// Exact contract identity is mandatory; pre-baseline NULL sessions are unsupported.
 		`ALTER TABLE fused_connect_sessions ALTER COLUMN service_version_id SET NOT NULL;`,
+		// Carries the explicit managed-auth selection across the provider
+		// browser redirect so the callback (which only has this persisted
+		// session, not the original auth.ref string) resolves the same way.
+		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS is_managed_auth boolean NOT NULL DEFAULT false;`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_connect_sessions_state_hash
 			ON fused_connect_sessions(state_hash);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_connect_sessions_expires
@@ -542,6 +551,8 @@ func engineSchemaQueries() []string {
 		// index, so only expiry needs a separate cleanup index.
 		`CREATE INDEX IF NOT EXISTS idx_fused_connect_input_sessions_expires
 			ON fused_connect_input_sessions(expires_at);`,
+		// Same explicit managed-auth carry-through as fused_connect_sessions.
+		`ALTER TABLE fused_connect_input_sessions ADD COLUMN IF NOT EXISTS is_managed_auth boolean NOT NULL DEFAULT false;`,
 
 		// Engine execution receipts are compact product/audit records. OTEL owns
 		// rich step-level detail; this table keeps user history queryable even
@@ -1763,6 +1774,7 @@ func engineSchemaQueries() []string {
 			ON fused_mcp_sessions(app_id, started_at DESC, id DESC);`,
 	}
 	queries = append(queries, oauthProviderSchemaQueries()...)
+	queries = append(queries, managedAuthBrokerSchemaQueries()...)
 	return append(queries, unifiedSchemaConvergenceQueries()...)
 }
 
@@ -1856,6 +1868,109 @@ func oauthProviderSchemaQueries() []string {
 			PRIMARY KEY (client_id, subject_id)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_oauth_user_consents_subject ON fused_oauth_user_consents(subject_id);`,
+	}
+}
+
+// managedAuthBrokerSchemaQueries declares the installation-credential table
+// for an Engine instance acting as the Fused-hosted managed-auth broker: the
+// credential issued to a *remote* customer Engine after Registry vouches for
+// it via a one-time enrollment ticket. registry_account_id intentionally
+// carries no foreign key -- it identifies a row in Registry's own accounts
+// table, a different database this Engine never queries directly.
+func managedAuthBrokerSchemaQueries() []string {
+	return []string{
+		// Each verified installation has one active credential pair. Atomic hash replacement
+		// rejects consumed refresh tokens without revoking sibling installations.
+		`CREATE TABLE IF NOT EXISTS fused_managed_auth_installations (
+			id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			registry_account_id  uuid NOT NULL,
+			token_family_id      uuid NOT NULL,
+			access_token_hash    text NOT NULL,
+			refresh_token_hash   text NOT NULL,
+			scope                text[] NOT NULL,
+			access_expires_at    timestamptz NOT NULL,
+			refresh_expires_at   timestamptz NOT NULL,
+			revoked_at           timestamptz,
+			created_at           timestamptz NOT NULL DEFAULT NOW()
+		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_managed_auth_installations_access_hash ON fused_managed_auth_installations(access_token_hash);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_managed_auth_installations_refresh_hash ON fused_managed_auth_installations(refresh_token_hash);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_managed_auth_installations_family ON fused_managed_auth_installations(token_family_id);`,
+		// Existing account-wide credentials cannot be mapped safely; require installation-bound re-enrollment.
+		`ALTER TABLE fused_managed_auth_installations ADD COLUMN IF NOT EXISTS engine_installation_id uuid;`,
+		`UPDATE fused_managed_auth_installations SET revoked_at = NOW() WHERE engine_installation_id IS NULL AND revoked_at IS NULL;`,
+		`DROP INDEX IF EXISTS uq_fused_managed_auth_installations_active_account;`,
+		// Bound already-issued long leases during cutover; never extend an existing expiry.
+		`UPDATE fused_managed_auth_installations SET access_expires_at = LEAST(access_expires_at, NOW() + INTERVAL '5 minutes') WHERE revoked_at IS NULL AND access_expires_at > NOW() + INTERVAL '5 minutes';`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_managed_auth_installations_active_installation ON fused_managed_auth_installations(registry_account_id, engine_installation_id) WHERE revoked_at IS NULL;`,
+
+		// This Engine's own credential for calling the (remote) managed-auth
+		// broker, the client-side counterpart of
+		// fused_managed_auth_installations on the broker itself. Singleton
+		// row (id=1) because one Engine installation holds one broker
+		// enrollment; values are envelope-encrypted, not hashed, because
+		// this side must present them as bearer credentials, not verify them.
+		`CREATE TABLE IF NOT EXISTS fused_managed_auth_broker_credential (
+			id                        smallint PRIMARY KEY DEFAULT 1,
+			encrypted_dek             text NOT NULL,
+			encrypted_access_token    text NOT NULL,
+			encrypted_refresh_token   text NOT NULL,
+			access_expires_at         timestamptz NOT NULL,
+			refresh_expires_at        timestamptz NOT NULL,
+			enrolled_at               timestamptz NOT NULL DEFAULT NOW(),
+			updated_at                timestamptz NOT NULL DEFAULT NOW(),
+			CONSTRAINT chk_fused_managed_auth_broker_credential_singleton CHECK (id = 1)
+		);`,
+
+		// Persist operator intent independently of credentials so outages and restarts cannot undo disable.
+		`CREATE TABLE IF NOT EXISTS fused_managed_auth_preferences (
+            id smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+            enabled boolean NOT NULL,
+            updated_at timestamptz NOT NULL DEFAULT NOW()
+        );`,
+
+		// Relay state stores only provider proof hashes and receiver authorization; event payloads remain in WEBHOOKS.
+		`ALTER TABLE fused_workspace_webhooks ADD COLUMN IF NOT EXISTS relay_config jsonb;`,
+		`CREATE TABLE IF NOT EXISTS fused_webhook_grants (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          installation_id uuid NOT NULL REFERENCES fused_managed_auth_installations(id) ON DELETE CASCADE,
+          registration_id uuid NOT NULL REFERENCES fused_workspace_webhooks(id) ON DELETE CASCADE,
+          token_hash text NOT NULL, refresh_hash text NOT NULL, resource_id text NOT NULL, provider_app_id text NOT NULL,
+          policy_hash text NOT NULL, created_at timestamptz NOT NULL DEFAULT NOW(),
+          UNIQUE(installation_id,registration_id,token_hash)
+        );`,
+		`CREATE TABLE IF NOT EXISTS fused_webhook_subscriptions (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          grant_id uuid NOT NULL REFERENCES fused_webhook_grants(id) ON DELETE CASCADE,
+          receiver_id uuid NOT NULL, revoked_at timestamptz,
+          UNIQUE(grant_id,receiver_id)
+        );`,
+		// Local receiver tombstones survive config/connection removal until remote cleanup succeeds.
+		`CREATE TABLE IF NOT EXISTS fused_webhook_receivers (
+          id uuid PRIMARY KEY, registration_id uuid UNIQUE REFERENCES fused_workspace_webhooks(id) ON DELETE SET NULL,
+          connection_id uuid REFERENCES fused_auth_connections(id) ON DELETE SET NULL,
+          config_hash text NOT NULL, token_hash text NOT NULL,
+          subscription_id uuid NOT NULL, broker_url text NOT NULL,
+          updated_at timestamptz NOT NULL DEFAULT NOW()
+        );`,
+		`CREATE TABLE IF NOT EXISTS fused_webhook_relay_receipts (
+          registration_id uuid NOT NULL REFERENCES fused_workspace_webhooks(id) ON DELETE CASCADE,
+          event_id text NOT NULL, published_at timestamptz NOT NULL DEFAULT NOW(),
+          PRIMARY KEY(registration_id,event_id)
+        );`,
+
+		// Publications hold references and identity fences only; all secrets and auth contracts use canonical Engine storage.
+		// Source deletion leaves this identity reserved, so it has no cascading bucket foreign key.
+		`CREATE TABLE IF NOT EXISTS fused_oauth_publications (
+ service_id uuid NOT NULL,
+ auth_name text NOT NULL,
+ bucket_id uuid NOT NULL,
+ service_version_id uuid NOT NULL,
+ flow_name text NOT NULL,
+ registration_hash text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(service_id,auth_name)
+ );`,
 	}
 }
 

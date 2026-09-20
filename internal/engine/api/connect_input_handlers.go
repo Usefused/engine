@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/managedauthclient"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"go.opentelemetry.io/otel"
@@ -201,12 +202,12 @@ var connectInputProviderTemplate = parseHostedConnectTemplate("connect-input-pro
 // ConnectInputPageHandler renders the short-lived Engine-owned collection
 // page only for a valid pending form session. The raw token is a bearer secret,
 // so the response is non-cacheable and telemetry records counts/outcomes only.
-func ConnectInputPageHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, redirectURIs ...string) http.HandlerFunc {
+func ConnectInputPageHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, managedConnect *managedauthclient.ConnectClient, redirectURIs ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.connect.input.view")
 		defer span.End()
 		branding := loadHostedConnectBranding(ctx, s)
-		loaded, err := loadConnectInputSession(ctx, s, verifier, masterKey, firstRedirectURI(redirectURIs), r.URL.Query().Get("token"))
+		loaded, err := loadConnectInputSession(ctx, s, verifier, masterKey, managedConnect, firstRedirectURI(redirectURIs), r.URL.Query().Get("token"))
 		if err != nil {
 			recordConnectInputOutcome(ctx, span, "view", connectInputOutcome(err), 0)
 			writeConnectInputUnavailable(w, branding)
@@ -221,7 +222,7 @@ func ConnectInputPageHandler(s store.Store, verifier ServiceVerifier, masterKey 
 // ConnectInputSubmitHandler validates the browser fields before creating any
 // OAuth state. A successful submission atomically consumes the form session
 // and inserts the provider callback session, then renders the provider handoff.
-func ConnectInputSubmitHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, redirectURIs ...string) http.HandlerFunc {
+func ConnectInputSubmitHandler(s store.Store, verifier ServiceVerifier, masterKey []byte, managedConnect *managedauthclient.ConnectClient, redirectURIs ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.connect.input.submit")
 		defer span.End()
@@ -236,7 +237,7 @@ func ConnectInputSubmitHandler(s store.Store, verifier ServiceVerifier, masterKe
 		// preventing collisions with a provider profile that declares "token" as
 		// legitimate customer routing input.
 		token := strings.TrimSpace(r.URL.Query().Get("token"))
-		loaded, err := loadConnectInputSession(ctx, s, verifier, masterKey, firstRedirectURI(redirectURIs), token)
+		loaded, err := loadConnectInputSession(ctx, s, verifier, masterKey, managedConnect, firstRedirectURI(redirectURIs), token)
 		if err != nil {
 			recordConnectInputOutcome(ctx, span, "submit", connectInputOutcome(err), 0)
 			writeConnectInputUnavailable(w, branding)
@@ -267,7 +268,7 @@ func ConnectInputSubmitHandler(s store.Store, verifier ServiceVerifier, masterKe
 // loadConnectInputSession resolves one exact hashed token row and its pinned
 // runtime profile. The lookup remains constant-count and rejects replay,
 // expiry, or configuration drift before any customer values are displayed.
-func loadConnectInputSession(ctx context.Context, s store.Store, verifier ServiceVerifier, masterKey []byte, redirectURI, rawToken string) (resolvedConnectInputSession, error) {
+func loadConnectInputSession(ctx context.Context, s store.Store, verifier ServiceVerifier, masterKey []byte, managedConnect *managedauthclient.ConnectClient, redirectURI, rawToken string) (resolvedConnectInputSession, error) {
 	tokenHash, err := connectInputTokenHash(rawToken)
 	if err != nil {
 		return resolvedConnectInputSession{}, err
@@ -286,9 +287,10 @@ func loadConnectInputSession(ctx context.Context, s store.Store, verifier Servic
 			session.CredentialSourceServiceID,
 			session.CredentialSourceAuthType,
 			session.CredentialSourceAuthName,
+			session.ManagedAuth,
 		),
 	}
-	resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey, redirectURI)
+	resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey, managedConnect, redirectURI)
 	if err != nil {
 		return resolvedConnectInputSession{}, err
 	}
@@ -354,6 +356,7 @@ func completeConnectInputSession(ctx context.Context, s store.Store, loaded reso
 			session.CredentialSourceServiceID,
 			session.CredentialSourceAuthType,
 			session.CredentialSourceAuthName,
+			session.ManagedAuth,
 		),
 	}
 	providerSession, response, err := buildProviderConnectSession(call, session.EndUserRef, session.CreatedByAppID, session.ReturnURL, resourceInputJSON, session.RequestedScopes, loaded.resolved, masterKey)
