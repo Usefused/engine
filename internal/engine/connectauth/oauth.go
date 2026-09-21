@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Usefused/engine/internal/shared/oauthmapping"
 	"io"
 	"net/http"
 	"net/url"
@@ -286,7 +287,15 @@ func doTokenGrant(ctx context.Context, client *http.Client, auth fusedobject.Aut
 	if err != nil {
 		return TokenResponse{}, err
 	}
-	return doTokenRequest(client, req)
+	// Refresh grants return their own standard token object; only code exchange selects a consent principal.
+	if err := oauthmapping.Validate(auth.ScopeParameter, auth.AuthorizationTokenResponsePath); err != nil {
+		return TokenResponse{}, err
+	}
+	var responsePath []string
+	if form.Get("grant_type") == "authorization_code" {
+		responsePath = auth.AuthorizationTokenResponsePath
+	}
+	return doTokenRequest(client, req, responsePath)
 }
 
 // newTokenRequest keeps Basic auth construction next to request creation so
@@ -335,7 +344,7 @@ func encodeTokenRequestBody(mediaType fusedobject.TokenRequestMediaType, form ur
 
 // doTokenRequest fails closed on malformed token responses so the bucket never
 // stores an incomplete connection that would fail later during execution.
-func doTokenRequest(client *http.Client, req *http.Request) (TokenResponse, error) {
+func doTokenRequest(client *http.Client, req *http.Request, responsePath []string) (TokenResponse, error) {
 	resp, err := client.Do(req)
 	if err != nil {
 		return TokenResponse{}, err
@@ -350,7 +359,7 @@ func doTokenRequest(client *http.Client, req *http.Request) (TokenResponse, erro
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return TokenResponse{}, decodeTokenEndpointError(resp.StatusCode, resp.Header.Get("Content-Type"), body)
 	}
-	token, err := decodeTokenResponse(resp.Header.Get("Content-Type"), body)
+	token, err := decodeSelectedTokenResponse(resp.Header.Get("Content-Type"), body, responsePath)
 	if err != nil {
 		return TokenResponse{}, err
 	}

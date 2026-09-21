@@ -127,7 +127,7 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	if err := r.mergeStoredSecrets(ctx, bucketID, request.ServiceID, finalCreds, request.Auths, request.Requirements); err != nil {
 		return nil, nil, err
 	}
-	if err := r.resolveConnectedAuth(ctx, bucketID, request.ServiceID, request.Auths, request.Requirements, finalCreds); err != nil {
+	if err := r.resolveConnectedAuth(ctx, bucketID, request.ServiceID, request.Auths, request.Requirements, finalCreds, selections...); err != nil {
 		return nil, nil, err
 	}
 	values, err := resolveRequestBindings(bindings, finalCreds, bucketID)
@@ -593,7 +593,7 @@ func (r *secretResolver) decryptStoredSecret(serviceID uuid.UUID, sec store.Work
 
 // resolveConnectedAuth resolves OAuth/OIDC provider credentials inside Engine,
 // leaving named static schemes on the bucket-secret path even with user context.
-func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, serviceID uuid.UUID, auths fusedobject.AuthConfigs, requirements authrouting.Requirements, credentials map[string]any) error {
+func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, serviceID uuid.UUID, auths fusedobject.AuthConfigs, requirements authrouting.Requirements, credentials map[string]any, selections ...models.SDKSelection) error {
 	endUserRef := connectedEndUserRef(credentials)
 	// A selected connected family without user identity is an actionable connection miss, never permission to dispatch anonymously.
 	if endUserRef == "" && credentialString(credentials, "fused_connection_id") == "" && !requirementsPermitAnonymous(requirements) && isConnectedAuthSelector(requestedAuthType(credentials)) {
@@ -615,7 +615,7 @@ func (r *secretResolver) resolveConnectedAuth(ctx context.Context, bucketID, ser
 		// Identity context alone cannot identify a provider credential slot.
 		return errors.New("connected auth requires fused_auth_name or fused_auth_type")
 	}
-	conn, err := r.selectedUsableAuthConnection(ctx, bucketID, serviceID, endUserRef, authName, credentials)
+	conn, err := r.selectedUsableAuthConnection(ctx, bucketID, serviceID, endUserRef, authName, credentials, selections...)
 	if err != nil {
 		return err
 	}
@@ -808,7 +808,7 @@ func runtimeAuthSelectionError(auths fusedobject.AuthConfigs, requirements authr
 
 // usableAuthConnection loads the bucket-owned grant and refreshes it through
 // its persisted consent contract, allowing a live token through transient provider failures.
-func (r *secretResolver) usableAuthConnection(ctx context.Context, bucketID, serviceID uuid.UUID, endUserRef, authName string) (*store.AuthConnection, error) {
+func (r *secretResolver) usableAuthConnection(ctx context.Context, bucketID, serviceID uuid.UUID, endUserRef, authName string, selections ...models.SDKSelection) (*store.AuthConnection, error) {
 	conn, err := r.db.GetAuthConnection(ctx, bucketID, serviceID, endUserRef, authName)
 	// Storage failures remain distinct from an absent user grant.
 	if err != nil {
@@ -818,16 +818,20 @@ func (r *secretResolver) usableAuthConnection(ctx context.Context, bucketID, ser
 	if conn == nil {
 		return nil, newConnectionRequiredError(bucketID.String(), serviceID.String(), endUserRef)
 	}
+	// Validate the app-selected publication before any refresh or token decryption.
+	if !connectionMatchesManagedSelection(conn, selections) {
+		return nil, newConnectionRequiredError(conn.BucketID.String(), conn.ServiceID.String(), conn.EndUserRef)
+	}
 	return r.ensureUsableAuthConnection(ctx, conn)
 }
 
 // selectedUsableAuthConnection resolves either the natural connection key or
 // a fixed token binding while preserving the stored consent-version identity.
-func (r *secretResolver) selectedUsableAuthConnection(ctx context.Context, bucketID, serviceID uuid.UUID, endUserRef, authName string, credentials map[string]any) (*store.AuthConnection, error) {
+func (r *secretResolver) selectedUsableAuthConnection(ctx context.Context, bucketID, serviceID uuid.UUID, endUserRef, authName string, credentials map[string]any, selections ...models.SDKSelection) (*store.AuthConnection, error) {
 	connectionID := credentialString(credentials, "fused_connection_id")
 	// Dynamic callers use the bucket/service/user natural key; fixed tokens supply an opaque connection ID.
 	if connectionID == "" {
-		return r.usableAuthConnection(ctx, bucketID, serviceID, endUserRef, authName)
+		return r.usableAuthConnection(ctx, bucketID, serviceID, endUserRef, authName, selections...)
 	}
 	id, err := uuid.Parse(connectionID)
 	// Fixed bindings accept only Engine-issued UUID identities.
@@ -842,6 +846,10 @@ func (r *secretResolver) selectedUsableAuthConnection(ctx context.Context, bucke
 	// Every persisted binding must still match the executing bucket, service, and named auth slot.
 	if conn == nil || conn.BucketID != bucketID || conn.ServiceID != serviceID || conn.AuthName != authName {
 		return nil, store.ErrAppTokenBindingInvalid
+	}
+	// Validate the app-selected publication before any refresh or token decryption.
+	if !connectionMatchesManagedSelection(conn, selections) {
+		return nil, newConnectionRequiredError(conn.BucketID.String(), conn.ServiceID.String(), conn.EndUserRef)
 	}
 	return r.ensureUsableAuthConnection(ctx, conn)
 }
@@ -1096,4 +1104,15 @@ func (r *secretResolver) decryptWebhookSecret(sec store.WorkspaceSecret, secretR
 		return "", fmt.Errorf("failed to unwrap DEK: %w", err)
 	}
 	return store.DecryptWithDEK(dek, sec.EncryptedValue)
+}
+
+// connectionMatchesManagedSelection prevents an SDK/MCP configured for one managed application from using another's stored grant.
+func connectionMatchesManagedSelection(conn *store.AuthConnection, selections []models.SDKSelection) bool {
+	for _, selection := range selections {
+		// Only the executing service's explicit managed source constrains application identity.
+		if selection.ServiceID == conn.ServiceID && selection.AuthName == conn.AuthName && selection.ManagedAuth {
+			return conn.ManagedAuth && conn.ManagedApplicationID == selection.ManagedApplicationID && conn.CredentialSourceServiceID == selection.CredentialSourceServiceID && conn.CredentialSourceAuthName == selection.CredentialSourceAuthName
+		}
+	}
+	return true
 }

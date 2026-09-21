@@ -740,23 +740,24 @@ type AuthConnection struct {
 	// referenced ${fused.bucket.auth.<service>.<authName>} -- never set as
 	// a fallback when no local application credentials exist.
 	ManagedAuth           bool
+	ManagedApplicationID  string `json:"managed_application_id,omitempty"`
 	EncryptedDEK          string
 	EncryptedAccessToken  string
-	EncryptedRefreshToken     string
-	EncryptedIDToken          string
-	TokenType                 string
-	Scopes                    []string
-	ScopeSource               string
-	Issuer                    string
-	Subject                   string
-	IdentityClaims            []byte
-	ExpiresAt                 *time.Time
-	RefreshTokenExpiresAt     *time.Time
-	LastUsedAt                *time.Time
-	LastRefreshAttemptAt      *time.Time
-	LastRefreshedAt           *time.Time
-	RefreshRetryNotBefore     *time.Time
-	RefreshState              string
+	EncryptedRefreshToken string
+	EncryptedIDToken      string
+	TokenType             string
+	Scopes                []string
+	ScopeSource           string
+	Issuer                string
+	Subject               string
+	IdentityClaims        []byte
+	ExpiresAt             *time.Time
+	RefreshTokenExpiresAt *time.Time
+	LastUsedAt            *time.Time
+	LastRefreshAttemptAt  *time.Time
+	LastRefreshedAt       *time.Time
+	RefreshRetryNotBefore *time.Time
+	RefreshState          string
 	// Failure metadata is deliberately limited to stable codes and OTEL
 	// correlation; raw provider responses and user identifiers do not belong here.
 	LastFailureCode    string
@@ -797,6 +798,7 @@ type ConnectSession struct {
 	CredentialSourceAuthType  string
 	CredentialSourceAuthName  string
 	ManagedAuth               bool
+	ManagedApplicationID      string `json:"managed_application_id,omitempty"`
 	RedirectURI               string
 	EndUserRef                string
 	StateHash                 string
@@ -826,6 +828,7 @@ type ConnectInputSession struct {
 	CredentialSourceAuthType  string
 	CredentialSourceAuthName  string
 	ManagedAuth               bool
+	ManagedApplicationID      string `json:"managed_application_id,omitempty"`
 	ContractHash              string
 	EndUserRef                string
 	TokenHash                 string

@@ -867,14 +867,17 @@ type AuthConfig struct {
 	TokenEndpointAuthMethod TokenEndpointAuthMethod          `json:"token_endpoint_auth_method,omitempty"`
 	OAuthTokenPlacement     *authrouting.OAuthTokenPlacement `json:"oauth_token_placement,omitempty"`
 	TokenRequestMediaType   TokenRequestMediaType            `json:"token_request_media_type,omitempty"`
-	ExtraAuthParams         map[string]string                `json:"extra_auth_params,omitempty"`
-	ExtraTokenParams        map[string]string                `json:"extra_token_params,omitempty"`
-	RefreshTokenRotates     bool                             `json:"refresh_token_rotates,omitempty"`
-	RefreshTokenRequired    bool                             `json:"refresh_token_required,omitempty"`
-	OAuth2Flows             OAuth2Flows                      `json:"oauth2_flows,omitempty"`
-	SelectedOAuth2Flow      *OAuth2FlowContract              `json:"-"`
-	Strategy                *AuthRuntimeStrategy             `json:"strategy,omitempty"`
-	PolicyProvenance        map[string]string                `json:"policy_provenance,omitempty"`
+	// Authorization mapping selects a consent principal without changing refresh-token semantics.
+	ScopeParameter                 string               `json:"scope_parameter,omitempty"`
+	AuthorizationTokenResponsePath []string             `json:"authorization_token_response_path,omitempty"`
+	ExtraAuthParams                map[string]string    `json:"extra_auth_params,omitempty"`
+	ExtraTokenParams               map[string]string    `json:"extra_token_params,omitempty"`
+	RefreshTokenRotates            bool                 `json:"refresh_token_rotates,omitempty"`
+	RefreshTokenRequired           bool                 `json:"refresh_token_required,omitempty"`
+	OAuth2Flows                    OAuth2Flows          `json:"oauth2_flows,omitempty"`
+	SelectedOAuth2Flow             *OAuth2FlowContract  `json:"-"`
+	Strategy                       *AuthRuntimeStrategy `json:"strategy,omitempty"`
+	PolicyProvenance               map[string]string    `json:"policy_provenance,omitempty"`
 }
 
 type OAuth2Flows map[string]OAuth2FlowContract
@@ -1120,19 +1123,20 @@ type SDKSelection struct {
 	// AuthType and AuthName pin dispatch when the selected operations require
 	// authentication. Anonymous-only and webhook-only selections leave both
 	// empty so runtime calls preserve the operation security contract.
-	AuthType                  string               `json:"auth_type,omitempty"`
-	AuthName                  string               `json:"auth_name,omitempty"`
-	AuthRef                   string               `json:"auth_ref,omitempty"`
-	CredentialSourceServiceID uuid.UUID            `json:"credential_source_service_id,omitempty"`
-	CredentialSourceAuthType  string               `json:"credential_source_auth_type,omitempty"`
-	CredentialSourceAuthName  string               `json:"credential_source_auth_name,omitempty"`
+	AuthType                  string    `json:"auth_type,omitempty"`
+	AuthName                  string    `json:"auth_name,omitempty"`
+	AuthRef                   string    `json:"auth_ref,omitempty"`
+	CredentialSourceServiceID uuid.UUID `json:"credential_source_service_id,omitempty"`
+	CredentialSourceAuthType  string    `json:"credential_source_auth_type,omitempty"`
+	CredentialSourceAuthName  string    `json:"credential_source_auth_name,omitempty"`
 	// ManagedAuth is true only when the app's config explicitly referenced
 	// ${fused.bucket.auth.<service>.<authName>}; consent and refresh then route
 	// through the managed-auth broker instead of a bucket-owned app pair.
-	ManagedAuth bool `json:"managed_auth,omitempty"`
-	RequiredAuth              []SDKRequiredAuth    `json:"required_auth,omitempty"`
-	ConnectScopes             []string             `json:"connect_scopes,omitempty"`
-	Injections                []SDKInjectionConfig `json:"injections,omitempty"`
+	ManagedAuth          bool                 `json:"managed_auth,omitempty"`
+	ManagedApplicationID string               `json:"managed_application_id,omitempty"`
+	RequiredAuth         []SDKRequiredAuth    `json:"required_auth,omitempty"`
+	ConnectScopes        []string             `json:"connect_scopes,omitempty"`
+	Injections           []SDKInjectionConfig `json:"injections,omitempty"`
 }
 
 type SDKInjectionConfig struct {

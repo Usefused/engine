@@ -322,13 +322,16 @@ type AuthConfig struct {
 	TokenEndpointAuthMethod TokenEndpointAuthMethod          `json:"token_endpoint_auth_method,omitempty"`
 	OAuthTokenPlacement     *authrouting.OAuthTokenPlacement `json:"oauth_token_placement,omitempty"`
 	TokenRequestMediaType   TokenRequestMediaType            `json:"token_request_media_type,omitempty"`
-	ExtraAuthParams         map[string]string                `json:"extra_auth_params,omitempty"`
-	ExtraTokenParams        map[string]string                `json:"extra_token_params,omitempty"`
-	RefreshTokenRotates     bool                             `json:"refresh_token_rotates,omitempty"`
-	RefreshTokenRequired    bool                             `json:"refresh_token_required,omitempty"`
-	OAuth2Flows             OAuth2Flows                      `json:"oauth2_flows,omitempty"`
-	Strategy                *AuthRuntimeStrategy             `json:"strategy,omitempty"`
-	PolicyProvenance        map[string]string                `json:"policy_provenance,omitempty"`
+	// Authorization mapping selects a consent principal without changing refresh-token semantics.
+	ScopeParameter                 string               `json:"scope_parameter,omitempty"`
+	AuthorizationTokenResponsePath []string             `json:"authorization_token_response_path,omitempty"`
+	ExtraAuthParams                map[string]string    `json:"extra_auth_params,omitempty"`
+	ExtraTokenParams               map[string]string    `json:"extra_token_params,omitempty"`
+	RefreshTokenRotates            bool                 `json:"refresh_token_rotates,omitempty"`
+	RefreshTokenRequired           bool                 `json:"refresh_token_required,omitempty"`
+	OAuth2Flows                    OAuth2Flows          `json:"oauth2_flows,omitempty"`
+	Strategy                       *AuthRuntimeStrategy `json:"strategy,omitempty"`
+	PolicyProvenance               map[string]string    `json:"policy_provenance,omitempty"`
 }
 
 type OAuth2Flows map[string]OAuth2FlowContract

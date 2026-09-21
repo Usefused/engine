@@ -24,16 +24,17 @@ type Receiver struct {
 }
 
 type receiverTarget struct {
-	RegistrationID uuid.UUID
-	ConnectionID   uuid.UUID
-	ServiceID      uuid.UUID
-	VersionID      uuid.UUID
-	AccountID      uuid.UUID
-	Label          string
-	ConfigHash     string
-	Config         Config
-	WrappedKey     string
-	Ciphertext     string
+	ManagedApplicationID string
+	RegistrationID       uuid.UUID
+	ConnectionID         uuid.UUID
+	ServiceID            uuid.UUID
+	VersionID            uuid.UUID
+	AccountID            uuid.UUID
+	Label                string
+	ConfigHash           string
+	Config               Config
+	WrappedKey           string
+	Ciphertext           string
 }
 
 type receiverState struct {
@@ -119,7 +120,7 @@ func (w *Receiver) receivePage(ctx context.Context, targets []receiverTarget) er
 // targets resolves active managed connections, source buckets and workspace audience in one bounded SQL query.
 func (w *Receiver) targets(ctx context.Context) ([]receiverTarget, error) {
 	rows, err := w.DB.Query(ctx, `SELECT wh.id,c.id,wh.service_id,wh.service_version_id,ws.account_id,wh.label,
- encode(sha256(convert_to(wh.relay_config::text,'UTF8')),'hex'),wh.relay_config,c.encrypted_dek,c.access_token
+ encode(sha256(convert_to(wh.relay_config::text,'UTF8')),'hex'),wh.relay_config,c.encrypted_dek,c.access_token,c.managed_application_id
  FROM fused_workspace_webhooks wh
  JOIN fused_auth_connections c ON c.id=(wh.relay_config->'source'->>'connection_id')::uuid
  JOIN fused_buckets b ON b.id=c.bucket_id AND b.name=wh.relay_config->'source'->>'bucket'
@@ -138,7 +139,7 @@ func (w *Receiver) targets(ctx context.Context) ([]receiverTarget, error) {
 		var t receiverTarget
 		var raw []byte
 		// Stop before credential use if the persisted row cannot be decoded exactly.
-		if err = rows.Scan(&t.RegistrationID, &t.ConnectionID, &t.ServiceID, &t.VersionID, &t.AccountID, &t.Label, &t.ConfigHash, &raw, &t.WrappedKey, &t.Ciphertext); err != nil {
+		if err = rows.Scan(&t.RegistrationID, &t.ConnectionID, &t.ServiceID, &t.VersionID, &t.AccountID, &t.Label, &t.ConfigHash, &raw, &t.WrappedKey, &t.Ciphertext, &t.ManagedApplicationID); err != nil {
 			return nil, err
 		}
 		t.Config, err = Decode(raw)
@@ -163,14 +164,14 @@ func (w *Receiver) receive(ctx context.Context, t receiverTarget) error {
 	if err != nil {
 		return err
 	}
-	state, err := w.ensureState(ctx, t, Digest(token))
+	state, err := w.ensureState(ctx, t, receiverTokenIdentity(token, t.ManagedApplicationID))
 	// Mismatched or withdrawing state must settle before resubscribing.
 	if err != nil {
 		return err
 	}
 	// Persist the remote subscription identity before accepting any event.
 	if state.SubscriptionID == uuid.Nil {
-		state.SubscriptionID, err = w.Client.Subscribe(ctx, t.Config.Source.RegistrationID, state.ID, token)
+		state.SubscriptionID, err = w.Client.Subscribe(ctx, t.Config.Source.RegistrationID, state.ID, token, t.ManagedApplicationID)
 		// Missing broker proof requires a fresh provider connection, never a customer workspace claim.
 		if err != nil {
 			return err
@@ -260,7 +261,7 @@ func (w *Receiver) accept(ctx context.Context, t receiverTarget, s receiverState
 	err := w.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM fused_workspace_webhooks wh
  JOIN fused_auth_connections c ON c.id=$2 JOIN fused_webhook_receivers r ON r.registration_id=wh.id
  WHERE wh.id=$1 AND wh.auth_type='fused_remote' AND encode(sha256(convert_to(wh.relay_config::text,'UTF8')),'hex')=$3
- AND c.is_managed_auth AND c.refresh_state='ok' AND c.access_token=$4 AND r.id=$5)`, t.RegistrationID, t.ConnectionID, t.ConfigHash, t.Ciphertext, s.ID).Scan(&active)
+ AND c.is_managed_auth AND c.refresh_state='ok' AND c.access_token=$4 AND r.id=$5 AND c.managed_application_id=$6)`, t.RegistrationID, t.ConnectionID, t.ConfigHash, t.Ciphertext, s.ID, t.ManagedApplicationID).Scan(&active)
 	// Disconnect, reconnect or config replacement during network I/O wins before local publication.
 	if err != nil || !active {
 		return ErrDenied
@@ -308,4 +309,13 @@ func (w *Receiver) publish(ctx context.Context, t receiverTarget, s receiverStat
 	}
 	_, err = w.DB.Exec(ctx, `INSERT INTO fused_webhook_relay_receipts(registration_id,event_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, t.RegistrationID, d.EventID)
 	return err
+}
+
+// receiverTokenIdentity fences app replacement even if a provider issues coincident token strings across applications.
+func receiverTokenIdentity(token, applicationID string) string {
+	// Default receivers retain their existing durable hash during additive upgrades.
+	if applicationID == "" {
+		return Digest(token)
+	}
+	return Digest(token + "\x00" + applicationID)
 }

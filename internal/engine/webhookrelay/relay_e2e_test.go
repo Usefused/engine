@@ -47,7 +47,7 @@ func (s staticToken) AccessToken(context.Context) (string, error) { return strin
 type providerCatalog struct{ url string }
 
 // GetProviderApp supplies a reviewed HTTPS provider fixture; the real OAuth exchange and proof extraction run unchanged.
-func (p providerCatalog) GetProviderApp(context.Context, uuid.UUID, string, []byte) (managedauthbroker.ProviderApp, error) {
+func (p providerCatalog) GetProviderApp(context.Context, uuid.UUID, string, []byte, ...string) (managedauthbroker.ProviderApp, error) {
 	return managedauthbroker.ProviderApp{ClientID: "test-client", ClientSecret: "test-secret", Auth: fusedobject.AuthConfig{Type: "oauth2", TokenEndpointAuthMethod: fusedobject.TokenEndpointAuthMethodClientSecretPost}, Flow: fusedobject.OAuth2FlowContract{TokenURL: p.url}}, nil
 }
 
@@ -329,4 +329,65 @@ func TestRemoteWebhookSubscriptionQuotaIsBounded(t *testing.T) {
 	require.NoError(t, err)
 	_, err = f.client.Subscribe(t.Context(), f.registration, uuid.New(), "provider-access")
 	require.Error(t, err)
+}
+
+// TestMultipleApplicationWebhookProofs pins proof and revocation to one application even when provider routing claims coincide.
+func TestMultipleApplicationWebhookProofs(t *testing.T) {
+	f := newFixture(t)
+	application, registration := uuid.NewString(), uuid.New()
+	_, err := f.brokerDB.Exec(t.Context(), `INSERT INTO fused_oauth_publications(service_id,auth_name,bucket_id,service_version_id,flow_name,registration_hash,application_id)
+ SELECT service_id,auth_name,bucket_id,service_version_id,flow_name,'second-app-contract',$2 FROM fused_oauth_publications WHERE service_id=$1 AND application_id=''`, f.service, application)
+	require.NoError(t, err)
+	_, err = f.brokerDB.Exec(t.Context(), `INSERT INTO fused_workspace_webhooks(id,service_id,service_version_id,label,slug,signature_policy,secret_ref,secret_bucket_id,owning_config_key,relay_config)
+ SELECT $2,service_id,service_version_id,'second-app','second-app',signature_policy,secret_ref,secret_bucket_id,'webhook:second-app',jsonb_set(relay_config,'{publish,managed_application_id}',to_jsonb($3::text)) FROM fused_workspace_webhooks WHERE id=$1`, f.registration, registration, application)
+	require.NoError(t, err)
+	raw := []byte(`{"team":{"id":"team-verified"},"app_id":"app-verified"}`)
+	require.NoError(t, f.broker.Proof.RecordExchange(t.Context(), f.installation, f.service, "oauth", "default-access", "shared-refresh", raw))
+	_, err = f.client.Subscribe(t.Context(), registration, uuid.New(), "default-access", application)
+	require.Error(t, err)
+	require.NoError(t, f.broker.Proof.RecordExchange(t.Context(), f.installation, f.service, "oauth", "named-access", "shared-refresh", raw, application))
+	_, err = f.client.Subscribe(t.Context(), f.registration, uuid.New(), "named-access")
+	require.Error(t, err)
+	// A legacy/default receiver cannot consume a named application's proof.
+	_, err = f.client.Subscribe(t.Context(), registration, uuid.New(), "named-access")
+	require.Error(t, err)
+	assertNamedReceiverSubscription(t, f, registration, application, "named-access")
+	subscription, err := f.client.Subscribe(t.Context(), registration, uuid.New(), "named-access", application)
+	require.NoError(t, err)
+	// Even coincident refresh strings cannot rotate a proof for another application.
+	require.NoError(t, f.broker.Proof.RecordRefresh(t.Context(), f.installation, f.service, "oauth", "shared-refresh", "named-rotated", "", application))
+	_, err = f.client.Subscribe(t.Context(), f.registration, uuid.New(), "default-access")
+	require.NoError(t, err)
+	_, err = f.client.Subscribe(t.Context(), f.registration, uuid.New(), "named-rotated")
+	require.Error(t, err)
+	_, err = f.client.Subscribe(t.Context(), registration, uuid.New(), "named-rotated", application)
+	require.NoError(t, err)
+	_, err = f.brokerDB.Exec(t.Context(), `UPDATE fused_oauth_publications SET allow_all_enrolled=false WHERE service_id=$1 AND application_id=$2`, f.service, application)
+	require.NoError(t, err)
+	_, err = f.client.Pull(t.Context(), subscription)
+	require.Error(t, err)
+	_, err = f.client.Subscribe(t.Context(), registration, uuid.New(), "named-rotated", application)
+	require.Error(t, err)
+	// Revoking one publication leaves the separately authorized default proof usable.
+	_, err = f.client.Subscribe(t.Context(), f.registration, uuid.New(), "default-access")
+	require.NoError(t, err)
+}
+
+// assertNamedReceiverSubscription drives the real consumer worker using the application identity saved on its connection.
+func assertNamedReceiverSubscription(t *testing.T, f *fixture, registration uuid.UUID, application, token string) {
+	t.Helper()
+	wrapped, dek, err := store.WrapDEK(f.key)
+	require.NoError(t, err)
+	encrypted, err := store.EncryptWithDEK(dek, token)
+	require.NoError(t, err)
+	_, err = f.consumerDB.Exec(t.Context(), `UPDATE fused_auth_connections SET managed_application_id=$2,encrypted_dek=$3,access_token=$4 WHERE id=$1`, f.connection, application, wrapped, encrypted)
+	require.NoError(t, err)
+	_, err = f.consumerDB.Exec(t.Context(), `UPDATE fused_workspace_webhooks SET relay_config=jsonb_set(relay_config,'{source,registration_id}',to_jsonb($2::text)) WHERE id=$1`, f.localRegistration, registration.String())
+	require.NoError(t, err)
+	require.NoError(t, f.receiver.Step(t.Context()))
+	var subscription uuid.UUID
+	require.NoError(t, f.consumerDB.QueryRow(t.Context(), `SELECT subscription_id FROM fused_webhook_receivers WHERE registration_id=$1`, f.localRegistration).Scan(&subscription))
+	authorization, err := f.broker.Proof.Authorize(t.Context(), f.installation, subscription)
+	require.NoError(t, err)
+	require.Equal(t, application, authorization.Policy.ManagedApplicationID)
 }

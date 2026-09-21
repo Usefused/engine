@@ -16,7 +16,7 @@ import (
 type securityCatalog struct{ app ProviderApp }
 
 // GetProviderApp models the trusted catalogue independently from consumer request metadata.
-func (c securityCatalog) GetProviderApp(context.Context, uuid.UUID, string, []byte) (ProviderApp, error) {
+func (c securityCatalog) GetProviderApp(context.Context, uuid.UUID, string, []byte, ...string) (ProviderApp, error) {
 	return c.app, nil
 }
 

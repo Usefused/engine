@@ -36,6 +36,12 @@ func (fixedTicketMinter) MintManagedAuthEnrollmentTicket(context.Context) (strin
 // (Postgres-backed) managed-auth broker, and the authorize URL carries the
 // broker-issued client_id, never a secret. Managed auth is never a fallback.
 func TestStartConnectSessionUsesManagedAppOnlyWhenExplicitlyReferenced(t *testing.T) {
+	t.Run("default", func(t *testing.T) { testManagedConnectSelection(t, "") })
+	t.Run("named", func(t *testing.T) { testManagedConnectSelection(t, uuid.NewString()) })
+}
+
+// testManagedConnectSelection exercises the real consumer client and broker, and checks the durable browser-session selector.
+func testManagedConnectSelection(t *testing.T, applicationID string) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("DATABASE_URL not set")
@@ -65,7 +71,9 @@ func TestStartConnectSessionUsesManagedAppOnlyWhenExplicitlyReferenced(t *testin
 	// The provider registration reuses an ordinary bucket pair and exact service contract.
 	auth := fusedobject.AuthConfig{Name: "bearerAuth", Type: "oauth2", TokenEndpointAuthMethod: fusedobject.TokenEndpointAuthMethodClientSecretPost, OAuth2Flows: fusedobject.OAuth2Flows{"authorizationCode": {TokenURL: "https://provider.example/token"}}}
 	bucket, version := testoauth.Seed(t, pool, fixture.serviceID, auth, masterKey, "managed-client-id", "managed-client-secret")
-	if err := catalog.PublishRegistration(t.Context(), fixture.serviceID, "bearerAuth", managedauthbroker.Registration{BucketID: bucket, ServiceVersionID: version, FlowName: "authorizationCode"}, masterKey); err != nil {
+	owner, allowAll := uuid.New(), true
+	// The fixture explicitly publishes enrollment-wide access for both legacy and named applications.
+	if err := catalog.PublishRegistration(t.Context(), fixture.serviceID, "bearerAuth", managedauthbroker.Registration{ApplicationID: applicationID, Name: "test app", OwnerAccountID: &owner, AllowAllEnrolled: &allowAll, BucketID: bucket, ServiceVersionID: version, FlowName: "authorizationCode"}, masterKey); err != nil {
 		t.Fatal(err)
 	}
 
@@ -107,7 +115,7 @@ func TestStartConnectSessionUsesManagedAppOnlyWhenExplicitlyReferenced(t *testin
 	appID := attachConnectTestArtifact(&fixture)
 	// The fused reference is what selects the managed app; without it this
 	// start would fail exactly like any other missing local credential.
-	body := `{"end_user_ref":"user_123","created_by_app_id":"` + appID.String() + `","auth_ref":"${fused.bucket.auth.gmail.bearerAuth}"}`
+	body := `{"end_user_ref":"user_123","created_by_app_id":"` + appID.String() + `","auth_ref":"${fused.bucket.auth.gmail.bearerAuth}","managed_application_id":"` + applicationID + `"}`
 	request := httptest.NewRequest(http.MethodPost, fixture.startPath(), strings.NewReader(body))
 	request.Header.Set("X-API-Key", "fsk_test")
 	response := httptest.NewRecorder()
@@ -123,4 +131,9 @@ func TestStartConnectSessionUsesManagedAppOnlyWhenExplicitlyReferenced(t *testin
 	if strings.Contains(response.Body.String(), "managed-client-secret") {
 		t.Fatalf("response must never contain the managed app's client secret: %s", response.Body.String())
 	}
+	// Callback routing must survive loss of the original config or browser request.
+	if len(fixture.store.createdSessions) != 1 || fixture.store.createdSessions[0].ManagedApplicationID != applicationID {
+		t.Fatal("managed application selection was not saved on the callback session")
+	}
+
 }

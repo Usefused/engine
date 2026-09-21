@@ -2,6 +2,7 @@ package managedauthbroker
 
 import (
 	"errors"
+	"github.com/Usefused/engine/internal/shared/oauthmapping"
 	"net/url"
 
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -50,6 +51,10 @@ func validatePublishedContract(auth fusedobject.AuthConfig, flow fusedobject.OAu
 	}
 	// Preserve the core form default and explicit JSON encoding without accepting arbitrary encodings.
 	if auth.TokenRequestMediaType != "" && auth.TokenRequestMediaType != fusedobject.TokenRequestMediaTypeForm && auth.TokenRequestMediaType != fusedobject.TokenRequestMediaTypeJSON {
+		return ErrPublishedContractUnavailable
+	}
+	// Remote registrations must enforce the same principal mapping invariants as local imports.
+	if err := oauthmapping.Validate(auth.ScopeParameter, auth.AuthorizationTokenResponsePath); err != nil {
 		return ErrPublishedContractUnavailable
 	}
 	return nil

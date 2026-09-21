@@ -288,6 +288,7 @@ func loadConnectInputSession(ctx context.Context, s store.Store, verifier Servic
 			session.CredentialSourceAuthType,
 			session.CredentialSourceAuthName,
 			session.ManagedAuth,
+			session.ManagedApplicationID,
 		),
 	}
 	resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey, managedConnect, redirectURI)
@@ -357,6 +358,7 @@ func completeConnectInputSession(ctx context.Context, s store.Store, loaded reso
 			session.CredentialSourceAuthType,
 			session.CredentialSourceAuthName,
 			session.ManagedAuth,
+			session.ManagedApplicationID,
 		),
 	}
 	providerSession, response, err := buildProviderConnectSession(call, session.EndUserRef, session.CreatedByAppID, session.ReturnURL, resourceInputJSON, session.RequestedScopes, loaded.resolved, masterKey)

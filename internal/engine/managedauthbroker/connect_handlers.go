@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Usefused/engine/internal/shared/managedpublication"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
@@ -21,12 +23,15 @@ const maxManagedAuthConnectBodyBytes = 64 << 10
 // managed_auth:connect access token, resolved fresh on each request so a
 // revoked or expired installation loses access immediately.
 func MountConnectRoutes(router chi.Router, connect *ConnectService, installations *Store) {
-	router.Route("/managed-auth/broker/connect/{serviceID}/{authName}", func(r chi.Router) {
-		r.Use(requireInstallationAccessToken(installations))
-		r.Get("/client-id", clientIDHandler(connect))
-		r.Post("/exchange", exchangeHandler(connect))
-		r.Post("/refresh", connectRefreshHandler(connect))
-	})
+	// Both routes share installation checks; the legacy route selects only its reserved default.
+	for _, path := range []string{"/managed-auth/broker/connect/{serviceID}/{authName}", "/managed-auth/broker/connect/{serviceID}/{authName}/applications/{applicationID}"} {
+		router.Route(path, func(r chi.Router) {
+			r.Use(requireInstallationAccessToken(installations))
+			r.Get("/client-id", clientIDHandler(connect))
+			r.Post("/exchange", exchangeHandler(connect))
+			r.Post("/refresh", connectRefreshHandler(connect))
+		})
+	}
 }
 
 type installationContextKey struct{}
@@ -62,7 +67,12 @@ func bearerToken(r *http.Request) string {
 	return strings.TrimSpace(strings.TrimPrefix(header, prefix))
 }
 
+// connectRouteIdentity rejects malformed publication selectors before any credential lookup.
 func connectRouteIdentity(r *http.Request) (serviceID uuid.UUID, authName string, ok bool) {
+	// Application selection belongs exclusively to the path; query selectors must never be silently ignored.
+	if _, err := managedpublication.Selector([]string{chi.URLParam(r, "applicationID")}); err != nil || r.URL.RawQuery != "" {
+		return uuid.Nil, "", false
+	}
 	serviceID, err := uuid.Parse(chi.URLParam(r, "serviceID"))
 	if err != nil {
 		return uuid.Nil, "", false
@@ -78,6 +88,7 @@ type clientIDResponse struct {
 	ClientID string `json:"client_id"`
 }
 
+// clientIDHandler exposes only the public client identity of an authorized exact publication.
 func clientIDHandler(connect *ConnectService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		serviceID, authName, ok := connectRouteIdentity(r)
@@ -85,7 +96,7 @@ func clientIDHandler(connect *ConnectService) http.HandlerFunc {
 			writeBrokerError(w, http.StatusBadRequest, "service id and auth name are required")
 			return
 		}
-		clientID, err := connect.ClientID(r.Context(), serviceID, authName)
+		clientID, err := connect.ClientID(r.Context(), serviceID, authName, chi.URLParam(r, "applicationID"))
 		if err != nil {
 			writeBrokerError(w, http.StatusNotFound, "no Fused Managed App is registered for this service")
 			return
@@ -104,6 +115,7 @@ type connectExchangeRequest struct {
 	Verifier    string                         `json:"verifier"`
 }
 
+// exchangeHandler delegates code redemption to the selected operator publication without accepting credential destinations.
 func exchangeHandler(connect *ConnectService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		serviceID, authName, ok := connectRouteIdentity(r)
@@ -116,7 +128,7 @@ func exchangeHandler(connect *ConnectService) http.HandlerFunc {
 			writeBrokerError(w, http.StatusBadRequest, "code is required")
 			return
 		}
-		token, err := connect.Exchange(r.Context(), serviceID, authName, req.RedirectURI, req.Auth, req.Flow, req.Code, req.Verifier)
+		token, err := connect.Exchange(r.Context(), serviceID, authName, req.RedirectURI, req.Auth, req.Flow, req.Code, req.Verifier, chi.URLParam(r, "applicationID"))
 		if err != nil {
 			writeBrokerError(w, http.StatusBadGateway, "provider token exchange failed")
 			return
@@ -148,7 +160,7 @@ func connectRefreshHandler(connect *ConnectService) http.HandlerFunc {
 			writeBrokerError(w, http.StatusBadRequest, "refresh_token is required")
 			return
 		}
-		token, err := connect.Refresh(r.Context(), serviceID, authName, req.RedirectURI, req.Auth, req.Flow, req.RefreshToken)
+		token, err := connect.Refresh(r.Context(), serviceID, authName, req.RedirectURI, req.Auth, req.Flow, req.RefreshToken, chi.URLParam(r, "applicationID"))
 		if err != nil {
 			writeBrokerError(w, http.StatusBadGateway, "provider token refresh failed")
 			return

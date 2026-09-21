@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"github.com/Usefused/engine/internal/shared/managedpublication"
 
 	"github.com/Usefused/engine/internal/engine/managedauthtransport"
 
@@ -42,7 +45,7 @@ func NewConnectClient(brokerURL string, tokens *Service, httpClient *http.Client
 
 // ClientID returns the public client_id of Fused's registered app for
 // serviceID/authName, or ErrManagedAppNotRegistered if there is none.
-func (c *ConnectClient) ClientID(ctx context.Context, serviceID uuid.UUID, authName string) (string, error) {
+func (c *ConnectClient) ClientID(ctx context.Context, serviceID uuid.UUID, authName string, applicationIDs ...string) (string, error) {
 	// A disabled optional remote adapter must fail closed even when carried in a typed interface.
 	if c == nil || c.tokens == nil {
 		return "", ErrNotEnrolled
@@ -51,7 +54,7 @@ func (c *ConnectClient) ClientID(ctx context.Context, serviceID uuid.UUID, authN
 	if err != nil {
 		return "", err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.path(serviceID, authName, "client-id"), nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.path(serviceID, authName, "client-id", applicationIDs...), nil)
 	if err != nil {
 		return "", err
 	}
@@ -67,20 +70,21 @@ func (c *ConnectClient) ClientID(ctx context.Context, serviceID uuid.UUID, authN
 
 // Exchange redeems a provider authorization code through the broker, the
 // managed-auth counterpart of connectauth.ExchangeAuthorizationCode.
-func (c *ConnectClient) Exchange(ctx context.Context, serviceID uuid.UUID, authName, redirectURI string, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, code, verifier string) (connectauth.TokenResponse, error) {
+func (c *ConnectClient) Exchange(ctx context.Context, serviceID uuid.UUID, authName, redirectURI string, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, code, verifier string, applicationIDs ...string) (connectauth.TokenResponse, error) {
 	return c.grant(ctx, serviceID, authName, "exchange", map[string]any{
 		"redirect_uri": redirectURI, "auth": auth, "flow": flow, "code": code, "verifier": verifier,
-	})
+	}, applicationIDs...)
 }
 
 // Refresh is the managed-auth counterpart of connectauth.RefreshAccessToken.
-func (c *ConnectClient) Refresh(ctx context.Context, serviceID uuid.UUID, authName, redirectURI string, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, refreshToken string) (connectauth.TokenResponse, error) {
+func (c *ConnectClient) Refresh(ctx context.Context, serviceID uuid.UUID, authName, redirectURI string, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, refreshToken string, applicationIDs ...string) (connectauth.TokenResponse, error) {
 	return c.grant(ctx, serviceID, authName, "refresh", map[string]any{
 		"redirect_uri": redirectURI, "auth": auth, "flow": flow, "refresh_token": refreshToken,
-	})
+	}, applicationIDs...)
 }
 
-func (c *ConnectClient) grant(ctx context.Context, serviceID uuid.UUID, authName, action string, body map[string]any) (connectauth.TokenResponse, error) {
+// grant carries the same explicit publication selector for code exchange and refresh.
+func (c *ConnectClient) grant(ctx context.Context, serviceID uuid.UUID, authName, action string, body map[string]any, applicationIDs ...string) (connectauth.TokenResponse, error) {
 	accessToken, err := c.tokens.AccessToken(ctx)
 	if err != nil {
 		return connectauth.TokenResponse{}, err
@@ -89,7 +93,7 @@ func (c *ConnectClient) grant(ctx context.Context, serviceID uuid.UUID, authName
 	if err != nil {
 		return connectauth.TokenResponse{}, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.path(serviceID, authName, action), bytes.NewReader(payload))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.path(serviceID, authName, action, applicationIDs...), bytes.NewReader(payload))
 	if err != nil {
 		return connectauth.TokenResponse{}, err
 	}
@@ -102,8 +106,19 @@ func (c *ConnectClient) grant(ctx context.Context, serviceID uuid.UUID, authName
 	return token, nil
 }
 
-func (c *ConnectClient) path(serviceID uuid.UUID, authName, action string) string {
-	return c.brokerURL + "/managed-auth/broker/connect/" + serviceID.String() + "/" + authName + "/" + action
+// path keeps provider scheme and application identity separate and escapes both on the wire.
+func (c *ConnectClient) path(serviceID uuid.UUID, authName, action string, applicationIDs ...string) string {
+	id, err := managedpublication.Selector(applicationIDs)
+	// Malformed selectors are sent as an invalid value, never silently mapped onto the default.
+	if err != nil {
+		id = "invalid"
+	}
+	base := c.brokerURL + "/managed-auth/broker/connect/" + serviceID.String() + "/" + url.PathEscape(authName)
+	// Named publications get an explicit path; the empty selector preserves the legacy wire route.
+	if id != "" {
+		base += "/applications/" + url.PathEscape(id)
+	}
+	return base + "/" + action
 }
 
 func (c *ConnectClient) do(request *http.Request, out any) error {

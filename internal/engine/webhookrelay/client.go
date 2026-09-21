@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Usefused/engine/internal/shared/managedpublication"
 	"github.com/google/uuid"
 )
 
@@ -92,11 +93,21 @@ func (c *Client) call(ctx context.Context, method, path string, input, output an
 }
 
 // Subscribe presents provider-token possession only to the broker which originally exchanged that token.
-func (c *Client) Subscribe(ctx context.Context, registration, receiver uuid.UUID, token string) (uuid.UUID, error) {
+func (c *Client) Subscribe(ctx context.Context, registration, receiver uuid.UUID, token string, applicationIDs ...string) (uuid.UUID, error) {
+	applicationID, err := managedpublication.Selector(applicationIDs)
+	// Local corruption must fail before transporting a provider token.
+	if err != nil {
+		return uuid.Nil, ErrDenied
+	}
 	var response struct {
 		ID uuid.UUID `json:"subscription_id"`
 	}
-	err := c.call(ctx, "POST", "subscriptions", map[string]any{"registration_id": registration, "receiver_id": receiver, "access_token": token}, &response)
+	input := map[string]any{"registration_id": registration, "receiver_id": receiver, "access_token": token}
+	// Legacy default receivers preserve their existing wire body for compatible deployments.
+	if applicationID != "" {
+		input["managed_application_id"] = applicationID
+	}
+	err = c.call(ctx, "POST", "subscriptions", input, &response)
 	return response.ID, err
 }
 

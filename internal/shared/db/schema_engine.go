@@ -1971,6 +1971,22 @@ func managedAuthBrokerSchemaQueries() []string {
  created_at timestamptz NOT NULL DEFAULT NOW(),
  PRIMARY KEY(service_id,auth_name)
  );`,
+		// Empty application IDs permanently reserve the legacy default; named publications share the same source model.
+		`ALTER TABLE fused_oauth_publications ADD COLUMN IF NOT EXISTS application_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE fused_oauth_publications ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE fused_oauth_publications ADD COLUMN IF NOT EXISTS owner_account_id UUID`,
+		`ALTER TABLE fused_oauth_publications ADD COLUMN IF NOT EXISTS allow_all_enrolled BOOLEAN NOT NULL DEFAULT TRUE`,
+		`ALTER TABLE fused_oauth_publications ADD COLUMN IF NOT EXISTS allowed_consumers JSONB NOT NULL DEFAULT '[]'::jsonb`,
+		// Replacing this key is idempotent and retains existing publication tombstones and credentials in place.
+		`DO $$ BEGIN
+         IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='fused_oauth_publications'::regclass AND contype='p' AND cardinality(conkey)=2) THEN
+           ALTER TABLE fused_oauth_publications DROP CONSTRAINT fused_oauth_publications_pkey;
+           ALTER TABLE fused_oauth_publications ADD PRIMARY KEY(service_id,auth_name,application_id);
+         END IF;
+        END $$`,
+		`ALTER TABLE fused_auth_connections ADD COLUMN IF NOT EXISTS managed_application_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE fused_connect_sessions ADD COLUMN IF NOT EXISTS managed_application_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE fused_connect_input_sessions ADD COLUMN IF NOT EXISTS managed_application_id TEXT NOT NULL DEFAULT ''`,
 	}
 }
 

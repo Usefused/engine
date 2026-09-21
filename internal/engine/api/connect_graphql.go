@@ -2162,6 +2162,7 @@ func connectSessionMutationArgs() graphql.FieldConfigArgument {
 	args["created_by_app_id"] = &graphql.ArgumentConfig{Type: graphql.String}
 	args["auth_type"] = &graphql.ArgumentConfig{Type: graphql.String}
 	args["auth_name"] = &graphql.ArgumentConfig{Type: graphql.String}
+	args["managed_application_id"] = &graphql.ArgumentConfig{Type: graphql.String}
 	args["auth_ref"] = &graphql.ArgumentConfig{Type: graphql.String}
 	args["return_url"] = &graphql.ArgumentConfig{Type: graphql.String}
 	args["resource_input"] = &graphql.ArgumentConfig{Type: engineJSONType}
@@ -2215,6 +2216,11 @@ func connectAdminCallFromArgs(p graphql.ResolveParams, s store.Store) (connectAd
 	authType, _ := p.Args["auth_type"].(string)
 	authName, _ := p.Args["auth_name"].(string)
 	authRef, _ := p.Args["auth_ref"].(string)
+	applicationID, _ := p.Args["managed_application_id"].(string)
+	// GraphQL enforces the same source identity requirement as REST.
+	if err := validateManagedApplicationReference(authRef, applicationID); err != nil {
+		return connectAdminCall{}, err
+	}
 	authType = canonicalConnectAuthType(authType)
 	authName = strings.TrimSpace(authName)
 	authRef = strings.TrimSpace(authRef)
@@ -2228,7 +2234,7 @@ func connectAdminCallFromArgs(p graphql.ResolveParams, s store.Store) (connectAd
 			return connectAdminCall{}, errors.New("auth_ref must use ${bucket.auth.<service>.<authName>} or ${fused.bucket.auth.<service>.<authName>}")
 		}
 	}
-	return connectAdminCall{bucketID: bucketID, serviceID: serviceID, authType: authType, authName: authName, authRef: authRef}, nil
+	return connectAdminCall{bucketID: bucketID, serviceID: serviceID, authType: authType, authName: authName, authRef: authRef, managedApplicationID: applicationID}, nil
 }
 
 // secretBulkGraphQLArgs verifies bucket ownership before decoding secret rows,

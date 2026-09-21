@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Usefused/engine/internal/shared/oauthmapping"
 	"log/slog"
 	"net"
 	"net/http"
@@ -35,14 +36,15 @@ import (
 const connectSessionTTL = 10 * time.Minute
 
 type connectSessionStartRequest struct {
-	EndUserRef     string            `json:"end_user_ref"`
-	CreatedByAppID string            `json:"created_by_app_id,omitempty"`
-	AuthType       string            `json:"auth_type,omitempty"`
-	AuthName       string            `json:"auth_name,omitempty"`
-	AuthRef        string            `json:"auth_ref,omitempty"`
-	ReturnURL      string            `json:"return_url,omitempty"`
-	ResourceInput  map[string]string `json:"resource_input,omitempty"`
-	Scopes         []string          `json:"scopes,omitempty"`
+	ManagedApplicationID string            `json:"managed_application_id,omitempty"`
+	EndUserRef           string            `json:"end_user_ref"`
+	CreatedByAppID       string            `json:"created_by_app_id,omitempty"`
+	AuthType             string            `json:"auth_type,omitempty"`
+	AuthName             string            `json:"auth_name,omitempty"`
+	AuthRef              string            `json:"auth_ref,omitempty"`
+	ReturnURL            string            `json:"return_url,omitempty"`
+	ResourceInput        map[string]string `json:"resource_input,omitempty"`
+	Scopes               []string          `json:"scopes,omitempty"`
 }
 
 type connectSessionStartResponse struct {
@@ -82,6 +84,7 @@ func StartConnectSessionHandler(s store.Store, verifier ServiceVerifier, masterK
 		}
 		// Control-plane app identity is audit attribution only; explicit auth_ref owns reusable credential routing.
 		call.authType, call.authName, call.authRef = req.AuthType, req.AuthName, req.AuthRef
+		call.managedApplicationID = req.ManagedApplicationID
 		resolved, err := resolveConnectRuntimeConfig(ctx, s, verifier, call, masterKey, managedConnect, firstRedirectURI(redirectURIs))
 		// Resolution failures occur before any one-time connect session can be persisted.
 		if err != nil {
@@ -187,6 +190,7 @@ func ConnectCallbackHandler(s store.Store, verifier ServiceVerifier, masterKey [
 				session.CredentialSourceAuthType,
 				session.CredentialSourceAuthName,
 				session.ManagedAuth,
+				session.ManagedApplicationID,
 			),
 		}
 		span.SetAttributes(connectAdminAttrs("connect.callback", call)...)
@@ -288,6 +292,11 @@ func decodeConnectSessionStartRequest(w http.ResponseWriter, r *http.Request, ct
 	req.AuthType = canonicalConnectAuthType(req.AuthType)
 	req.AuthName = strings.TrimSpace(req.AuthName)
 	req.AuthRef = strings.TrimSpace(req.AuthRef)
+	// Reject a named application without a managed source before creating browser state.
+	if err := validateManagedApplicationReference(req.AuthRef, req.ManagedApplicationID); err != nil {
+		writeConnectRuntimeError(w, ctx, connectRuntimeHTTPError{status: http.StatusBadRequest, message: err.Error()}, "request_admission", "not_committed")
+		return req, uuid.Nil, false
+	}
 	// An exact selector is all-or-none so a partial request cannot float across schemes.
 	if (req.AuthType == "") != (req.AuthName == "") {
 		writeConnectRuntimeError(w, ctx, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "invalid_connect_auth_selector", message: "auth_type and auth_name must be provided together"}, "request_admission", "not_committed")
@@ -444,7 +453,7 @@ func resolveExplicitConnectCredentialSource(ctx context.Context, s store.Store, 
 		if parsed.AuthName != call.authName {
 			return connectauth.ApplicationCredentialSource{}, connectRuntimeHTTPError{status: http.StatusBadRequest, code: "connect_auth_ref_incompatible", message: "managed auth reference scheme does not match the target auth scheme"}
 		}
-		return connectauth.ApplicationCredentialSource{ServiceID: sourceID, AuthType: call.authType, AuthName: parsed.AuthName, Managed: true}, nil
+		return connectauth.ApplicationCredentialSource{ServiceID: sourceID, AuthType: call.authType, AuthName: parsed.AuthName, Managed: true, ManagedApplicationID: call.managedApplicationID}, nil
 	}
 	version, err := resolveConnectCredentialSourceVersion(ctx, s, sourceID)
 	// A source without one pinned workspace version cannot authorize credential reuse.
@@ -557,10 +566,11 @@ func applicationCredentialSourceForSelection(selection models.SDKSelection) (con
 		return connectauth.ApplicationCredentialSource{}, errors.New("credential source identity is incomplete")
 	}
 	source := connectauth.ApplicationCredentialSource{
-		ServiceID: selection.CredentialSourceServiceID,
-		AuthType:  canonicalConnectAuthType(selection.CredentialSourceAuthType),
-		AuthName:  strings.TrimSpace(selection.CredentialSourceAuthName),
-		Managed:   selection.ManagedAuth,
+		ServiceID:            selection.CredentialSourceServiceID,
+		AuthType:             canonicalConnectAuthType(selection.CredentialSourceAuthType),
+		AuthName:             strings.TrimSpace(selection.CredentialSourceAuthName),
+		Managed:              selection.ManagedAuth,
+		ManagedApplicationID: selection.ManagedApplicationID,
 	}
 	// References may change service and scheme name, but never the OAuth/OIDC family selected for the target.
 	if source.AuthType != target.AuthType || source.AuthType == "" {
@@ -572,12 +582,13 @@ func applicationCredentialSourceForSelection(selection models.SDKSelection) (con
 // persistedApplicationCredentialSource reconstructs the immutable routing identity carried by browser sessions and grants.
 // The managed flag is persisted separately (is_managed_auth) so a callback can
 // re-resolve through the broker without the original auth.ref string.
-func persistedApplicationCredentialSource(serviceID uuid.UUID, authType, authName string, managed bool) connectauth.ApplicationCredentialSource {
+func persistedApplicationCredentialSource(serviceID uuid.UUID, authType, authName string, managed bool, applicationID string) connectauth.ApplicationCredentialSource {
 	return connectauth.ApplicationCredentialSource{
-		ServiceID: serviceID,
-		AuthType:  canonicalConnectAuthType(authType),
-		AuthName:  strings.TrimSpace(authName),
-		Managed:   managed,
+		ServiceID:            serviceID,
+		AuthType:             canonicalConnectAuthType(authType),
+		AuthName:             strings.TrimSpace(authName),
+		Managed:              managed,
+		ManagedApplicationID: applicationID,
 	}
 }
 
@@ -813,6 +824,7 @@ func createConnectInputSession(ctx context.Context, s store.Store, call connectA
 		CredentialSourceAuthType:  source.AuthType,
 		CredentialSourceAuthName:  source.AuthName,
 		ManagedAuth:               source.Managed,
+		ManagedApplicationID:      source.ManagedApplicationID,
 		EndUserRef:                endUserRef, TokenHash: connectHash(token), CreatedByAppID: createdByAppID,
 		ReturnURL: returnURL, ResourceInputJSON: canonical, RequestedScopes: scopes, ExpiresAt: expiresAt,
 	}); err != nil {
@@ -885,6 +897,7 @@ func buildProviderConnectSession(call connectAdminCall, endUserRef string, creat
 		CredentialSourceAuthType:  source.AuthType,
 		CredentialSourceAuthName:  source.AuthName,
 		ManagedAuth:               source.Managed,
+		ManagedApplicationID:      source.ManagedApplicationID,
 		RedirectURI:               resolved.credentials.RedirectURI,
 		EndUserRef:                endUserRef,
 		StateHash:                 connectHash(state),
@@ -1259,7 +1272,17 @@ func buildConnectAuthorizeURL(auth fusedobject.AuthConfig, flow fusedobject.OAut
 		values.Set("code_challenge", challenge)
 		values.Set("code_challenge_method", "S256")
 	}
-	values.Set("scope", strings.Join(scopes, delimiter))
+	// Scope aliases still use only the Engine-validated consent ceiling.
+	if err := oauthmapping.Validate(auth.ScopeParameter, auth.AuthorizationTokenResponsePath); err != nil {
+		return "", err
+	}
+	parameter := auth.ScopeParameter
+	// Existing contracts continue using the standard OAuth field.
+	if parameter == "" {
+		parameter = "scope"
+	}
+	values.Del("scope")
+	values.Set(parameter, strings.Join(scopes, delimiter))
 	if isOIDCAuth(auth) {
 		values.Set("nonce", nonce)
 	}
@@ -1267,7 +1290,10 @@ func buildConnectAuthorizeURL(auth fusedobject.AuthConfig, flow fusedobject.OAut
 	if err != nil {
 		return "", connectRuntimeHTTPError{status: http.StatusBadRequest, message: "authorization_url must be absolute"}
 	}
-	authURL.RawQuery = mergeQuery(authURL.Query(), values).Encode()
+	baseQuery := authURL.Query()
+	// Provider URL defaults cannot smuggle a second principal alongside the selected scope field.
+	baseQuery.Del("scope")
+	authURL.RawQuery = mergeQuery(baseQuery, values).Encode()
 	return authURL.String(), nil
 }
 
@@ -1332,6 +1358,7 @@ func encryptAuthConnectionFromToken(session *store.ConnectSession, resolved conn
 		CredentialSourceAuthType:  session.CredentialSourceAuthType,
 		CredentialSourceAuthName:  session.CredentialSourceAuthName,
 		ManagedAuth:               session.ManagedAuth,
+		ManagedApplicationID:      session.ManagedApplicationID,
 		EncryptedDEK:              wrappedDEK,
 		EncryptedAccessToken:      access,
 		EncryptedRefreshToken:     refresh,

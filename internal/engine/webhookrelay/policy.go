@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/Usefused/engine/internal/shared/managedpublication"
+
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
@@ -24,12 +26,13 @@ type Config struct {
 
 // Routing contains reviewed provider facts, never a customer assertion of resource ownership.
 type Routing struct {
-	AuthName          string `json:"auth_name"`
-	TokenResourcePath string `json:"token_resource_path"`
-	TokenAppPath      string `json:"token_app_path"`
-	EventResourcePath string `json:"event_resource_path"`
-	EventAppPath      string `json:"event_app_path"`
-	EventIDPath       string `json:"event_id_path"`
+	ManagedApplicationID string `json:"managed_application_id,omitempty"`
+	AuthName             string `json:"auth_name"`
+	TokenResourcePath    string `json:"token_resource_path"`
+	TokenAppPath         string `json:"token_app_path"`
+	EventResourcePath    string `json:"event_resource_path"`
+	EventAppPath         string `json:"event_app_path"`
+	EventIDPath          string `json:"event_id_path"`
 }
 
 // Source identifies a local connection and a broker registration, without any provider secret or destination URL.
@@ -83,6 +86,10 @@ func validateSource(s Source) error {
 
 // Validate rejects query operators, arrays and fallback paths at the ownership boundary.
 func (p Routing) Validate() error {
+	// The default and named application namespaces must remain unambiguous across OAuth and ingress.
+	if _, err := managedpublication.Selector([]string{p.ManagedApplicationID}); err != nil {
+		return ErrDenied
+	}
 	// A named OAuth publication is required to identify the app whose response proves ownership.
 	if p.AuthName == "" || len(p.AuthName) > 128 {
 		return ErrDenied

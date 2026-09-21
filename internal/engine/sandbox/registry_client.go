@@ -106,6 +106,8 @@ const registryAuthConfigGraphQLFields = `
 	token_endpoint_auth_method
 	oauth_token_placement { location name format }
 	token_request_media_type
+	scope_parameter
+	authorization_token_response_path
 	open_id_connect_url
 	pkce_required
 	scopes_delimiter

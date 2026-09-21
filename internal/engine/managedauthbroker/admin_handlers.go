@@ -10,14 +10,17 @@ import (
 	"github.com/google/uuid"
 )
 
-const maxManagedAuthAdminBodyBytes = 4 << 10
+// Bound operator metadata while admitting up to 64 explicit account/installation grants.
+const maxManagedAuthAdminBodyBytes = 16 << 10
 
-// MountAdminRoutes exposes catalogue registration for Fused's own operators.
-// There is deliberately no customer-facing path to this: the managed-app
-// catalogue is Fused's own OAuth application inventory, registered with each
-// provider out of band, not something any Engine installation configures.
+// MountAdminRoutes restricts publication management to broker operators;
+// enrolled consumer Engines cannot register or alter provider applications.
 func MountAdminRoutes(router chi.Router, catalog *CatalogStore, masterKey []byte, adminKey string) {
-	router.With(requireAdminKey(adminKey)).Put("/managed-auth/broker/admin/apps/{serviceID}/{authName}", upsertProviderAppHandler(catalog, masterKey))
+	admin := router.With(requireAdminKey(adminKey))
+	const path = "/managed-auth/broker/admin/apps/{serviceID}/{authName}"
+	admin.Put(path, upsertProviderAppHandler(catalog, masterKey))
+	admin.Delete(path, revokeProviderAppHandler(catalog))
+	admin.Delete(path+"/applications/{applicationID}", revokeProviderAppHandler(catalog))
 }
 
 // requireAdminKey fails closed: an unset adminKey rejects every request
@@ -70,6 +73,24 @@ func upsertProviderAppHandler(catalog *CatalogStore, masterKey []byte) http.Hand
 			return
 		}
 
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// revokeProviderAppHandler permits only operators to withdraw access while keeping publication identity permanently reserved.
+func revokeProviderAppHandler(catalog *CatalogStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		service, auth, ok := connectRouteIdentity(r)
+		// Missing or malformed routing must never widen withdrawal to another application.
+		if !ok {
+			writeBrokerError(w, http.StatusBadRequest, "invalid application identity")
+			return
+		}
+		// Withdrawal remains available even when the source bucket or provider contract is unavailable.
+		if err := catalog.RevokeRegistrationAccess(r.Context(), service, auth, chi.URLParam(r, "applicationID")); err != nil {
+			writeBrokerError(w, http.StatusNotFound, "publication unavailable")
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

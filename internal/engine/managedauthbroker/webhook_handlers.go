@@ -25,16 +25,17 @@ func MountWebhookRoutes(router chi.Router, broker *webhookrelay.Broker, installa
 func relaySubscribeHandler(b *webhookrelay.Broker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var input struct {
-			RegistrationID uuid.UUID `json:"registration_id"`
-			ReceiverID     uuid.UUID `json:"receiver_id"`
-			AccessToken    string    `json:"access_token"`
+			RegistrationID       uuid.UUID `json:"registration_id"`
+			ManagedApplicationID string    `json:"managed_application_id,omitempty"`
+			ReceiverID           uuid.UUID `json:"receiver_id"`
+			AccessToken          string    `json:"access_token"`
 		}
 		// Small strict requests exclude alternate resource identities and arbitrary remote destinations.
 		if !decodeRelayRequest(w, r, &input) {
 			return
 		}
 		installation := r.Context().Value(installationContextKey{}).(Installation)
-		id, err := b.Proof.Subscribe(r.Context(), installation.ID, input.RegistrationID, input.ReceiverID, input.AccessToken)
+		id, err := b.Proof.Subscribe(r.Context(), installation.ID, input.RegistrationID, input.ReceiverID, input.AccessToken, input.ManagedApplicationID)
 		// Identical denial copy prevents token or provider-resource enumeration across tenants.
 		if err != nil {
 			writeBrokerError(w, 403, "webhook subscription is unavailable")
