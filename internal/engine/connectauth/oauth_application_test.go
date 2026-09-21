@@ -14,17 +14,15 @@ import (
 )
 
 type delegatedFixture struct {
-	source        uuid.UUID
-	name          string
-	applicationID string
-	calls         int
-	unavailable   bool
+	source      uuid.UUID
+	name        string
+	calls       int
+	unavailable bool
 }
 
 // ClientID models discovery without exporting application credentials.
-func (f *delegatedFixture) ClientID(_ context.Context, _ uuid.UUID, _ string, ids ...string) (string, error) {
+func (f *delegatedFixture) ClientID(context.Context, uuid.UUID, string) (string, error) {
 	f.calls++
-	f.applicationID = ids[0]
 	// Unavailable remote registration must never fall back to a local credential.
 	if f.unavailable {
 		return "", errors.New("unavailable")
@@ -33,23 +31,22 @@ func (f *delegatedFixture) ClientID(_ context.Context, _ uuid.UUID, _ string, id
 }
 
 // Exchange captures the selected source, which can differ from the target connection service.
-func (f *delegatedFixture) Exchange(_ context.Context, id uuid.UUID, name, _ string, _ fusedobject.AuthConfig, _ fusedobject.OAuth2FlowContract, _, _ string, ids ...string) (TokenResponse, error) {
+func (f *delegatedFixture) Exchange(_ context.Context, id uuid.UUID, name, _ string, _ fusedobject.AuthConfig, _ fusedobject.OAuth2FlowContract, _, _ string) (TokenResponse, error) {
 	f.source, f.name = id, name
-	f.applicationID = ids[0]
 	f.calls++
 	return TokenResponse{AccessToken: "remote-access"}, nil
 }
 
 // Refresh uses the same exact delegated identity as exchange instead of re-deriving it from a target connection.
-func (f *delegatedFixture) Refresh(ctx context.Context, id uuid.UUID, name, redirect string, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, token string, ids ...string) (TokenResponse, error) {
-	return f.Exchange(ctx, id, name, redirect, auth, flow, token, "", ids...)
+func (f *delegatedFixture) Refresh(ctx context.Context, id uuid.UUID, name, redirect string, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, token string) (TokenResponse, error) {
+	return f.Exchange(ctx, id, name, redirect, auth, flow, token, "")
 }
 
 // TestOAuthApplicationDelegatesExactSource keeps source selection out of connection and refresh orchestration.
 func TestOAuthApplicationDelegatesExactSource(t *testing.T) {
 	repository := &applicationCredentialTestStore{}
 	resolver := NewApplicationCredentialResolver(repository, make([]byte, 32), "https://consumer.example/callback")
-	source := ApplicationCredentialSource{ServiceID: uuid.New(), AuthType: "oauth", AuthName: "SourceOAuth", Managed: true, ManagedApplicationID: uuid.NewString()}
+	source := ApplicationCredentialSource{ServiceID: uuid.New(), AuthType: "oauth", AuthName: "SourceOAuth", Managed: true}
 	request := ApplicationRequest{BucketID: uuid.New(), ServiceID: uuid.New(), AuthType: "oauth", AuthName: "TargetOAuth", Source: source}
 	remote := &delegatedFixture{}
 	creds, grant, err := resolver.ResolveApplication(t.Context(), request, http.DefaultClient, remote)
@@ -66,7 +63,7 @@ func TestOAuthApplicationDelegatesExactSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Both operations must target the resolved source, never the consuming service's identity.
-	if remote.source != source.ServiceID || remote.name != source.AuthName || remote.calls != 3 || remote.applicationID != source.ManagedApplicationID {
+	if remote.source != source.ServiceID || remote.name != source.AuthName || remote.calls != 3 {
 		t.Fatal("delegated source identity drifted")
 	}
 }

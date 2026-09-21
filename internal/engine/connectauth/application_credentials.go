@@ -38,8 +38,7 @@ type ApplicationCredentialSource struct {
 	// managed source has no local client_id/secret to resolve; consent and
 	// refresh route through the managed-auth broker instead. It is only ever
 	// set from an explicit config reference, never from a lookup miss.
-	Managed              bool
-	ManagedApplicationID string `json:"managed_application_id,omitempty"`
+	Managed bool
 }
 
 // NewApplicationCredentialResolver fixes shared dependencies without exposing credential values to adapters.

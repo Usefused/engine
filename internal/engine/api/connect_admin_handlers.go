@@ -77,14 +77,13 @@ func DeleteAuthConnectionHandler(s store.Store) http.HandlerFunc {
 }
 
 type connectAdminCall struct {
-	bucketID             uuid.UUID
-	serviceID            uuid.UUID
-	authType             string
-	authName             string
-	authRef              string
-	managedApplicationID string
-	credentialSource     connectauth.ApplicationCredentialSource
-	appConnectScopes     []string
+	bucketID         uuid.UUID
+	serviceID        uuid.UUID
+	authType         string
+	authName         string
+	authRef          string
+	credentialSource connectauth.ApplicationCredentialSource
+	appConnectScopes []string
 }
 
 type bucketAdminCall struct {

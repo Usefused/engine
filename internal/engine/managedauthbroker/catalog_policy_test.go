@@ -1,7 +1,6 @@
 package managedauthbroker
 
 import (
-	"context"
 	"encoding/json"
 
 	"net/http"
@@ -44,7 +43,6 @@ func TestPublishedRegistrationUsesCanonicalStorage(t *testing.T) {
 	publicationRequire(t, err)
 	t.Cleanup(pool.Close)
 	catalog := NewCatalogStore(pool)
-	ctx := publicationConsumerContext(t, pool)
 	id := uuid.New()
 	app := securityApp(fusedobject.TokenEndpointAuthMethodClientSecretPost, "")
 	app.Auth.Name = "OAuth"
@@ -53,19 +51,19 @@ func TestPublishedRegistrationUsesCanonicalStorage(t *testing.T) {
 	bucket, version := testoauth.Seed(t, pool, id, app.Auth, key, app.ClientID, app.ClientSecret)
 	registration := Registration{BucketID: bucket, ServiceVersionID: version, FlowName: "authorizationCode"}
 	// Existing bucket credentials are private until the exact registration is published.
-	if _, err := catalog.GetProviderApp(ctx, id, "OAuth", key); err == nil {
+	if _, err := catalog.GetProviderApp(t.Context(), id, "OAuth", key); err == nil {
 		t.Fatal("unpublished bucket exposed")
 	}
 	publicationRequire(t, catalog.PublishRegistration(t.Context(), id, "OAuth", registration, key))
 	publicationRequire(t, catalog.PublishRegistration(t.Context(), id, "OAuth", registration, key))
-	stored, err := catalog.GetProviderApp(ctx, id, "OAuth", key)
+	stored, err := catalog.GetProviderApp(t.Context(), id, "OAuth", key)
 	publicationRequire(t, err)
 	if !reflect.DeepEqual(stored, app) {
 		t.Fatal("canonical contract or bucket pair changed")
 	}
 	runtime := store.NewPostgresStore(pool)
 	testoauth.SavePair(t, runtime, bucket, id, "OAuth", key, app.ClientID, "rotated-secret")
-	stored, err = catalog.GetProviderApp(ctx, id, "OAuth", key)
+	stored, err = catalog.GetProviderApp(t.Context(), id, "OAuth", key)
 	publicationRequire(t, err)
 	// Secret rotation should take effect without copying credentials into another table.
 	if stored.ClientSecret != "rotated-secret" {
@@ -73,7 +71,7 @@ func TestPublishedRegistrationUsesCanonicalStorage(t *testing.T) {
 	}
 	testoauth.SavePair(t, runtime, bucket, id, "OAuth", key, "different-client", "rotated-secret")
 	// A different provider client cannot silently take over an existing publication.
-	if _, err := catalog.GetProviderApp(ctx, id, "OAuth", key); err == nil {
+	if _, err := catalog.GetProviderApp(t.Context(), id, "OAuth", key); err == nil {
 		t.Fatal("client identity changed silently")
 	}
 	if err := catalog.PublishRegistration(t.Context(), id, "OAuth", registration, key); err == nil {
@@ -83,11 +81,11 @@ func TestPublishedRegistrationUsesCanonicalStorage(t *testing.T) {
 	testoauth.SavePair(t, runtime, bucket, id, "OAuth", key, app.ClientID, "rotated-secret")
 	_, err = pool.Exec(t.Context(), `UPDATE fused_service_contract_snapshots SET service_metadata=jsonb_set(service_metadata,'{auth_configs,0,oauth2_flows,authorizationCode,token_url}','"https://changed.example/token"'::jsonb) WHERE service_version_id=$1`, version)
 	publicationRequire(t, err)
-	assertPublicationUnavailable(t, ctx, catalog, id, registration, key)
+	assertPublicationUnavailable(t, catalog, id, registration, key)
 	// Bucket deletion must remain possible without freeing this publication identity for reassignment.
 	_, err = pool.Exec(t.Context(), `DELETE FROM fused_buckets WHERE id=$1`, bucket)
 	publicationRequire(t, err)
-	assertPublicationUnavailable(t, ctx, catalog, id, registration, key)
+	assertPublicationUnavailable(t, catalog, id, registration, key)
 
 }
 
@@ -127,10 +125,10 @@ func TestTokenPolicyHTTPBoundary(t *testing.T) {
 }
 
 // assertPublicationUnavailable rejects both use and silent republication after source material has drifted or disappeared.
-func assertPublicationUnavailable(t *testing.T, ctx context.Context, catalog *CatalogStore, id uuid.UUID, registration Registration, key []byte) {
+func assertPublicationUnavailable(t *testing.T, catalog *CatalogStore, id uuid.UUID, registration Registration, key []byte) {
 	t.Helper()
 	// No missing source can inherit metadata or credentials from the consumer.
-	if _, err := catalog.GetProviderApp(ctx, id, "OAuth", key); err == nil {
+	if _, err := catalog.GetProviderApp(t.Context(), id, "OAuth", key); err == nil {
 		t.Fatal("changed publication usable")
 	}
 	if err := catalog.PublishRegistration(t.Context(), id, "OAuth", registration, key); err == nil {

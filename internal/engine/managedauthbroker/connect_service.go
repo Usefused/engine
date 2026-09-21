@@ -51,8 +51,8 @@ func NewConnectService(catalog ProviderAppReader, masterKey []byte, httpClient *
 
 // ClientID returns the public client_id an installation needs to build its
 // own authorization redirect; the secret is never exposed.
-func (s *ConnectService) ClientID(ctx context.Context, serviceID uuid.UUID, authName string, applicationIDs ...string) (string, error) {
-	app, err := s.providerApp(ctx, serviceID, authName, applicationIDs...)
+func (s *ConnectService) ClientID(ctx context.Context, serviceID uuid.UUID, authName string) (string, error) {
+	app, err := s.providerApp(ctx, serviceID, authName)
 	// Invalid or unavailable operator policy must fail before a credential-bearing network request.
 	if err != nil {
 		return "", err
@@ -64,8 +64,8 @@ func (s *ConnectService) ClientID(ctx context.Context, serviceID uuid.UUID, auth
 // application, mirroring connectauth.ExchangeAuthorizationCode exactly
 // except that credentials and token policy come exclusively from the operator catalogue.
 // Legacy auth/flow arguments are ignored so older consumers cannot select a credential destination.
-func (s *ConnectService) Exchange(ctx context.Context, serviceID uuid.UUID, authName, redirectURI string, _ fusedobject.AuthConfig, _ fusedobject.OAuth2FlowContract, code, verifier string, applicationIDs ...string) (connectauth.TokenResponse, error) {
-	app, err := s.providerApp(ctx, serviceID, authName, applicationIDs...)
+func (s *ConnectService) Exchange(ctx context.Context, serviceID uuid.UUID, authName, redirectURI string, _ fusedobject.AuthConfig, _ fusedobject.OAuth2FlowContract, code, verifier string) (connectauth.TokenResponse, error) {
+	app, err := s.providerApp(ctx, serviceID, authName)
 	// Invalid or unavailable operator policy must fail before a credential-bearing network request.
 	if err != nil {
 		return connectauth.TokenResponse{}, err
@@ -80,7 +80,7 @@ func (s *ConnectService) Exchange(ctx context.Context, serviceID uuid.UUID, auth
 		if !ok {
 			return connectauth.TokenResponse{}, webhookrelay.ErrDenied
 		}
-		err = s.Proof.RecordExchange(ctx, installation.ID, serviceID, authName, token.AccessToken, token.RefreshToken, token.RawResponse, applicationIDs...)
+		err = s.Proof.RecordExchange(ctx, installation.ID, serviceID, authName, token.AccessToken, token.RefreshToken, token.RawResponse)
 	}
 	token.RawResponse = nil
 	return token, err
@@ -88,8 +88,8 @@ func (s *ConnectService) Exchange(ctx context.Context, serviceID uuid.UUID, auth
 
 // Refresh mirrors connectauth.RefreshAccessToken the same way Exchange
 // mirrors ExchangeAuthorizationCode.
-func (s *ConnectService) Refresh(ctx context.Context, serviceID uuid.UUID, authName, redirectURI string, _ fusedobject.AuthConfig, _ fusedobject.OAuth2FlowContract, refreshToken string, applicationIDs ...string) (connectauth.TokenResponse, error) {
-	app, err := s.providerApp(ctx, serviceID, authName, applicationIDs...)
+func (s *ConnectService) Refresh(ctx context.Context, serviceID uuid.UUID, authName, redirectURI string, _ fusedobject.AuthConfig, _ fusedobject.OAuth2FlowContract, refreshToken string) (connectauth.TokenResponse, error) {
+	app, err := s.providerApp(ctx, serviceID, authName)
 	// Invalid or unavailable operator policy must fail before a credential-bearing network request.
 	if err != nil {
 		return connectauth.TokenResponse{}, err
@@ -104,7 +104,7 @@ func (s *ConnectService) Refresh(ctx context.Context, serviceID uuid.UUID, authN
 		if !ok {
 			return connectauth.TokenResponse{}, webhookrelay.ErrDenied
 		}
-		err = s.Proof.RecordRefresh(ctx, installation.ID, serviceID, authName, refreshToken, token.AccessToken, token.RefreshToken, applicationIDs...)
+		err = s.Proof.RecordRefresh(ctx, installation.ID, serviceID, authName, refreshToken, token.AccessToken, token.RefreshToken)
 	}
 	token.RawResponse = nil
 	return token, err
@@ -112,12 +112,12 @@ func (s *ConnectService) Refresh(ctx context.Context, serviceID uuid.UUID, authN
 
 // ProviderAppReader separates trusted registration lookup from caller-supplied OAuth metadata.
 type ProviderAppReader interface {
-	GetProviderApp(context.Context, uuid.UUID, string, []byte, ...string) (ProviderApp, error)
+	GetProviderApp(context.Context, uuid.UUID, string, []byte) (ProviderApp, error)
 }
 
 // providerApp validates at the use boundary so legacy rows or alternate readers cannot bypass policy validation.
-func (s *ConnectService) providerApp(ctx context.Context, serviceID uuid.UUID, authName string, applicationIDs ...string) (ProviderApp, error) {
-	app, err := s.catalog.GetProviderApp(ctx, serviceID, authName, s.masterKey, applicationIDs...)
+func (s *ConnectService) providerApp(ctx context.Context, serviceID uuid.UUID, authName string) (ProviderApp, error) {
+	app, err := s.catalog.GetProviderApp(ctx, serviceID, authName, s.masterKey)
 	// Never construct a provider request from a failed lookup.
 	if err != nil {
 		return ProviderApp{}, err

@@ -416,11 +416,10 @@ func (c *AuthRefreshCoordinator) loadAuthRefreshContract(ctx context.Context, co
 		return authRefreshContract{}, ErrAuthRefreshContractUnavailable
 	}
 	source := connectauth.ApplicationCredentialSource{
-		ServiceID:            conn.CredentialSourceServiceID,
-		AuthType:             conn.CredentialSourceAuthType,
-		AuthName:             conn.CredentialSourceAuthName,
-		Managed:              conn.ManagedAuth,
-		ManagedApplicationID: conn.ManagedApplicationID,
+		ServiceID: conn.CredentialSourceServiceID,
+		AuthType:  conn.CredentialSourceAuthType,
+		AuthName:  conn.CredentialSourceAuthName,
+		Managed:   conn.ManagedAuth,
 	}
 	// Resolve the persisted source once; remote grants use the source identity instead of the target service.
 	_, grant, err := c.applicationCredentials.ResolveApplication(ctx, connectauth.ApplicationRequest{BucketID: conn.BucketID, ServiceID: conn.ServiceID, AuthType: conn.AuthType, AuthName: conn.AuthName, Source: source, Auth: auth, Flow: flow}, c.httpClient, c.managedConnect)

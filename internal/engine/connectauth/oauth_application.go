@@ -4,17 +4,15 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/Usefused/engine/internal/shared/managedpublication"
-
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/google/uuid"
 )
 
 // DelegatedOAuth admits only OAuth operations on an explicitly published remote registration.
 type DelegatedOAuth interface {
-	ClientID(context.Context, uuid.UUID, string, ...string) (string, error)
-	Exchange(context.Context, uuid.UUID, string, string, fusedobject.AuthConfig, fusedobject.OAuth2FlowContract, string, string, ...string) (TokenResponse, error)
-	Refresh(context.Context, uuid.UUID, string, string, fusedobject.AuthConfig, fusedobject.OAuth2FlowContract, string, ...string) (TokenResponse, error)
+	ClientID(context.Context, uuid.UUID, string) (string, error)
+	Exchange(context.Context, uuid.UUID, string, string, fusedobject.AuthConfig, fusedobject.OAuth2FlowContract, string, string) (TokenResponse, error)
+	Refresh(context.Context, uuid.UUID, string, string, fusedobject.AuthConfig, fusedobject.OAuth2FlowContract, string) (TokenResponse, error)
 }
 
 // OAuthGrant is the shared connect/refresh boundary after source selection; it owns neither user-token storage nor scheduling.
@@ -34,11 +32,6 @@ type ApplicationRequest struct {
 
 // ResolveApplication chooses local or delegated operations once; a missing local credential never selects a remote source.
 func (r *ApplicationCredentialResolver) ResolveApplication(ctx context.Context, request ApplicationRequest, client *http.Client, remote DelegatedOAuth) (ClientCredentials, OAuthGrant, error) {
-	// A malformed or non-managed selector cannot quietly fall through to a local client pair.
-	if _, err := managedpublication.Selector([]string{request.Source.ManagedApplicationID}); err != nil || (request.Source.ManagedApplicationID != "" && !request.Source.Managed) {
-		return ClientCredentials{}, nil, ErrApplicationCredentialsUnavailable
-	}
-
 	// Only an explicit source reference may select a delegated registration.
 	if request.Source.Managed {
 		return r.resolveDelegated(ctx, request, remote)
@@ -58,7 +51,7 @@ func (r *ApplicationCredentialResolver) resolveDelegated(ctx context.Context, re
 	if remote == nil || source.ServiceID == uuid.Nil || source.AuthName == "" {
 		return ClientCredentials{}, nil, ErrApplicationCredentialsUnavailable
 	}
-	id, err := remote.ClientID(ctx, source.ServiceID, source.AuthName, source.ManagedApplicationID)
+	id, err := remote.ClientID(ctx, source.ServiceID, source.AuthName)
 	// Discovery never returns a client secret and must succeed before constructing a grant adapter.
 	if err != nil || id == "" {
 		return ClientCredentials{}, nil, ErrApplicationCredentialsUnavailable
@@ -94,10 +87,10 @@ type delegatedOAuthGrant struct {
 
 // Exchange delegates only the grant operation; callback ownership and token persistence stay with the customer Engine.
 func (g delegatedOAuthGrant) Exchange(ctx context.Context, code, verifier string) (TokenResponse, error) {
-	return g.remote.Exchange(ctx, g.source.ServiceID, g.source.AuthName, g.redirectURI, g.auth, g.flow, code, verifier, g.source.ManagedApplicationID)
+	return g.remote.Exchange(ctx, g.source.ServiceID, g.source.AuthName, g.redirectURI, g.auth, g.flow, code, verifier)
 }
 
 // Refresh sends the current user token to its exact published source, never a generic credential proxy.
 func (g delegatedOAuthGrant) Refresh(ctx context.Context, token string) (TokenResponse, error) {
-	return g.remote.Refresh(ctx, g.source.ServiceID, g.source.AuthName, g.redirectURI, g.auth, g.flow, token, g.source.ManagedApplicationID)
+	return g.remote.Refresh(ctx, g.source.ServiceID, g.source.AuthName, g.redirectURI, g.auth, g.flow, token)
 }

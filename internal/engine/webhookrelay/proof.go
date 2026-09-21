@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Usefused/engine/internal/shared/managedpublication"
-
 	"github.com/Usefused/engine/internal/shared/signaturepolicy"
 
 	"github.com/google/uuid"
@@ -18,18 +16,12 @@ import (
 type ProofStore struct{ DB *pgxpool.Pool }
 
 // RecordExchange stores only claims extracted from the broker's own successful provider token response.
-func (s ProofStore) RecordExchange(ctx context.Context, installation, service uuid.UUID, authName, token, refreshToken string, raw []byte, applicationIDs ...string) error {
-	applicationID, err := managedpublication.Selector(applicationIDs)
-	// Invalid selectors cannot create a proof for the default publication.
-	if err != nil {
-		return ErrDenied
-	}
+func (s ProofStore) RecordExchange(ctx context.Context, installation, service uuid.UUID, authName, token, refreshToken string, raw []byte) error {
 	rows, err := s.DB.Query(ctx, `SELECT w.id,w.relay_config,w.signature_policy,`+policyFingerprintSQL+`
- FROM fused_workspace_webhooks w JOIN fused_oauth_publications p ON `+managedpublication.WebhookPublicationSQL+`
- JOIN fused_managed_auth_installations i ON i.id=$4
+ FROM fused_workspace_webhooks w JOIN fused_oauth_publications p ON p.service_id=w.service_id
+ AND p.auth_name=w.relay_config->'publish'->>'auth_name'
  WHERE w.service_id=$1 AND p.auth_name=$2 AND w.signature_policy IS NOT NULL
- AND w.secret_bucket_id IS NOT NULL AND p.service_version_id=w.service_version_id AND p.application_id=$3
- AND i.revoked_at IS NULL AND i.access_expires_at>NOW() AND `+managedpublication.AudienceSQL, service, authName, applicationID, installation)
+ AND w.secret_bucket_id IS NOT NULL AND p.service_version_id=w.service_version_id`, service, authName)
 	// A failed proof lookup must fail the delegated exchange rather than issuing unbound claims.
 	if err != nil {
 		return err
@@ -84,17 +76,10 @@ type proofRow struct {
 const policyFingerprintSQL = `encode(sha256(convert_to(jsonb_build_array(w.relay_config,w.signature_policy,w.secret_bucket_id,w.secret_ref,w.slug,w.service_version_id,p.registration_hash)::text,'UTF8')),'hex')`
 
 // RecordRefresh rotates the token proof only for grants this installation already established by code exchange.
-func (s ProofStore) RecordRefresh(ctx context.Context, installation, service uuid.UUID, authName, oldToken, newToken, newRefresh string, applicationIDs ...string) error {
-	applicationID, err := managedpublication.Selector(applicationIDs)
-	// Refresh proof may move only within the exact original application.
-	if err != nil {
-		return ErrDenied
-	}
-	_, err = s.DB.Exec(ctx, `UPDATE fused_webhook_grants g SET token_hash=$1, refresh_hash=CASE WHEN $6='' THEN g.refresh_hash ELSE $6 END
- FROM fused_workspace_webhooks w JOIN fused_oauth_publications p ON `+managedpublication.WebhookPublicationSQL+`
- JOIN fused_managed_auth_installations i ON i.id=$2 WHERE g.registration_id=w.id AND g.installation_id=$2
- AND g.refresh_hash=$3 AND w.service_id=$4 AND w.relay_config->'publish'->>'auth_name'=$5 AND p.application_id=$7 AND g.policy_hash=`+policyFingerprintSQL+`
- AND i.revoked_at IS NULL AND i.access_expires_at>NOW() AND `+managedpublication.AudienceSQL, Digest(newToken), installation, Digest(oldToken), service, authName, optionalDigest(newRefresh), applicationID)
+func (s ProofStore) RecordRefresh(ctx context.Context, installation, service uuid.UUID, authName, oldToken, newToken, newRefresh string) error {
+	_, err := s.DB.Exec(ctx, `UPDATE fused_webhook_grants g SET token_hash=$1, refresh_hash=CASE WHEN $6='' THEN g.refresh_hash ELSE $6 END
+ FROM fused_workspace_webhooks w WHERE g.registration_id=w.id AND g.installation_id=$2
+ AND g.refresh_hash=$3 AND w.service_id=$4 AND w.relay_config->'publish'->>'auth_name'=$5`, Digest(newToken), installation, Digest(oldToken), service, authName, optionalDigest(newRefresh))
 	return err
 }
 
@@ -123,9 +108,9 @@ func (s ProofStore) Authorize(ctx context.Context, installation, subscription uu
  FROM fused_webhook_subscriptions sub JOIN fused_webhook_grants g ON g.id=sub.grant_id
  JOIN fused_managed_auth_installations i ON i.id=g.installation_id
  JOIN fused_workspace_webhooks w ON w.id=g.registration_id CROSS JOIN fused_workspaces ws
- JOIN fused_oauth_publications p ON `+managedpublication.WebhookPublicationSQL+`
+ JOIN fused_oauth_publications p ON p.service_id=w.service_id AND p.auth_name=w.relay_config->'publish'->>'auth_name'
  WHERE sub.id=$1 AND g.installation_id=$2 AND sub.revoked_at IS NULL
- AND i.revoked_at IS NULL AND i.access_expires_at>NOW() AND `+managedpublication.AudienceSQL+` AND g.policy_hash=`+policyFingerprintSQL, subscription, installation).Scan(
+ AND i.revoked_at IS NULL AND i.access_expires_at>NOW() AND g.policy_hash=`+policyFingerprintSQL, subscription, installation).Scan(
 		&a.ID, &a.GrantID, &a.RegistrationID, &a.ReceiverID, &a.ServiceID, &a.VersionID, &a.AccountID, &a.Label, &a.ResourceID, &a.AppID, &raw, &a.CreatedAt)
 	// Absent and unauthorized subscriptions share one bounded failure.
 	if err != nil {
@@ -141,12 +126,7 @@ func (s ProofStore) Authorize(ctx context.Context, installation, subscription uu
 }
 
 // Subscribe admits an explicit receiver only when the supplied token hash matches this installation's broker-verified grant.
-func (s ProofStore) Subscribe(ctx context.Context, installation, registration, receiver uuid.UUID, token string, applicationIDs ...string) (uuid.UUID, error) {
-	applicationID, err := managedpublication.Selector(applicationIDs)
-	// Invalid selectors cannot subscribe to the default publication.
-	if err != nil {
-		return uuid.Nil, ErrDenied
-	}
+func (s ProofStore) Subscribe(ctx context.Context, installation, registration, receiver uuid.UUID, token string) (uuid.UUID, error) {
 	var id uuid.UUID
 	// Empty identities must never acquire a durable receiver.
 	if registration == uuid.Nil || receiver == uuid.Nil || token == "" {
@@ -164,16 +144,13 @@ func (s ProofStore) Subscribe(ctx context.Context, installation, registration, r
 	}
 	err = tx.QueryRow(ctx, `INSERT INTO fused_webhook_subscriptions(grant_id,receiver_id)
  SELECT g.id,$3 FROM fused_webhook_grants g JOIN fused_managed_auth_installations i ON i.id=g.installation_id
- JOIN fused_workspace_webhooks w ON w.id=g.registration_id
- JOIN fused_oauth_publications p ON `+managedpublication.WebhookPublicationSQL+`
- WHERE g.installation_id=$1 AND g.registration_id=$2 AND g.token_hash=$4 AND p.application_id=$5
- AND `+managedpublication.AudienceSQL+` AND g.policy_hash=`+policyFingerprintSQL+`
+ WHERE g.installation_id=$1 AND g.registration_id=$2 AND g.token_hash=$4
  AND i.revoked_at IS NULL AND i.access_expires_at>NOW()
  AND ((SELECT count(*) FROM fused_webhook_subscriptions sub JOIN fused_webhook_grants owned ON owned.id=sub.grant_id
  WHERE owned.installation_id=$1 AND sub.revoked_at IS NULL)<128
  OR EXISTS(SELECT 1 FROM fused_webhook_subscriptions sub WHERE sub.grant_id=g.id AND sub.receiver_id=$3))
  ON CONFLICT(grant_id,receiver_id) DO UPDATE SET receiver_id=EXCLUDED.receiver_id
- WHERE fused_webhook_subscriptions.revoked_at IS NULL RETURNING id`, installation, registration, receiver, Digest(token), applicationID).Scan(&id)
+ WHERE fused_webhook_subscriptions.revoked_at IS NULL RETURNING id`, installation, registration, receiver, Digest(token)).Scan(&id)
 	// Do not reveal whether another installation owns the provider token or registration.
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("subscribe webhook: %w", err)

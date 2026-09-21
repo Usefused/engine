@@ -116,10 +116,9 @@ type sdkConfigServiceDoc struct {
 }
 
 type sdkAppAuthDoc struct {
-	ManagedApplicationID string `json:"managed_application_id,omitempty"`
-	Type                 string `json:"type"`
-	Name                 string `json:"name,omitempty"`
-	Ref                  string `json:"ref,omitempty"`
+	Type string `json:"type"`
+	Name string `json:"name,omitempty"`
+	Ref  string `json:"ref,omitempty"`
 }
 
 type sdkAppConnectDoc struct {
@@ -737,10 +736,6 @@ func validateAppServiceCapabilitySelection(name string, service sdkConfigService
 
 // validateAppAuthReferenceIntent keeps app-owned references limited to exact OAuth/OIDC application families.
 func validateAppAuthReferenceIntent(serviceName string, auth *sdkAppAuthDoc) error {
-	// Application identity is meaningful only with an explicit managed source.
-	if err := validateManagedApplicationReference(auth.Ref, auth.ManagedApplicationID); err != nil {
-		return err
-	}
 	// Direct selections retain their established behavior when no source is declared.
 	if strings.TrimSpace(auth.Ref) == "" {
 		return nil
@@ -1572,7 +1567,6 @@ func resolveAppAuthReferenceSelection(selection *models.SDKSelection, auth *sdkA
 		selection.CredentialSourceAuthType = selection.AuthType
 		selection.CredentialSourceAuthName = parsed.AuthName
 		selection.ManagedAuth = true
-		selection.ManagedApplicationID = auth.ManagedApplicationID
 		selection.AuthRef = "${fused.bucket.auth." + parsed.ServiceKey + "." + parsed.AuthName + "}"
 		return nil
 	}
@@ -4409,7 +4403,6 @@ func sameReturnedSelectionPolicy(planned, returned models.SDKSelection) bool {
 func sameReturnedAuthPolicy(planned, returned models.SDKSelection) bool {
 	return planned.AuthType == returned.AuthType && planned.AuthName == returned.AuthName &&
 		planned.AuthRef == returned.AuthRef &&
-		planned.ManagedApplicationID == returned.ManagedApplicationID && planned.ManagedAuth == returned.ManagedAuth &&
 		planned.CredentialSourceServiceID == returned.CredentialSourceServiceID &&
 		planned.CredentialSourceAuthType == returned.CredentialSourceAuthType &&
 		planned.CredentialSourceAuthName == returned.CredentialSourceAuthName

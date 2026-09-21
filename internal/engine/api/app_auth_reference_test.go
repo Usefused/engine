@@ -224,7 +224,7 @@ func TestManagedAuthReferencePlanReachesSDKAndMCPHTTP(t *testing.T) {
 			router := newControlTestRouter(s.accountID)
 			router.Post("/sdk-config/plan", SDKConfigPlanHandler(configStore, s, registry))
 			router.Post("/mcp-config/plan", MCPConfigPlanHandler(configStore, s, registry))
-			body := fmt.Sprintf(`{"source_hash":"fixture","config_key":"%s:fixture:1.0.0","config":{"apiVersion":"fused/v1","kind":%q,"name":"fixture","version":"1.0.0"%s,"language":%q,"bucket":"default","services":{"jira":{"version":"v1","operations":["readIssue"],"auth":{"type":"oauth","name":"oauthAuth","ref":"${fused.bucket.auth.jira.oauthAuth}","managed_application_id":"729ea172-5512-4f37-b202-31084e2d2766"}}}}}`, test.kind, test.kind, test.descriptionField, test.language)
+			body := fmt.Sprintf(`{"source_hash":"fixture","config_key":"%s:fixture:1.0.0","config":{"apiVersion":"fused/v1","kind":%q,"name":"fixture","version":"1.0.0"%s,"language":%q,"bucket":"default","services":{"jira":{"version":"v1","operations":["readIssue"],"auth":{"type":"oauth","name":"oauthAuth","ref":"${fused.bucket.auth.jira.oauthAuth}"}}}}}`, test.kind, test.kind, test.descriptionField, test.language)
 			request := httptest.NewRequest(http.MethodPost, "/"+test.kind+"-config/plan", strings.NewReader(body))
 			response := httptest.NewRecorder()
 			router.ServeHTTP(response, request)
@@ -249,7 +249,7 @@ func TestManagedAuthReferencePlanReachesSDKAndMCPHTTP(t *testing.T) {
 				t.Fatalf("resolved payload = %s / %v", configStore.createdPlan.ResolvedPayload, err)
 			}
 			selection := resolved.Selections[0]
-			if !selection.ManagedAuth || selection.CredentialSourceServiceID != serviceID || selection.CredentialSourceAuthName != "oauthAuth" || selection.ManagedApplicationID != "729ea172-5512-4f37-b202-31084e2d2766" {
+			if !selection.ManagedAuth || selection.CredentialSourceServiceID != serviceID || selection.CredentialSourceAuthName != "oauthAuth" {
 				t.Fatalf("%s: pinned selection = %#v", test.kind, selection)
 			}
 		})

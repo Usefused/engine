@@ -1132,11 +1132,10 @@ type SDKSelection struct {
 	// ManagedAuth is true only when the app's config explicitly referenced
 	// ${fused.bucket.auth.<service>.<authName>}; consent and refresh then route
 	// through the managed-auth broker instead of a bucket-owned app pair.
-	ManagedAuth          bool                 `json:"managed_auth,omitempty"`
-	ManagedApplicationID string               `json:"managed_application_id,omitempty"`
-	RequiredAuth         []SDKRequiredAuth    `json:"required_auth,omitempty"`
-	ConnectScopes        []string             `json:"connect_scopes,omitempty"`
-	Injections           []SDKInjectionConfig `json:"injections,omitempty"`
+	ManagedAuth   bool                 `json:"managed_auth,omitempty"`
+	RequiredAuth  []SDKRequiredAuth    `json:"required_auth,omitempty"`
+	ConnectScopes []string             `json:"connect_scopes,omitempty"`
+	Injections    []SDKInjectionConfig `json:"injections,omitempty"`
 }
 
 type SDKInjectionConfig struct {
