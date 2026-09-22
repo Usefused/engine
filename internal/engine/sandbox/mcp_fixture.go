@@ -35,15 +35,18 @@ type FixturePagination struct {
 
 // FixtureServerMetadata is the immutable MCP identity advertised before a host inspects any tools.
 type FixtureServerMetadata struct {
-	Name        string `json:"name"`
-	Title       string `json:"title"`
-	Version     string `json:"version"`
-	Description string `json:"description"`
+	Name                       string `json:"name"`
+	Title                      string `json:"title"`
+	Version                    string `json:"version"`
+	Description                string `json:"description"`
+	FusedIntelligentClassifier bool   `json:"fused-intelligent-classifier,omitempty"`
 }
 
 // Fixture is the app-scoped operation catalogue serialized for the shared MCP runtime.
 type Fixture struct {
 	Server FixtureServerMetadata `json:"server"`
+	// Request-local classifier output is never persisted or supplied by an MCP caller.
+	ClassifierOperationNames *[]string `json:"classifier_operation_names,omitempty"`
 	// Version-keyed dictionaries are serialized once for lazy schema documentation lookup.
 	SchemaDefinitions map[string]map[string]fusedobject.SchemaContract `json:"schema_definitions,omitempty"`
 	Operations        []FixtureOperation                               `json:"operations"`

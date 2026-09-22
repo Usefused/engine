@@ -155,7 +155,7 @@ const MAX_CHILD_PATHS = 32;
 const MANUAL_GET_PAGINATION_USAGE = "Only when this operation's documentation explicitly identifies a page input, continuation output, and stop condition, pass the page input in params, await the two-argument call(), read the continuation from its result, and repeat until the documented stop condition. Never infer page, cursor, or offset semantics from names. Each page counts toward execute's call and time limits.";
 
 /** Routes exact, lazy, intent, and list requests without changing call authorization. */
-export function searchDocs(fixture: Fixture, args: SearchDocsArgs): SearchDocsResult {
+export function searchDocs(fixture: Fixture, args: SearchDocsArgs, classifiedNames?: string[]): SearchDocsResult {
   // Lazy requests require both an exact callable and a named public section.
   if (args.section !== undefined || args.schemaPath !== undefined) {
     return resolveSection(fixture, args);
@@ -166,7 +166,7 @@ export function searchDocs(fixture: Fixture, args: SearchDocsArgs): SearchDocsRe
   }
   // Whitespace carries no lexical intent and therefore selects schema-free list mode.
   if (args.query?.trim()) {
-    return queryOperations(fixture, args.query, normalizeLimit(args.limit));
+    return queryOperations(fixture, args.query, normalizeLimit(args.limit), classifiedNames);
   }
   return listOperations(fixture, normalizeListLimit(args.limit));
 }
@@ -210,8 +210,11 @@ function listOperations(fixture: Fixture, limit: number): SearchDocsResult {
 }
 
 /** Ranks physical and Unified callables together, then packs complete sections by priority. */
-function queryOperations(fixture: Fixture, query: string, limit: number): SearchDocsResult {
-  const matched = allCandidates(fixture)
+function queryOperations(fixture: Fixture, query: string, limit: number, classifiedNames?: string[]): SearchDocsResult {
+  // Trusted classifier order replaces lexical scoring while preserving query schema packing and pagination guidance.
+  const matched = classifiedNames !== undefined
+    ? classifiedNames.map(name => exactCandidate(fixture, name)).filter((candidate): candidate is SearchCandidate => candidate !== undefined)
+    : allCandidates(fixture)
     .map((candidate) => ({ ...candidate, score: scoreCandidate(query, candidate) }))
     .filter(({ score }) => score > 0)
     .sort(compareCandidates);

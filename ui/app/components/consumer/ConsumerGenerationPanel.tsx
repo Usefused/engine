@@ -1,5 +1,5 @@
 import type { FormEvent } from "react";
-import { AlertTriangle, Check, Copy, Download, Globe2, Server } from "lucide-react";
+import { AlertTriangle, Check, Copy, Download, Globe2, Info, Server } from "lucide-react";
 import { AppOwnerControls } from "~/components/access/AppOwnerControls";
 import { McpTransportEndpoints, type McpTransportEndpointData } from "~/components/mcp/McpTransportEndpoints";
 import type { AppBuildSelector, AppCreationMode, AppOwningTeam } from "~/lib/app-builder-contract";
@@ -12,6 +12,10 @@ import { formatVersion } from "~/lib/format";
 // so that route isn't carrying this JSX inline alongside the service list.
 export interface ConsumerGenerationPanelProps {
   generationMode: AppCreationMode;
+  mcpDescription: string;
+  setMcpDescription: (value: string) => void;
+  intelligentSearch: boolean;
+  setIntelligentSearch: (value: boolean) => void;
   ownerTeams: AppOwningTeam[];
   ownerTeamId: string;
   setOwnerTeamId: (id: string) => void;
@@ -442,6 +446,8 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
         >
           <AppOwnerControls ownerTeams={ownerTeams} ownerTeamId={ownerTeamId} buckets={availableBuckets} bucketId={bucketId} onOwnerTeamChange={setOwnerTeamId} onBucketChange={setBucketId} onCreateCredential={onCreateCredential} />
           <NameField generationMode={generationMode} sdkName={sdkName} setSdkName={setSdkName} setIsDuplicate={setIsDuplicate} checkDuplicateSDK={checkDuplicateSDK} />
+          {/* MCP-specific controls record authored identity and explicit remote-processing consent. */}
+          {generationMode === "mcp" && <McpSearchSettings {...props} />}
           <WebhookBundleField totalSelectedWebhooks={totalSelectedWebhooks} webhookAttachment={webhookAttachment} setWebhookAttachment={setWebhookAttachment} />
           <VersionField
             generationMode={generationMode}
@@ -498,4 +504,26 @@ function ExecutionTokenField({ token, copied, onCopy }: { token: string; copied:
       </button>
     </div>
   );
+}
+
+/** Keeps Jev consent explicit with an aligned control and a compact processing note. */
+function McpSearchSettings(props: ConsumerGenerationPanelProps) {
+  return <div className="space-y-4">
+    <label className="block text-sm font-medium text-slate-700">Server description
+      {/* Keep the server-level summary authored and available before discovery. */}
+      <textarea required maxLength={1024} value={props.mcpDescription} onChange={event => props.setMcpDescription(event.target.value)}
+        placeholder="Describe the services and tasks this server enables."
+        className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm" />
+    </label>
+    <label className="flex items-center gap-2 text-sm text-slate-700">
+      {/* Only an owner-selected checkbox adds the remote search provider to the config. */}
+      <input type="checkbox" checked={props.intelligentSearch} onChange={event => props.setIntelligentSearch(event.target.checked)} aria-describedby="jev-disclosure"
+        className="h-4 w-4 shrink-0 accent-[var(--brand-violet)]" />
+      <span>Intelligent search with Jev</span>
+    </label>
+    <div id="jev-disclosure" className="flex items-start gap-2 rounded-lg border border-violet-100 bg-violet-50/60 p-3 text-xs leading-5 text-slate-600">
+      <Info aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-violet-500" />
+      <p>Search intent, operation names, and descriptions are sent to Jev via Fused Registry. No extra API key needed.</p>
+    </div>
+  </div>;
 }

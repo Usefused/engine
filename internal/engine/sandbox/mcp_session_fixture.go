@@ -87,7 +87,7 @@ func (c *LocalObjectCache) GetMCPServerMetadata(ctx context.Context, appID strin
 		return FixtureServerMetadata{}, fmt.Errorf("load MCP server metadata: %w", err)
 	}
 	return FixtureServerMetadata{
-		Name: runtime.Name, Title: runtime.Name, Version: runtime.Version, Description: runtime.Description,
+		Name: runtime.Name, Title: runtime.Name, Version: runtime.Version, Description: runtime.Description, FusedIntelligentClassifier: runtime.FusedIntelligentClassifier,
 	}, nil
 }
 

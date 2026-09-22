@@ -638,3 +638,17 @@ describe("searchDocs", () => {
     expect(alias).toHaveProperty("error");
   });
 });
+
+// Classifier-selected results retain query-mode safety instead of masquerading as exact lookup.
+it("packs classified operation names as query results and preserves abstention", () => {
+  const fixture = new Fixture([listRepos, getRepo]);
+  const selected = searchDocs(fixture, { query: "intent without lexical overlap" }, ["github.listRepos"]);
+  expect(selected.mode).toBe("query");
+  // Query results must never acquire exact-only pagination authorization from semantic selection.
+  if (selected.mode !== "query") throw new Error("expected query result");
+  expect(selected.operations[0].operation_id).toBe("github.listRepos");
+  expect(selected.operations[0]).toMatchObject({ pagination: { exact_lookup_required: true } });
+  expect(selected.operations[0]).not.toHaveProperty("pagination.caller_bound_supported");
+  expect(searchDocs(fixture, { query: "intent" }, [])).toMatchObject({ mode: "query", operations: [], total: 0 });
+  expect(searchDocs(fixture, { query: "intent", operationId: "github.getRepo" }, ["github.listRepos"])).toMatchObject({ mode: "operationId", operation: { operation_id: "github.getRepo" } });
+});

@@ -277,6 +277,8 @@ function generationFailureMessage(mode: GenerationMode, cause: unknown): string 
 
 // buildGenerationConfig serializes the validated builder form into the shared app contract.
 function buildGenerationConfig(input: {
+  mcpDescription: string;
+  intelligentSearch: boolean;
   mode: GenerationMode;
   name: string;
   version: string;
@@ -295,6 +297,12 @@ function buildGenerationConfig(input: {
     bucket: input.bucket,
     services: appServicesConfig(input.selections, input.data),
   };
+  // MCP metadata and classifier consent belong to the immutable creation document.
+  if (input.mode === "mcp") {
+    config.description = input.mcpDescription.trim();
+    // Omission preserves local search as the default.
+    if (input.intelligentSearch) config["fused-intelligent-classifier"] = true;
+  }
   // SDK-kind validation still requires a maintained target language even when REST delivery skips packaging.
   if (input.mode !== "mcp") config.language = input.language;
   // An explicit false is the immutable direct-REST delivery selector understood by Engine plan/apply.
@@ -1365,6 +1373,8 @@ export default function SdkBuilder() {
   const [workspaceServicesLoaded, setWorkspaceServicesLoaded] = useState(false);
 
   const [sdkName, setSdkName] = useState("");
+  const [mcpDescription, setMcpDescription] = useState("");
+  const [intelligentSearch, setIntelligentSearch] = useState(false);
   const [appVersion, setAppVersion] = useState("1.0.0");
   const [ownerTeams, setOwnerTeams] = useState<AppOwningTeam[]>([]);
   const [ownerTeamId, setOwnerTeamId] = useState("");
@@ -1986,6 +1996,7 @@ export default function SdkBuilder() {
     try {
       const ownerTeamSlug = ownerTeams.find((team) => team.id === ownerTeamId)?.slug || "";
       const config = buildGenerationConfig({
+        mcpDescription, intelligentSearch,
         mode: generationMode,
         name: sdkName,
         version: appVersion,
@@ -2058,6 +2069,7 @@ export default function SdkBuilder() {
     setPage,
   };
   const generation: ConsumerGenerationPanelProps = {
+    mcpDescription, setMcpDescription, intelligentSearch, setIntelligentSearch,
     generationMode,
     ownerTeams,
     ownerTeamId,

@@ -167,7 +167,14 @@ COALESCE((
 	  AND applied.status = 'applied'
 	ORDER BY applied.applied_at DESC NULLS LAST, applied.created_at DESC
 	LIMIT 1
-), ''), a.version, a.config_key, a.created_at`
+), ''), COALESCE((
+	SELECT (applied.resolved_payload->>'fused-intelligent-classifier')::boolean
+	FROM fused_config_plans applied
+	WHERE applied.config_key = a.config_key AND applied.source_hash = a.source_hash
+	  AND applied.status = 'applied'
+	ORDER BY applied.applied_at DESC NULLS LAST, applied.created_at DESC
+	LIMIT 1
+), false), a.version, a.config_key, a.created_at`
 
 func scanAppRuntime(row pgx.Row) (*AppRuntime, error) {
 	scope, _, err := scanAppRuntimeRow(row, false)
@@ -191,7 +198,7 @@ func scanAppRuntimeRow(row pgx.Row, includeTotal bool) (*AppRuntime, int, error)
 		&bucketID, &scope.ScopeSchemaVersion, &scope.Selections,
 		&scope.UnifiedDefinitionSchemaVersion, &scope.UnifiedDefinitions,
 		&scope.UnifiedDefinitionHash, &scope.UnifiedCodegenDescriptorHash, &scope.Status,
-		&scope.Kind, &name, &scope.Description, &version, &configKey, &scope.CreatedAt,
+		&scope.Kind, &name, &scope.Description, &scope.FusedIntelligentClassifier, &version, &configKey, &scope.CreatedAt,
 	}
 	if includeTotal {
 		targets = append(targets, &total)

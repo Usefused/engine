@@ -99,7 +99,7 @@ func handleMCPModernSearchDocs(ctx context.Context, w http.ResponseWriter, reque
 		return
 	}
 	observation := startMCPSearchObservation(ctx, request, &mcpSession{fixture: fixture, transport: mcpModernToolTransport})
-	result, err := runMCPMetadata(ctx, fixture, arguments)
+	result, err := runMCPDocumentation(ctx, fixture, arguments)
 	// Retain privacy-safe search telemetry even though no process/session exists for metadata requests.
 	if err != nil {
 		finishMCPSearchObservation(observation, "", "runtime_unavailable")

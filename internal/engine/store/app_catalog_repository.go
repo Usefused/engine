@@ -16,21 +16,22 @@ import (
 )
 
 type AppCatalogItem struct {
-	AppFamilyID           uuid.UUID
-	AppID                 uuid.UUID
-	StableAppID           uuid.UUID
-	Name                  string
-	Description           string
-	Version               string
-	Kind                  AppKind
-	DeliveryMode          AppDeliveryMode
-	Status                AppStatus
-	CreatedAt             time.Time
-	TargetLanguage        string
-	GeneratorVersion      string
-	Readme                string
-	Selections            []models.SDKSelection
-	PlannedDeactivationAt *time.Time
+	AppFamilyID                uuid.UUID
+	AppID                      uuid.UUID
+	StableAppID                uuid.UUID
+	Name                       string
+	Description                string
+	FusedIntelligentClassifier bool
+	Version                    string
+	Kind                       AppKind
+	DeliveryMode               AppDeliveryMode
+	Status                     AppStatus
+	CreatedAt                  time.Time
+	TargetLanguage             string
+	GeneratorVersion           string
+	Readme                     string
+	Selections                 []models.SDKSelection
+	PlannedDeactivationAt      *time.Time
 }
 
 type AppServiceSummary struct {
@@ -54,7 +55,7 @@ const appCatalogSelect = `
 	SELECT app.app_family_id, app.app_id,
 	       COALESCE(family.mcp_stable_app_id, '00000000-0000-0000-0000-000000000000'::uuid),
 	       family.display_name,
-	       COALESCE(plan.resolved_payload->>'description', ''), app.version,
+	       COALESCE(plan.resolved_payload->>'description', ''), COALESCE((plan.resolved_payload->>'fused-intelligent-classifier')::boolean, false), app.version,
 	       family.kind, COALESCE(family.delivery_mode, 'sdk'), app.status, app.created_at, COALESCE(family.target_language, ''),
 	       COALESCE(app.generator_version, ''), COALESCE(plan.resolved_payload->>'readme', ''), app.selections,
 	       app.planned_deactivation_at
@@ -164,7 +165,7 @@ type appCatalogScanner interface{ Scan(...any) error }
 func scanAppCatalogItem(row appCatalogScanner) (*AppCatalogItem, error) {
 	var item AppCatalogItem
 	var selections json.RawMessage
-	err := row.Scan(&item.AppFamilyID, &item.AppID, &item.StableAppID, &item.Name, &item.Description,
+	err := row.Scan(&item.AppFamilyID, &item.AppID, &item.StableAppID, &item.Name, &item.Description, &item.FusedIntelligentClassifier,
 		&item.Version, &item.Kind, &item.DeliveryMode, &item.Status, &item.CreatedAt, &item.TargetLanguage,
 		&item.GeneratorVersion, &item.Readme, &selections, &item.PlannedDeactivationAt)
 	if err == nil {

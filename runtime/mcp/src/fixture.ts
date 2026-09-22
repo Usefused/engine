@@ -209,6 +209,7 @@ export interface FixtureUnifiedTarget {
 
 /** Carries app-version identity that MCP hosts can inspect before listing tools. */
 export interface FixtureServerMetadata {
+  "fused-intelligent-classifier"?: boolean;
   name: string;
   title: string;
   version: string;
@@ -304,7 +305,7 @@ function validateServerMetadata(server?: Partial<FixtureServerMetadata>): Fixtur
   if (Buffer.byteLength(description, "utf8") > 1024) {
     throw new Error("fixture server description exceeds 1024 bytes");
   }
-  return { name, title, version, description };
+  return { name, title, version, description, "fused-intelligent-classifier": server?.["fused-intelligent-classifier"] };
 }
 
 /** Rejects incomplete or contradictory pagination metadata before it becomes model-visible. */

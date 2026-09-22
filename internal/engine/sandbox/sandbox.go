@@ -239,7 +239,9 @@ func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, 
 	registerMCPRoutes(r)
 }
 
+// registerMCPRoutes keeps child discovery and execution on the existing session-authenticated bridge.
 func registerMCPRoutes(r chi.Router) {
+	r.Post("/mcp/search", mcpSearchHandler)
 	r.Get("/mcp/{id}/sse", mcpSseHandler)
 	r.HandleFunc("/mcp/{id}", mcpStreamableHandler)
 	r.Post("/mcp/message", mcpMessageHandler)

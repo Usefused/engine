@@ -421,6 +421,7 @@ var mcpAnalyticsDashboardType = graphql.NewObject(graphql.ObjectConfig{
 })
 
 // newMCPGraphQLSchema keeps session history and execution Activity behind the shared Engine authorization surface.
+// newMCPGraphQLSchema assembles Engine-owned reads and mutations, including the authorized prompt discovery bridge.
 func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, masterKey []byte, oauthProvider OAuthProviderService, managedConnect *managedauthclient.ConnectClient, redirectURIs ...string) (graphql.Schema, error) {
 	publicInsightReader := newPublicInsightReader(registryClient)
 	packageDownloads, _ := registryClient.(sandbox.SDKPackageDownloadCountClient)
@@ -430,6 +431,8 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 		// in GraphQL validation errors, so keep it aligned with that surface.
 		Name: "EngineQuery",
 		Fields: graphql.Fields{
+			// Prompt discovery shares the Registry classifier without accepting arbitrary candidate payloads.
+			"classifyPromptOperation": classifyPromptOperationGraphQLField(registryClient),
 			"appScaffoldRequirements": appScaffoldRequirementsGraphQLField(s),
 			"currentActorAccess":      currentActorAccessGraphQLField(),
 			"app":                     appGraphQLField(s, packageDownloads),

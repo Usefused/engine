@@ -71,6 +71,8 @@ type graphQLAuthorizationPolicy struct {
 // policy is therefore a fail-closed server configuration error.
 var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 	queryRoots: map[string]graphQLFieldPolicy{
+		// Prompt may discover Registry operations before workspace activation, using the same catalogue grant as search.
+		"classifyPromptOperation": permissions(accesscontrol.PermissionCatalogueRead),
 		"appScaffoldRequirements": collectionPermissions(accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),
 		"currentActorAccess":      authenticatedOnly(),
 		"app":                     collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),

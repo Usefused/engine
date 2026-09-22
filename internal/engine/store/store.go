@@ -96,6 +96,8 @@ type AppRuntime struct {
 	// Description is immutable authored MCP identity metadata projected from
 	// the applied config plan; an empty value makes an MCP version unrunnable.
 	Description string
+	// FusedIntelligentClassifier is recovered from the exact applied plan, preserving version consent.
+	FusedIntelligentClassifier bool
 	// Version and ConfigKey identify the immutable declaration that created a
 	// runtime scope; they are metadata only and never contain credentials.
 	Version   string
@@ -742,21 +744,21 @@ type AuthConnection struct {
 	ManagedAuth           bool
 	EncryptedDEK          string
 	EncryptedAccessToken  string
-	EncryptedRefreshToken     string
-	EncryptedIDToken          string
-	TokenType                 string
-	Scopes                    []string
-	ScopeSource               string
-	Issuer                    string
-	Subject                   string
-	IdentityClaims            []byte
-	ExpiresAt                 *time.Time
-	RefreshTokenExpiresAt     *time.Time
-	LastUsedAt                *time.Time
-	LastRefreshAttemptAt      *time.Time
-	LastRefreshedAt           *time.Time
-	RefreshRetryNotBefore     *time.Time
-	RefreshState              string
+	EncryptedRefreshToken string
+	EncryptedIDToken      string
+	TokenType             string
+	Scopes                []string
+	ScopeSource           string
+	Issuer                string
+	Subject               string
+	IdentityClaims        []byte
+	ExpiresAt             *time.Time
+	RefreshTokenExpiresAt *time.Time
+	LastUsedAt            *time.Time
+	LastRefreshAttemptAt  *time.Time
+	LastRefreshedAt       *time.Time
+	RefreshRetryNotBefore *time.Time
+	RefreshState          string
 	// Failure metadata is deliberately limited to stable codes and OTEL
 	// correlation; raw provider responses and user identifiers do not belong here.
 	LastFailureCode    string

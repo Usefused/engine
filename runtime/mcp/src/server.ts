@@ -7,7 +7,7 @@ import {
   DocumentationSection,
   searchDocs,
 } from "./searchDocs.js";
-import { callClientOptionsFromEnv } from "./callClient.js";
+import { callClientOptionsFromEnv, remoteSearch } from "./callClient.js";
 import { DEFAULT_EXECUTE_LIMITS, runExecute, SessionState } from "./sandbox.js";
 import {
   DOCUMENTATION_OUTPUT_POLICY,
@@ -48,7 +48,11 @@ function main(): void {
     SEARCH_DOCS_DEFINITION,
     // Documentation is serialized at the handler boundary so every discovery
     // mode shares one wire-size policy without changing catalogue semantics.
-    async (args) => {
+    async (args, extra) => {
+      // Opted-in compatibility sessions share Engine's validated classifier and bounded result path.
+      if (fixture.server["fused-intelligent-classifier"] === true) {
+        return remoteSearch(callOptions, args, extra.signal);
+      }
       // MCP's schema inference erases custom Zod output types after the section predicate validates them.
       const result = searchDocs(fixture, { ...args, section: args.section as DocumentationSection | undefined });
       const output = serializeBoundedJson(result, DOCUMENTATION_OUTPUT_POLICY);

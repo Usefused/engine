@@ -199,6 +199,10 @@ func validateAppConfigDocument(doc sdkConfigDocument, kind string) error {
 
 // validateMCPServerDescription keeps hosted-server identity policy separate from shared app selection validation.
 func validateMCPServerDescription(doc sdkConfigDocument, kind string) error {
+	// Only the explicit Registry provider enables remote disclosure of discovery intent.
+	if doc.FusedIntelligentClassifier && kind != "mcp" {
+		return errors.New("fused-intelligent-classifier is only supported on an mcp config")
+	}
 	// SDK documents share this decoder but must not be subjected to MCP-only metadata requirements.
 	if kind != store.AppKindMCP.String() {
 		return nil
@@ -273,8 +277,9 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		return sdkPlanResult{}, err
 	}
 	payload := appResolvedPayload{
-		Description: strings.TrimSpace(call.document.Description),
-		Selections:  selections, ContractBindings: targetBindings, CredentialSourceBindings: credentialSourceBindings, BucketID: bucket.ID,
+		Description:                strings.TrimSpace(call.document.Description),
+		FusedIntelligentClassifier: call.document.FusedIntelligentClassifier,
+		Selections:                 selections, ContractBindings: targetBindings, CredentialSourceBindings: credentialSourceBindings, BucketID: bucket.ID,
 		ServiceBuckets:                 appResolvedBucketRefs(buckets.Overrides),
 		UnifiedDefinitionSchemaVersion: unified.DefinitionSchemaVersion,
 		UnifiedDefinitions:             unifiedCompilation.DefinitionJSON,
@@ -309,7 +314,7 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	}
 	trace.SpanFromContext(ctx).SetAttributes(attribute.Int("required_permissions_count", requiredCount))
 	return sdkPlanResult{
-		plan: plan, summary: map[string]any{"create_mcp": current == nil, "services": services},
+		plan: plan, summary: mcpSearchPlanSummary(current == nil, services, call.document.FusedIntelligentClassifier),
 		notifications: withAppCredentialReadinessWarning(collectSDKPlanNotifications(ctx, configStore, registryClient, call, resolved), readiness),
 		readiness:     readiness,
 	}, nil
@@ -490,6 +495,7 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 		selections:     payload.Selections, scopeSchemaVersion: models.AppScopeSchemaVersion,
 		kind: store.AppKindMCP, name: doc.Name, version: doc.Version, configKey: plan.ConfigKey,
 		description:                    payload.Description,
+		fusedIntelligentClassifier:     payload.FusedIntelligentClassifier,
 		unifiedDefinitionSchemaVersion: payload.UnifiedDefinitionSchemaVersion,
 		unifiedDefinitions:             payload.UnifiedDefinitions,
 		unifiedDefinitionHash:          payload.UnifiedDefinitionHash,

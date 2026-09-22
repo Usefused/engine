@@ -1022,6 +1022,8 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	executionServer := api.NewEngineGRPCServer(
 		deps.engineStore, deps.registryClient, deps.masterKey, deps.configStore, deps.natsClient, deps.tokenValidator, deps.managedAuthConnectClient, deps.connectRedirectURI,
 	)
+	// Discovery reuses the licensed Registry client without introducing provider credentials in Engine.
+	sandbox.SetMCPOperationClassifier(deps.registryClient)
 	sandbox.InitSandbox(
 		r, deps.natsClient, deps.cfg, deps.localObjectCache, deps.tokenValidator, deps.engineStore, deps.engineStore, deps.configStore, secretResolver,
 		deps.providerRateLimits, port, executionServer.ExecuteUnified, executionServer.StartConnectSession,

@@ -7,6 +7,7 @@ import { SEARCH_DOCS_DEFINITION, EXECUTE_DEFINITION } from "./toolDefinitions.js
 
 /** Carries only the already-authorized, schema-admitted Go catalogue into trusted search code. */
 interface Catalogue {
+  classifier_operation_names?: string[];
   operations?: FixtureOperation[] | null;
   unified_operations?: { operations: FixtureUnifiedOperation[] };
   schema_definitions?: Record<string, Record<string, FixtureSchemaContract>>;
@@ -34,7 +35,7 @@ export function search(catalogue: Catalogue, arguments_: unknown) {
   const fixture = { operations, unifiedOperations, schemaDefinitions: catalogue.schema_definitions ?? {},
     resolve: (id: string) => physical.get(id), resolveUnified: (id: string) => unified.get(id),
   } as Fixture;
-  const result = searchDocs(fixture, { ...args.data, section: args.data.section as DocumentationSection | undefined });
+  const result = searchDocs(fixture, { ...args.data, section: args.data.section as DocumentationSection | undefined }, catalogue.classifier_operation_names);
   const output = serializeBoundedJson(result, DOCUMENTATION_OUTPUT_POLICY);
   return { content: [{ type: "text", text: output.text }], isError: output.isError };
 }

@@ -129,8 +129,9 @@ func TestMCPConfigApplyPersistsCompiledUnifiedState(t *testing.T) {
 	configStore := &mockConfigStore{}
 	doc := sdkConfigDocument{
 		APIVersion: "fused/v1", Kind: store.AppKindMCP.String(), Name: "security", Version: "1.0.0", Bucket: "default",
-		Description: "Look up identities and coordinate security workflows in Okta.",
-		Services:    map[string]sdkConfigServiceDoc{"okta": {Version: "2026-07-01", Operations: []string{"getUser"}}},
+		Description:                "Look up identities and coordinate security workflows in Okta.",
+		FusedIntelligentClassifier: true,
+		Services:                   map[string]sdkConfigServiceDoc{"okta": {Version: "2026-07-01", Operations: []string{"getUser"}}},
 		UnifiedOperations: map[string]sdkUnifiedOperationDoc{
 			"security.lookup": {
 				Input:    json.RawMessage(`{"type":"object"}`),
@@ -166,6 +167,10 @@ func TestMCPConfigApplyPersistsCompiledUnifiedState(t *testing.T) {
 	// MCP keeps the credential-free descriptor in the plan without a new persistence column.
 	if planned.UnifiedOperations == nil || len(planned.UnifiedOperations.Operations) != 1 {
 		t.Fatalf("credential-free Unified descriptor is absent from the applied plan: %#v", planned.UnifiedOperations)
+	}
+	// The remote-processing opt-in must survive the same immutable plan/apply handoff.
+	if planned.FusedIntelligentClassifier != doc.FusedIntelligentClassifier || configStore.artifactApply.Scope.FusedIntelligentClassifier != doc.FusedIntelligentClassifier {
+		t.Fatal("classifier consent lost during plan/apply")
 	}
 	// The authored server summary must survive plan and apply without being reconstructed from operation identifiers.
 	if planned.Description != doc.Description || configStore.artifactApply.Scope.Description != doc.Description {

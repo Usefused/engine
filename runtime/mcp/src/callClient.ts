@@ -212,3 +212,18 @@ function callErrorMessage(body: CallResponse, status: number): string {
   // Physical errors already carry their stable prefix in prose, so adding it again would obscure correction guidance.
   return message.startsWith(prefix) ? message : `${prefix} ${message}`;
 }
+
+/** Sends trusted discovery to Engine's session bridge; Registry and Jev credentials stay outside Node. */
+export async function remoteSearch(options: CallClientOptions, args: unknown, signal?: AbortSignal): Promise<{ content: Array<{ type: "text"; text: string }>; isError: boolean }> {
+  try {
+    const response = await fetch(`http://localhost:${options.enginePort}/mcp/search`, {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${options.sessionId}` },
+      body: JSON.stringify(args), signal,
+    });
+    // Engine failure content is deliberately withheld from model-facing tool output.
+    if (!response.ok) throw new Error("discovery unavailable");
+    return await response.json();
+  } catch {
+    return { content: [{ type: "text", text: "Jev intelligent search is unavailable. Retry later or use an exact operationId." }], isError: true };
+  }
+}

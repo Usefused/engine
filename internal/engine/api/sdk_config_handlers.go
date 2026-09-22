@@ -65,9 +65,10 @@ type sdkConfigDocument struct {
 	Name       string `json:"name"`
 	Version    string `json:"version"`
 	// Description is the authored MCP server summary returned in protocol identity metadata.
-	Description string `json:"description,omitempty"`
-	Language    string `json:"language"`
-	Bucket      string `json:"bucket,omitempty"`
+	Description                string `json:"description,omitempty"`
+	FusedIntelligentClassifier bool   `json:"fused-intelligent-classifier,omitempty"`
+	Language                   string `json:"language"`
+	Bucket                     string `json:"bucket,omitempty"`
 	// Generate is tri-state on purpose: absent means the historical default of
 	// building a package. Only an explicit false suppresses codegen, leaving a
 	// published app version that is reachable over REST execution and
@@ -201,6 +202,7 @@ type appResolvedPayload struct {
 	ServiceBuckets                 map[uuid.UUID]appResolvedBucketRef     `json:"service_buckets,omitempty"`
 	Name                           string                                 `json:"name,omitempty"`
 	Description                    string                                 `json:"description,omitempty"`
+	FusedIntelligentClassifier     bool                                   `json:"fused-intelligent-classifier,omitempty"`
 	Version                        string                                 `json:"version,omitempty"`
 	Selections                     []models.SDKSelection                  `json:"selections"`
 	IncludeMCP                     bool                                   `json:"include_mcp,omitempty"`
@@ -489,8 +491,12 @@ func validateSDKConfigDocument(doc sdkConfigDocument) error {
 	return validateSDKUnifiedOperations(doc)
 }
 
-// validateSDKIdentity admits package identity fields while rejecting MCP-only server metadata.
+// validateSDKIdentity admits package identity while rejecting MCP-only metadata and discovery settings.
 func validateSDKIdentity(doc sdkConfigDocument) error {
+	// SDK versions have no search_docs surface and must not accept ineffective consent.
+	if doc.FusedIntelligentClassifier {
+		return errors.New("sdk config must not set fused-intelligent-classifier")
+	}
 	// Base identity errors must stop before output-only fields are interpreted.
 	if err := validateSDKBaseIdentity(doc); err != nil {
 		return err
@@ -3960,14 +3966,15 @@ type persistAppRuntimeParams struct {
 	selections         []models.SDKSelection
 	scopeSchemaVersion int
 	// Kind and name label the exact version for the app catalogue.
-	kind             store.AppKind
-	name             string
-	version          string
-	configKey        string
-	description      string
-	targetLanguage   string
-	sourceHash       string
-	generatorVersion string
+	kind                       store.AppKind
+	name                       string
+	version                    string
+	configKey                  string
+	description                string
+	fusedIntelligentClassifier bool
+	targetLanguage             string
+	sourceHash                 string
+	generatorVersion           string
 	// Generation identity is mutable lifecycle state for SDK building recovery,
 	// not part of the immutable runtime selection contract.
 	generationJobID                string
@@ -4005,6 +4012,7 @@ func appRuntimeForApply(p persistAppRuntimeParams) (store.AppRuntime, error) {
 		Kind:                           p.kind,
 		Name:                           p.name,
 		Description:                    p.description,
+		FusedIntelligentClassifier:     p.fusedIntelligentClassifier,
 		Version:                        p.version,
 		ConfigKey:                      p.configKey,
 	}, nil

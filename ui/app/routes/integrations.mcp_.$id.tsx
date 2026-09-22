@@ -22,6 +22,7 @@ export const meta: MetaFunction = ({ matches }) => {
 type McpDetailTab = "overview" | "activity" | "changes";
 
 interface McpServerDetail extends McpTransportEndpointData {
+  fused_intelligent_classifier?: boolean;
   app_id: string;
   app_family_id: string;
   name: string;
@@ -52,6 +53,7 @@ function readMcpDetails(appId: string): Promise<McpServerDetail> {
         app_id
         app_family_id
         name
+        fused_intelligent_classifier
         version
         kind
         status
@@ -273,6 +275,8 @@ function McpLoadedContent({ id, server, versions, activeTab, canReadActivity, ca
       <AppDetailTabs label="App details" active={activeTab} tabs={mcpDetailTabs(canReadActivity)} onChange={onTabChange} />
 
       <AppDetailBody>
+        {/* Disclosure follows this exact immutable version, including versions created through CLI. */}
+        {server.fused_intelligent_classifier === true && <p className="mb-4 text-sm text-slate-600">Intelligent search uses Jev through Fused Registry. Search intent and authorized operation names and descriptions are sent to Jev. Fused manages the Jev API key; no additional key is required.</p>}
         {/* MCP contributes only its transport controls; service selection remains shared. */}
         {activeTab === "overview" ? (
           <AppOverviewBody
