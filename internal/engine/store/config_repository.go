@@ -1183,14 +1183,18 @@ func appKindMatchesConfigType(kind AppKind, configType ConfigType) bool {
 		(kind == AppKindMCP && configType == ConfigTypeMCP)
 }
 
+// validateAppApplyMetadata enforces adapter metadata while respecting explicit deferred token issuance.
 func validateAppApplyMetadata(params ApplyAppConfigPlanParams) error {
+	// Generated SDK identity requires a language even when token issuance is deferred.
 	if params.Plan.State.ConfigType == ConfigTypeSDK && strings.TrimSpace(params.TargetLanguage) == "" {
 		return errors.New("sdk target language is required")
 	}
+	// Hosted MCP runtimes must not inherit SDK package settings.
 	if params.Plan.State.ConfigType == ConfigTypeMCP && params.TargetLanguage != "" {
 		return errors.New("mcp must not set a target language")
 	}
-	if strings.TrimSpace(params.TokenHash) == "" || strings.TrimSpace(params.TokenName) == "" {
+	// The transaction deliberately skips token creation for --no-token; requiring a hash would reject that valid path.
+	if !params.SkipTokenIssuance && (strings.TrimSpace(params.TokenHash) == "" || strings.TrimSpace(params.TokenName) == "") {
 		return errors.New("app token identity is required")
 	}
 	return nil
