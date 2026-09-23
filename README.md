@@ -4,8 +4,8 @@ Fused is an integration gateway for applications and AI agents. Connect to
 internal and external services through typed SDKs, a direct API, or MCP servers,
 with credentials, access policies, retries, and execution records handled by the Engine.
 
-**[Documentation](https://docs.usefused.com)** ·
-[Quickstart](https://docs.usefused.com/quickstart) ·
+**[Documentation](https://usefused.com/docs)** ·
+[Quickstart](https://usefused.com/docs/quickstart) ·
 [Website](https://usefused.com)
 
 ## How it works
@@ -52,7 +52,7 @@ fused-cli login
 fused-cli whoami
 ```
 
-See the [deployment guide](https://docs.usefused.com/deploy-an-engine) for Docker
+See the [deployment guide](https://usefused.com/docs/deploy-an-engine) for Docker
 and hosted Engine setup.
 
 ## Create an integration interface
@@ -68,9 +68,9 @@ a generated package. The examples below use Linear:
 
 | Interface | Command | Documentation |
 |---|---|---|
-| Typed SDK | `fused-cli init support-sdk --sdk --service linear` | [SDK quickstart](https://docs.usefused.com/quickstart) |
-| MCP server | `fused-cli init support-mcp --mcp --service linear` | [MCP server guide](https://docs.usefused.com/mcp/deploy-a-server) |
-| REST API | `fused-cli init support-api --api --service linear` | [REST API guide](https://docs.usefused.com/app/testing/over-rest) |
+| Typed SDK | `fused-cli init support-sdk --sdk --service linear` | [SDK quickstart](https://usefused.com/docs/quickstart) |
+| MCP server | `fused-cli init support-mcp --mcp --service linear` | [MCP server guide](https://usefused.com/docs/mcp/deploy-a-server) |
+| REST API | `fused-cli init support-api --api --service linear` | [REST API guide](https://usefused.com/docs/app/testing/over-rest) |
 
 Each command guides you through selecting operations and approving setup.
 Omit the mode flag to choose interactively.
@@ -89,5 +89,5 @@ fused-cli import apply
 fused-cli init billing-app --sdk --service billing-api
 ```
 
-See the [API import guide](https://docs.usefused.com/workspace/bring-your-own-api)
+See the [API import guide](https://usefused.com/docs/workspace/bring-your-own-api)
 for local file imports and other supported formats.
