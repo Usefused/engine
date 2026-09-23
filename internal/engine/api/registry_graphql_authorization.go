@@ -32,6 +32,8 @@ var registryGraphQLQueryPolicies = registryGraphQLPolicies(
 		// Batched service candidates are catalogue discovery before a service has workspace execution authority.
 		"searchEndpoints", "searchServices", "serviceCandidatesByRefs", "parseSDKIntent", "draftPromptUnifiedOperation", "driftSnapshots", "driftSnapshotsForServices",
 		"serviceChangelogSince",
+		// Published workflow definitions are catalogue discovery, not workspace execution authority.
+		"workflows",
 	},
 	[]accesscontrol.Permission{accesscontrol.PermissionCatalogueRead},
 	map[string][]accesscontrol.Permission{
@@ -43,6 +45,8 @@ var registryGraphQLQueryPolicies = registryGraphQLPolicies(
 )
 
 var registryGraphQLMutationPolicies = map[string][]accesscontrol.Permission{
+	// Publishing authoring content uses the existing catalogue management and audit boundary.
+	"publishWorkflow":            {accesscontrol.PermissionCatalogueManage},
 	"updateServicePublic":        {accesscontrol.PermissionCatalogueManage},
 	"updateServiceVersionPublic": {accesscontrol.PermissionCatalogueManage},
 	"setConnectionProfile":       {accesscontrol.PermissionServiceManage, accesscontrol.PermissionCredentialsManage},

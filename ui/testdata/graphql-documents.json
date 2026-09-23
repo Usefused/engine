@@ -1,6 +1,6 @@
 {
-  "call_count": 88,
-  "document_count": 106,
+  "call_count": 90,
+  "document_count": 108,
   "calls": [
     {
       "endpoint": "engine",
@@ -424,6 +424,12 @@
     },
     {
       "endpoint": "registry",
+      "file": "app/lib/workflow-api.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
       "file": "app/routes/integrations._index.tsx",
       "call": 1,
       "document_count": 1
@@ -528,6 +534,12 @@
       "endpoint": "engine",
       "file": "app/routes/integrations.sdks.$id.tsx",
       "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.workflows.install.tsx",
+      "call": 1,
       "document_count": 1
     }
   ],
@@ -1129,6 +1141,13 @@
     },
     {
       "endpoint": "registry",
+      "file": "app/lib/workflow-api.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "query WorkflowLibrary($search: String!, $ids: [ID!], $limit: Int!, $offset: Int!) {\n  workflows(search: $search, ids: $ids, limit: $limit, offset: $offset) {\n    total items { id publisher hash public template }\n  }\n}"
+    },
+    {
+      "endpoint": "registry",
       "file": "app/routes/integrations._index.tsx",
       "call": 1,
       "variant": 1,
@@ -1273,6 +1292,13 @@
       "call": 2,
       "variant": 1,
       "document": "\n      query($appFamilyId: String!) {\n        appVersions(app_family_id: $appFamilyId) {\n            app_id\n            version\n            created_at\n        }\n      }\n    "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.workflows.install.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "query WorkflowAppChoices($search: String!) {\n        appFamilies(search: $search, limit: 20, offset: 0) { items { name kind delivery_mode latest_version_id latest_version } }\n      }"
     }
   ]
 }

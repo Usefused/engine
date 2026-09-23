@@ -86,6 +86,8 @@ type sdkConfigDocument struct {
 	WebhookAttachment string                            `json:"webhook_attachment,omitempty"`
 	Services          map[string]sdkConfigServiceDoc    `json:"services"`
 	UnifiedOperations map[string]sdkUnifiedOperationDoc `json:"unified_operations,omitempty"`
+	// Provenance is local desired state; Registry code generation still receives only public descriptors.
+	WorkflowSources []workflowSource `json:"workflow_sources,omitempty"`
 }
 
 const maxAppVersionLength = 128
@@ -477,14 +479,21 @@ func rejectRemovedSDKConfigFields(raw json.RawMessage) error {
 	return nil
 }
 
-// validateSDKConfigDocument rejects malformed sdk config document before it can cross the Unified operation boundary.
+// validateSDKConfigDocument admits app identity, workflow provenance, and the shared executable graph.
 func validateSDKConfigDocument(doc sdkConfigDocument) error {
+	// Malformed provenance must not enter immutable app state.
+	if err := validateWorkflowSources(doc.WorkflowSources); err != nil {
+		return err
+	}
+	// Invalid package identity must fail before service or graph compilation.
 	if err := validateSDKIdentity(doc); err != nil {
 		return err
 	}
+	// Event selections require one explicit registration identity.
 	if err := validateWebhookAttachmentRequired(doc); err != nil {
 		return err
 	}
+	// Bindings may rely only on validated service and operation selections.
 	if err := validateAppServiceDocs(doc.Services); err != nil {
 		return err
 	}
@@ -1312,6 +1321,9 @@ func canonicalAppDocument(doc sdkConfigDocument) sdkConfigDocument {
 	canonical.Bucket = strings.TrimSpace(doc.Bucket)
 	canonical.WebhookAttachment = strings.TrimSpace(doc.WebhookAttachment)
 	canonical.UnifiedOperations = canonicalizeUnifiedOperations(doc.UnifiedOperations)
+	// Selection order does not change the identity of an installed workflow set.
+	canonical.WorkflowSources = append([]workflowSource(nil), doc.WorkflowSources...)
+	sort.Slice(canonical.WorkflowSources, func(i, j int) bool { return canonical.WorkflowSources[i].ID < canonical.WorkflowSources[j].ID })
 	canonical.Services = make(map[string]sdkConfigServiceDoc, len(doc.Services))
 	for name, service := range doc.Services {
 		service.Version = strings.TrimSpace(service.Version)

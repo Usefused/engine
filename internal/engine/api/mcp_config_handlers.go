@@ -167,12 +167,24 @@ func decodeAppConfigPlanRequest(r *http.Request, kind string) (SDKConfigPlanRequ
 // validateAppConfigDocument enforces the shared app identity while
 // keeping generation-only fields out of an Engine-projected MCP runtime.
 func validateAppConfigDocument(doc sdkConfigDocument, kind string) error {
+	// SDK and MCP admit the same local-only workflow provenance.
+	if err := validateWorkflowSources(doc.WorkflowSources); err != nil {
+		return err
+	}
+	return validateHostedAppDefinition(doc, kind)
+}
+
+// validateHostedAppDefinition keeps hosted identity and executable scope admission independent of provenance metadata.
+func validateHostedAppDefinition(doc sdkConfigDocument, kind string) error {
+	// A mismatched document kind cannot cross the adapter boundary.
 	if doc.APIVersion != "fused/v1" || doc.Kind != kind {
 		return fmt.Errorf("config must use apiVersion fused/v1 and kind %s", kind)
 	}
+	// Stable app coordinates must be known before compiling its operation graph.
 	if strings.TrimSpace(doc.Name) == "" || !validAppVersion(doc.Version) {
 		return fmt.Errorf("%s config requires name and a SemVer-compatible version", kind)
 	}
+	// One explicit bucket prevents credential routing from changing implicitly at runtime.
 	if strings.TrimSpace(doc.Bucket) == "" {
 		return fmt.Errorf("%s config requires exactly one bucket", kind)
 	}
@@ -180,6 +192,7 @@ func validateAppConfigDocument(doc sdkConfigDocument, kind string) error {
 	if err := validateMCPServerDescription(doc, kind); err != nil {
 		return err
 	}
+	// SDK generation choices cannot acquire meaning inside a hosted MCP app.
 	if err := validateMCPAppRestrictions(doc, kind); err != nil {
 		return err
 	}

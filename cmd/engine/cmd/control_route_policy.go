@@ -83,9 +83,11 @@ var dynamicControlRequirements = map[string]dynamicRequirementKind{
 	http.MethodPost + " /apps/{app_id}/undeprecate":          dynamicAppAccess,
 	http.MethodDelete + " /apps/{app_id}/":                   dynamicAppAccess,
 	http.MethodGet + " /apps/{app_id}/openapi":               dynamicAppAccess,
-	http.MethodGet + " /sdks/{app_id}/download":              dynamicAppAccess,
-	http.MethodPost + " /workspace/app-tokens":               dynamicAppTokenAccess,
-	http.MethodDelete + " /workspace/app-tokens":             dynamicAppTokenAccess,
+	// Source export additionally enforces app.manage in its handler.
+	http.MethodGet + " /apps/{app_id}/config":    dynamicAppAccess,
+	http.MethodGet + " /sdks/{app_id}/download":  dynamicAppAccess,
+	http.MethodPost + " /workspace/app-tokens":   dynamicAppTokenAccess,
+	http.MethodDelete + " /workspace/app-tokens": dynamicAppTokenAccess,
 }
 
 // These endpoints need a valid current identity but deliberately have no RBAC
@@ -186,6 +188,7 @@ var controlRESTPolicies = []controlRoutePolicy{
 		pathRequirement(accesscontrol.PermissionAppManage, accesscontrol.ResourceApp, "app_family_id"),
 	}},
 	{http.MethodGet, "/apps/{app_id}/openapi", false, nil},
+	{http.MethodGet, "/apps/{app_id}/config", false, nil},
 	{http.MethodPost, "/mcp-config/plan", false, nil},
 	{http.MethodPost, "/mcp-config/apply", false, nil},
 	{http.MethodPost, "/webhook-config/plan", false, nil},

@@ -5,6 +5,8 @@ const TITLES: Record<string, string> = {
   "/terms-of-service": "Terms of Service - Fused",
   "/integrations": "Services - Fused",
   "/integrations/sdks": "Apps - Fused",
+  "/integrations/workflows": "Workflows - Fused",
+  "/integrations/workflows/install": "Add workflows - Fused",
   "/integrations/mcp": "Apps - Fused",
   "/integrations/access/people": "People - Fused",
   "/integrations/access/teams": "Teams - Fused",
@@ -32,6 +34,8 @@ export function routeTitle(pathname: string, search = ""): string {
     return builderTitle(search);
   }
   if (TITLES[normalizedPath]) return TITLES[normalizedPath];
+  // Workflow detail pages are Engine-owned catalogue pages.
+  if (normalizedPath.startsWith("/integrations/workflows/")) return "Workflow details - Fused";
   if (/^\/integrations\/mcp\/[^/]+\/analytics$/.test(normalizedPath)) {
     return "MCP server activity - Fused";
   }

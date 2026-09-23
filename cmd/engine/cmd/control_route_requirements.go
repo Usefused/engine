@@ -142,13 +142,16 @@ func (r *storeBackedControlRequirementResolver) resolveDesiredConfigRequirements
 	}
 }
 
+// appAccessRequirements protects private authoring exports with edit authority while ordinary app reads retain read authority.
 func (r *storeBackedControlRequirementResolver) appAccessRequirements(ctx context.Context, actor accesscontrol.Actor, params map[string]string, request *http.Request) ([]accesscontrol.Requirement, error) {
 	appID, err := uuid.Parse(params["app_id"])
+	// Malformed immutable identity must not fall back to a broader workspace permission.
 	if err != nil {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
 	permission := accesscontrol.PermissionAppManage
-	if request.Method == http.MethodGet {
+	// Private config includes executable mappings and must not inherit ordinary GET read authority.
+	if request.Method == http.MethodGet && !strings.HasSuffix(request.URL.Path, "/config") {
 		permission = accesscontrol.PermissionAppRead
 	}
 	return r.appFamilyRequirement(ctx, actor.AccountID, appID, permission)

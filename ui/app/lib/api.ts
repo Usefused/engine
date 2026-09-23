@@ -1348,6 +1348,8 @@ export const api = {
     }).then(unwrapGraphQLResponse),
 
   appConfig: {
+    // Exact private source is Engine-local and requires app edit authority.
+    source: <T>(appID: string) => req<T>(`/apps/${encodeURIComponent(appID)}/config`),
     // plan validates a versioned SDK or MCP config without changing active state.
     plan: <T>(kind: "sdk" | "mcp", input: {
       owner_team?: string;

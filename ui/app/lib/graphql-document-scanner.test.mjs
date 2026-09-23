@@ -60,17 +60,17 @@ test("keeps the Registry repo-boundary manifest synchronized when present", (t) 
   }
 });
 
-// Exact UI transport totals cover the shared Apps catalogue and the remaining OAuth client management calls.
+// Exact UI transport totals include workflow discovery and destination-app selection.
 test("accounts for every current UI GraphQL call and document variant", () => {
   const scan = scanCurrentUI();
   // Exact totals ensure every static query remains represented in schema validation.
-  assert.equal(scan.call_count, 88);
-  assert.equal(scan.calls.length, 88);
-  assert.equal(scan.document_count, 106);
-  assert.equal(scan.documents.length, 106);
-  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 19);
-  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 87);
-  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 106);
+  assert.equal(scan.call_count, 90);
+  assert.equal(scan.calls.length, 90);
+  assert.equal(scan.document_count, 108);
+  assert.equal(scan.documents.length, 108);
+  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 20);
+  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 88);
+  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 108);
 });
 
 test("resolves imported fragments and expands conditional and map variants", () => {

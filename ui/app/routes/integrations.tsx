@@ -15,7 +15,8 @@ export default function IntegrationsLayout() {
   const [signOutError, setSignOutError] = useState("");
 
   useEffect(() => {
-    const isAuthenticatedStaticRoute = location.pathname.startsWith("/integrations/access/") ||
+    // Workflow authoring and installation belong to the authenticated Engine workspace.
+    const isAuthenticatedStaticRoute = location.pathname.startsWith("/integrations/workflows") || location.pathname.startsWith("/integrations/access/") ||
       location.pathname.startsWith("/integrations/mcp/") ||
       location.pathname.startsWith("/integrations/sdks/") || [
       "/integrations/buckets",

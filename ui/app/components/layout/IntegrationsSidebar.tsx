@@ -35,6 +35,10 @@ const PUBLIC_NAV_ITEMS: SidebarItem[] = [
 ];
 
 const AUTH_NAV_ITEMS: SidebarItem[] = [
+  { to: "/integrations/workflows", label: "Workflows", Icon: Layers,
+    // Workflow discovery precedes service activation and uses catalogue read authority.
+    visible: (access) => hasWorkspacePermission(access, "catalogue.read"),
+  },
   {
     to: "/integrations/sdks",
     label: "Apps",
