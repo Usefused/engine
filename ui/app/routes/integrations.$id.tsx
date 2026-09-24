@@ -89,7 +89,6 @@ import EndpointsTab from "~/components/EndpointsTab";
 import WebhooksTab from "~/components/WebhooksTab";
 import ActivityTab from "~/components/AnalyticsTab";
 import EndpointDetailsSidebar from "~/components/EndpointDetailsSidebar";
-import { ServerDisplay } from "~/components/integration-details/ServerDisplay";
 import { VersionSelector } from "~/components/integration-details/VersionSelector";
 import { WorkspaceConnectionProfileSection } from "~/components/integration-details/WorkspaceConnectionProfileSection";
 import {
@@ -1385,7 +1384,7 @@ function LoadedDetail() {
   );
 }
 
-// DetailHeader presents imported service identity, version state, and management controls.
+// DetailHeader separates identity from controls and aligns the publisher tag with the service title.
 function DetailHeader({
   srv,
   overallStatus,
@@ -1395,7 +1394,7 @@ function DetailHeader({
   overallStatus: string;
   importWarnings: NonNullable<Service["import_warnings"]>;
 }) {
-  const { serviceVersions, currentVersionEntry } = useDetail();
+  const { serviceVersions } = useDetail();
   return (
     <div className="flex min-w-0 items-start justify-between gap-4">
       <div className="min-w-0 flex-1">
@@ -1404,38 +1403,26 @@ function DetailHeader({
             Back to services
           </Link>
         </div>
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <div className="flex min-w-0 items-start gap-3">
           <ServiceIcon name={srv.name} iconURL={srv.icon_url} />
-          <h1 className="text-xl font-semibold text-slate-900">{formatServiceName(srv.name)}</h1>
+          <div className="min-w-0 flex-1">
+            <h1 className="break-words text-xl font-semibold text-slate-900">{formatServiceName(srv.name)}</h1>
+            <ProviderIdentity srv={srv} />
+          </div>
+        </div>
+        {/* The selector already labels version visibility; a second badge adds no information. */}
+        <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
           <VersionSelector currentVersionTag={srv.current_service_version} versions={serviceVersions} />
-          <VersionStatusBadge version={currentVersionEntry} />
+          <VisibilityControl srv={srv} />
           <DriftStatusBadge status={overallStatus} />
           <ServiceHeaderWarningIcon warningCount={importWarnings.length} />
-          <ShareControl serviceName={srv.name} />
-        </div>
-        <ProviderIdentity srv={srv} />
-        <ServerDisplay srv={srv} isAuth={false} />
-        <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
-          <VisibilityControl srv={srv} />
           <DriftWatchControl srv={srv} />
+          <ShareControl serviceName={srv.name} />
         </div>
       </div>
       <HeaderActions srv={srv} />
     </div>
   );
-}
-
-function VersionStatusBadge({ version }: { version?: ServiceVersion }) {
-  if (version?.status === "deprecated") {
-    return <Badge label="DEPRECATED VERSION" color="bg-amber-50 text-amber-700" />;
-  }
-  if (version?.status === "draft") {
-    return <Badge label="DRAFT VERSION" color="bg-slate-100 text-slate-600" />;
-  }
-  if (version?.status === "public" || version?.is_public) {
-    return <Badge label="PUBLIC VERSION" color="bg-slate-100 text-slate-600" />;
-  }
-  return null;
 }
 
 function DriftStatusBadge({ status }: { status: string }) {
@@ -1494,13 +1481,13 @@ function ShareControl({ serviceName }: { serviceName: string }) {
   );
 }
 
+// ProviderIdentity uses the canonical tag to identify the publisher without repeating its display name.
 function ProviderIdentity({ srv }: { srv: Service }) {
-  if (!srv.provider && !srv.canonical_ref) return null;
+  // Services without a canonical tag do not need an empty identity line.
+  if (!srv.canonical_ref) return null;
   return (
     <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-sm text-slate-500">
-      {srv.provider && <span className="break-words">Provider: {srv.provider.name}</span>}
-      {srv.provider && srv.canonical_ref && <span>·</span>}
-      {srv.canonical_ref && <CopyableCanonicalRef text={srv.canonical_ref} />}
+      <CopyableCanonicalRef text={srv.canonical_ref} />
     </div>
   );
 }

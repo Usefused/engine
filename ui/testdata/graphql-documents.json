@@ -1,7 +1,13 @@
 {
-  "call_count": 90,
-  "document_count": 108,
+  "call_count": 91,
+  "document_count": 109,
   "calls": [
+    {
+      "endpoint": "engine",
+      "file": "app/components/buckets/BucketConnectAccount.tsx",
+      "call": 1,
+      "document_count": 1
+    },
     {
       "endpoint": "engine",
       "file": "app/components/mcp/useMcpSessionsPage.ts",
@@ -544,6 +550,13 @@
     }
   ],
   "documents": [
+    {
+      "endpoint": "engine",
+      "file": "app/components/buckets/BucketConnectAccount.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "mutation BucketStartConnectSession($bucketId: String!, $serviceId: String!, $endUserRef: String!, $authType: String, $authName: String, $authRef: String, $scopes: [String!], $returnUrl: String) {\n  startConnectSession(bucket_id: $bucketId, service_id: $serviceId, end_user_ref: $endUserRef, auth_type: $authType, auth_name: $authName, auth_ref: $authRef, scopes: $scopes, return_url: $returnUrl) {\n    authorize_url expires_at\n  }\n}"
+    },
     {
       "endpoint": "engine",
       "file": "app/components/mcp/useMcpSessionsPage.ts",

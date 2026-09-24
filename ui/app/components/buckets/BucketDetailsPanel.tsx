@@ -9,6 +9,8 @@ import {
   type BucketValue,
   type SecretMeta,
 } from "~/lib/api";
+import { useSearchParams } from "@remix-run/react";
+import { ConnectReturnStatus } from "~/components/buckets/BucketConnectAccount";
 import { BucketAddDropdown } from "~/components/buckets/BucketAddDropdown";
 import { BucketConnectedUsersTable } from "~/components/buckets/BucketConnectedUsersTable";
 import { BucketEntryComposer } from "~/components/buckets/BucketEntryComposer";
@@ -90,8 +92,10 @@ type BucketDetailsPermissions = {
   manageConnections: boolean;
 };
 
-/** Renders a credential-set drawer with permission-aware sections and actions. */
+/** Keeps bucket content in one scroll region beneath a fixed header, including expanded consent and credential forms. */
 export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
+  const [params] = useSearchParams();
+  // A selected bucket is required before any credential or connection control can target it.
   if (!props.bucket) return null;
 
   return (
@@ -100,7 +104,7 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
         className="fixed inset-0 z-40 bg-slate-900/20 transition-opacity"
         onClick={props.onClose}
       />
-      <aside className="fixed inset-y-0 right-0 z-50 flex w-full flex-col overflow-y-auto overflow-x-hidden border-l border-slate-200 bg-white shadow-2xl transition-transform md:w-[calc(100vw-4rem)] md:max-w-[940px] xl:max-w-[1080px]">
+      <aside className="fixed inset-y-0 right-0 z-50 flex w-full flex-col overflow-hidden border-l border-slate-200 bg-white shadow-2xl transition-transform md:w-[calc(100vw-4rem)] md:max-w-[940px] xl:max-w-[1080px]">
         <BucketDetailsHeader
           bucket={props.bucket}
           loading={props.loading}
@@ -111,8 +115,12 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
           onAddEntry={props.onAddEntry}
           permissions={props.permissions}
         />
+        {/* One bounded scroll owner keeps expanded forms and lower credential tabs reachable together. */}
+        <div role="region" aria-label="Credential set contents" tabIndex={0} className="min-h-0 flex-1 overflow-y-auto overscroll-contain focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-400">
+        <div className="px-6"><ConnectReturnStatus result={params.get("fused_connect")} /></div>
         {props.permissions.readConnections && <BucketConnectUsage summary={props.connectSummary} />}
         {(props.permissions.readApps || props.permissions.readServices) && <BucketOverview
+          bucket={props.bucket}
           sdks={props.bucketSDKs}
           sdkTotal={props.bucketSDKTotal}
           services={props.bucketServices}
@@ -155,8 +163,7 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
             permissions={props.permissions}
           />
         </div>
-        <div className="flex-1 overflow-y-auto">
-          <BucketTabPanel {...props} />
+        <BucketTabPanel {...props} />
         </div>
       </aside>
     </>
@@ -280,7 +287,7 @@ type BucketDetailsHeaderProps = {
   permissions: BucketDetailsPermissions;
 };
 
-/** Renders safe refresh controls and authorized credential-set mutations. */
+/** Keeps authorized bucket actions visible while the separate content region scrolls. */
 function BucketDetailsHeader({
   bucket,
   loading,
@@ -293,7 +300,7 @@ function BucketDetailsHeader({
 }: BucketDetailsHeaderProps) {
   const deleteDisabledReason = bucketDeleteDisabledReason(bucket, saving);
   return (
-    <div className="sticky top-0 z-10 flex flex-col items-stretch justify-between gap-3 border-b border-slate-100 bg-white/90 px-4 py-4 backdrop-blur sm:flex-row sm:items-center sm:px-6 sm:py-5">
+    <div className="z-10 flex shrink-0 flex-col items-stretch justify-between gap-3 border-b border-slate-100 bg-white/90 px-4 py-4 backdrop-blur sm:flex-row sm:items-center sm:px-6 sm:py-5">
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-2">
           <h2 className="truncate text-lg font-semibold text-slate-900">

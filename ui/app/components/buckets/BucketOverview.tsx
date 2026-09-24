@@ -3,14 +3,17 @@ import { Link } from "@remix-run/react";
 import { Box, CheckCircle2, PlugZap, XCircle } from "lucide-react";
 import {
   type ActivatedService,
+  type BucketSummary,
   type BucketSDKSummary,
   type BucketServiceSummary,
 } from "~/lib/api";
+import { BucketConnectAccount } from "./BucketConnectAccount";
 import { BucketPagination } from "~/components/buckets/BucketPagination";
 import { BucketServiceSelect } from "~/components/buckets/BucketServiceSelect";
 import { serviceDetailPath } from "~/lib/service-navigation";
 
 type BucketOverviewProps = {
+  bucket: BucketSummary;
   sdks: BucketSDKSummary[];
   sdkTotal: number;
   services: BucketServiceSummary[];
@@ -27,8 +30,9 @@ type BucketOverviewProps = {
   showServices: boolean;
 };
 
-/** Renders only related-resource lists the actor may enumerate. */
+/** Renders related resources with account consent scoped to each listed service. */
 export function BucketOverview({
+  bucket,
   sdks,
   sdkTotal,
   services,
@@ -84,6 +88,7 @@ export function BucketOverview({
           <ServiceRow
             key={service.service_id}
             service={service}
+            bucket={bucket}
             workspaceServices={workspaceServices}
           />
         ))}
@@ -92,6 +97,7 @@ export function BucketOverview({
   );
 }
 
+/** Leaves header menus free to overlap neighboring sections while keeping row contents inside the card. */
 function OverviewList({
   title,
   total,
@@ -112,7 +118,8 @@ function OverviewList({
   children: ReactNode;
 }) {
   return (
-    <div className="overflow-hidden rounded-lg border border-slate-200">
+    // Clipping the whole card cuts off the service selector's menu below its header.
+    <div className="rounded-lg border border-slate-200">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
         <h3 className="text-sm font-semibold text-slate-900">{title}</h3>
         <div className="flex items-center gap-3">
@@ -120,7 +127,8 @@ function OverviewList({
           <span className="text-xs text-slate-500">{total}</span>
         </div>
       </div>
-      <div className="divide-y divide-slate-100">
+      <div className="divide-y divide-slate-100 overflow-hidden rounded-b-lg">
+        {/* Empty results keep the filter available so users can recover without closing the drawer. */}
         {total === 0 ? (
           <p className="px-4 py-5 text-sm text-slate-400">{empty}</p>
         ) : (
@@ -166,18 +174,24 @@ function SDKRow({ sdk }: { sdk: BucketSDKSummary }) {
   );
 }
 
+/** Keeps service navigation and account connection as separate actions for the same bucket-owned entry. */
 function ServiceRow({
   service,
+  bucket,
   workspaceServices,
 }: {
   service: BucketServiceSummary;
+  bucket: BucketSummary;
   workspaceServices: ActivatedService[];
 }) {
+  // A missing cached name still leaves a recognizable service identity.
   const label = service.service_name || service.service_id.slice(0, 8);
+  const workspaceService = workspaceServices.find((item) => item.service_id === service.service_id);
   return (
+    <div className="px-4 py-3">
     <Link
       to={serviceDetailHref(service, workspaceServices)}
-      className="grid gap-3 px-4 py-3 transition-colors hover:bg-slate-50 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
+      className="grid gap-3 transition-colors hover:bg-slate-50 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
     >
       <div className="flex min-w-0 items-center gap-3">
         <PlugZap className="h-4 w-4 shrink-0 text-slate-400" />
@@ -195,6 +209,8 @@ function ServiceRow({
         <ServiceMetric label="Users" value={service.connected_user_count} />
       </div>
     </Link>
+    <BucketConnectAccount key={`${bucket.id}:${service.service_id}`} bucket={bucket} service={workspaceService} />
+    </div>
   );
 }
 

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronUp,
@@ -134,7 +134,7 @@ function ConnectedUserToolbar({
   );
 }
 
-/** Shows the connection's stored scheme name independently of resource expansion and gates mutations. */
+/** Leads with the user and service, keeping technical details inside an accessible disclosure. */
 function ConnectedUserRow({
   connection,
   serviceName,
@@ -150,24 +150,41 @@ function ConnectedUserRow({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [resources, setResources] = useState<ConnectionResource[]>([]);
+  const resourcesLoaded = useRef(false);
+  const resourcesPending = useRef(false);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const detailsId = useId();
   const [loadingResources, setLoadingResources] = useState(false);
 	const [rediscovering, setRediscovering] = useState(false);
   const toast = useToast();
+
+  // Opening a row near the drawer's bottom must reveal its details, not just change an off-screen panel.
+  useEffect(() => {
+    // Wait for the resource layout to settle, and never move the viewport after the user collapses it.
+    if (expanded && !loadingResources) {
+      rowRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }, [expanded, loadingResources]);
 
   // Resource metadata is loaded only when the row is opened, keeping the
   // paginated connection list to one GraphQL request instead of one per user.
   const toggleExpanded = async () => {
     const opening = !expanded;
     setExpanded(opening);
-    if (!opening || resources.length > 0) return;
+    // Empty results are still loaded; rapid reopening must also reuse an in-flight request.
+    if (!opening || resourcesLoaded.current || resourcesPending.current) return;
+    resourcesPending.current = true;
     setLoadingResources(true);
     try {
       setResources(await api.workspace.listConnectionResources(connection.id));
+      resourcesLoaded.current = true;
     } catch (error) {
+      // Leave failures retryable on the next expansion without blocking the connection metadata.
       toast.error(
         error instanceof Error ? error.message : "Failed to load resources"
       );
     } finally {
+      resourcesPending.current = false;
       setLoadingResources(false);
     }
   };
@@ -210,39 +227,45 @@ function ConnectedUserRow({
 	};
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white transition-shadow hover:shadow-sm">
-      <div
-        className="flex cursor-pointer items-start justify-between gap-4 p-4 hover:bg-slate-50"
+    <div ref={rowRef} className="rounded-lg border border-slate-200 bg-white transition-shadow hover:shadow-sm">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-controls={detailsId}
+        aria-label={`Connection details for ${connection.end_user_ref}`}
+        className="flex w-full cursor-pointer items-center justify-between gap-4 rounded-lg px-4 py-3 text-left hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-400"
         onClick={toggleExpanded}
       >
-        <div className="flex min-w-0 items-start gap-3">
+        <span className="flex min-w-0 items-start gap-3">
           <UserRound className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
-          <div className="min-w-0">
-            <p className="mb-1 text-xs text-slate-500">Connected user · <code>end_user_ref</code></p>
-            <p className="truncate font-mono text-sm font-medium text-slate-900">
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-medium text-slate-900">
               {connection.end_user_ref}
-            </p>
-            <p className="mt-0.5 truncate text-xs text-slate-500">
-              {serviceName} · {connection.service_id.slice(0, 8)}
-            </p>
-          </div>
-        </div>
-        <div className="flex items-center gap-1">
-          <div className="p-1.5 text-slate-400">
+            </span>
+            <span className="mt-0.5 block truncate text-xs text-slate-500">
+              {serviceName}
+            </span>
+          </span>
+        </span>
+        <span className="flex items-center gap-1" aria-hidden="true">
+          <span className="p-1.5 text-slate-400">
+            {/* The caret mirrors the same state exposed to assistive technology by the button. */}
             {expanded ? (
               <ChevronUp className="h-4 w-4" />
             ) : (
               <ChevronDown className="h-4 w-4" />
             )}
-          </div>
-        </div>
-      </div>
-      {/* Keep copy outside the clickable header so it never expands the row or fetches resources. */}
-      <div className="px-4 pb-4 pl-11">
-        <AuthNameField name={connection.auth_name} context="bucket" />
-      </div>
+          </span>
+        </span>
+      </button>
+      {/* Keep the controlled region mounted so the disclosure always references an existing element. */}
+      <div id={detailsId} hidden={!expanded}>
       {expanded && (
         <div className="border-t border-slate-100 bg-slate-50/50 p-4">
+          {/* Scheme names are configuration details; keep them and their copy feedback out of the summary. */}
+          <div className="mb-4">
+            <AuthNameField name={connection.auth_name} context="bucket" />
+          </div>
           <ConnectionMetaGrid
             connection={connection}
             serviceName={serviceName}
@@ -255,6 +278,7 @@ function ConnectedUserRow({
 			rediscovering={rediscovering}
             canManage={canManage}
           />
+          {/* Read-only viewers may inspect metadata but cannot remove the connection. */}
           {canManage && <div className="mt-4 flex justify-end">
             <button
               type="button"
@@ -272,6 +296,7 @@ function ConnectedUserRow({
           </div>}
         </div>
       )}
+      </div>
     </div>
   );
 }
