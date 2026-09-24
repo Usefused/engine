@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   APP_BUILDER_OPERATIONS,
+  unactivatedBuilderServices,
   appCreationModeFromSearch,
   appApplyInput,
   appConfigKey,
@@ -105,4 +106,13 @@ test("hydrates the effective URL for catalog, expansion, and version changes", a
     assert.match(section, /servers\s*\{\s*url\b/);
   }
   assert.match(source, /effectiveAppBuilderServiceURL\(serviceData\.service\)/);
+});
+
+// Missing authority, pending membership, and existing app sources must not expose speculative activation controls.
+test("activation controls require authenticated service access and authoritative membership", () => {
+  const enabled = new Set(["present"]);
+  assert.deepEqual(unactivatedBuilderServices(false, true, true, true, ["present", "missing"], enabled), ["missing"]);
+  for (const flags of [[true, true, true, true], [false, false, true, true], [false, true, false, true], [false, true, true, false]]) {
+    assert.deepEqual(unactivatedBuilderServices(...flags, ["missing"], enabled), []);
+  }
 });

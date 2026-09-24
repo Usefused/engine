@@ -64,13 +64,13 @@ test("keeps the Registry repo-boundary manifest synchronized when present", (t) 
 test("accounts for every current UI GraphQL call and document variant", () => {
   const scan = scanCurrentUI();
   // Exact totals ensure every static query remains represented in schema validation.
-  assert.equal(scan.call_count, 91);
-  assert.equal(scan.calls.length, 91);
-  assert.equal(scan.document_count, 109);
-  assert.equal(scan.documents.length, 109);
-  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 20);
+  assert.equal(scan.call_count, 92);
+  assert.equal(scan.calls.length, 92);
+  assert.equal(scan.document_count, 110);
+  assert.equal(scan.documents.length, 110);
+  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 21);
   assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 89);
-  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 109);
+  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 110);
 });
 
 test("resolves imported fragments and expands conditional and map variants", () => {

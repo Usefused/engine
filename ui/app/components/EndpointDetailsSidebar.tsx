@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { OperationDetailsHeader, OperationParameterTable, OperationDisclosure } from "~/components/OperationDetailsParts";
 import { AlertTriangle, ChevronDown, ChevronUp, Loader2, Copy, Check, Info } from "lucide-react";
 import { SchemaViewer } from "~/components/SchemaViewer";
 import { type JsonSchemaNode } from "~/components/SchemaViewer";
@@ -24,8 +25,7 @@ function ResponseSchemaViewer({ code, schema, serviceId, componentScope, allowRe
   schema: JsonSchemaNode;
   serviceId: string;
 } & ComponentReferenceScope) {
-  const [isOpen, setIsOpen] = useState(false);
-
+  // Status families retain the endpoint inspector’s semantic response colors.
   const codeStyle = code.startsWith('2')
     ? { bg: "bg-emerald-50",    text: "text-emerald-700",    border: "border-emerald-200",    dotColor: "bg-emerald-500"    }
     : code.startsWith('4')
@@ -34,29 +34,15 @@ function ResponseSchemaViewer({ code, schema, serviceId, componentScope, allowRe
     ? { bg: "bg-red-50",       text: "text-red-700",        border: "border-red-200",        dotColor: "bg-red-500"       }
     : { bg: "bg-slate-50",     text: "text-slate-700",      border: "border-slate-200",      dotColor: "bg-slate-500"     };
 
-  return (
-    <div className="border border-slate-200 rounded-xl overflow-hidden shadow-sm">
-      <button
-        data-track="toggle_response_schema"
-        onClick={() => setIsOpen(!isOpen)}
-        className={`w-full px-4 py-2.5 flex items-center justify-between cursor-pointer transition-colors focus:outline-none ${isOpen ? 'bg-slate-50 border-b border-slate-200' : 'bg-white hover:bg-slate-50/50'}`}
-      >
-        <div className="flex items-center gap-2">
-          <span className={`inline-flex items-center gap-1.5 text-[10px] font-bold px-2 py-0.5 rounded-md border uppercase tracking-wider ${codeStyle.bg} ${codeStyle.text} ${codeStyle.border}`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${codeStyle.dotColor}`} />
-            {code}
-          </span>
-          <span className="text-xs font-medium text-slate-900">Schema</span>
-        </div>
-        {isOpen ? <ChevronUp className="w-4 h-4 text-slate-500" /> : <ChevronDown className="w-4 h-4 text-slate-500" />}
-      </button>
-      {isOpen && (
-        <div className="bg-[#161c27] p-4 animate-in fade-in slide-in-from-top-1 duration-200">
-          <SchemaViewer schema={schema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
-        </div>
-      )}
+  return <OperationDisclosure track="toggle_response_schema" label="Schema" badge={
+    <span className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${codeStyle.bg} ${codeStyle.text} ${codeStyle.border}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${codeStyle.dotColor}`} />{code}
+    </span>
+  }>
+    <div className="bg-[#161c27] p-4 animate-in fade-in slide-in-from-top-1 duration-200">
+      <SchemaViewer schema={schema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
     </div>
-  );
+  </OperationDisclosure>;
 }
 
 // schemaContractProjection prefers the bounded projection while retaining raw-schema compatibility.
@@ -168,7 +154,6 @@ export default function EndpointDetailsSidebar({
   componentScope,
   allowRemoteRefs,
 }: EndpointDetailsSidebarProps) {
-  const [copiedPath, setCopiedPath] = useState(false);
   const isLoading = !selectedEndpoint._detailsLoaded && !selectedEndpoint.isWebhook;
   const endpointType = operationDisplayType(selectedEndpoint);
   const requestSchema = selectedEndpoint.isWebhook
@@ -181,7 +166,7 @@ export default function EndpointDetailsSidebar({
     <>
       <div className="fixed inset-0 bg-slate-900/20 z-40 transition-opacity" onClick={() => setSelectedEndpoint(null)} />
       <div className="fixed inset-y-0 right-0 w-full md:w-[600px] bg-white shadow-2xl z-50 overflow-y-auto overflow-x-hidden transform transition-transform border-l border-slate-200 flex flex-col">
-        <EndpointSidebarHeader endpoint={selectedEndpoint} endpointType={endpointType} copiedPath={copiedPath} setCopiedPath={setCopiedPath} close={() => setSelectedEndpoint(null)} />
+        <EndpointSidebarHeader endpoint={selectedEndpoint} endpointType={endpointType} close={() => setSelectedEndpoint(null)} />
         <EndpointDriftPanel snapshots={endpointDrift} driftAction={driftAction} handleDismiss={handleDismiss} handleApply={handleApply} />
         <EndpointContractContent endpoint={selectedEndpoint} isLoading={isLoading} requestSchema={requestSchema} responseSchemas={responseSchemas} serviceId={srv.id} serviceName={srv.name} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
       </div>
@@ -206,35 +191,18 @@ function endpointTypeClass(endpointType: string): string {
   return "bg-slate-50 text-slate-500 border-slate-200";
 }
 
-// EndpointSidebarHeader renders identity, copy, and close controls.
-function EndpointSidebarHeader({ endpoint, endpointType, copiedPath, setCopiedPath, close }: {
+// EndpointSidebarHeader adapts physical endpoint identity to the shared inspector header.
+function EndpointSidebarHeader({ endpoint, endpointType, close }: {
   endpoint: IntegrationObject;
   endpointType: string;
-  copiedPath: boolean;
-  setCopiedPath: (value: boolean) => void;
   close: () => void;
 }) {
-  // copyPath provides brief feedback without changing the selected operation.
-  function copyPath(event: React.MouseEvent) {
-    event.stopPropagation();
-    navigator.clipboard.writeText(endpoint.path);
-    setCopiedPath(true);
-    setTimeout(() => setCopiedPath(false), 2000);
-  }
-  return (
-    <div className="sticky top-0 z-10 flex min-w-0 items-center justify-between gap-2 border-b border-slate-100 bg-white/90 p-4 backdrop-blur sm:p-6">
-      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-        <span className={`shrink-0 rounded px-2 py-1 text-xs font-bold ${methodBadgeClass(endpoint)}`}>{endpoint.isWebhook ? "WEBHOOK" : endpoint.method}</span>
-        <code className="min-w-0 flex-1 break-all text-sm text-slate-800">{endpoint.path}</code>
-        <button data-track="copy_endpoint_path" onClick={copyPath} className="rounded p-1 text-slate-400 hover:bg-slate-100" title="Copy Path">
-          {copiedPath ? <Check className="h-3.5 w-3.5 text-green-500" /> : <Copy className="h-3.5 w-3.5" />}
-        </button>
-        {!endpoint.isWebhook && <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold uppercase ${endpointTypeClass(endpointType)}`}>{endpointType}</span>}
-        {endpoint.deprecated && <span className="rounded border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-semibold uppercase text-red-700">Deprecated</span>}
-      </div>
-      <button data-track="close_endpoint_sidebar" onClick={close} className="rounded-full p-2 text-slate-400 hover:bg-slate-100">✕</button>
-    </div>
-  );
+  // Webhooks have their own primary badge; ordinary operations retain their HTTP method.
+  const badge = endpoint.isWebhook ? "WEBHOOK" : endpoint.method;
+  // The webhook badge already identifies its kind, so it needs no secondary label.
+  const kind = endpoint.isWebhook ? undefined : endpointType;
+  return <OperationDetailsHeader badge={badge} badgeClass={methodBadgeClass(endpoint)} identity={endpoint.path}
+    copyTrack="copy_endpoint_path" closeTrack="close_endpoint_sidebar" copyLabel="Copy Path" kind={kind} kindClass={endpointTypeClass(endpointType)} deprecated={endpoint.deprecated} onClose={close} />;
 }
 
 // EndpointDriftPanel renders only drift snapshots belonging to the selected operation.
@@ -296,12 +264,14 @@ function EndpointContractContent({ endpoint, isLoading, requestSchema, responseS
   serviceId: string;
   serviceName: string;
 } & ComponentReferenceScope) {
+  // Defer contract presentation until the selected version has finished loading.
   if (isLoading) return <div className="flex min-h-[300px] flex-1 items-center justify-center text-slate-400"><Loader2 className="mr-3 h-8 w-8 animate-spin text-blue-500" />Loading endpoint details...</div>;
   return (
     <div className="flex flex-1 flex-col space-y-8 p-4 sm:p-6">
       <EndpointSummary endpoint={endpoint} />
       <GeneratedSDKExample endpoint={endpoint} serviceName={serviceName} requestSchema={requestSchema} />
-      <ParameterTable endpoint={endpoint} />
+      {/* Missing parameter contracts stay empty rather than inventing fields. */}
+      <OperationParameterTable parameters={endpoint.parameters ?? []} />
       <RequestSchemaSection endpoint={endpoint} schema={requestSchema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
       <ResponseSchemasSection responses={responseSchemas} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
     </div>
@@ -344,69 +314,6 @@ function GeneratedSDKExample({ endpoint, serviceName, requestSchema }: { endpoin
         <pre className="overflow-x-auto p-4 pr-10 text-[11px] leading-5 text-slate-200"><code>{code}</code></pre>
       </div>
     </details>
-  );
-}
-
-type EndpointParameter = NonNullable<IntegrationObject["parameters"]>[number];
-
-// ParameterEncodingNote surfaces only an explicit non-default wire decision so
-// ordinary textual parameters are not burdened with a meaningless default.
-function ParameterEncodingNote({ pathEncoding }: { pathEncoding?: string }) {
-  if (!pathEncoding) return null;
-  // Slash preservation is the only currently supported override and deserves
-  // product language instead of its internal contract identifier.
-  const label = pathEncoding === "preserve_slashes"
-    ? "Preserves slashes"
-    : `Encoding: ${pathEncoding.replace(/[_-]+/g, " ")}`;
-  return <span className="mt-1 block break-words font-sans text-[10px] text-slate-500">{label}</span>;
-}
-
-// ParameterRequirementBadge makes required state scannable without consuming
-// the width of separate Yes and No values.
-function ParameterRequirementBadge({ required }: { required: boolean }) {
-  const style = required
-    ? "bg-blue-50 text-blue-700 ring-blue-200"
-    : "bg-slate-50 text-slate-500 ring-slate-200";
-  return <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 ring-inset ${style}`}>{required ? "Required" : "Optional"}</span>;
-}
-
-// ParameterRow keeps long identifiers contained while retaining the complete
-// name in both visible wrapped text and the native hover tooltip.
-function ParameterRow({ parameter }: { parameter: EndpointParameter }) {
-  return (
-    <tr className="border-t border-slate-200 align-top">
-      <td className="w-[46%] px-3 py-3 sm:px-4">
-        <code className="break-all text-xs text-slate-900" title={parameter.name}>{parameter.name}</code>
-        <ParameterEncodingNote pathEncoding={parameter.path_encoding} />
-      </td>
-      <td className="w-[18%] px-2 py-3 text-xs capitalize text-slate-600 sm:px-4">{parameter.in}</td>
-      <td className="w-[18%] break-all px-2 py-3 font-mono text-xs text-slate-700 sm:px-4">{parameter.type}</td>
-      <td className="w-[18%] px-2 py-3 sm:px-4"><ParameterRequirementBadge required={parameter.required} /></td>
-    </tr>
-  );
-}
-
-// ParameterTable presents exact type and location data without forcing the
-// sidebar into a horizontally scrolling desktop-width table.
-function ParameterTable({ endpoint }: { endpoint: IntegrationObject }) {
-  if (!endpoint.parameters?.length) return null;
-  return (
-    <div>
-      <h3 className="mb-3 border-b pb-2 text-sm font-semibold">Parameters</h3>
-      <div className="overflow-hidden rounded-lg border border-slate-200">
-        <table className="w-full table-fixed text-left text-sm">
-          <thead className="bg-slate-100 text-xs text-slate-700">
-            <tr>
-              <th className="w-[46%] px-3 py-2 sm:px-4">Name</th>
-              <th className="w-[18%] px-2 py-2 sm:px-4">Location</th>
-              <th className="w-[18%] px-2 py-2 sm:px-4">Type</th>
-              <th className="w-[18%] px-2 py-2 sm:px-4">Requirement</th>
-            </tr>
-          </thead>
-          <tbody>{endpoint.parameters.map((parameter) => <ParameterRow key={`${parameter.in}:${parameter.name}`} parameter={parameter} />)}</tbody>
-        </table>
-      </div>
-    </div>
   );
 }
 

@@ -3,13 +3,13 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { URL } from "node:url";
 
+// Physical and unified operations use this same responsive table.
 const sidebarSource = readFileSync(
-  new URL("../components/EndpointDetailsSidebar.tsx", import.meta.url),
+  new URL("../components/OperationDetailsParts.tsx", import.meta.url),
   "utf8"
 );
 const parameterSection = sidebarSource.slice(
-  sidebarSource.indexOf("type EndpointParameter"),
-  sidebarSource.indexOf("// RequestSchemaSection")
+  sidebarSource.indexOf("export interface OperationParameter")
 );
 
 // This contract keeps the parameter table responsive and prevents ordinary

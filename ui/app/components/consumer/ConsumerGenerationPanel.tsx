@@ -12,6 +12,10 @@ import { formatVersion } from "~/lib/format";
 // so that route isn't carrying this JSX inline alongside the service list.
 export interface ConsumerGenerationPanelProps {
   generationMode: AppCreationMode;
+  existingApp?: { name: string; bucket: string; owner: string };
+  selectedWorkflowCount?: number;
+  selectionError?: string;
+  selectionPending?: boolean;
   mcpDescription: string;
   setMcpDescription: (value: string) => void;
   intelligentSearch: boolean;
@@ -393,15 +397,6 @@ function McpDeploymentResult({ mcpDeployment, mcpTokenCopied, setMcpTokenCopied 
 export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
   const {
     generationMode,
-    ownerTeams,
-    ownerTeamId,
-    setOwnerTeamId,
-    availableBuckets,
-    bucketId,
-    setBucketId,
-    onCreateCredential,
-    sdkName,
-    setSdkName,
     setIsDuplicate,
     checkDuplicateSDK,
     totalSelectedWebhooks,
@@ -411,8 +406,6 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
     setAppVersion,
     checkingDuplicate,
     isDuplicate,
-    language,
-    setLanguage,
     totalSelectedServices,
     totalSelected,
     unactivatedSelectedServiceIds,
@@ -431,7 +424,8 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
     AddSelectedServiceToWorkspaceButton,
   } = props;
 
-  const submitDisabled = generating || totalSelected === 0 || !sdkName.trim() || !bucketId || totalSelectedServices > 10 || unactivatedSelectedServiceIds.length > 0;
+  // Pending or conflicting workflow selections cannot submit an older capability set.
+  const submitDisabled = generationSubmitDisabled(props);
 
   return (
     <div className="w-full lg:w-80 flex-shrink-0">
@@ -444,10 +438,7 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
           toolname="generate_sdk"
           tooldescription="Create a generated SDK, direct REST API, or MCP server from selected operations. Requires name and version."
         >
-          <AppOwnerControls ownerTeams={ownerTeams} ownerTeamId={ownerTeamId} buckets={availableBuckets} bucketId={bucketId} onOwnerTeamChange={setOwnerTeamId} onBucketChange={setBucketId} onCreateCredential={onCreateCredential} />
-          <NameField generationMode={generationMode} sdkName={sdkName} setSdkName={setSdkName} setIsDuplicate={setIsDuplicate} checkDuplicateSDK={checkDuplicateSDK} />
-          {/* MCP-specific controls record authored identity and explicit remote-processing consent. */}
-          {generationMode === "mcp" && <McpSearchSettings {...props} />}
+          <GenerationIdentity props={props} />
           <WebhookBundleField totalSelectedWebhooks={totalSelectedWebhooks} webhookAttachment={webhookAttachment} setWebhookAttachment={setWebhookAttachment} />
           <VersionField
             generationMode={generationMode}
@@ -458,9 +449,12 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
             checkingDuplicate={checkingDuplicate}
             isDuplicate={isDuplicate}
           />
-          <LanguageSelector generationMode={generationMode} language={language} setLanguage={setLanguage} />
+          {/* A successor keeps its family's language, while new SDKs retain the normal selector. */}
+          <NewAppLanguage props={props} />
 
           <div className="pt-4 border-t border-slate-100">
+            {/* Workflow methods participate in the same operation count and app creation action. */}
+            {!!props.selectedWorkflowCount && <p className="mb-3 text-xs text-slate-500">{props.selectedWorkflowCount} selected {/* Match the singular label when only one workflow is chosen. */}workflow{props.selectedWorkflowCount === 1 ? "" : "s"}. Required service versions will be enabled when you create the app.</p>}
             <SelectedOperationsSummary totalSelectedServices={totalSelectedServices} totalSelected={totalSelected} />
 
             <UnactivatedServicesWarning
@@ -486,6 +480,34 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
 }
 
 
+/** Collects identity only for new apps; extensions retain Engine-owned family metadata. */
+function GenerationIdentity({ props }: { props: ConsumerGenerationPanelProps }) {
+  // Existing apps expose their preserved binding instead of editable ownership and credential controls.
+  if (props.existingApp) return <dl className="space-y-3 text-sm">
+    <div><dt className="text-xs text-slate-500">App</dt><dd className="mt-1 font-medium text-slate-900">{props.existingApp.name}</dd></div>
+    <div><dt className="text-xs text-slate-500">Credentials</dt><dd className="mt-1 text-slate-700">{props.existingApp.bucket}</dd></div>
+  </dl>;
+  return <>
+    <AppOwnerControls ownerTeams={props.ownerTeams} ownerTeamId={props.ownerTeamId} buckets={props.availableBuckets} bucketId={props.bucketId} onOwnerTeamChange={props.setOwnerTeamId} onBucketChange={props.setBucketId} onCreateCredential={props.onCreateCredential} />
+    <NameField {...props} />
+    {/* Hosted MCP requires its authored description and explicit classifier consent. */}
+    {props.generationMode === "mcp" && <McpSearchSettings {...props} />}
+  </>;
+}
+
+/** Language selection is available only while establishing a new SDK family. */
+function NewAppLanguage({ props }: { props: ConsumerGenerationPanelProps }) {
+  // A successor cannot change its family's pinned language.
+  if (props.existingApp) return null;
+  return <LanguageSelector {...props} />;
+}
+
+/** One shared gate prevents pending, empty, or conflicting capability selections from being submitted. */
+function generationSubmitDisabled(props: ConsumerGenerationPanelProps) {
+  return [props.selectionError, props.selectionPending, props.generating, props.totalSelected === 0, !props.sdkName.trim(), !props.bucketId, props.totalSelectedServices > 10, props.unactivatedSelectedServiceIds.length > 0].some(Boolean);
+}
+
+/** Presents one-time runtime credentials only after the shared app lifecycle completes. */
 function ExecutionTokenField({ token, copied, onCopy }: { token: string; copied: boolean; onCopy: () => void }) {
   return (
     <div className="mt-3 flex items-center gap-2">

@@ -53,6 +53,7 @@ test("resource permission checks honor exact bucket grants and workspace inherit
   assert.equal(hasResourcePermission(null, "bucket.manage", "BUCKET", "bucket-1"), false);
 });
 
+// Protected surfaces must retain their access guards when workflow creation reuses the builder.
 test("credential and lifecycle surfaces gate protected queries and actions", () => {
   const buckets = source("../routes/integrations.buckets.tsx");
   const bucketQueries = source("./buckets.ts");
@@ -73,7 +74,7 @@ test("credential and lifecycle surfaces gate protected queries and actions", () 
   assert.match(notifications, /canMutateNotification\(item\.source, canUpdate\) && <NotificationActions/);
   assert.match(notificationActions, /canUpdate && source === "engine"/);
   assert.match(builder, /if \(!canReadApps\)/);
-  assert.match(builder, /isAuth && canReadServices && workspaceServicesLoaded/);
+  assert.match(builder, /unactivatedBuilderServices\(Boolean\(source\), isAuth, canReadServices, workspaceServicesLoaded/);
 });
 
 test("access routes gate reads before mounting data loaders and gate management controls separately", () => {

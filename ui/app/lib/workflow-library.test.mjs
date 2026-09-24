@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   composeWorkflowApp,
+  composeBuilderWorkflows,
   workflowDependencies,
   decodeWorkflow,
   workflowSelectionURL,
@@ -149,4 +150,73 @@ test("selection remains bounded and duplicate URL selections collapse", () => {
     workflowSelectionURL("/install", ["a", "b", "a"]),
     "/install?workflow=a&workflow=b"
   );
+});
+
+// Manual operations and workflow dependencies on the same exact version share one provider entry.
+test("builder combines physical selections and workflows without losing operations", () => {
+  const physical = base();
+  physical.services.issues = physical.services["@example/issues"];
+  delete physical.services["@example/issues"];
+  const result = composeBuilderWorkflows(physical, [workflow("a", "create")], [{ key: "issues", service_id: "service", service_version_id: "version-v1" }]);
+  assert.deepEqual(Object.keys(result.services), ["@example/issues"]);
+  assert.deepEqual(result.services["@example/issues"].operations, ["create", "existing"]);
+  assert.equal(result.services["@example/issues"].auth.name, "custom");
+  assert.ok(physical.services.issues);
+});
+
+// Immutable provider IDs are authoritative even if human-facing version labels match.
+test("builder rejects a physical snapshot that conflicts with a workflow pin", () => {
+  assert.throws(() => composeBuilderWorkflows(base(), [workflow("a", "create")], [{ key: "@example/issues", service_id: "service", service_version_id: "different-id" }]), /Selected service version conflicts/);
+});
+
+// Ordinary builds do not acquire workflow metadata or extra permission requirements.
+test("builder leaves service-only configs untouched", () => {
+  const config = base();
+  assert.equal(composeBuilderWorkflows(config, [], []), config);
+});
+
+// Two existing aliases must never be collapsed by silently replacing private routing.
+test("builder rejects ambiguous aliases instead of overwriting routing", () => {
+  const config = base();
+  config.services.issues = { version: "v1", operations: ["other"] };
+  assert.throws(() => composeBuilderWorkflows(config, [workflow("a", "create")], [{ key: "issues", service_id: "service", service_version_id: "version-v1" }]), /Conflicting service aliases/);
+});
+
+// Engine-owned alias pins repair older display-name state without touching private expressions or step namespaces.
+test("builder extends saved source with display-name and authored graph aliases", () => {
+  const original = base();
+  original.services["Issue tracker"] = original.services["@example/issues"];
+  delete original.services["@example/issues"];
+  original.unified_operations = {
+    existing: { bindings: {
+      issues: { operation: "existing", input: { token: "${bucket.values.private}" }, rollback: { operation: "undo" } },
+      later: { service: "issues", operation: "existing", depends_on: ["issues"], input: { id: "${results.issues.id}" } },
+    } },
+  };
+  const pins = ["Issue tracker", "issues"].map((key) => ({ key, service_id: "service", service_version_id: "version-v1" }));
+  const result = composeBuilderWorkflows(original, [workflow("a", "create")], pins);
+  assert.deepEqual(Object.keys(result.services), ["@example/issues"]);
+  assert.deepEqual(result.services["@example/issues"].auth, original.services["Issue tracker"].auth);
+  const bindings = result.unified_operations.existing.bindings;
+  assert.equal(bindings.issues.service, "@example/issues");
+  assert.equal(bindings.later.service, "@example/issues");
+  assert.deepEqual(bindings.later.depends_on, ["issues"]);
+  assert.equal(bindings.later.input.id, "${results.issues.id}");
+  assert.deepEqual(bindings.issues.rollback, { operation: "undo" });
+  assert.equal(bindings.issues.input.token, "${bucket.values.private}");
+  assert.equal(original.unified_operations.existing.bindings.issues.service, undefined);
+});
+
+// A workflow on one provider must not invalidate existing graphs on another saved provider.
+test("builder preserves unrelated saved graph selectors during an addition", () => {
+  const original = base();
+  original.services.Other = { version: "v1", operations: ["read"] };
+  original.unified_operations = { other: { bindings: { read: { service: "@other/api", operation: "read" } } } };
+  const result = composeBuilderWorkflows(original, [workflow("a", "create")], [
+    { key: "Other", service_id: "other", service_version_id: "other-version" },
+    { key: "@other/api", service_id: "other", service_version_id: "other-version" },
+  ]);
+  assert.equal(result.unified_operations.other.bindings.read.service, "Other");
+  assert.deepEqual(result.services.Other, original.services.Other);
+  assert.equal(original.unified_operations.other.bindings.read.service, "@other/api");
 });

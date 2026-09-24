@@ -2,7 +2,7 @@ import { hasAnyAppPermission } from "~/lib/current-actor-access";
 import { useState, type ComponentType } from "react";
 import { Link, useLocation, useNavigate } from "@remix-run/react";
 import { Logo } from "~/components/Logo";
-import { Layers, Boxes, KeyRound, ShieldCheck, Activity, Settings, LogOut, ChevronLeft, ChevronRight, Menu, X, LogIn, PlusCircle } from "lucide-react";
+import { Layers, Workflow as WorkflowIcon, Boxes, KeyRound, ShieldCheck, Activity, Settings, LogOut, ChevronLeft, ChevronRight, Menu, X, LogIn, PlusCircle } from "lucide-react";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasAnyPermission, hasWorkspacePermission, type CurrentActorAccess } from "~/lib/current-actor-access";
 import { workspaceActivityTabs } from "~/lib/activity-access";
@@ -35,7 +35,7 @@ const PUBLIC_NAV_ITEMS: SidebarItem[] = [
 ];
 
 const AUTH_NAV_ITEMS: SidebarItem[] = [
-  { to: "/integrations/workflows", label: "Workflows", Icon: Layers,
+  { to: "/integrations/workflows", label: "Workflows", Icon: WorkflowIcon,
     // Workflow discovery precedes service activation and uses catalogue read authority.
     visible: (access) => hasWorkspacePermission(access, "catalogue.read"),
   },

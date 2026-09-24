@@ -1,6 +1,6 @@
 {
-  "call_count": 91,
-  "document_count": 109,
+  "call_count": 92,
+  "document_count": 110,
   "calls": [
     {
       "endpoint": "engine",
@@ -23,6 +23,12 @@
     {
       "endpoint": "registry",
       "file": "app/components/webhooks/useWebhookEditor.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/components/workflows/WorkflowAppDestination.tsx",
       "call": 1,
       "document_count": 1
     },
@@ -436,6 +442,12 @@
     },
     {
       "endpoint": "registry",
+      "file": "app/lib/workflow-api.ts",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
       "file": "app/routes/integrations._index.tsx",
       "call": 1,
       "document_count": 1
@@ -541,12 +553,6 @@
       "file": "app/routes/integrations.sdks.$id.tsx",
       "call": 2,
       "document_count": 1
-    },
-    {
-      "endpoint": "engine",
-      "file": "app/routes/integrations.workflows.install.tsx",
-      "call": 1,
-      "document_count": 1
     }
   ],
   "documents": [
@@ -577,6 +583,13 @@
       "call": 1,
       "variant": 1,
       "document": "query ServiceWebhookEditor($service_id: String!, $version: String!) {\n  serviceWebhookEditor(service_id: $service_id, version: $version) {\n    service_id service_version_id revision source_content\n  }\n}"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/components/workflows/WorkflowAppDestination.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "query WorkflowAppChoices($search: String!) {\n        appFamilies(search: $search, limit: 20, offset: 0) { items { name kind latest_version_id latest_version } }\n      }"
     },
     {
       "endpoint": "registry",
@@ -1157,7 +1170,14 @@
       "file": "app/lib/workflow-api.ts",
       "call": 1,
       "variant": 1,
-      "document": "query WorkflowLibrary($search: String!, $ids: [ID!], $limit: Int!, $offset: Int!) {\n  workflows(search: $search, ids: $ids, limit: $limit, offset: $offset) {\n    total items { id publisher hash public template }\n  }\n}"
+      "document": "query WorkflowLibrary($search: String!, $ids: [ID!], $limit: Int!, $offset: Int!) {\n  workflows(search: $search, ids: $ids, limit: $limit, offset: $offset) {\n    total items { id publisher hash public is_owner template }\n  }\n}"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/workflow-api.ts",
+      "call": 2,
+      "variant": 1,
+      "document": "mutation SetWorkflowVisibility($id: ID!, $public: Boolean!) {\n    setWorkflowVisibility(id: $id, public: $public) { id publisher hash public is_owner template }\n  }"
     },
     {
       "endpoint": "registry",
@@ -1305,13 +1325,6 @@
       "call": 2,
       "variant": 1,
       "document": "\n      query($appFamilyId: String!) {\n        appVersions(app_family_id: $appFamilyId) {\n            app_id\n            version\n            created_at\n        }\n      }\n    "
-    },
-    {
-      "endpoint": "engine",
-      "file": "app/routes/integrations.workflows.install.tsx",
-      "call": 1,
-      "variant": 1,
-      "document": "query WorkflowAppChoices($search: String!) {\n        appFamilies(search: $search, limit: 20, offset: 0) { items { name kind delivery_mode latest_version_id latest_version } }\n      }"
     }
   ]
 }

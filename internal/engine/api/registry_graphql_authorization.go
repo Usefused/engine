@@ -47,6 +47,7 @@ var registryGraphQLQueryPolicies = registryGraphQLPolicies(
 var registryGraphQLMutationPolicies = map[string][]accesscontrol.Permission{
 	// Publishing authoring content uses the existing catalogue management and audit boundary.
 	"publishWorkflow":            {accesscontrol.PermissionCatalogueManage},
+	"setWorkflowVisibility":      {accesscontrol.PermissionCatalogueManage},
 	"updateServicePublic":        {accesscontrol.PermissionCatalogueManage},
 	"updateServiceVersionPublic": {accesscontrol.PermissionCatalogueManage},
 	"setConnectionProfile":       {accesscontrol.PermissionServiceManage, accesscontrol.PermissionCredentialsManage},

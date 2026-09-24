@@ -1,11 +1,9 @@
 import { api } from "./api";
-import { applyApp, planApp } from "./app-builder";
 import {
   decodeWorkflow,
   workflowDependencies,
   WORKFLOW_QUERY,
   type Workflow,
-  type WorkflowAppConfig,
   type WorkflowRelease,
 } from "./workflow-library";
 
@@ -29,21 +27,14 @@ export async function listWorkflows(
   return { items, total: response.workflows.total };
 }
 
-export interface WorkflowInstallResult {
-  app_id: string;
-  status: string;
-  generation_status?: string;
-  execution_token?: string;
-  transport_urls?: { streamable_http?: string; sse?: string };
-}
-
-/** Reuses workspace activation and the normal app plan/apply boundaries, retaining actionable partial-failure status. */
-export async function installWorkflowApp(
-  config: WorkflowAppConfig,
+/** Enables exact workflow dependencies, then runs the existing App Builder lifecycle with partial-failure reporting. */
+export async function withWorkflowDependencies<T>(
   workflows: Workflow[],
-  ownerTeam: string,
-  progress: (message: string) => void
-): Promise<WorkflowInstallResult> {
+  progress: (message: string) => void,
+  createApp: () => Promise<T>
+): Promise<T> {
+  // Ordinary service-only builds retain their existing permissions and network calls.
+  if (!workflows.length) return createApp();
   const dependencies = workflowDependencies(workflows);
   let stage = "Checking workspace services";
   const enabled: string[] = [];
@@ -70,12 +61,9 @@ export async function installWorkflowApp(
       );
       enabled.push(key);
     }
-    stage = "Validating the combined app";
+    stage = "Creating the app";
     progress(stage);
-    const plan = await planApp(config.kind, ownerTeam, config);
-    stage = "Applying the app";
-    progress(stage);
-    return await applyApp<WorkflowInstallResult>(config.kind, plan);
+    return await createApp();
   } catch (error) {
     // Successful workspace changes survive an app failure and must be visible before retrying.
     const partial = enabled.length
@@ -87,4 +75,12 @@ export async function installWorkflowApp(
       }`
     );
   }
+}
+
+/** Changes release visibility through the owner-checked Registry mutation and verifies the unchanged authoring digest. */
+export async function setWorkflowVisibility(id: string, visible: boolean): Promise<Workflow> {
+  const result = await api.graphql<{ setWorkflowVisibility: WorkflowRelease }>(`mutation SetWorkflowVisibility($id: ID!, $public: Boolean!) {
+    setWorkflowVisibility(id: $id, public: $public) { id publisher hash public is_owner template }
+  }`, { id, public: visible });
+  return decodeWorkflow(result.setWorkflowVisibility);
 }

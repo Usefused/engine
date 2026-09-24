@@ -22,6 +22,7 @@ export interface WorkflowRelease {
   publisher: string;
   hash: string;
   public: boolean;
+  is_owner?: boolean;
   template: string;
 }
 
@@ -52,7 +53,7 @@ export interface WorkflowAppConfig extends Record<string, unknown> {
 
 export const WORKFLOW_QUERY = `query WorkflowLibrary($search: String!, $ids: [ID!], $limit: Int!, $offset: Int!) {
   workflows(search: $search, ids: $ids, limit: $limit, offset: $offset) {
-    total items { id publisher hash public template }
+    total items { id publisher hash public is_owner template }
   }
 }`;
 
@@ -244,4 +245,65 @@ function validateWorkflowSelectionCount(count: number): void {
   // Empty selections are not installs and larger sets exceed the published composition contract.
   if (count === 0 || count > 32)
     throw new Error("Select between 1 and 32 workflows.");
+}
+
+export interface WorkflowBuilderPin {
+  key: string;
+  service_id: string;
+  service_version_id?: string;
+}
+
+/** Adds workflow graphs to normal builder choices without allowing a physical selection to drift from an exact pin. */
+export function composeBuilderWorkflows(base: WorkflowAppConfig, workflows: Workflow[], pins: WorkflowBuilderPin[]): WorkflowAppConfig {
+  // Ordinary service-only builds keep their existing config shape and lifecycle.
+  if (workflows.length === 0) return base;
+  const dependencies = workflowDependencies(workflows);
+  const normalized = structuredClone(base);
+  const storedKeys = builderStoredServiceKeys(base, pins);
+  for (const pin of pins) {
+    const entry = Object.entries(dependencies).find(([, dependency]) => dependency.service_id === pin.service_id);
+    // Older saved configs also need valid selectors for existing graphs unrelated to this workflow addition.
+    if (!entry) {
+      remapWorkflowServiceBindings(normalized, pin.key, storedKeys.get(pin.service_id) ?? pin.key);
+      continue;
+    }
+    const [key, dependency] = entry;
+    // Matching version labels cannot conceal two different immutable provider snapshots.
+    if (pin.service_version_id !== dependency.service_version_id) throw new Error(`Selected service version conflicts with workflow requirement for ${key}.`);
+    // Saved configs can use display names; only exact Engine-owned pins authorize alias normalization.
+    if (pin.key !== key && normalized.services[pin.key]) {
+      // Existing routing under both identities is ambiguous and must not be overwritten.
+      if (normalized.services[key]) throw new Error(`Conflicting service aliases for ${key}.`);
+      normalized.services[key] = normalized.services[pin.key];
+      delete normalized.services[pin.key];
+    }
+    remapWorkflowServiceBindings(normalized, pin.key, key);
+  }
+  return composeWorkflowApp(normalized, workflows);
+}
+
+/** Associates each exact service with one saved key so unrelated private graphs survive successor composition too. */
+function builderStoredServiceKeys(base: WorkflowAppConfig, pins: WorkflowBuilderPin[]): Map<string, string> {
+  const keys = new Map<string, string>();
+  for (const pin of pins) {
+    // Graph-only aliases identify the same provider without declaring another credential scope.
+    if (!Object.hasOwn(base.services, pin.key)) continue;
+    // Two credential scopes for one provider cannot be silently collapsed.
+    if (keys.has(pin.service_id) && keys.get(pin.service_id) !== pin.key) throw new Error(`Conflicting service aliases for ${pin.key}.`);
+    keys.set(pin.service_id, pin.key);
+  }
+  return keys;
+}
+
+/** Rebinds only service selectors, preserving step names, expressions, rollback mappings, and private credentials. */
+function remapWorkflowServiceBindings(config: WorkflowAppConfig, previous: string, next: string): void {
+  // Already-canonical selectors retain their authored shape for idempotent workflow comparisons.
+  if (previous === next) return;
+  for (const operation of Object.values(config.unified_operations ?? {})) {
+    const bindings = operation.bindings as Record<string, Record<string, unknown>> | undefined;
+    for (const [target, binding] of Object.entries(bindings ?? {})) {
+      // Implicit service targets become explicit so result namespaces and depends_on remain unchanged.
+      if ((binding.service || target) === previous) binding.service = next;
+    }
+  }
 }

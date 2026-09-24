@@ -2,12 +2,16 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/engine/unified"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 )
 
@@ -64,9 +68,125 @@ func AppConfigSourceHandler(s store.Store, configs store.ConfigRepository) http.
 			writeSDKConfigError(w, err)
 			return
 		}
+		pins, err := workflowSourcePins(r.Context(), s, app, state.DesiredState)
+		// Export alias identity only when it still matches the immutable app scope.
+		if err != nil {
+			writeSDKConfigError(w, err)
+			return
+		}
 		w.Header().Set("Cache-Control", "no-store")
-		writeJSON(w, map[string]any{"app_id": app.AppID, "config": state.DesiredState, "owner_team": ownerTeam})
+		writeJSON(w, map[string]any{"app_id": app.AppID, "config": state.DesiredState, "owner_team": ownerTeam, "service_pins": pins})
 	}
+}
+
+type workflowServicePin struct {
+	Key              string    `json:"key"`
+	ServiceID        uuid.UUID `json:"service_id"`
+	ServiceVersionID uuid.UUID `json:"service_version_id"`
+}
+
+// workflowSourcePins associates saved display-name keys and authored graph aliases with exact app selections, without rebuilding private config.
+func workflowSourcePins(ctx context.Context, s store.Store, app *store.App, source json.RawMessage) ([]workflowServicePin, error) {
+	var doc sdkConfigDocument
+	// Corrupt private source must not become a partial editable configuration.
+	if err := json.Unmarshal(source, &doc); err != nil {
+		return nil, workflowSourceIdentityError()
+	}
+	var selections []models.SDKSelection
+	// Version identity comes from this immutable app, never the workspace's latest pin.
+	if err := json.Unmarshal(app.Selections, &selections); err != nil {
+		return nil, workflowSourceIdentityError()
+	}
+	keys := workflowSourceKeys(doc)
+	// Empty source fixtures and operation-free configs need no identity query.
+	if len(keys) == 0 {
+		return []workflowServicePin{}, nil
+	}
+	resolved, err := s.ResolveWorkspaceServiceIDsByKeys(ctx, keys)
+	// One bounded local lookup rejects missing or ambiguous aliases without Registry fallback.
+	if err != nil {
+		return nil, err
+	}
+	pins, err := matchWorkflowSourcePins(keys, resolved, selections)
+	// Exact membership must be established before comparing private graph identities.
+	if err != nil {
+		return nil, err
+	}
+	return pins, validateWorkflowSourceGraphPins(app, doc, pins)
+}
+
+// validateWorkflowSourceGraphPins catches alias swaps even when both providers already belong to the app's immutable scope.
+func validateWorkflowSourceGraphPins(app *store.App, doc sdkConfigDocument, pins []workflowServicePin) error {
+	// Physical-only apps have no private graph selectors to preserve.
+	if len(doc.UnifiedOperations) == 0 {
+		return nil
+	}
+	definitions, err := unified.DecodeDefinitions(app.UnifiedDefinitions, unified.DefaultLimits())
+	// Missing executable evidence must not be replaced by public descriptors or live catalogue data.
+	if err != nil || len(definitions) != len(doc.UnifiedOperations) {
+		return workflowSourceIdentityError()
+	}
+	byKey := make(map[string]workflowServicePin, len(pins))
+	for _, pin := range pins {
+		byKey[pin.Key] = pin
+	}
+	for _, definition := range definitions {
+		for _, binding := range definition.Bindings {
+			pin := byKey[binding.ServiceTarget]
+			// An existing binding must retain both the provider and immutable contract version.
+			if pin.ServiceID != binding.ServiceID || pin.ServiceVersionID != binding.ServiceVersionID {
+				return workflowSourceIdentityError()
+			}
+		}
+	}
+	return nil
+}
+
+// workflowSourceKeys includes graph aliases because older desired state saved display names while leaving authored bindings intact.
+func workflowSourceKeys(doc sdkConfigDocument) []string {
+	keys := make(map[string]bool, len(doc.Services))
+	for key := range doc.Services {
+		keys[key] = true
+	}
+	for _, operation := range doc.UnifiedOperations {
+		for target, binding := range operation.Bindings {
+			keys[unifiedBindingServiceTarget(target, binding.Service)] = true
+		}
+	}
+	result := make([]string, 0, len(keys))
+	for key := range keys {
+		result = append(result, key)
+	}
+	sort.Strings(result)
+	return result
+}
+
+// matchWorkflowSourcePins prevents a renamed or reused local alias from retargeting an existing app during composition.
+func matchWorkflowSourcePins(keys []string, resolved map[string]uuid.UUID, selections []models.SDKSelection) ([]workflowServicePin, error) {
+	versions := make(map[uuid.UUID]uuid.UUID, len(selections))
+	for _, selection := range selections {
+		// Multiple versions under one alias cannot be merged without explicit authoring.
+		if previous, exists := versions[selection.ServiceID]; exists && previous != selection.ServiceVersionID {
+			return nil, workflowSourceIdentityError()
+		}
+		versions[selection.ServiceID] = selection.ServiceVersionID
+	}
+	pins := make([]workflowServicePin, 0, len(keys))
+	for _, key := range keys {
+		id := resolved[key]
+		version := versions[id]
+		// Unresolved keys and identities outside the immutable scope must fail closed.
+		if id == uuid.Nil || version == uuid.Nil {
+			return nil, workflowSourceIdentityError()
+		}
+		pins = append(pins, workflowServicePin{Key: key, ServiceID: id, ServiceVersionID: version})
+	}
+	return pins, nil
+}
+
+// workflowSourceIdentityError gives editors a concrete conflict instead of allowing an alias to silently change provider scope.
+func workflowSourceIdentityError() error {
+	return workspaceConfigHTTPError{status: http.StatusConflict, message: "exact app service identities are unavailable; refresh the original services before adding workflows"}
 }
 
 // authorizeWorkflowSource derives type-specific edit authority from the trusted immutable family.

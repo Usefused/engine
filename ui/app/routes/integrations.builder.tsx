@@ -1,15 +1,17 @@
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
 import { hasAnyAppPermission } from "~/lib/current-actor-access";
-import { useState, useEffect, type FormEvent } from "react";
-import { useSearchParams, useLoaderData, type MetaFunction } from "@remix-run/react";
+import { useState, useEffect, type FormEvent, type ReactNode } from "react";
+import { useSearchParams, useLoaderData, useNavigation, type MetaFunction } from "@remix-run/react";
 import { redirect } from "@remix-run/react";
 
 // meta preserves shared metadata while naming the app builder route.
-export const meta: MetaFunction = ({ matches }) => {
+export const meta: MetaFunction<typeof clientLoader> = ({ matches, data, location }) => {
   const parentMeta = matches.filter((m) => m.id === "root").flatMap((m) => m.meta ?? []);
+  // Loader-owned destinations pin delivery type; ordinary new apps use their explicit URL choice.
+  const mode = data?.source ? existingBuilderMode(data.source.config) : appCreationModeFromSearch(new URLSearchParams(location.search));
   return [
     ...parentMeta.filter((m) => !('title' in m)),
-    { title: "Create app - Fused" },
+    { title: builderPageTitle(mode) },
   ];
 };
 import { api, handleCredentialedResponse, type Service, type IntegrationObject, type WebhookObject, type ServiceVersion, BASE } from "~/lib/api";
@@ -20,6 +22,7 @@ import {
 } from "~/lib/app-builder";
 import {
   appCreationModeFromSearch,
+  unactivatedBuilderServices,
   appKindForCreationMode,
   effectiveAppBuilderServiceURL,
   type AppBuildSelector,
@@ -41,6 +44,10 @@ import type { McpTransportEndpointData } from "~/components/mcp/McpTransportEndp
 import { WorkspacePermissionGate, useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { apiErrorMessage } from "~/lib/authorization-error";
 import { hasAnyPermission } from "~/lib/current-actor-access";
+import { WorkflowAppDestination } from "~/components/workflows/WorkflowAppDestination";
+import { BuilderWorkflows } from "~/components/workflows/BuilderWorkflows";
+import { listWorkflows, withWorkflowDependencies } from "~/lib/workflow-api";
+import { composeBuilderWorkflows, workflowDependencies, type Workflow, type WorkflowAppConfig, type WorkflowBuilderPin } from "~/lib/workflow-library";
 import { CREATE_APP_OPTIONS } from "~/components/apps/CreateAppMenu";
 
 // clientLoader requires an authenticated Engine session before building an app.
@@ -53,7 +60,15 @@ export const clientLoader = async ({ request }: { request: Request }) => {
 
   // Team-aware selectors are Engine-owned and depend on the user's chosen
   // owner. Do not broad-load Registry services before that choice exists.
-  return { services: [] as Service[], total: 0, isAuth: true };
+  const ids = url.searchParams.getAll("workflow");
+  // Untrusted deep links must stay within the same bounded workflow composition contract.
+  if (ids.length > 32) throw new Response("Select at most 32 workflows.", { status: 400 });
+  // Explicit release selections are verified before any builder form is presented.
+  const workflows = ids.length ? (await listWorkflows("", ids)).items : [];
+  const appID = url.searchParams.get("app") ?? "";
+  // Existing private config stays on Engine and requires manage authority for this exact app.
+  const source = appID ? { ...(await api.appConfig.source<{ config: WorkflowAppConfig; owner_team: string; service_pins: WorkflowBuilderPin[] }>(appID)), appID } : null;
+  return { services: [] as Service[], total: 0, isAuth: true, workflows, source };
 };
 
 // The service-versions query below fetches header_value (the value clients
@@ -89,6 +104,8 @@ type SelectionMaps = {
 
 type GenerationInput = {
   selections: AppSelection[];
+  workflowCount: number;
+  source?: WorkflowAppConfig;
   data: ServiceData[];
   sdkName: string;
   generationMode: GenerationMode;
@@ -212,10 +229,18 @@ function generationActionName(mode: GenerationMode): string {
   return "generate an SDK";
 }
 
+/** Resolves eligible new-app credentials or preserves an existing family's immutable binding. */
+function generationBucket(input: GenerationInput): AppBuildSelector | undefined {
+  // Engine revalidates existing-family credential use during ordinary plan/apply.
+  if (input.source) return { resource_type: "BUCKET", resource_id: input.source.bucket, display_name: input.source.bucket };
+  return input.availableBuckets.find((candidate) => candidate.resource_id === input.bucketId);
+}
+
 // validateGenerationInput resolves all local prerequisites before starting plan/apply.
 function validateGenerationInput(input: GenerationInput): GenerationValidation {
-  if (input.selections.length === 0) {
-    return { ok: false, severity: "warning", message: `Please select at least one endpoint or webhook to ${generationActionName(input.generationMode)}.` };
+  // Unified workflow definitions are executable choices even without manually selected physical operations.
+  if (input.selections.length + input.workflowCount === 0) {
+    return { ok: false, severity: "warning", message: `Please select at least one workflow, endpoint, or webhook to ${generationActionName(input.generationMode)}.` };
   }
   if (input.selections.some((selection) => !selection.service_version_id)) {
     return { ok: false, severity: "error", message: `Each selected service needs a service version before you ${generationActionName(input.generationMode)}.` };
@@ -226,7 +251,7 @@ function validateGenerationInput(input: GenerationInput): GenerationValidation {
   if (!input.sdkName.trim()) {
     return { ok: false, severity: "warning", message: `${generationArtifactName(input.generationMode)} name is required.` };
   }
-  const bucket = input.availableBuckets.find((candidate) => candidate.resource_id === input.bucketId);
+  const bucket = generationBucket(input);
   if (!bucket) {
     const message = input.ownerTeamId
       ? "Choose a credential set available to both you and the owning team."
@@ -680,6 +705,10 @@ type BuilderServiceInteractions = {
 };
 
 type BuilderSelectionPaneProps = BuilderServiceInteractions & {
+  workflows: Workflow[];
+  setWorkflows: (items: Workflow[]) => void;
+  generating: boolean;
+  existingConfig?: WorkflowAppConfig;
   data: ServiceData[];
   generationMode: GenerationMode;
   query: string;
@@ -698,6 +727,7 @@ type BuilderSelectionPaneProps = BuilderServiceInteractions & {
 };
 
 type BuilderPageProps = {
+  destination?: ReactNode;
   generationMode: GenerationMode;
   error: string;
   loading: boolean;
@@ -750,44 +780,25 @@ function serviceReference(service: Service): string {
   return "";
 }
 
-// serviceSelectionSummary explains the service-card expansion state.
-function serviceSelectionSummary(loaded: boolean, selected: number): string {
-  if (loaded && selected > 0) return `${selected} selected`;
-  return "Expand to view endpoints and webhooks";
-}
-
-// BuilderServiceCardHeader renders the compact identity and selected count.
-function BuilderServiceCardHeader({
-  item,
-  view,
-  onExpand,
-}: {
-  item: ServiceData;
-  view: ServiceCardView;
-  onExpand: () => void;
-}) {
-  const reference = serviceReference(item.service);
+// BuilderServiceCardHeader shares the workflow row's compact identity and trailing disclosure, with selection metadata beside its name.
+function BuilderServiceCardHeader({ item, view, onExpand }: { item: ServiceData; view: ServiceCardView; onExpand: () => void }) {
+  // Expanded cards share their lower border with the operation selector.
   const roundedClass = view.expanded ? "rounded-t-xl" : "rounded-xl";
   return (
-    <div
-      className={`flex items-center justify-between p-4 cursor-pointer hover:bg-slate-50 transition-colors ${roundedClass}`}
-      onClick={onExpand}
-    >
-      <div className="flex min-w-0 items-center gap-3">
-        <button className="shrink-0 text-slate-400 hover:text-slate-600 transition-colors">
-          {view.expanded ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
-        </button>
-        <div className="min-w-0">
-          <h3 className="font-semibold text-slate-900 flex items-center gap-2">
-            <span className="truncate">{capitalizeFirstLetter(item.service.name)}</span>
-          </h3>
-          <p className="truncate text-xs text-slate-400">
-            {reference}{reference ? " · " : ""}
-            {serviceSelectionSummary(view.loaded, view.totalSelected)}
-          </p>
-        </div>
-      </div>
-    </div>
+    <button type="button" aria-expanded={view.expanded}
+      className={`flex w-full items-center justify-between gap-3 p-4 text-left hover:bg-slate-50 transition-colors ${roundedClass}`}
+      onClick={onExpand}>
+      <span className="min-w-0 flex-1">
+        <span className="flex flex-wrap items-center gap-2 font-semibold text-slate-900">
+          <span className="truncate">{capitalizeFirstLetter(item.service.name)}</span>
+          {/* Selection belongs beside the service identity rather than in a detached column. */}
+          {view.totalSelected > 0 && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">{view.totalSelected} selected</span>}
+        </span>
+        <span className="mt-1 block truncate text-sm text-slate-500">{serviceReference(item.service)}</span>
+      </span>
+      {/* One keyboard-accessible disclosure controls the existing exact-version selector. */}
+      {view.expanded ? <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" /> : <ChevronRight className="h-4 w-4 shrink-0 text-slate-400" />}
+    </button>
   );
 }
 
@@ -1222,12 +1233,31 @@ function BuilderPagination(props: Pick<
 
 // BuilderSelectionPane composes search, service cards, and pagination.
 function BuilderSelectionPane(props: BuilderSelectionPaneProps) {
+  // A workflow deep link opens its selected definitions; ordinary builds start with services.
+  const [pane, setPane] = useState(props.workflows.length ? "workflows" : "services");
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0">
-      <BuilderSearchForm {...props} />
-      <div className="flex-1 overflow-y-auto pr-2 pb-8 space-y-4">
-        <BuilderServiceList {...props} />
-        <BuilderPagination {...props} />
+      <div role="tablist" aria-label="App capabilities" className="mb-4 flex gap-1 rounded-lg bg-slate-100 p-1">
+        {[["services", "Services"], ["workflows", `Workflows (${props.workflows.length})`]].map(([id, label]) => (
+          // Tabs change only discovery; all selected capabilities remain in the same app config.
+          <button key={id} type="button" role="tab" aria-selected={pane === id} onClick={() => setPane(id)}
+            className={`flex-1 rounded-md px-4 py-2 text-sm font-medium ${pane === id ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{label}</button>
+        ))}
+      </div>
+      {/* Workflow discovery starts only when opened; selected releases remain owned by the route. */}
+      {pane === "workflows" && <div className="pb-8"><BuilderWorkflows selected={props.workflows} onChange={props.setWorkflows} disabled={props.generating} /></div>}
+      <div hidden={pane !== "services"}>
+        {/* Existing app scope and private routing are preserved; this flow only adds workflow definitions. */}
+        {props.existingConfig ? <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600">
+          <p className="mb-3">Existing service operations and credentials are preserved.</p>
+          <ul className="space-y-2">{Object.entries(props.existingConfig.services).map(([name, config]) => <li key={name} className="flex flex-wrap items-center gap-2"><span>{name}</span><span className="rounded bg-slate-100 px-2 py-0.5 text-xs">{config.version}</span></li>)}</ul>
+        </div> : <>
+        <BuilderSearchForm {...props} />
+        <div className="flex-1 overflow-y-auto pr-2 pb-8 space-y-4">
+          <BuilderServiceList {...props} />
+          <BuilderPagination {...props} />
+        </div>
+        </>}
       </div>
     </div>
   );
@@ -1256,10 +1286,11 @@ function BuilderPageHeader({ generationMode }: { generationMode: GenerationMode 
 }
 
 // BuilderPage renders the builder shell without owning execution state.
-function BuilderPage({ generationMode, error, loading, selection, generation }: BuilderPageProps) {
+function BuilderPage({ destination, generationMode, error, loading, selection, generation }: BuilderPageProps) {
   return (
     <div className="max-w-6xl mx-auto py-8 px-4 h-full flex flex-col">
       <BuilderPageHeader generationMode={generationMode} />
+      {destination}
       {error && (
         <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700 font-medium">
           {error}
@@ -1281,13 +1312,16 @@ function BuilderPage({ generationMode, error, loading, selection, generation }: 
 }
 
 /** Requests an explicit immutable delivery adapter when the builder URL omitted one. */
-function BuilderModeSelectionPage({ onSelect, allowedModes }: { onSelect: (mode: GenerationMode) => void; allowedModes: GenerationMode[] }) {
+function BuilderModeSelectionPage({ onSelect, allowedModes, workflows, destination }: { onSelect: (mode: GenerationMode) => void; allowedModes: GenerationMode[]; workflows: Workflow[]; destination?: ReactNode }) {
   return (
     <div className="mx-auto flex h-full max-w-4xl flex-col justify-center px-4 py-10">
       <div className="mb-8 text-center">
         <h1 className="text-3xl font-bold tracking-tight text-slate-900">Create app</h1>
         <p className="mt-2 text-slate-500">Choose how this app will expose its selected services and operations.</p>
       </div>
+      {/* Deep links keep the chosen workflows visible before the user selects an app delivery type. */}
+      {workflows.length > 0 && <p className="mb-6 text-sm text-slate-600">Selected workflows: {workflows.map((workflow) => workflow.template.name).join(", ")}</p>}
+      {destination}
       <div role="group" aria-label="App type" className="grid gap-4 md:grid-cols-3">
         {CREATE_APP_OPTIONS.filter((option) => allowedModes.includes(option.mode)).map((option) => {
           const Icon = option.icon;
@@ -1318,6 +1352,91 @@ function initialBuilderServiceId(searchParams: URLSearchParams, services: Servic
   return services[0]?.id;
 }
 
+/** Computes one validated workflow selection summary without allowing conflicts to crash the builder. */
+function workflowBuilderSummary(workflows: Workflow[], source: BuilderSource) {
+  try {
+    // Ordinary service-only creation needs no synthetic workflow config.
+    if (!workflows.length) return { serviceIDs: [] as string[], operations: 0, serviceCount: 0, error: "" };
+    // Existing definitions participate in conflict checks before workspace services are enabled.
+    const config = composeBuilderWorkflows(source?.config ?? { apiVersion: "fused/v1", kind: "sdk", name: "preview", version: "1.0.0", language: "typescript", bucket: "", services: {} }, workflows, source?.service_pins ?? []);
+    return { serviceIDs: Object.values(workflowDependencies(workflows)).map((dependency) => dependency.service_id), operations: Object.keys(config.unified_operations ?? {}).length, serviceCount: Object.keys(config.services).length, error: "" };
+  } catch (cause) {
+    // An invalid combination is shown as a form error before any activation or plan call.
+    return { serviceIDs: [] as string[], operations: 0, serviceCount: 0, error: cause instanceof Error ? cause.message : String(cause) };
+  }
+}
+
+/** Keeps document metadata in sync with route changes, including destinations sharing a delivery type. */
+function builderPageTitle(mode: GenerationMode | null): string {
+  // A generic title belongs only to the delivery-choice screen.
+  if (!mode) return "Create app - Fused";
+  const labels = { sdk: "SDK", mcp: "MCP server", api: "REST API" };
+  return `Create ${labels[mode]} - Fused`;
+}
+
+type BuilderSource = { appID: string; owner_team: string; config: WorkflowAppConfig; service_pins: WorkflowBuilderPin[] } | null;
+
+/** Projects optional private source metadata once so the builder's form state stays independent of nullable transport fields. */
+function builderWorkflowContext(source: BuilderSource, params: URLSearchParams) {
+  // New apps retain explicit delivery selection and ordinary owner/credential controls.
+  if (!source) return { appID: "", config: undefined, identity: undefined, bucket: "", mode: appCreationModeFromSearch(params) };
+  return {
+    appID: source.appID, config: source.config, bucket: source.config.bucket,
+    identity: { name: source.config.name, bucket: source.config.bucket, owner: source.owner_team },
+    mode: existingBuilderMode(source.config),
+  };
+}
+
+/** Existing app delivery cannot be changed through builder query parameters. */
+function existingBuilderMode(config: WorkflowAppConfig): GenerationMode {
+  // Hosted MCP and package-free REST remain distinct completion adapters.
+  if (config.kind === "mcp") return "mcp";
+  return config.generate === false ? "api" : "sdk";
+}
+
+/** Existing-family creation uses manage authority established by the source endpoint; new apps require create authority. */
+function builderCanSubmit(source: BuilderSource, allowed: GenerationMode[], mode: GenerationMode) { return Boolean(source) || allowed.includes(mode); }
+
+/** Private source scope takes precedence over any manual choices left in the form. */
+function builderPhysicalCount(source: BuilderSource, count: number) { return source ? 0 : count; }
+
+/** Physical service selection is additive only for a new app in this workflow extension flow. */
+function builderPhysicalSelections(source: BuilderSource, data: ServiceData[], maps: SelectionMaps) { return source ? [] : buildAppSelections(data, maps); }
+
+/** Workflow extension retains the family's owner rather than reading a new-app selector. */
+function builderOwner(source: BuilderSource, teams: AppOwningTeam[], teamID: string) {
+  return source?.owner_team ?? (teams.find((team) => team.id === teamID)?.slug || "");
+}
+
+/** Validates one additive successor before any workspace activation, preserving all private routing fields. */
+function builderCombinedConfig(source: BuilderSource, physical: Record<string, unknown>, version: string, workflows: Workflow[], selections: AppSelection[]) {
+  // Reusing the source label can never overwrite an immutable app version.
+  if (source && version.trim() === source.config.version) throw new Error("Choose a new app version for these workflows.");
+  const base = source ? { ...source.config, version: version.trim() } : physical as WorkflowAppConfig;
+  return composeBuilderWorkflows(base, workflows, source?.service_pins ?? selections.map((selection) => ({ key: appSelectionKey(selection), service_id: selection.service_id, service_version_id: selection.service_version_id })));
+}
+
+/** Counts the complete composed service set, including the preserved scope of an existing app. */
+function builderServiceCount(source: BuilderSource, summary: ReturnType<typeof workflowBuilderSummary>, data: ServiceData[], maps: SelectionMaps) {
+  // Existing config may contain services not present in the current workflow selection.
+  if (source) return summary.serviceCount;
+  return new Set([...summary.serviceIDs, ...data.filter(({ service }) => hasServiceSelection(service.id, maps)).map(({ service }) => service.id)]).size;
+}
+
+/** Destination discovery is only relevant to workflow additions, not ordinary service-only builds. */
+function BuilderDestinationControl({ count, appID, onSelect, disabled }: { count: number; appID: string; onSelect: (id: string) => void; disabled: boolean }) {
+  // Hide optional extension discovery until there is something to add or an existing target.
+  if (!count && !appID) return null;
+  return <WorkflowAppDestination appID={appID} onSelect={onSelect} disabled={disabled} />;
+}
+
+/** Keeps the existing create-permission gate while respecting exact-source manage authorization for extensions. */
+function BuilderCreationAccess({ existing, mode, children }: { existing: boolean; mode: GenerationMode; children: ReactNode }) {
+  // Source loading already enforced app.manage; plan/apply checks it again at mutation time.
+  if (existing) return <>{children}</>;
+  return <WorkspacePermissionGate permission={`app.${mode}.create`} area="these app creation controls">{children}</WorkspacePermissionGate>;
+}
+
 // SdkBuilder assembles exact-version service selections into an app contract.
 export default function SdkBuilder() {
   const { access } = useCurrentActorAccess();
@@ -1327,6 +1446,20 @@ export default function SdkBuilder() {
   const loaderData = useLoaderData<typeof clientLoader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const isAuth = loaderData.isAuth;
+  const navigation = useNavigation();
+  const workflows = loaderData.workflows;
+  const source = loaderData.source;
+  // Workflow selection is URL-backed, so bookmarks and mode changes retain exact release identities.
+  function setWorkflows(items: Workflow[]) {
+    setSearchParams((previous) => {
+      const next = new URLSearchParams(previous);
+      next.delete("workflow");
+      for (const item of items) next.append("workflow", item.id);
+      return next;
+    }, { replace: true });
+  }
+  const workflowContext = builderWorkflowContext(source, searchParams);
+  const workflowSelection = workflowBuilderSummary(workflows, source);
   const initialSelectedServiceId = initialBuilderServiceId(searchParams, loaderData.services);
 
   const [data, setData] = useState<ServiceData[]>([]);
@@ -1389,23 +1522,46 @@ export default function SdkBuilder() {
   const [mcpTokenCopied, setMcpTokenCopied] = useState(false);
   const [isDuplicate, setIsDuplicate] = useState(false);
   const [checkingDuplicate, setCheckingDuplicate] = useState(false);
-  const requestedGenerationMode = appCreationModeFromSearch(searchParams);
+  const requestedGenerationMode = workflowContext.mode;
   // Internal builder state stays fully typed, but the UI does not expose it until the user makes an explicit choice.
   const generationMode: GenerationMode = requestedGenerationMode ?? "sdk";
   // Creation choices reflect explicit workspace grants for each delivery type.
   const allowedModes = (["sdk", "mcp", "api"] as GenerationMode[]).filter((mode) => hasWorkspacePermission(access, `app.${mode}.create`));
   const [language, setLanguage] = useState<"typescript" | "python">("typescript");
 
+  // Loading another existing app initializes its successor while later workflow toggles preserve user edits.
   useEffect(() => {
-    // The document title stays generic until an immutable adapter has been selected.
-    document.title = requestedGenerationMode === "mcp"
-      ? "Create MCP server - Fused"
-      : requestedGenerationMode === "api"
-        ? "Create REST API - Fused"
-        : requestedGenerationMode === "sdk"
-          ? "Create SDK - Fused"
-          : "Create app - Fused";
-  }, [requestedGenerationMode]);
+    // Returning to new-app creation removes the old family's locked identity.
+    if (!source) { setSdkName(""); setAppVersion("1.0.0"); return; }
+    setSdkName(source.config.name);
+    const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(source.config.version);
+    // Non-semver labels require an explicit successor instead of guessing identity.
+    setAppVersion(match ? `${match[1]}.${Number(match[2]) + 1}.0` : "");
+    setMcpDescription(source.config.description ?? "");
+    setLanguage(source.config.language === "python" ? "python" : "typescript");
+  }, [workflowContext.appID]);
+
+  const workflowSelectionKey = workflows.map((workflow) => workflow.id).join(",");
+  // A completed app belongs to one configuration; changing its destination or workflow set invalidates that preview.
+  useEffect(() => {
+    setSdkDeployment(null);
+    setMcpDeployment(null);
+    setSdkTokenCopied(false);
+    setMcpTokenCopied(false);
+    setIsDuplicate(false);
+    setError("");
+  }, [workflowContext.appID, workflowSelectionKey]);
+
+  // Destination changes preserve selected workflows but clear a stale explicit delivery choice.
+  function selectDestination(appID: string) {
+    setSearchParams((previous) => {
+      const next = new URLSearchParams(previous);
+      next.delete("tab");
+      // Empty destination means the ordinary new-app builder.
+      if (appID) next.set("app", appID); else next.delete("app");
+      return next;
+    });
+  }
 
   /** Commits the chosen delivery adapter to the URL before rendering its form. */
   const selectGenerationMode = (mode: GenerationMode) => {
@@ -1482,6 +1638,8 @@ export default function SdkBuilder() {
 
   // loadData fetches one authorized selector page and hydrates its services.
   async function loadData(pageNum: number, search = "") {
+    // Existing app scope is already authorized by app.manage and needs no create-only selector.
+    if (source) return;
     setLoading(true);
     setError("");
     try {
@@ -1556,16 +1714,20 @@ export default function SdkBuilder() {
   // Load only teams the actor may choose as an owner. This query intentionally
   // exposes no bindings or roles, so builders do not need access.read.
   useEffect(() => {
+    // Existing ownership is immutable and must not require workspace create permissions.
+    if (source) return;
     listAppOwningTeams()
       .then((page) => {
         setOwnerTeams(page.items);
       })
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not load owning teams."));
-  }, []);
+  }, [workflowContext.appID]);
 
   // loadAvailableBuckets refreshes credential sets usable by both actor and owner.
-  const loadAvailableBuckets = () =>
-    listAppBuildSelectors(ownerTeamId, "BUCKET", "", 100, 0).then((bucketPage) => {
+  const loadAvailableBuckets = () => {
+    // Successors retain their stored credential scope without loading new-app selectors.
+    if (source) return Promise.resolve();
+    return listAppBuildSelectors(ownerTeamId, "BUCKET", "", 100, 0).then((bucketPage) => {
       setAvailableBuckets(bucketPage.items);
       setBucketId((current) =>
         bucketPage.items.some((bucket) => bucket.resource_id === current)
@@ -1574,6 +1736,7 @@ export default function SdkBuilder() {
       );
       return bucketPage;
     });
+  };
 
   useEffect(() => {
     setPage(1);
@@ -1581,7 +1744,7 @@ export default function SdkBuilder() {
       loadData(1, query.trim()),
       loadAvailableBuckets(),
     ]).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not load team access."));
-  }, [ownerTeamId]);
+  }, [ownerTeamId, workflowContext.appID]);
 
   useEffect(() => {
     const refreshAfterCredentialTab = () => {
@@ -1593,7 +1756,7 @@ export default function SdkBuilder() {
     };
     window.addEventListener("focus", refreshAfterCredentialTab);
     return () => window.removeEventListener("focus", refreshAfterCredentialTab);
-  }, [ownerTeamId]);
+  }, [ownerTeamId, workflowContext.appID]);
 
   // createCredential preserves builder state while opening credential creation.
   const createCredential = () => {
@@ -1882,18 +2045,16 @@ export default function SdkBuilder() {
     }
   };
 
-  const totalSelected = data.reduce((acc, { service, integrations }) => {
+  const physicalSelected = data.reduce((acc, { service, integrations }) => {
     const endpointCount = selectAllServices.has(service.id)
       ? (service.endpoint_count || integrations.length || 0)
       : (selections[service.id]?.size || 0);
     return acc + endpointCount + (webhookSelections[service.id]?.size || 0);
   }, 0);
   const totalSelectedWebhooks = Object.values(webhookSelections).reduce((total, selected) => total + selected.size, 0);
-  const totalSelectedServices = data.filter(({ service }) =>
-    selectAllServices.has(service.id) ||
-    (selections[service.id]?.size || 0) > 0 ||
-    (webhookSelections[service.id]?.size || 0) > 0
-  ).length;
+  // An existing app's hidden manual choices cannot expand its immutable source.
+  const totalSelected = builderPhysicalCount(source, physicalSelected) + workflowSelection.operations;
+  const totalSelectedServices = builderServiceCount(source, workflowSelection, data, { selections, selectAllServices, webhookSelections, versionSelections });
 
   // Task 7 (engine_workspace_registration_plan.md): the Registry's direct
   // /sdks/generate is now workspace-gated server-side (Task 6), so a
@@ -1909,9 +2070,7 @@ export default function SdkBuilder() {
       (webhookSelections[service.id]?.size || 0) > 0
     )
     .map(({ service }) => service.id);
-  const unactivatedSelectedServiceIds = isAuth && canReadServices && workspaceServicesLoaded
-    ? selectedServiceIdsForGate.filter(id => !workspaceServiceIds.has(id))
-    : [];
+  const unactivatedSelectedServiceIds = unactivatedBuilderServices(Boolean(source), isAuth, canReadServices, workspaceServicesLoaded, selectedServiceIdsForGate, workspaceServiceIds);
 
   // handleServiceAddedToWorkspace updates the local activation gate after success.
   const handleServiceAddedToWorkspace = (serviceId: string) => {
@@ -1948,7 +2107,7 @@ export default function SdkBuilder() {
   // handleGenerate validates, plans, applies, and reports one app build.
   const handleGenerate = async (e: FormEvent) => {
     // Direct links and stale UI state cannot select an ungranted app type.
-    if (!allowedModes.includes(generationMode)) {
+    if (!builderCanSubmit(source, allowedModes, generationMode)) {
       e.preventDefault();
       setError(apiErrorMessage(403, {
         code: "permission_denied",
@@ -1957,7 +2116,8 @@ export default function SdkBuilder() {
       return;
     }
     e.preventDefault();
-    const selectionPayload = buildAppSelections(data, {
+    // Existing private service mappings are authoritative and are never reconstructed from catalogue rows.
+    const selectionPayload = builderPhysicalSelections(source, data, {
       selections,
       selectAllServices,
       webhookSelections,
@@ -1965,6 +2125,8 @@ export default function SdkBuilder() {
     });
     const validation = validateGenerationInput({
       selections: selectionPayload,
+      workflowCount: workflows.length,
+      source: workflowContext.config,
       data,
       sdkName,
       generationMode,
@@ -1978,6 +2140,8 @@ export default function SdkBuilder() {
       return;
     }
 
+    // Conflicting workflow graphs must fail before enabling any workspace dependency.
+    if (workflowSelection.error) { setError(workflowSelection.error); return; }
     const confirmed = await confirmDuplicateGeneration({
       toast,
       mode: generationMode,
@@ -1994,8 +2158,8 @@ export default function SdkBuilder() {
     setSdkTokenCopied(false);
     setMcpTokenCopied(false);
     try {
-      const ownerTeamSlug = ownerTeams.find((team) => team.id === ownerTeamId)?.slug || "";
-      const config = buildGenerationConfig({
+      const ownerTeamSlug = builderOwner(source, ownerTeams, ownerTeamId);
+      const physicalConfig = buildGenerationConfig({
         mcpDescription, intelligentSearch,
         mode: generationMode,
         name: sdkName,
@@ -2008,7 +2172,9 @@ export default function SdkBuilder() {
         hasWebhookSelections: validation.hasWebhookSelections,
       });
 
-      await completeBuilderCreation({
+      const config = builderCombinedConfig(source, physicalConfig, appVersion, workflows, selectionPayload);
+      // Dependency activation wraps the existing adapter lifecycle; SDK download and MCP completion remain shared.
+      await withWorkflowDependencies(workflows, setGenerateStatus, () => completeBuilderCreation({
         mode: generationMode,
         ownerTeamSlug,
         config,
@@ -2019,7 +2185,7 @@ export default function SdkBuilder() {
         setStatus: setGenerateStatus,
         setSdkDeployment,
         setMcpDeployment,
-      });
+      }));
 
     } catch (err) {
       toast.error(generationFailureMessage(generationMode, err), 0);
@@ -2052,6 +2218,10 @@ export default function SdkBuilder() {
   };
   const selection: BuilderSelectionPaneProps = {
     ...serviceInteractions,
+    workflows,
+    existingConfig: workflowContext.config,
+    setWorkflows,
+    generating: generating || navigation.state !== "idle",
     data,
     generationMode,
     query,
@@ -2070,12 +2240,16 @@ export default function SdkBuilder() {
   };
   const generation: ConsumerGenerationPanelProps = {
     mcpDescription, setMcpDescription, intelligentSearch, setIntelligentSearch,
+    existingApp: workflowContext.identity,
+    selectedWorkflowCount: workflows.length,
+    selectionError: workflowSelection.error,
+    selectionPending: navigation.state !== "idle",
     generationMode,
     ownerTeams,
     ownerTeamId,
     setOwnerTeamId,
     availableBuckets,
-    bucketId,
+    bucketId: workflowContext.bucket || bucketId,
     setBucketId,
     onCreateCredential: createCredential,
     sdkName,
@@ -2109,20 +2283,22 @@ export default function SdkBuilder() {
     AddSelectedServiceToWorkspaceButton,
   };
 
+  // Workflow extensions choose a destination within the same builder, never through a parallel installer.
+  const destination = <BuilderDestinationControl count={workflows.length} appID={workflowContext.appID} onSelect={selectDestination} disabled={generating || navigation.state !== "idle"} />;
+
   // An untyped entry must ask before SDK language or MCP/REST-specific fields are shown.
   if (!requestedGenerationMode) {
-    return <BuilderModeSelectionPage onSelect={selectGenerationMode} allowedModes={allowedModes} />;
+    return <BuilderModeSelectionPage onSelect={selectGenerationMode} allowedModes={allowedModes} workflows={workflows} destination={destination} />;
   }
 
-  return (
-    <WorkspacePermissionGate permission={`app.${generationMode}.create`} area="these app creation controls">
-      <BuilderPage
+  const pageContent = <BuilderPage
+        destination={destination}
         generationMode={generationMode}
-        error={error}
+        error={error || workflowSelection.error}
         loading={loading}
         selection={selection}
         generation={generation}
-      />
-    </WorkspacePermissionGate>
-  );
+      />;
+  // Source loading requires app.manage; new-app creation remains governed by its workspace create permission.
+  return <BuilderCreationAccess existing={Boolean(source)} mode={generationMode}>{pageContent}</BuilderCreationAccess>;
 }

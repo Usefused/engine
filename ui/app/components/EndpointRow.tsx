@@ -21,6 +21,8 @@ interface WebhookRowData {
 }
 
 export const METHOD_COLORS: Record<string, string> = {
+  // Workflow rows share this component but expose logical operations rather than an HTTP verb.
+  UNIFIED: "bg-teal-100 text-teal-700 border-teal-200",
   GET: "bg-green-100 text-green-700 border-green-200",
   POST: "bg-blue-100 text-blue-700 border-blue-200",
   PUT: "bg-yellow-100 text-yellow-700 border-yellow-200",

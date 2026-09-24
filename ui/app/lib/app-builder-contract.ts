@@ -130,3 +130,10 @@ function requiredAppText(value: unknown, field: string): string {
   }
   return value.trim();
 }
+
+/** Keeps optional activation controls behind authenticated service-read access and authoritative membership data. */
+export function unactivatedBuilderServices(existing: boolean, authenticated: boolean, canRead: boolean, loaded: boolean, selected: string[], enabled: Set<string>): string[] {
+  // Existing app scope is preserved; new workflow dependencies activate only through the shared create action.
+  if (existing || !authenticated || !canRead || !loaded) return [];
+  return selected.filter((id) => !enabled.has(id));
+}
