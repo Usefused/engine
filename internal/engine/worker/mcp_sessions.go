@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/nats-io/nats.go"
 )
 
@@ -37,24 +39,38 @@ func StartMCPSessionWorker(ctx context.Context, engineStore store.Store, natsCli
 	slog.InfoContext(ctx, "Started MCP session consumer")
 }
 
-// persistMCPSessionMessage acknowledges poison documents and retries storage without logging private provenance.
+// persistMCPSessionMessage traces terminal persistence failures without logging private provenance.
 func persistMCPSessionMessage(ctx context.Context, engineStore store.Store, message *nats.Msg) {
 	thread, _ := observability.Start(ctx, "Worker: MCP Session", "", "worker:mcp_session")
-	defer thread.Complete(ctx, "Processed")
 	session, err := decodeMCPSession(message.Data, time.Now())
 	// Invalid documents cannot recover through redelivery and must not expose raw client metadata.
 	if err != nil {
 		slog.WarnContext(ctx, "Discarding invalid MCP session event")
 		_ = message.Ack()
+		thread.Complete(ctx, "Invalid session event discarded")
 		return
 	}
-	// Storage errors may quote private values; emit a fixed diagnostic and retry the canonical event.
+	// Storage errors may quote private values, so expose only their type and PostgreSQL SQLSTATE.
 	if err := engineStore.UpsertMCPSession(ctx, &session); err != nil {
-		slog.ErrorContext(ctx, "Failed to persist MCP session")
-		_ = message.Nak()
+		errorType := fmt.Sprintf("%T", err)
+		attrs := []any{slog.String("error_type", errorType)}
+		traceContext := map[string]any{"error.type": errorType}
+		var postgresError *pgconn.PgError
+		// SQLSTATE identifies the database failure without exposing its detail string or bound values.
+		if errors.As(err, &postgresError) {
+			attrs = append(attrs, slog.String("sqlstate", postgresError.Code))
+			traceContext["db.sqlstate"] = postgresError.Code
+		}
+		slog.ErrorContext(ctx, "Failed to persist MCP session", attrs...)
+		// Terminal acknowledgement prevents an unpersistable event from replaying forever.
+		_ = message.Term()
+		thread.Step("Persist MCP session").AddContext(traceContext).Failed(ctx, "MCP session persistence failed")
+		thread.Close(ctx, "MCP session persistence failed")
 		return
 	}
 	_ = message.Ack()
+	thread.Step("Persist MCP session").Success(ctx)
+	thread.Complete(ctx, "Processed")
 }
 
 type mcpSessionEventData struct {
