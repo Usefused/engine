@@ -21,6 +21,8 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+const mcpSessionPersistenceMaxRetries = 5
+
 // StartMCPSessionWorker keeps connection lifecycle state separate from call
 // history. Tool executions use the canonical execution-event subject; this
 // worker only owns session start/end rows needed by the live-agent view.
@@ -39,7 +41,7 @@ func StartMCPSessionWorker(ctx context.Context, engineStore store.Store, natsCli
 	slog.InfoContext(ctx, "Started MCP session consumer")
 }
 
-// persistMCPSessionMessage traces terminal persistence failures without logging private provenance.
+// persistMCPSessionMessage retries session writes before tracing and logging terminal failures.
 func persistMCPSessionMessage(ctx context.Context, engineStore store.Store, message *nats.Msg) {
 	thread, _ := observability.Start(ctx, "Worker: MCP Session", "", "worker:mcp_session")
 	session, err := decodeMCPSession(message.Data, time.Now())
@@ -60,6 +62,25 @@ func persistMCPSessionMessage(ctx context.Context, engineStore store.Store, mess
 		if errors.As(err, &postgresError) {
 			attrs = append(attrs, slog.String("sqlstate", postgresError.Code))
 			traceContext["db.sqlstate"] = postgresError.Code
+		}
+		metadata, metadataErr := message.Metadata()
+		// Five delayed redeliveries give transient database faults time to recover before terminal logging.
+		if metadataErr == nil && metadata.NumDelivered <= mcpSessionPersistenceMaxRetries {
+			delay := time.Duration(metadata.NumDelivered) * time.Minute
+			traceContext["messaging.delivery_attempt"] = metadata.NumDelivered
+			traceContext["messaging.retry_delay"] = delay.String()
+			// A retry is observable as a failed persistence step while the overall message remains in progress.
+			// Return early only after JetStream accepts the delayed redelivery request.
+			if nakErr := message.NakWithDelay(delay); nakErr == nil {
+				thread.Step("Persist MCP session").AddContext(traceContext).Failed(ctx, "MCP session persistence retry scheduled")
+				thread.Complete(ctx, "Retry scheduled")
+				return
+			}
+		}
+		// Exhausted retries are terminal; retain only a delivery count, never the private event or DB error text.
+		if metadataErr == nil {
+			attrs = append(attrs, slog.Uint64("delivery_attempts", metadata.NumDelivered))
+			traceContext["messaging.delivery_attempt"] = metadata.NumDelivered
 		}
 		slog.ErrorContext(ctx, "Failed to persist MCP session", attrs...)
 		// Terminal acknowledgement prevents an unpersistable event from replaying forever.
