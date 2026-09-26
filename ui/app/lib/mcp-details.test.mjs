@@ -63,6 +63,7 @@ test("MCP Activity is a permission-gated detail tab and the old URL redirects", 
   assert.match(layout, /location\.pathname\.startsWith\("\/integrations\/mcp\/"\)/);
 });
 
+// Combined App details reuse the shared chrome and reveal MCP routes only for hosted delivery.
 test("SDK and MCP details share app identity, navigation, overview, activity, and Changes components", () => {
   for (const route of [detail, sdkDetail]) {
     assert.match(route, /<AppDetailHeader/);
@@ -85,7 +86,8 @@ test("SDK and MCP details share app identity, navigation, overview, activity, an
   assert.match(detailBody, /export function AppChangesBody/);
   assert.match(activity, /<AppActivityBody/);
   assert.match(detail, /<McpTransportEndpoints/);
-  assert.doesNotMatch(sdkDetail, /<McpTransportEndpoints/);
+  // Combined Apps expose MCP endpoints within the SDK-kind detail view only when hosted MCP is enabled.
+  assert.match(sdkDetail, /optionalNode\(sdk\.hosted_mcp === true,[\s\S]*<McpTransportEndpoints/);
   assert.match(sdkDetail, /Download package/);
   assert.doesNotMatch(detail, /Download package|ReactMarkdown|LanguageBadge/);
 });

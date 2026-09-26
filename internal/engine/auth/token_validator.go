@@ -42,6 +42,8 @@ type RuntimeIdentity struct {
 	TokenID     uuid.UUID
 	AppVersion  string
 	Kind        store.AppKind
+	// HostedMCP is the immutable entitlement for SDK kind versions exposed over MCP.
+	HostedMCP   bool
 	Status      store.AppStatus
 	TokenPolicy store.AppTokenPolicy
 	BindingMode store.AppTokenBindingMode
@@ -205,7 +207,7 @@ func (v *CachedTokenValidator) load(ctx context.Context, key tokenCacheKey) (Run
 	identity := RuntimeIdentity{
 		AccountID: projection.AccountID, AppFamilyID: projection.AppFamilyID,
 		AppID: projection.AppID, TokenID: projection.TokenID, AppVersion: projection.Version,
-		Kind: projection.Kind, Status: projection.AppStatus, TokenPolicy: projection.TokenPolicy,
+		Kind: projection.Kind, HostedMCP: projection.HostedMCP, Status: projection.AppStatus, TokenPolicy: projection.TokenPolicy,
 		BindingMode: projection.BindingMode,
 	}
 	if !projection.TokenPolicy.IsUnrestricted() {

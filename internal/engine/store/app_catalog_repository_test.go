@@ -24,12 +24,13 @@ func (fixture appCatalogScanFixture) Scan(dest ...any) error {
 	*(dest[7].(*AppKind)) = AppKind(fixture.values[7].(string))
 	*(dest[8].(*AppDeliveryMode)) = AppDeliveryMode(fixture.values[8].(string))
 	*(dest[9].(*AppStatus)) = AppStatus(fixture.values[9].(string))
-	*(dest[10].(*time.Time)) = fixture.values[10].(time.Time)
-	*(dest[11].(*string)) = fixture.values[11].(string)
+	*(dest[10].(*bool)) = fixture.values[10].(bool)
+	*(dest[11].(*time.Time)) = fixture.values[11].(time.Time)
 	*(dest[12].(*string)) = fixture.values[12].(string)
 	*(dest[13].(*string)) = fixture.values[13].(string)
-	*(dest[14].(*json.RawMessage)) = fixture.values[14].([]byte)
-	*(dest[15].(**time.Time)) = fixture.values[15].(*time.Time)
+	*(dest[14].(*string)) = fixture.values[14].(string)
+	*(dest[15].(*json.RawMessage)) = fixture.values[15].([]byte)
+	*(dest[16].(**time.Time)) = fixture.values[16].(*time.Time)
 	return nil
 }
 
@@ -38,7 +39,7 @@ func TestScanAppCatalogItemPreservesExactVersionIdentityAndSelections(t *testing
 	familyID, appID, serviceID := uuid.New(), uuid.New(), uuid.New()
 	createdAt, deactivationAt := time.Now(), time.Now().Add(24*time.Hour)
 	item, err := scanAppCatalogItem(appCatalogScanFixture{values: []any{
-		familyID, appID, uuid.Nil, "Support", "Internal support SDK", false, "2.0.0", "sdk", "sdk", "deprecated",
+		familyID, appID, uuid.Nil, "Support", "Internal support SDK", false, "2.0.0", "sdk", "sdk", "deprecated", false,
 		createdAt, "typescript", "generator-v2", "# Support", []byte(`[{"service_id":"` + serviceID.String() + `","endpoint_ids":[],"webhook_ids":[]}]`), &deactivationAt,
 	}})
 	if err != nil {

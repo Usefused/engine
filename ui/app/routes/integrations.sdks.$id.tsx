@@ -10,6 +10,7 @@ import { NotificationBanner } from "~/components/notifications/NotificationBanne
 import { useWorkspaceNotifications } from "~/components/notifications/useWorkspaceNotifications";
 import { isPending, matchesConfig } from "~/components/notifications/notificationHelpers";
 import { AppRequestsPanel } from "~/components/activity/AppRequestsPanel";
+import { McpTransportEndpoints, type McpTransportEndpointData } from "~/components/mcp/McpTransportEndpoints";
 import { AppActivityOverview } from "~/components/activity/AppActivityOverview";
 import { type NestedActivityTabOption } from "~/components/activity/NestedActivityTabs";
 import { AppDetailBackLink, AppDetailHeader, AppDetailPrimaryAction, AppDetailTabs, AppVersionSwitcher, type AppDetailTab } from "~/components/apps/AppDetailChrome";
@@ -115,6 +116,11 @@ type Sdk = {
   version: string;
   kind: string;
   delivery_mode: string;
+  hosted_mcp?: boolean;
+  default_transport?: string;
+  stable?: boolean;
+  stable_version_id?: string;
+  transport_urls?: McpTransportEndpointData["transport_urls"];
   target_type: string;
   target_language?: string;
   sandbox_url?: string;
@@ -323,6 +329,11 @@ export default function SdkDetails() {
           version
           kind
           delivery_mode
+          hosted_mcp
+          default_transport
+          stable
+          stable_version_id
+          transport_urls { streamable_http sse versioned_streamable_http versioned_sse }
           target_language
           created_at
           readme
@@ -568,7 +579,14 @@ function SdkLoadedContent({
         {optionalNode(activeTab === "overview", (
           <AppOverviewBody
             selections={sdk.detailed_selections ?? []}
-            adapterDetails={optionalNode(hasSandboxURL(sdk), (
+            adapterDetails={<>
+            {optionalNode(sdk.hosted_mcp === true, (
+              <AppDetailSection title="MCP delivery">
+                {/* Engine projects the exact and stable routes for this shared App version. */}
+                <McpTransportEndpoints endpoints={sdk} enabled={sdk.status === "active" || sdk.status === "deprecated"} />
+              </AppDetailSection>
+            ))}
+            {optionalNode(hasSandboxURL(sdk), (
               <AppDetailSection title="Hosted Sandbox URL">
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 shadow-sm">
                   <p className="text-sm text-slate-700 mb-4 max-w-2xl">
@@ -588,6 +606,7 @@ function SdkLoadedContent({
                 </div>
               </AppDetailSection>
             ))}
+            </>}
           />
         ))}
 

@@ -33,6 +33,8 @@ type streamableTokenValidator struct {
 	tokenID       uuid.UUID
 	expectedAppID uuid.UUID
 	lastAppID     uuid.UUID
+	kind          store.AppKind
+	hostedMCP     bool
 }
 
 // Validate records the exact immutable app identity presented by transport
@@ -48,8 +50,13 @@ func (validator *streamableTokenValidator) Validate(_ context.Context, appID uui
 	if token != validator.token {
 		return auth.RuntimeIdentity{}, auth.ErrUnauthorized
 	}
+	// Transport tests default to standalone MCP while allowing explicit SDK marker boundary checks.
+	kind := validator.kind
+	if kind == "" {
+		kind = store.AppKindMCP
+	}
 	return auth.RuntimeIdentity{
-		AppID: appID, TokenID: validator.tokenID,
+		AppID: appID, TokenID: validator.tokenID, Kind: kind, HostedMCP: validator.hostedMCP,
 		TokenPolicy: store.AppTokenPolicy{AllowAll: true},
 	}, nil
 }

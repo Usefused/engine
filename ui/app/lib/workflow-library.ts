@@ -43,6 +43,7 @@ export interface WorkflowAppConfig extends Record<string, unknown> {
   bucket: string;
   language?: string;
   description?: string;
+  mcp?: { description: string; "fused-intelligent-classifier"?: boolean };
   services: Record<
     string,
     { version: string; operations?: string[]; [key: string]: unknown }

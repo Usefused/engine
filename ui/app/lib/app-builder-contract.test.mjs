@@ -42,16 +42,17 @@ test("derives plan identity without embedding ownership in declarative config", 
   assert.equal(appConfigKey("mcp", config), "mcp:support:1.2.0");
 });
 
-// UI delivery choices must preserve the two-kind persistence contract and require an explicit selection.
+// UI delivery choices preserve two persisted kinds while defaulting untyped creation to all methods.
 test("maps builder delivery choices onto the persisted app kinds", () => {
+  assert.equal(appKindForCreationMode("app"), "sdk");
   assert.equal(appKindForCreationMode("sdk"), "sdk");
   assert.equal(appKindForCreationMode("api"), "sdk");
   assert.equal(appKindForCreationMode("mcp"), "mcp");
   assert.equal(appCreationModeFromSearch("?tab=api"), "api");
   assert.equal(appCreationModeFromSearch("?tab=mcp"), "mcp");
   assert.equal(appCreationModeFromSearch("?tab=sdk"), "sdk");
-  assert.equal(appCreationModeFromSearch("?tab=unknown"), null);
-  assert.equal(appCreationModeFromSearch(""), null);
+  assert.equal(appCreationModeFromSearch("?tab=unknown"), "app");
+  assert.equal(appCreationModeFromSearch(""), "app");
 });
 
 test("places ownership only on plan intent and makes apply owner-proof", () => {

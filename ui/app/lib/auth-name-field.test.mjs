@@ -69,7 +69,8 @@ test("service and bucket views expose the same auth identity without extra fetch
   assert.match(service, /label="HTTP scheme"/);
   assert.match(service, /label="Request key"/);
   assert.match(bucket, /<AuthNameField name=\{connection\.auth_name\} context="bucket"/);
-  assert.match(bucket, /Connected user · <code>end_user_ref/);
+  // The bucket help text keeps the connected-user identifier distinct from the stored auth scheme.
+  assert.match(bucket, /<code>end_user_ref<\/code> identifies the connected user/);
   assert.match(queries, /items \{ id bucket_id service_id end_user_ref auth_type auth_name token_type/);
 });
 

@@ -2,7 +2,7 @@ import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
 import { useEffect, useId, useRef, useState, type ComponentType } from "react";
 import { Link } from "@remix-run/react";
-import { ChevronDown, Code2, Globe2, Plus, TerminalSquare, type LucideProps } from "lucide-react";
+import { ChevronDown, Code2, Globe2, Layers3, Plus, TerminalSquare, type LucideProps } from "lucide-react";
 import type { AppCreationMode } from "~/lib/app-builder-contract";
 
 export type CreateAppOption = {
@@ -18,6 +18,13 @@ type CreateAppMenuProps = {
 };
 
 export const CREATE_APP_OPTIONS: CreateAppOption[] = [
+  {
+    mode: "app",
+    label: "App",
+    description: "One App with SDK, MCP, and REST delivery",
+    to: "/integrations/builder?tab=app",
+    icon: Layers3,
+  },
   {
     mode: "sdk",
     label: "SDK",
@@ -44,8 +51,12 @@ export const CREATE_APP_OPTIONS: CreateAppOption[] = [
 /** Presents delivery choices without splitting the shared app catalogue. */
 export function CreateAppMenu({ className = "" }: CreateAppMenuProps) {
   const { access } = useCurrentActorAccess();
-  // A workspace creation grant unlocks only its corresponding delivery option.
-  const options = CREATE_APP_OPTIONS.filter((option) => hasWorkspacePermission(access, `app.${option.mode}.create`));
+  // A combined App requires both delivery grants; individual choices retain their own grants.
+  const options = CREATE_APP_OPTIONS.filter((option) => option.mode === "app"
+    ? hasWorkspacePermission(access, "app.sdk.create") && hasWorkspacePermission(access, "app.mcp.create")
+    : hasWorkspacePermission(access, `app.${option.mode}.create`));
+  // The primary action creates all three methods when authorized; narrower grants use their first available choice.
+  const primaryOption = options.find((option) => option.mode === "app") ?? options[0];
   const [open, setOpen] = useState(false);
   const menuId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -81,7 +92,7 @@ export function CreateAppMenu({ className = "" }: CreateAppMenuProps) {
     };
   }, [open]);
 
-  /** Toggles delivery selection without choosing a default app type. */
+  /** Toggles optional single-method choices beside the default App action. */
   function toggleMenu() {
     setOpen((current) => !current);
   }
@@ -93,6 +104,14 @@ export function CreateAppMenu({ className = "" }: CreateAppMenuProps) {
 
   return (
     <div ref={rootRef} className={`relative ${className}`}>
+      <div className="inline-flex w-full items-stretch rounded-lg bg-slate-950 text-white shadow-sm sm:w-auto">
+      <Link
+        to={primaryOption?.mode === "app" ? "/integrations/builder" : primaryOption?.to ?? "/integrations/builder"}
+        className="inline-flex flex-1 items-center justify-center gap-2 rounded-l-lg px-4 py-2 text-sm font-medium transition-colors hover:bg-slate-800"
+      >
+        <Plus className="h-4 w-4" />
+        Create app
+      </Link>
       <button
         ref={triggerRef}
         type="button"
@@ -100,12 +119,12 @@ export function CreateAppMenu({ className = "" }: CreateAppMenuProps) {
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={menuId}
-        className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-slate-800 sm:w-auto"
+        aria-label="Choose a delivery method"
+        className="inline-flex items-center justify-center rounded-r-lg border-l border-slate-700 px-3 transition-colors hover:bg-slate-800"
       >
-        <Plus className="h-4 w-4" />
-        Create app
         <ChevronDown className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
+      </div>
 
       {/* The menu names delivery adapters while preserving one application lifecycle. */}
       {open && (

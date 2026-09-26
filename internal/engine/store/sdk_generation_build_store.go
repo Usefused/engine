@@ -189,6 +189,18 @@ func (s *postgresStore) transitionSDKGeneration(ctx context.Context, appID uuid.
 		return false, fmt.Errorf("transition SDK generation: %w", err)
 	}
 	changed := result.RowsAffected() == 1
+	// The hosted MCP alias becomes available only after the exact SDK build makes the shared version runnable.
+	if changed && status == AppStatusActive {
+		app, loadErr := scanApp(tx.QueryRow(ctx, appSelect+` WHERE a.app_id = $1`, appID))
+		// A successful compare-and-swap must still have its immutable version in this transaction.
+		if loadErr != nil {
+			return false, fmt.Errorf("transition SDK generation: load activated app: %w", loadErr)
+		}
+		app.ExpectedFamilyKind = AppKindSDK
+		if err := promoteStableMCPVersionTx(ctx, tx, *app); err != nil {
+			return false, err
+		}
+	}
 	// An idempotent loser commits no data change but still closes its transaction cleanly.
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("transition SDK generation: commit: %w", err)
@@ -198,18 +210,78 @@ func (s *postgresStore) transitionSDKGeneration(ctx context.Context, appID uuid.
 
 // admitSDKGenerationActivation serializes the invokable-family count and
 // permits an already-runnable sibling family without allocating another unit.
+// admitSDKGenerationActivation reserves every delivery allowance before a completed build becomes runnable.
 func admitSDKGenerationActivation(ctx context.Context, tx pgx.Tx, appID uuid.UUID) error {
 	var accountID, familyID uuid.UUID
+	var hostedMCP bool
 	err := tx.QueryRow(ctx, `
-		SELECT account_id, app_family_id
+		SELECT account_id, app_family_id, hosted_mcp
 		FROM fused_apps
 		WHERE app_id = $1
-	`, appID).Scan(&accountID, &familyID)
+	`, appID).Scan(&accountID, &familyID, &hostedMCP)
 	// Completion must bind quota admission to the exact retained app before counting its family.
 	if err != nil {
 		return fmt.Errorf("activate SDK generation: load app identity: %w", err)
 	}
-	return admitSDKFamilyActivation(ctx, tx, accountID, familyID, false)
+	if err := admitSDKFamilyActivation(ctx, tx, accountID, familyID, false); err != nil {
+		return err
+	}
+	// The hosted MCP route is activated by this same compare-and-swap, so its quota must be reserved now.
+	if hostedMCP {
+		return admitMCPFamilyActivation(ctx, tx, accountID, familyID)
+	}
+	return nil
+}
+
+// admitMCPFamilyActivation serializes standalone and shared hosted MCP activation against one Engine entitlement.
+func admitMCPFamilyActivation(ctx context.Context, tx pgx.Tx, accountID, familyID uuid.UUID) error {
+	var limit int
+	err := tx.QueryRow(ctx, `SELECT max_mcp_families FROM fused_runtime_entitlements WHERE singleton_key = 1 FOR UPDATE`).Scan(&limit)
+	// Missing entitlement state cannot turn an unreviewed transport runnable.
+	if err != nil {
+		return fmt.Errorf("activate MCP delivery: load entitlement: %w", err)
+	}
+	// A negative ceiling explicitly permits unlimited hosted families.
+	if limit < 0 {
+		return nil
+	}
+	var current int
+	var targetInvokable, targetExists bool
+	err = tx.QueryRow(ctx, `
+		WITH families AS (
+			SELECT family.app_family_id,
+			       EXISTS (
+			         SELECT 1 FROM fused_apps app
+			         WHERE app.app_family_id = family.app_family_id
+			           AND app.account_id = family.account_id
+			           AND app.status IN ('active', 'deprecated')
+			           AND (family.kind = 'mcp' OR app.hosted_mcp)
+			       ) AS invokable
+			FROM fused_app_families family
+			WHERE family.account_id = $1 AND family.archived_at IS NULL
+			  AND family.kind IN ('mcp', 'sdk')
+		)
+		SELECT COUNT(*) FILTER (WHERE invokable),
+		       COALESCE(BOOL_OR(app_family_id = $2 AND invokable), FALSE),
+		       COALESCE(BOOL_OR(app_family_id = $2), FALSE)
+		FROM families
+	`, accountID, familyID).Scan(&current, &targetInvokable, &targetExists)
+	// A missing or foreign family cannot borrow capacity from another tenant.
+	if err != nil {
+		return fmt.Errorf("activate MCP delivery: count families: %w", err)
+	}
+	if !targetExists {
+		return errors.New("activate MCP delivery: target family not found")
+	}
+	// Another active version in this family already occupies its unit.
+	if targetInvokable {
+		return nil
+	}
+	// Only a new runnable MCP family consumes capacity.
+	if current >= limit {
+		return ErrMCPFamilyLimitExceeded
+	}
+	return nil
 }
 
 // admitSDKFamilyActivation serializes every path that can make an SDK or direct-API family invokable.

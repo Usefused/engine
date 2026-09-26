@@ -7,7 +7,7 @@ import { redirect } from "@remix-run/react";
 // meta preserves shared metadata while naming the app builder route.
 export const meta: MetaFunction<typeof clientLoader> = ({ matches, data, location }) => {
   const parentMeta = matches.filter((m) => m.id === "root").flatMap((m) => m.meta ?? []);
-  // Loader-owned destinations pin delivery type; ordinary new apps use their explicit URL choice.
+  // Loader-owned destinations pin delivery type; ordinary new apps default to all three methods.
   const mode = data?.source ? existingBuilderMode(data.source.config) : appCreationModeFromSearch(new URLSearchParams(location.search));
   return [
     ...parentMeta.filter((m) => !('title' in m)),
@@ -48,7 +48,6 @@ import { WorkflowAppDestination } from "~/components/workflows/WorkflowAppDestin
 import { BuilderWorkflows } from "~/components/workflows/BuilderWorkflows";
 import { listWorkflows, withWorkflowDependencies } from "~/lib/workflow-api";
 import { composeBuilderWorkflows, workflowDependencies, type Workflow, type WorkflowAppConfig, type WorkflowBuilderPin } from "~/lib/workflow-library";
-import { CREATE_APP_OPTIONS } from "~/components/apps/CreateAppMenu";
 
 // clientLoader requires an authenticated Engine session before building an app.
 export const clientLoader = async ({ request }: { request: Request }) => {
@@ -216,6 +215,7 @@ function baseURLConfigurationError(selections: AppSelection[], data: ServiceData
 // generationArtifactName returns the user-facing artifact name for validation copy.
 function generationArtifactName(mode: GenerationMode): string {
   // Validation copy names the concrete delivery adapter the user chose.
+  if (mode === "app") return "App";
   if (mode === "mcp") return "MCP server";
   if (mode === "api") return "REST API";
   return "SDK";
@@ -224,6 +224,7 @@ function generationArtifactName(mode: GenerationMode): string {
 // generationActionName keeps builder prerequisites phrased for the selected delivery adapter.
 function generationActionName(mode: GenerationMode): string {
   // MCP is deployed, REST is published, and only generated SDKs produce a package.
+  if (mode === "app") return "create an App";
   if (mode === "mcp") return "deploy an MCP server";
   if (mode === "api") return "publish a REST API";
   return "generate an SDK";
@@ -282,7 +283,7 @@ async function confirmDuplicateGeneration(input: {
   name: string;
   version: string;
 }): Promise<boolean> {
-  if (input.mode !== "sdk" || !input.duplicate) return true;
+  if ((input.mode !== "sdk" && input.mode !== "app") || !input.duplicate) return true;
   return input.toast.confirm(
     `An SDK with name "${input.name.trim()}" and version "${input.version.trim()}" already exists. Generating it again will overwrite the existing package file. Are you sure you want to continue?`
   );
@@ -295,7 +296,7 @@ function generationFailureMessage(mode: GenerationMode, cause: unknown): string 
     ? "Failed to deploy MCP server"
     : mode === "api"
       ? "Failed to publish REST API"
-      : "Failed to generate SDK";
+      : mode === "app" ? "Failed to create App" : "Failed to generate SDK";
   const detail = cause instanceof Error ? cause.message : "Unknown error";
   return `${prefix}: ${detail}`;
 }
@@ -328,6 +329,13 @@ function buildGenerationConfig(input: {
     // Omission preserves local search as the default.
     if (input.intelligentSearch) config["fused-intelligent-classifier"] = true;
   }
+  // Hosted MCP metadata lives inside an SDK-kind document so all methods share one immutable version.
+  if (input.mode === "app") {
+    config.mcp = {
+      description: input.mcpDescription.trim(),
+      ...(input.intelligentSearch ? { "fused-intelligent-classifier": true } : {}),
+    };
+  }
   // SDK-kind validation still requires a maintained target language even when REST delivery skips packaging.
   if (input.mode !== "mcp") config.language = input.language;
   // An explicit false is the immutable direct-REST delivery selector understood by Engine plan/apply.
@@ -350,7 +358,8 @@ function processGenerationStreamEvent(
   if (event.type === "complete") {
     context.controller.abort();
     context.setStatus("Downloading...");
-    api.sdks.download(event.integration_id, context.sdkName, context.appVersion).then(() => {
+    // Registry completion can precede Engine's activation poll, so download after the version becomes visible.
+    downloadSDKWhenReady(context.appId, context.sdkName, context.appVersion).then(() => {
       context.setDeployment({
         id: context.appId,
         name: context.sdkName.trim(),
@@ -365,6 +374,22 @@ function processGenerationStreamEvent(
   if (event.type === "error") {
     context.controller.abort();
     reject(new Error(event.message || "Unknown generation error"));
+  }
+}
+
+/** Waits for Engine to activate a completed package before starting the browser download. */
+async function downloadSDKWhenReady(appId: string, name: string, version: string): Promise<void> {
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    try {
+      await api.sdks.download(appId, name, version);
+      return;
+    } catch (error) {
+      // Only a temporary not-found/building response is eligible for an activation retry.
+      if (!(error instanceof Error) || (error.message !== "HTTP 404" && error.message !== "HTTP 409")) throw error;
+      // A bounded wait gives the user a useful failure if activation never completes.
+      if (attempt === 14) throw new Error("App created, but its SDK package did not become ready for download");
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
   }
 }
 
@@ -442,7 +467,7 @@ async function publishRESTApp(context: BuilderCreationContext): Promise<void> {
 /** Generates and downloads one typed SDK package before reporting success. */
 async function generateSDKApp(context: BuilderCreationContext): Promise<void> {
   context.setStatus("Planning and generating SDK...");
-  const result = await planAndApplyApp<{ app_id: string; job_id: string; execution_token?: string }>("sdk", context.ownerTeamSlug, context.config);
+  const result = await planAndApplyApp<{ app_id: string; job_id: string; execution_token?: string; hosted_mcp?: boolean; mcp_transport_urls?: McpTransportEndpointData["transport_urls"] }>("sdk", context.ownerTeamSlug, context.config);
   await waitForSDKGeneration({
     controller: new AbortController(),
     appId: result.app_id,
@@ -453,6 +478,11 @@ async function generateSDKApp(context: BuilderCreationContext): Promise<void> {
     setStatus: context.setStatus,
     setDeployment: context.setSdkDeployment,
   });
+  // The package stream completed before exposing the hosted MCP endpoint, which uses the same identity and token.
+  if (context.mode === "app") {
+    if (!result.hosted_mcp || !result.mcp_transport_urls) throw new Error("Engine did not return hosted MCP delivery");
+    context.setMcpDeployment({ id: result.app_id, token: "", default_transport: "streamable_http", stable: true, stable_version_id: result.app_id, transport_urls: result.mcp_transport_urls });
+  }
   await context.syncWorkspacePins(context.selections);
 }
 
@@ -1265,6 +1295,8 @@ function BuilderSelectionPane(props: BuilderSelectionPaneProps) {
 
 // BuilderPageHeader names the artifact being configured.
 function BuilderPageHeader({ generationMode }: { generationMode: GenerationMode }) {
+  // A combined build advertises the single App identity before listing its delivery methods.
+  if (generationMode === "app") return <div className="mb-8"><h1 className="text-3xl font-bold text-slate-900">Create App</h1><p className="text-slate-500">Choose operations for one App delivered through SDK, MCP, and REST.</p></div>;
   const isMCP = generationMode === "mcp";
   const isAPI = generationMode === "api";
   return (
@@ -1311,40 +1343,6 @@ function BuilderPage({ destination, generationMode, error, loading, selection, g
   );
 }
 
-/** Requests an explicit immutable delivery adapter when the builder URL omitted one. */
-function BuilderModeSelectionPage({ onSelect, allowedModes, workflows, destination }: { onSelect: (mode: GenerationMode) => void; allowedModes: GenerationMode[]; workflows: Workflow[]; destination?: ReactNode }) {
-  return (
-    <div className="mx-auto flex h-full max-w-4xl flex-col justify-center px-4 py-10">
-      <div className="mb-8 text-center">
-        <h1 className="text-3xl font-bold tracking-tight text-slate-900">Create app</h1>
-        <p className="mt-2 text-slate-500">Choose how this app will expose its selected services and operations.</p>
-      </div>
-      {/* Deep links keep the chosen workflows visible before the user selects an app delivery type. */}
-      {workflows.length > 0 && <p className="mb-6 text-sm text-slate-600">Selected workflows: {workflows.map((workflow) => workflow.template.name).join(", ")}</p>}
-      {destination}
-      <div role="group" aria-label="App type" className="grid gap-4 md:grid-cols-3">
-        {CREATE_APP_OPTIONS.filter((option) => allowedModes.includes(option.mode)).map((option) => {
-          const Icon = option.icon;
-          return (
-            <button
-              key={option.mode}
-              type="button"
-              onClick={() => onSelect(option.mode)}
-              className="group rounded-2xl border border-slate-200 bg-white p-6 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-[var(--brand-violet)]/30"
-            >
-              <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-100 text-slate-600 transition-colors group-hover:bg-[var(--brand-violet-tint)] group-hover:text-[var(--brand-violet)]">
-                <Icon className="h-5 w-5" />
-              </span>
-              <span className="mt-5 block text-base font-semibold text-slate-900">{option.label}</span>
-              <span className="mt-1 block text-sm leading-5 text-slate-500">{option.description}</span>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 // initialBuilderServiceId resolves a route-selected service only when the loader is unambiguous.
 function initialBuilderServiceId(searchParams: URLSearchParams, services: Service[]): string | undefined {
   const selected = searchParams.get("serviceId") || searchParams.get("service") || searchParams.get("slug");
@@ -1370,7 +1368,7 @@ function workflowBuilderSummary(workflows: Workflow[], source: BuilderSource) {
 function builderPageTitle(mode: GenerationMode | null): string {
   // A generic title belongs only to the delivery-choice screen.
   if (!mode) return "Create app - Fused";
-  const labels = { sdk: "SDK", mcp: "MCP server", api: "REST API" };
+  const labels = { app: "App", sdk: "SDK", mcp: "MCP server", api: "REST API" };
   return `Create ${labels[mode]} - Fused`;
 }
 
@@ -1391,6 +1389,8 @@ function builderWorkflowContext(source: BuilderSource, params: URLSearchParams) 
 function existingBuilderMode(config: WorkflowAppConfig): GenerationMode {
   // Hosted MCP and package-free REST remain distinct completion adapters.
   if (config.kind === "mcp") return "mcp";
+  // The persisted nested MCP delivery retains the combined builder mode for successors.
+  if (config.mcp) return "app";
   return config.generate === false ? "api" : "sdk";
 }
 
@@ -1434,6 +1434,8 @@ function BuilderDestinationControl({ count, appID, onSelect, disabled }: { count
 function BuilderCreationAccess({ existing, mode, children }: { existing: boolean; mode: GenerationMode; children: ReactNode }) {
   // Source loading already enforced app.manage; plan/apply checks it again at mutation time.
   if (existing) return <>{children}</>;
+  // Combined creation needs both entitlements even when a user deep links directly to the builder.
+  if (mode === "app") return <WorkspacePermissionGate permission="app.sdk.create" area="these app creation controls"><WorkspacePermissionGate permission="app.mcp.create" area="these app creation controls">{children}</WorkspacePermissionGate></WorkspacePermissionGate>;
   return <WorkspacePermissionGate permission={`app.${mode}.create`} area="these app creation controls">{children}</WorkspacePermissionGate>;
 }
 
@@ -1523,10 +1525,12 @@ export default function SdkBuilder() {
   const [isDuplicate, setIsDuplicate] = useState(false);
   const [checkingDuplicate, setCheckingDuplicate] = useState(false);
   const requestedGenerationMode = workflowContext.mode;
-  // Internal builder state stays fully typed, but the UI does not expose it until the user makes an explicit choice.
-  const generationMode: GenerationMode = requestedGenerationMode ?? "sdk";
+  // An untyped builder URL now resolves directly to the combined App mode.
+  const generationMode: GenerationMode = requestedGenerationMode;
   // Creation choices reflect explicit workspace grants for each delivery type.
-  const allowedModes = (["sdk", "mcp", "api"] as GenerationMode[]).filter((mode) => hasWorkspacePermission(access, `app.${mode}.create`));
+  const allowedModes = (["app", "sdk", "mcp", "api"] as GenerationMode[]).filter((mode) => mode === "app"
+    ? hasWorkspacePermission(access, "app.sdk.create") && hasWorkspacePermission(access, "app.mcp.create")
+    : hasWorkspacePermission(access, `app.${mode}.create`));
   const [language, setLanguage] = useState<"typescript" | "python">("typescript");
 
   // Loading another existing app initializes its successor while later workflow toggles preserve user edits.
@@ -1537,7 +1541,8 @@ export default function SdkBuilder() {
     const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(source.config.version);
     // Non-semver labels require an explicit successor instead of guessing identity.
     setAppVersion(match ? `${match[1]}.${Number(match[2]) + 1}.0` : "");
-    setMcpDescription(source.config.description ?? "");
+    // Combined successors preserve their authored MCP description inside the nested delivery config.
+    setMcpDescription(source.config.mcp?.description ?? source.config.description ?? "");
     setLanguage(source.config.language === "python" ? "python" : "typescript");
   }, [workflowContext.appID]);
 
@@ -1562,15 +1567,6 @@ export default function SdkBuilder() {
       return next;
     });
   }
-
-  /** Commits the chosen delivery adapter to the URL before rendering its form. */
-  const selectGenerationMode = (mode: GenerationMode) => {
-    setSearchParams((previous) => {
-      const next = new URLSearchParams(previous);
-      next.set("tab", mode);
-      return next;
-    }, { replace: true });
-  };
 
   const [searching, setSearching] = useState(false);
   const pageParam = searchParams.get("page");
@@ -2111,7 +2107,7 @@ export default function SdkBuilder() {
       e.preventDefault();
       setError(apiErrorMessage(403, {
         code: "permission_denied",
-        missing: [{ permission: `app.${generationMode}.create`, resource_type: "workspace", resource_id: access?.workspace_id ?? "" }],
+        missing: [{ permission: generationMode === "app" ? "app.sdk.create + app.mcp.create" : `app.${generationMode}.create`, resource_type: "workspace", resource_id: access?.workspace_id ?? "" }],
       }));
       return;
     }
@@ -2285,11 +2281,6 @@ export default function SdkBuilder() {
 
   // Workflow extensions choose a destination within the same builder, never through a parallel installer.
   const destination = <BuilderDestinationControl count={workflows.length} appID={workflowContext.appID} onSelect={selectDestination} disabled={generating || navigation.state !== "idle"} />;
-
-  // An untyped entry must ask before SDK language or MCP/REST-specific fields are shown.
-  if (!requestedGenerationMode) {
-    return <BuilderModeSelectionPage onSelect={selectGenerationMode} allowedModes={allowedModes} workflows={workflows} destination={destination} />;
-  }
 
   const pageContent = <BuilderPage
         destination={destination}

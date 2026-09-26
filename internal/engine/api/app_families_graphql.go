@@ -33,6 +33,7 @@ var appFamilySummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"latest_version":    &graphql.Field{Type: graphql.String},
 		"latest_version_id": &graphql.Field{Type: graphql.String},
 		"latest_status":     &graphql.Field{Type: graphql.String},
+		"hosted_mcp":        &graphql.Field{Type: graphql.Boolean},
 		"latest_created_at": &graphql.Field{Type: graphql.String},
 		"archived_at":       &graphql.Field{Type: graphql.String},
 		"downloads":         &graphql.Field{Type: graphql.String},
@@ -115,6 +116,8 @@ func appFamilySummaryFields(r *http.Request, item store.AppFamilyCatalogItem, co
 	if item.LatestAppID != uuid.Nil {
 		result["latest_version"], result["latest_version_id"] = item.LatestVersion, item.LatestAppID.String()
 		result["latest_status"] = string(item.LatestStatus)
+		// A prior hosted version keeps its stable MCP route when a newer SDK-only version is published.
+		result["hosted_mcp"] = item.Kind == store.AppKindSDK && item.StableAppID != uuid.Nil
 		// Creation time is available for every persisted app row selected as latest.
 		if item.LatestCreatedAt != nil {
 			result["latest_created_at"] = item.LatestCreatedAt.Format(mcpGraphQLTimeFormat)
@@ -124,8 +127,8 @@ func appFamilySummaryFields(r *http.Request, item store.AppFamilyCatalogItem, co
 			result["downloads"] = strconv.FormatInt(counts[item.LatestAppID], 10)
 		}
 	}
-	// SDKs have no implicit current version; an unpromoted MCP must not borrow a sibling's route.
-	if item.Kind == store.AppKindMCP && item.StableAppID != uuid.Nil {
+	// Only a promoted hosted version can advertise the stable MCP family route.
+	if item.StableAppID != uuid.Nil {
 		urls := mcpTransportURLsForApp(r, item.AppFamilyID, item.StableAppID, item.StableAppID)
 		result["stable_version"], result["stable_version_id"] = item.StableVersion, item.StableAppID.String()
 		result["default_transport"] = mcpDefaultTransport

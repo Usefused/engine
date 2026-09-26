@@ -22,6 +22,7 @@ type AppCatalogItem struct {
 	Name                       string
 	Description                string
 	FusedIntelligentClassifier bool
+	HostedMCP                  bool
 	Version                    string
 	Kind                       AppKind
 	DeliveryMode               AppDeliveryMode
@@ -56,7 +57,7 @@ const appCatalogSelect = `
 	       COALESCE(family.mcp_stable_app_id, '00000000-0000-0000-0000-000000000000'::uuid),
 	       family.display_name,
 	       COALESCE(plan.resolved_payload->>'description', ''), COALESCE((plan.resolved_payload->>'fused-intelligent-classifier')::boolean, false), app.version,
-	       family.kind, COALESCE(family.delivery_mode, 'sdk'), app.status, app.created_at, COALESCE(family.target_language, ''),
+	       family.kind, COALESCE(family.delivery_mode, 'sdk'), app.status, app.hosted_mcp, app.created_at, COALESCE(family.target_language, ''),
 	       COALESCE(app.generator_version, ''), COALESCE(plan.resolved_payload->>'readme', ''), app.selections,
 	       app.planned_deactivation_at
 	FROM fused_apps app
@@ -166,7 +167,7 @@ func scanAppCatalogItem(row appCatalogScanner) (*AppCatalogItem, error) {
 	var item AppCatalogItem
 	var selections json.RawMessage
 	err := row.Scan(&item.AppFamilyID, &item.AppID, &item.StableAppID, &item.Name, &item.Description, &item.FusedIntelligentClassifier,
-		&item.Version, &item.Kind, &item.DeliveryMode, &item.Status, &item.CreatedAt, &item.TargetLanguage,
+		&item.Version, &item.Kind, &item.DeliveryMode, &item.Status, &item.HostedMCP, &item.CreatedAt, &item.TargetLanguage,
 		&item.GeneratorVersion, &item.Readme, &selections, &item.PlannedDeactivationAt)
 	if err == nil {
 		err = json.Unmarshal(selections, &item.Selections)

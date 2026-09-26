@@ -63,7 +63,8 @@ func loadMCPEventResources(ctx context.Context, appID string, identity auth.Runt
 		return nil, fmt.Errorf("load MCP event scope: %w", err)
 	}
 	// Token, tenant, family, version, and app kind must all agree before subjects are derived.
-	if runtime.AppID != identity.AppID || runtime.AccountID != identity.AccountID || runtime.AppFamilyID != identity.AppFamilyID || runtime.Kind != store.AppKindMCP || identity.Kind != store.AppKindMCP {
+	// A combined SDK version can deliver events only when both the runtime and token projection carry its hosted MCP marker.
+	if runtime.AppID != identity.AppID || runtime.AccountID != identity.AccountID || runtime.AppFamilyID != identity.AppFamilyID || runtime.Kind != identity.Kind || (runtime.Kind != store.AppKindMCP && (runtime.Kind != store.AppKindSDK || !runtime.HostedMCP || !identity.HostedMCP)) {
 		return nil, errors.New("MCP event scope does not match the authorized runtime")
 	}
 	selections, err := models.DecodeAppSelections(runtime.ScopeSchemaVersion, runtime.Selections)

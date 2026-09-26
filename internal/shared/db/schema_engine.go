@@ -1305,8 +1305,7 @@ func engineSchemaQueries() []string {
 				OR (kind = 'mcp' AND delivery_mode IS NULL)
 			),
 			CONSTRAINT chk_fused_app_families_stable_mcp CHECK (
-				(kind = 'sdk' AND mcp_stable_app_id IS NULL AND NOT mcp_stable_route_initialized)
-				OR (kind = 'mcp' AND (mcp_stable_app_id IS NULL OR mcp_stable_route_initialized))
+				mcp_stable_app_id IS NULL OR mcp_stable_route_initialized
 			),
 			UNIQUE (app_family_id, account_id)
 		);`,
@@ -1349,6 +1348,7 @@ func engineSchemaQueries() []string {
 			generator_version      text,
 			sdk_generation_job_id  text,
 			sdk_generation_status  text CONSTRAINT chk_fused_apps_sdk_generation_status CHECK (sdk_generation_status IS NULL OR sdk_generation_status IN ('pending', 'complete', 'failed', 'skipped')),
+			hosted_mcp             boolean NOT NULL DEFAULT false,
 			status                 text NOT NULL
 			                       CHECK (status IN ('building', 'active', 'deprecated')),
 			CONSTRAINT chk_fused_apps_sdk_generation_state CHECK (
@@ -1403,6 +1403,8 @@ func engineSchemaQueries() []string {
 		// place; no app identity or runtime selection is rewritten.
 		`ALTER TABLE fused_apps ADD COLUMN IF NOT EXISTS sdk_generation_job_id text;`,
 		`ALTER TABLE fused_apps ADD COLUMN IF NOT EXISTS sdk_generation_status text;`,
+		// The delivery marker is immutable per version and keeps MCP route admission independent of mutable plans.
+		`ALTER TABLE fused_apps ADD COLUMN IF NOT EXISTS hosted_mcp boolean NOT NULL DEFAULT false;`,
 		// Existing SDK families bind to the delivery class already evidenced by their durable versions; mixed history fails closed.
 		`DO $$
 		BEGIN
@@ -1541,9 +1543,19 @@ func engineSchemaQueries() []string {
 				ALTER TABLE fused_app_families
 				ADD CONSTRAINT chk_fused_app_families_stable_mcp
 				CHECK (
-					(kind = 'sdk' AND mcp_stable_app_id IS NULL AND NOT mcp_stable_route_initialized)
-					OR (kind = 'mcp' AND (mcp_stable_app_id IS NULL OR mcp_stable_route_initialized))
+					mcp_stable_app_id IS NULL OR mcp_stable_route_initialized
 				);
+			END IF;
+			-- Existing Engines replace the old SDK exclusion once; later startups keep the canonical constraint untouched.
+			IF EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'chk_fused_app_families_stable_mcp'
+				  AND conrelid = 'fused_app_families'::regclass
+				  AND pg_get_constraintdef(oid) LIKE '%kind%'
+			) THEN
+				ALTER TABLE fused_app_families DROP CONSTRAINT chk_fused_app_families_stable_mcp;
+				ALTER TABLE fused_app_families ADD CONSTRAINT chk_fused_app_families_stable_mcp
+					CHECK (mcp_stable_app_id IS NULL OR mcp_stable_route_initialized);
 			END IF;
 			IF NOT EXISTS (
 				SELECT 1 FROM pg_constraint

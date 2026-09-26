@@ -27,6 +27,7 @@ interface SdkListItem {
   version_count: number;
   kind: "sdk" | "mcp";
   delivery_mode?: "sdk" | "api";
+  hosted_mcp?: boolean;
   target_type: string;
   target_language?: string;
   sandbox_url?: string;
@@ -102,6 +103,7 @@ function readAppPage(query: string, page: number, state: AppCatalogueState): Pro
           version_count
           kind
           delivery_mode
+          hosted_mcp
           target_language
           created_at: latest_created_at
           status: latest_status
@@ -169,6 +171,10 @@ function SdkNameCell({ sdk, archived }: { sdk: SdkListItem; archived: boolean })
           <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-violet-100 text-violet-700 uppercase tracking-wider">
             MCP
           </span>
+        )}
+        {/* One combined family advertises MCP alongside its SDK and REST badges. */}
+        {sdk.hosted_mcp && sdk.target_type !== "mcp" && (
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-violet-100 text-violet-700 uppercase tracking-wider">MCP</span>
         )}
         {sdk.target_type !== "mcp" && (
           <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-700 uppercase tracking-wider">

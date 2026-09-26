@@ -73,9 +73,9 @@ Provider credentials, provider error bodies, operation schemas, runtime tokens,
 and private Unified mappings never appear in the response. Search telemetry
 retains the existing content-free search observation contract.
 
-## Prompt operation discovery
+## Describe operation discovery
 
-`fused-cli prompt '<goal>'` uses the same licensed Registry endpoint to select
+`fused-cli describe '<goal>'` uses the same licensed Registry endpoint to select
 operations for SDK, MCP, and REST app proposals. Goal parsing still uses the
 Registry's configured chat model; operation selection uses Jev. The CLI displays
 the Jev disclosure before resolution and requires interactive proposal review
@@ -90,5 +90,5 @@ outage, and names outside the catalogue fail rather than falling back to lexical
 ranking. Missing operation intent requires clarification: all operations must be
 explicitly requested. Event-only services retain event-only scope.
 
-Prompt's creation-time classification does not enable intelligent runtime MCP
+Describe's creation-time classification does not enable intelligent runtime MCP
 search. The separate MCP version setting remains opt-in.

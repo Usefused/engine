@@ -66,16 +66,18 @@ export interface ConsumerGenerationPanelProps {
 
 /** Names the adapter-specific setup while retaining one shared selection form. */
 function GenerationModeHeader({ generationMode }: { generationMode: AppCreationMode }) {
-  const title = generationMode === "mcp" ? "MCP server setup" : generationMode === "api" ? "REST API setup" : "SDK setup";
-  const description = generationMode === "mcp"
+  const title = generationMode === "app" ? "App setup" : generationMode === "mcp" ? "MCP server setup" : generationMode === "api" ? "REST API setup" : "SDK setup";
+  const description = generationMode === "app"
+    ? "One identity and token for SDK, MCP, and REST delivery."
+    : generationMode === "mcp"
     ? "Configure the MCP server your agent connects to."
     : generationMode === "api"
       ? "Configure the Engine REST API your app calls."
       : "Configure the generated package your app imports.";
   return (
-    <div className="border-b border-slate-200 bg-slate-50 p-6">
-      <h2 className="text-xl font-bold text-slate-900 mb-2">{title}</h2>
-      <p className="text-sm text-slate-500">{description}</p>
+    <div className="border-b border-slate-200 bg-slate-50 px-4 py-4">
+      <h2 className="mb-1 text-lg font-bold text-slate-900">{title}</h2>
+      <p className="text-xs leading-4 text-slate-500">{description}</p>
     </div>
   );
 }
@@ -85,11 +87,11 @@ function NameField({ generationMode, sdkName, setSdkName, setIsDuplicate, checkD
   generationMode: AppCreationMode; sdkName: string; setSdkName: (v: string) => void; setIsDuplicate: (v: boolean) => void; checkDuplicateSDK: () => void;
 }) {
   // One-company Engines use simple family names; package-manager scopes add no identity value here.
-  const placeholder = generationMode === "mcp" ? "customer-support" : generationMode === "api" ? "customer-api" : "customer-sdk";
-  const label = generationMode === "mcp" ? "Server name" : generationMode === "api" ? "API name" : "SDK name";
+  const placeholder = generationMode === "app" ? "customer-app" : generationMode === "mcp" ? "customer-support" : generationMode === "api" ? "customer-api" : "customer-sdk";
+  const label = generationMode === "app" ? "App name" : generationMode === "mcp" ? "Server name" : generationMode === "api" ? "API name" : "SDK name";
   return (
     <div>
-      <label className="block text-sm font-medium text-slate-700 mb-1.5">{label}</label>
+      <label className="mb-1 block text-sm font-medium text-slate-700">{label}</label>
       <input
         type="text"
         required
@@ -97,28 +99,29 @@ function NameField({ generationMode, sdkName, setSdkName, setIsDuplicate, checkD
         value={sdkName}
         onChange={e => { setSdkName(e.target.value); setIsDuplicate(false); }}
         onBlur={generationMode !== "mcp" ? checkDuplicateSDK : undefined}
-        className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:border-[var(--brand-violet)] focus:ring-2 focus:ring-[var(--brand-violet)]/20 transition-all bg-slate-50 focus:bg-white"
+        className="w-full rounded-lg border border-slate-300 bg-slate-50 px-2.5 py-1.5 text-sm transition-all focus:border-[var(--brand-violet)] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[var(--brand-violet)]/20"
       />
     </div>
   );
 }
 
+/** Keeps an optional webhook bundle name aligned with the compact identity fields. */
 function WebhookBundleField({ totalSelectedWebhooks, webhookAttachment, setWebhookAttachment }: {
   totalSelectedWebhooks: number; webhookAttachment: string; setWebhookAttachment: (v: string) => void;
 }) {
   if (totalSelectedWebhooks === 0) return null;
   return (
     <div>
-      <label className="block text-sm font-medium text-slate-700 mb-1.5">Webhook bundle</label>
+      <label className="mb-1 block text-sm font-medium text-slate-700">Webhook bundle</label>
       <input
         type="text"
         required
         placeholder="customer-events"
         value={webhookAttachment}
         onChange={(event) => setWebhookAttachment(event.target.value)}
-        className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm bg-white"
+        className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm"
       />
-      <p className="mt-1.5 text-xs text-slate-500">Name of the team-owned webhook configuration that supplies these events.</p>
+      <p className="mt-1 text-xs text-slate-500">Name of the team-owned webhook configuration that supplies these events.</p>
     </div>
   );
 }
@@ -131,18 +134,19 @@ function VersionField({ generationMode, appVersion, setAppVersion, setIsDuplicat
   const isSdkKind = generationMode !== "mcp";
   return (
     <div>
-      <label className="block text-sm font-medium text-slate-700 mb-1.5 flex justify-between">
+      <label htmlFor="app-version" className="mb-1 flex justify-between text-sm font-medium text-slate-700">
         <span>Version</span>
         {isSdkKind && checkingDuplicate && <span className="text-xs text-slate-400">Checking...</span>}
       </label>
       <input
+        id="app-version"
         type="text"
         required
         placeholder="1.0.0"
         value={appVersion}
         onChange={e => { setAppVersion(e.target.value); setIsDuplicate(false); }}
         onBlur={isSdkKind ? checkDuplicateSDK : undefined}
-        className="w-full px-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:border-[var(--brand-violet)] focus:ring-2 focus:ring-[var(--brand-violet)]/20 transition-all bg-slate-50 focus:bg-white"
+        className="w-full rounded-lg border border-slate-300 bg-slate-50 px-2.5 py-1.5 text-sm transition-all focus:border-[var(--brand-violet)] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[var(--brand-violet)]/20"
       />
       {isSdkKind && isDuplicate && (
         <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded-lg flex items-start gap-2 animate-in fade-in slide-in-from-top-1">
@@ -162,43 +166,29 @@ function VersionField({ generationMode, appVersion, setAppVersion, setIsDuplicat
 function LanguageSelector({ generationMode, language, setLanguage }: {
   generationMode: AppCreationMode; language: "typescript" | "python"; setLanguage: (v: "typescript" | "python") => void;
 }) {
-  if (generationMode !== "sdk") return null;
+  // Combined delivery generates the same typed package as an SDK-only App.
+  if (generationMode !== "sdk" && generationMode !== "app") return null;
   return (
-    <div className="pt-2">
-      <label className="block text-sm font-medium text-slate-700 mb-2">Language</label>
-      <div className="grid grid-cols-2 gap-3">
-        <button
-          data-track="select_language_typescript"
-          type="button"
-          onClick={() => setLanguage("typescript")}
-          className={`flex items-center justify-center py-2 px-3 rounded-lg border transition-all ${
-            language === "typescript"
-              ? "border-[var(--brand-violet)] bg-[var(--brand-violet-tint)] text-[var(--brand-violet)]"
-              : "border-slate-200 bg-white text-slate-500 hover:border-slate-300"
-          }`}
-        >
-          <span className="text-sm font-medium">TypeScript</span>
-        </button>
-        <button
-          data-track="select_language_python"
-          type="button"
-          onClick={() => setLanguage("python")}
-          className={`flex items-center justify-center py-2 px-3 rounded-lg border transition-all ${
-            language === "python"
-              ? "border-[var(--brand-violet)] bg-[var(--brand-violet-tint)] text-[var(--brand-violet)]"
-              : "border-slate-200 bg-white text-slate-500 hover:border-slate-300"
-          }`}
-        >
-          <span className="text-sm font-medium">Python</span>
-        </button>
-      </div>
+    <div>
+      <label htmlFor="app-language" className="mb-1 block text-sm font-medium text-slate-700">Language</label>
+      <select
+        id="app-language"
+        data-track="select_app_language"
+        value={language}
+        onChange={event => setLanguage(event.target.value as "typescript" | "python")}
+        className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm focus:border-[var(--brand-violet)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-violet)]/20"
+      >
+        <option value="typescript">TypeScript</option>
+        <option value="python">Python</option>
+      </select>
     </div>
   );
 }
 
+/** Keeps the selected-operation count visible without adding another large form section. */
 function SelectedOperationsSummary({ totalSelectedServices, totalSelected }: { totalSelectedServices: number; totalSelected: number }) {
   return (
-    <div className="flex items-center justify-between mb-6">
+    <div className="mb-3 flex items-center justify-between">
       <span className="text-sm text-slate-500 font-medium">Selected operations</span>
       <div className="flex items-center gap-3">
         {totalSelectedServices > 10 && (
@@ -206,7 +196,7 @@ function SelectedOperationsSummary({ totalSelectedServices, totalSelected }: { t
             Max 10 services allowed ({totalSelectedServices} selected)
           </span>
         )}
-        <span className="inline-flex items-center justify-center px-2.5 py-1 rounded-full text-xs font-bold bg-[var(--brand-violet-tint)] text-[var(--brand-violet)]">
+        <span className="inline-flex items-center justify-center rounded-full bg-[var(--brand-violet-tint)] px-2 py-0.5 text-xs font-bold text-[var(--brand-violet)]">
           {totalSelected}
         </span>
       </div>
@@ -286,15 +276,15 @@ function GenerateSubmitButtonContent({ generating, generationMode }: { generatin
     return (
       <>
         <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-        {generationMode === "mcp" ? "Deploying..." : generationMode === "api" ? "Publishing..." : "Generating..."}
+        {generationMode === "mcp" ? "Deploying..." : generationMode === "api" ? "Publishing..." : generationMode === "app" ? "Creating..." : "Generating..."}
       </>
     );
   }
-  if (generationMode === "sdk") {
+  if (generationMode === "sdk" || generationMode === "app") {
     return (
       <>
         <Download className="w-5 h-5" />
-        Create SDK
+        {generationMode === "app" ? "Create App" : "Create SDK"}
       </>
     );
   }
@@ -322,7 +312,7 @@ function GenerateSubmitButton({ generating, disabled, generationMode }: { genera
       data-track="generate_sdk_or_mcp"
       type="submit"
       disabled={disabled}
-      className="w-full py-3 px-4 bg-slate-950 hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-xl shadow-sm transition-all flex items-center justify-center gap-2 active:scale-[0.98]"
+      className="flex w-full items-center justify-center gap-2 rounded-xl bg-slate-950 px-4 py-2.5 font-semibold text-white shadow-sm transition-all hover:bg-slate-800 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
     >
       <GenerateSubmitButtonContent generating={generating} generationMode={generationMode} />
     </button>
@@ -352,9 +342,9 @@ function SdkDeploymentResult({ generationMode, sdkDeployment, sdkTokenCopied, se
   return (
     <div className="mt-4 border-t border-slate-200 pt-4 text-sm text-slate-700">
       <div className="flex items-center gap-2 font-semibold text-slate-900">
-        <Check className="h-4 w-4 text-emerald-600" /> {isAPI ? "REST API ready" : "SDK ready"}
+        <Check className="h-4 w-4 text-emerald-600" /> {generationMode === "app" ? "App ready: SDK, MCP, and REST" : isAPI ? "REST API ready" : "SDK ready"}
       </div>
-      <p className="mt-2 text-xs text-slate-500">{isAPI ? "The API is published on this Engine." : "The package has been downloaded."}</p>
+      <p className="mt-2 text-xs text-slate-500">{generationMode === "app" ? "The package is downloaded, and the same App ID and token work for REST and MCP." : isAPI ? "The API is published on this Engine." : "The package has been downloaded."}</p>
       {sdkDeployment.token && (
         <ExecutionTokenField token={sdkDeployment.token} copied={sdkTokenCopied} onCopy={() => setSdkTokenCopied(true)} />
       )}
@@ -373,8 +363,10 @@ function SdkDeploymentResult({ generationMode, sdkDeployment, sdkTokenCopied, se
   );
 }
 
-function McpDeploymentResult({ mcpDeployment, mcpTokenCopied, setMcpTokenCopied }: {
+/** Shows hosted MCP endpoints while keeping the combined App token in its shared result. */
+function McpDeploymentResult({ mcpDeployment, mcpTokenCopied, setMcpTokenCopied, generationMode }: {
   mcpDeployment: ConsumerGenerationPanelProps["mcpDeployment"]; mcpTokenCopied: boolean; setMcpTokenCopied: (v: boolean) => void;
+  generationMode: AppCreationMode;
 }) {
   if (!mcpDeployment) return null;
   return (
@@ -385,10 +377,10 @@ function McpDeploymentResult({ mcpDeployment, mcpTokenCopied, setMcpTokenCopied 
       <div className="mt-3">
         <McpTransportEndpoints endpoints={mcpDeployment} />
       </div>
-      {mcpDeployment.token && (
+      {generationMode !== "app" && mcpDeployment.token && (
         <ExecutionTokenField token={mcpDeployment.token} copied={mcpTokenCopied} onCopy={() => setMcpTokenCopied(true)} />
       )}
-      <p className="mt-2 text-xs text-slate-500">This token is displayed only when the server is first created. Store it securely.</p>
+      {generationMode !== "app" && <p className="mt-2 text-xs text-slate-500">This token is displayed only when the server is first created. Store it securely.</p>}
     </div>
   );
 }
@@ -426,33 +418,39 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
 
   // Pending or conflicting workflow selections cannot submit an older capability set.
   const submitDisabled = generationSubmitDisabled(props);
+  // Package language shares a row with version only when creating a new SDK-bearing App.
+  const showsLanguage = !props.existingApp && (generationMode === "sdk" || generationMode === "app");
 
   return (
-    <div className="w-full lg:w-80 flex-shrink-0">
+    /* The stacked layout should not stretch every input across a tablet-width screen. */
+    <div className="mx-auto w-full max-w-lg flex-shrink-0 lg:mx-0 lg:w-80 lg:max-w-none">
       <div className="bg-white rounded-2xl border border-slate-200 shadow-xl shadow-slate-200/50 overflow-hidden sticky top-8">
         <GenerationModeHeader generationMode={generationMode} />
 
         <form
           onSubmit={handleGenerate}
-          className="p-6 space-y-5"
+          className="space-y-3 p-4"
           toolname="generate_sdk"
           tooldescription="Create a generated SDK, direct REST API, or MCP server from selected operations. Requires name and version."
         >
           <GenerationIdentity props={props} />
           <WebhookBundleField totalSelectedWebhooks={totalSelectedWebhooks} webhookAttachment={webhookAttachment} setWebhookAttachment={setWebhookAttachment} />
-          <VersionField
-            generationMode={generationMode}
-            appVersion={appVersion}
-            setAppVersion={setAppVersion}
-            setIsDuplicate={setIsDuplicate}
-            checkDuplicateSDK={checkDuplicateSDK}
-            checkingDuplicate={checkingDuplicate}
-            isDuplicate={isDuplicate}
-          />
-          {/* A successor keeps its family's language, while new SDKs retain the normal selector. */}
-          <NewAppLanguage props={props} />
+          {/* Let Language consume the remaining form width beside the compact Version field. */}
+          <div className={showsLanguage ? "grid w-full grid-cols-[7rem_minmax(0,1fr)] gap-3" : ""}>
+            <VersionField
+              generationMode={generationMode}
+              appVersion={appVersion}
+              setAppVersion={setAppVersion}
+              setIsDuplicate={setIsDuplicate}
+              checkDuplicateSDK={checkDuplicateSDK}
+              checkingDuplicate={checkingDuplicate}
+              isDuplicate={isDuplicate}
+            />
+            {/* A successor keeps its family's language, while new SDKs expose it beside Version. */}
+            <NewAppLanguage props={props} />
+          </div>
 
-          <div className="pt-4 border-t border-slate-100">
+          <div className="border-t border-slate-100 pt-3">
             {/* Workflow methods participate in the same operation count and app creation action. */}
             {!!props.selectedWorkflowCount && <p className="mb-3 text-xs text-slate-500">{props.selectedWorkflowCount} selected {/* Match the singular label when only one workflow is chosen. */}workflow{props.selectedWorkflowCount === 1 ? "" : "s"}. Required service versions will be enabled when you create the app.</p>}
             <SelectedOperationsSummary totalSelectedServices={totalSelectedServices} totalSelected={totalSelected} />
@@ -465,13 +463,16 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
               AddSelectedServiceToWorkspaceButton={AddSelectedServiceToWorkspaceButton}
             />
 
+            {/* Keep search consent next to the creation action where its effect is decided. */}
+            {!props.existingApp && (generationMode === "mcp" || generationMode === "app") && <IntelligentSearchField {...props} />}
+
             <GenerateSubmitButton generating={generating} disabled={submitDisabled} generationMode={generationMode} />
 
             <GenerationProgress generating={generating} generateStatus={generateStatus} />
 
             <SdkDeploymentResult generationMode={generationMode} sdkDeployment={sdkDeployment} sdkTokenCopied={sdkTokenCopied} setSdkTokenCopied={setSdkTokenCopied} />
 
-            <McpDeploymentResult mcpDeployment={mcpDeployment} mcpTokenCopied={mcpTokenCopied} setMcpTokenCopied={setMcpTokenCopied} />
+            <McpDeploymentResult generationMode={generationMode} mcpDeployment={mcpDeployment} mcpTokenCopied={mcpTokenCopied} setMcpTokenCopied={setMcpTokenCopied} />
           </div>
         </form>
       </div>
@@ -490,8 +491,8 @@ function GenerationIdentity({ props }: { props: ConsumerGenerationPanelProps }) 
   return <>
     <AppOwnerControls ownerTeams={props.ownerTeams} ownerTeamId={props.ownerTeamId} buckets={props.availableBuckets} bucketId={props.bucketId} onOwnerTeamChange={props.setOwnerTeamId} onBucketChange={props.setBucketId} onCreateCredential={props.onCreateCredential} />
     <NameField {...props} />
-    {/* Hosted MCP requires its authored description and explicit classifier consent. */}
-    {props.generationMode === "mcp" && <McpSearchSettings {...props} />}
+    {/* MCP delivery needs an authored description for discovery. */}
+    {(props.generationMode === "mcp" || props.generationMode === "app") && <McpDescriptionField {...props} />}
   </>;
 }
 
@@ -528,22 +529,30 @@ function ExecutionTokenField({ token, copied, onCopy }: { token: string; copied:
   );
 }
 
-/** Keeps Jev consent explicit with an aligned control and a compact processing note. */
-function McpSearchSettings(props: ConsumerGenerationPanelProps) {
-  return <div className="space-y-4">
-    <label className="block text-sm font-medium text-slate-700">Server description
-      {/* Keep the server-level summary authored and available before discovery. */}
-      <textarea required maxLength={1024} value={props.mcpDescription} onChange={event => props.setMcpDescription(event.target.value)}
-        placeholder="Describe the services and tasks this server enables."
-        className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm" />
+/** Names the authored description for the delivery the user is creating. */
+function McpDescriptionField(props: ConsumerGenerationPanelProps) {
+  // A combined App has one user-facing identity, while MCP-only creation describes its server.
+  const isApp = props.generationMode === "app";
+  return <div>
+    <label className="block text-sm font-medium text-slate-700">{isApp ? "App description" : "Server description"}
+      {/* Preserve a description for MCP discovery in both creation modes. */}
+      <textarea required rows={2} maxLength={1024} value={props.mcpDescription} onChange={event => props.setMcpDescription(event.target.value)}
+        placeholder={isApp ? "Describe the services and tasks this app enables." : "Describe the services and tasks this server enables."}
+        className="mt-1 w-full resize-y rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm" />
     </label>
+  </div>;
+}
+
+/** Shows optional Jev processing consent beside the final creation action. */
+function IntelligentSearchField(props: ConsumerGenerationPanelProps) {
+  return <div className="space-y-2 pb-3">
     <label className="flex items-center gap-2 text-sm text-slate-700">
       {/* Only an owner-selected checkbox adds the remote search provider to the config. */}
       <input type="checkbox" checked={props.intelligentSearch} onChange={event => props.setIntelligentSearch(event.target.checked)} aria-describedby="jev-disclosure"
         className="h-4 w-4 shrink-0 accent-[var(--brand-violet)]" />
       <span>Intelligent search with Jev</span>
     </label>
-    <div id="jev-disclosure" className="flex items-start gap-2 rounded-lg border border-violet-100 bg-violet-50/60 p-3 text-xs leading-5 text-slate-600">
+    <div id="jev-disclosure" className="flex items-start gap-2 rounded-lg border border-violet-100 bg-violet-50/60 p-2 text-xs leading-4 text-slate-600">
       <Info aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-violet-500" />
       <p>Search intent, operation names, and descriptions are sent to Jev via Fused Registry. No extra API key needed.</p>
     </div>

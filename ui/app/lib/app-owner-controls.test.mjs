@@ -24,12 +24,14 @@ test("renders owning team and intersection-only credential choices in product la
   assert.match(html, /type="button"/);
 });
 
+// The compact owner picker communicates personal ownership while retaining team credential guidance.
 test("explains personal ownership and shared credential choices", () => {
   const noTeams = renderToStaticMarkup(createElement(AppOwnerControls, {
     ownerTeams: [], ownerTeamId: "", buckets: [], bucketId: "", onOwnerTeamChange() {}, onBucketChange() {},
   }));
 	assert.match(noTeams, /Personal \(you\)/i);
-	assert.match(noTeams, /personal ownership still works/i);
+	// The compact form uses the selected option itself to explain personal ownership.
+	assert.doesNotMatch(noTeams, /personal ownership still works/i);
 
   const noBuckets = renderToStaticMarkup(createElement(AppOwnerControls, {
     ownerTeams: [{ id: "team-1", name: "Support", slug: "support" }], ownerTeamId: "team-1", buckets: [], bucketId: "", onOwnerTeamChange() {}, onBucketChange() {},

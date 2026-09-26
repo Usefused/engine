@@ -104,6 +104,24 @@ func TestValidateMCPTokenRejectsInvalidToken(t *testing.T) {
 	}
 }
 
+// TestValidateMCPTokenRequiresHostedSDKMarker protects the shared token boundary between REST and MCP.
+func TestValidateMCPTokenRequiresHostedSDKMarker(t *testing.T) {
+	previous := globalTokenValidator
+	defer func() { globalTokenValidator = previous }()
+	appID := uuid.New()
+	validator := &streamableTokenValidator{token: "good", kind: store.AppKindSDK}
+	globalTokenValidator = validator
+	// An ordinary SDK token must not open an MCP session even for the same App ID.
+	if _, err := validateMCPToken(context.Background(), appID.String(), "good"); err == nil {
+		t.Fatal("ordinary SDK identity opened an MCP session")
+	}
+	validator.hostedMCP = true
+	// The immutable hosted marker is the additional authority granted to the combined delivery.
+	if _, err := validateMCPToken(context.Background(), appID.String(), "good"); err != nil {
+		t.Fatalf("hosted SDK identity denied MCP: %v", err)
+	}
+}
+
 func TestValidateMCPTokenUsesValidatorForEverySession(t *testing.T) {
 	orig := globalTokenValidator
 	defer func() { globalTokenValidator = orig }()

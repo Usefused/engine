@@ -14,6 +14,8 @@ test("offers every supported app delivery adapter from one accessible create men
 
   assert.match(menu, /aria-haspopup="menu"/);
   assert.match(menu, /role="menu"/);
+  assert.match(menu, /primaryOption\?\.mode === "app" \? "\/integrations\/builder"/);
+  assert.match(menu, /\/integrations\/builder\?tab=app/);
   assert.match(menu, /\/integrations\/builder\?tab=sdk/);
   assert.match(menu, /\/integrations\/builder\?tab=api/);
   assert.match(menu, /\/integrations\/builder\?tab=mcp/);
@@ -31,13 +33,12 @@ test("reuses the create menu in populated and empty app catalogue states", async
   assert.doesNotMatch(catalogue, /<Link\s+to="\/integrations\/builder"/);
 });
 
-// An untyped builder route must not silently commit the app to SDK delivery.
-test("asks for app type when the builder URL has no explicit delivery mode", async () => {
+// An untyped builder route starts the combined flow without an extra delivery-choice step.
+test("defaults the builder to a combined App", async () => {
   const builder = await readFile(builderPath, "utf8");
 
-  assert.match(builder, /if \(!requestedGenerationMode\)/);
-  assert.match(builder, /<BuilderModeSelectionPage onSelect=\{selectGenerationMode\}/);
-  assert.match(builder, /aria-label="App type"/);
+  assert.match(builder, /appCreationModeFromSearch\(params\)/);
+  assert.doesNotMatch(builder, /BuilderModeSelectionPage/);
 });
 
 // A single-company Engine names app families locally instead of using package-manager scopes.

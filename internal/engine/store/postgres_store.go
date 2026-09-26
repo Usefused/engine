@@ -159,7 +159,7 @@ f.owner_subject_id, f.owner_team_id,
 fb.bucket_id, a.scope_schema_version, a.selections,
 a.unified_definition_schema_version, a.unified_definitions,
 a.unified_definition_hash, a.unified_codegen_descriptor_hash,
-a.status, f.kind, f.display_name,
+a.status, f.kind, a.hosted_mcp, f.display_name,
 COALESCE((
 	SELECT applied.resolved_payload->>'description'
 	FROM fused_config_plans applied
@@ -198,7 +198,7 @@ func scanAppRuntimeRow(row pgx.Row, includeTotal bool) (*AppRuntime, int, error)
 		&bucketID, &scope.ScopeSchemaVersion, &scope.Selections,
 		&scope.UnifiedDefinitionSchemaVersion, &scope.UnifiedDefinitions,
 		&scope.UnifiedDefinitionHash, &scope.UnifiedCodegenDescriptorHash, &scope.Status,
-		&scope.Kind, &name, &scope.Description, &scope.FusedIntelligentClassifier, &version, &configKey, &scope.CreatedAt,
+		&scope.Kind, &scope.HostedMCP, &name, &scope.Description, &scope.FusedIntelligentClassifier, &version, &configKey, &scope.CreatedAt,
 	}
 	if includeTotal {
 		targets = append(targets, &total)
@@ -314,7 +314,7 @@ func (s *postgresStore) ListAuthorizedAppRuntimesByAccount(ctx context.Context, 
 		JOIN fused_app_families f ON f.app_family_id = a.app_family_id AND f.account_id = a.account_id
 		-- service_id IS NULL keeps this the family default row even once per-service overrides exist for the family.
 		LEFT JOIN fused_app_family_buckets fb ON fb.app_family_id = f.app_family_id AND fb.service_id IS NULL
-		WHERE a.account_id = $1 AND ($2 = '' OR f.kind = $2)
+		WHERE a.account_id = $1 AND ($2 = '' OR f.kind = $2 OR ($2 = 'mcp' AND a.hosted_mcp))
 		  AND a.status IN ('active', 'deprecated')
 		  AND ($3 OR a.app_family_id = ANY($4::uuid[]))
 		ORDER BY a.created_at DESC

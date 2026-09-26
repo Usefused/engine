@@ -42,6 +42,7 @@ var (
 	ErrAppFamilyKindMismatch          = errors.New("app kind does not match app family")
 	ErrAPIFamilyLimitExceeded         = errors.New("API family limit exceeded")
 	ErrSDKFamilyLimitExceeded         = errors.New("SDK family limit exceeded")
+	ErrMCPFamilyLimitExceeded         = errors.New("MCP family limit exceeded")
 	ErrSDKGenerationTransitionInvalid = errors.New("SDK generation transition is invalid")
 	ErrAppStatusInvalid               = errors.New("app status is invalid")
 
@@ -88,6 +89,8 @@ type AppRuntime struct {
 	// this is a listing/UI distinction (see ListMCPAppsByAccount), not an
 	// enforcement mechanism.
 	Kind AppKind
+	// HostedMCP marks an SDK/REST version that also serves the same scope over MCP.
+	HostedMCP bool
 	// Name is an optional user-supplied label (CLI --name flag, or a
 	// workspace config's name), surfaced on the MCP servers list page. Never
 	// set by a reactivate-only activate call (persistAppRuntime isn't invoked
@@ -155,8 +158,10 @@ type App struct {
 	GeneratorVersion               string // SDK only, empty for MCP
 	// SDKGenerationJobID and SDKGenerationStatus retain only the durable,
 	// credential-free Registry job identity needed to recover a building SDK.
-	SDKGenerationJobID    string
-	SDKGenerationStatus   string
+	SDKGenerationJobID  string
+	SDKGenerationStatus string
+	// HostedMCP is immutable delivery identity for this exact version.
+	HostedMCP             bool
 	Status                AppStatus
 	DeprecationMessage    string
 	PlannedDeactivationAt *time.Time
@@ -348,6 +353,8 @@ type AuthProjection struct {
 	TokenID     uuid.UUID
 	Version     string
 	Kind        AppKind
+	// HostedMCP is bound to the exact authorized version, never inferred from the request transport.
+	HostedMCP   bool
 	AppStatus   AppStatus
 	TokenPolicy AppTokenPolicy
 	BindingMode AppTokenBindingMode

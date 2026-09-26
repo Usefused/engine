@@ -1,5 +1,5 @@
 export type AppKind = "sdk" | "mcp";
-export type AppCreationMode = "sdk" | "api" | "mcp";
+export type AppCreationMode = "app" | "sdk" | "api" | "mcp";
 export type AppSelectorResourceType = "SERVICE" | "BUCKET";
 
 export interface AppOwningTeam {
@@ -76,17 +76,17 @@ export const APP_BUILDER_OPERATIONS = {
 /** Maps a UI delivery choice onto the two persisted app configuration kinds. */
 export function appKindForCreationMode(mode: AppCreationMode): AppKind {
   // Direct REST is the package-free delivery mode of an SDK-kind app, not a third persistence kind.
-  if (mode === "api") return "sdk";
+  if (mode === "api" || mode === "app") return "sdk";
   return mode;
 }
 
-/** Reads an explicit supported delivery choice without silently defaulting an untyped builder entry. */
-export function appCreationModeFromSearch(search: string | URLSearchParams): AppCreationMode | null {
+/** Defaults an untyped builder entry to one App with all three delivery methods. */
+export function appCreationModeFromSearch(search: string | URLSearchParams): AppCreationMode {
   const params = typeof search === "string" ? new URLSearchParams(search) : search;
   const mode = params.get("tab");
-  // Only the three product choices may lock immutable delivery behavior.
-  if (mode === "sdk" || mode === "api" || mode === "mcp") return mode;
-  return null;
+  // Explicit single-method choices preserve their narrower immutable delivery behavior.
+  if (mode === "app" || mode === "sdk" || mode === "api" || mode === "mcp") return mode;
+  return "app";
 }
 
 export function appConfigKey(kind: AppKind, config: Record<string, unknown>): string {

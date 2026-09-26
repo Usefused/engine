@@ -201,7 +201,12 @@ func validateMCPToken(ctx context.Context, appIDHex, token string) (auth.Runtime
 	}
 	// Every session passes through the process-shared validator. Valid entries
 	// are bounded to 30 seconds and precise revoke events evict them immediately.
-	return globalTokenValidator.Validate(ctx, appID, token)
+	identity, err := globalTokenValidator.Validate(ctx, appID, token)
+	// MCP transport never accepts an ordinary SDK credential even when it names a runnable SDK version.
+	if err != nil || (identity.Kind != store.AppKindMCP && (identity.Kind != store.AppKindSDK || !identity.HostedMCP)) {
+		return auth.RuntimeIdentity{}, auth.ErrUnauthorized
+	}
+	return identity, nil
 }
 
 // mcpSessionContext preserves credential expiry without imposing an age limit on active work.

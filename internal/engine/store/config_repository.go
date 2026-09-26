@@ -801,6 +801,12 @@ func persistAppRuntimeTx(ctx context.Context, tx pgx.Tx, params *ApplyAppConfigP
 			return uuid.Nil, uuid.Nil, false, false, err
 		}
 	}
+	// Either standalone or shared hosted MCP delivery occupies one MCP family unit when runnable.
+	if appStatus == AppStatusActive && (params.Scope.Kind == AppKindMCP || params.Scope.HostedMCP) {
+		if err := admitMCPFamilyActivation(ctx, tx, params.Scope.AccountID, familyID); err != nil {
+			return uuid.Nil, uuid.Nil, false, false, err
+		}
+	}
 	appID, versionCreated, err := publishConfigAppTx(ctx, tx, familyID, *params)
 	// Publication failure rolls back quota admission and every preceding family binding.
 	if err != nil {
@@ -962,6 +968,7 @@ func publishConfigAppTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, para
 		GeneratorVersion:               params.GeneratorVersion,
 		SDKGenerationJobID:             params.SDKGenerationJobID,
 		SDKGenerationStatus:            params.SDKGenerationStatus,
+		HostedMCP:                      params.Scope.HostedMCP,
 		Status:                         status,
 		ExpectedFamilyKind:             params.Scope.Kind,
 	}
@@ -974,6 +981,12 @@ func publishConfigAppTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, para
 	if !created && app.ExpectedFamilyKind == AppKindSDK {
 		if err := updateSDKGenerationStateTx(ctx, tx, app); err != nil {
 			return uuid.Nil, false, err
+		}
+		// A recovered build can become runnable during reapply, after ordinary publication promotion was deferred.
+		if app.HostedMCP && app.Status.Runnable() && !persisted.Status.Runnable() {
+			if err := promoteStableMCPVersionTx(ctx, tx, app); err != nil {
+				return uuid.Nil, false, err
+			}
 		}
 	}
 	return persisted.AppID, created, nil

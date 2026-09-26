@@ -49,9 +49,12 @@ func TestAppFamiliesPreserveUIVersionQueries(t *testing.T) {
 			account, family, oldID, newID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 			latestCreatedAt := time.Now().UTC()
 			deliveryMode := store.AppDeliveryMode("")
+			stableAppID := oldID
 			// SDK families expose package delivery while MCP families have no delivery subtype.
 			if kind == store.AppKindSDK {
 				deliveryMode = store.AppDeliveryModeSDK
+				// SDK-only families have no promoted MCP route; combined Apps are covered separately.
+				stableAppID = uuid.Nil
 			}
 			fixture := &workspaceTestStore{accountID: account, mockScopes: map[uuid.UUID]*store.AppRuntime{
 				oldID: {AccountID: account, AppFamilyID: family, AppID: oldID, StableAppID: oldID, Kind: kind, Name: "Support:Tools", Version: "1", CreatedAt: latestCreatedAt.Add(-time.Minute)},
@@ -60,7 +63,7 @@ func TestAppFamiliesPreserveUIVersionQueries(t *testing.T) {
 			s := &appFamilyGraphQLTestStore{artifactReferenceGraphQLTestStore: &artifactReferenceGraphQLTestStore{workspaceTestStore: fixture}, family: store.AppFamilyCatalogItem{
 				AppFamilyID: family, Name: "Support:Tools", Kind: kind, DeliveryMode: deliveryMode, VersionCount: 2,
 				LatestAppID: newID, LatestVersion: "2", LatestStatus: store.AppStatusActive, LatestCreatedAt: &latestCreatedAt,
-				StableAppID: oldID, StableVersion: "1",
+				StableAppID: stableAppID, StableVersion: "1",
 			}}
 			h := mountMCPGraphQLTestHandler(t, s)
 			data := doMCPGraphQLRequest(t, h, fmt.Sprintf(`query {

@@ -34,7 +34,8 @@ func usesMCPConnectionSelectors(ctx context.Context) bool {
 // classifyMCPEndUserRefRequirement replaces only a proven pre-provider auth miss that a connection selector can satisfy.
 func classifyMCPEndUserRefRequirement(ctx context.Context, identity auth.RuntimeIdentity, auths fusedobject.AuthConfigs, requirements authrouting.Requirements, credentials map[string]any, dispatchErr error) error {
 	// Only a dynamic MCP identity on the direct physical bridge sources its user selector from X-Fused-End-User-Ref.
-	if !usesMCPConnectionSelectors(ctx) || identity.Kind != store.AppKindMCP || identity.BindingMode != store.AppTokenBindingDynamic {
+	// SDK tokens gain MCP-specific guidance only when the authorized exact version opted into hosted MCP.
+	if !usesMCPConnectionSelectors(ctx) || (identity.Kind != store.AppKindMCP && (identity.Kind != store.AppKindSDK || !identity.HostedMCP)) || identity.BindingMode != store.AppTokenBindingDynamic {
 		return dispatchErr
 	}
 	var routingErr *engine.AuthRoutingError

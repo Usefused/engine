@@ -717,6 +717,23 @@ func TestValidateSDKConfigDocumentRequiresBucket(t *testing.T) {
 	}
 }
 
+// TestValidateSDKConfigDocumentAdmitsHostedMCP proves one SDK document can safely opt into agent delivery.
+func TestValidateSDKConfigDocumentAdmitsHostedMCP(t *testing.T) {
+	doc := sdkConfigDocument{
+		APIVersion: "fused/v1", Kind: "sdk", Name: "customer-app", Version: "1.0.0", Language: "typescript", Bucket: "default",
+		MCP:      &sdkMCPDeliveryDocument{Description: "Customer operations"},
+		Services: map[string]sdkConfigServiceDoc{"crm": {Version: "1.0", Operations: []string{"listCustomers"}}},
+	}
+	if err := validateSDKConfigDocument(doc); err != nil {
+		t.Fatalf("combined App rejected: %v", err)
+	}
+	// Hosted discovery must have a useful summary before this SDK version can acquire an MCP route.
+	doc.MCP.Description = " "
+	if err := validateSDKConfigDocument(doc); err == nil || !strings.Contains(err.Error(), "mcp description") {
+		t.Fatalf("missing MCP description error = %v", err)
+	}
+}
+
 // TestAppConfigValidationRejectsCompetingOperationSelection proves SDK and MCP share the same exactly-one selection rule.
 func TestAppConfigValidationRejectsCompetingOperationSelection(t *testing.T) {
 	sdkDoc := sdkConfigDocument{

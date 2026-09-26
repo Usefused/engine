@@ -31,6 +31,7 @@ var appSummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"version":                      &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
 		"kind":                         &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
 		"delivery_mode":                &graphql.Field{Type: graphql.String},
+		"hosted_mcp":                   &graphql.Field{Type: graphql.Boolean},
 		"status":                       &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
 		"created_at":                   &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
 		"target_language":              &graphql.Field{Type: graphql.String},
@@ -265,7 +266,7 @@ func mcpAppOperationsGraphQLField(s store.Store) *graphql.Field {
 		}
 		item, err := repository.GetAuthorizedApp(p.Context, actor.accountID, appID, authorized)
 		// Exact app authorization is authoritative even when another version in the family is visible.
-		if err != nil || item == nil || item.Kind != store.AppKindMCP {
+		if err != nil || item == nil || (item.Kind != store.AppKindMCP && !item.HostedMCP) {
 			return nil, errors.New("MCP server was not found")
 		}
 		catalogue, err := loadMCPAppOperationCatalogue(p.Context, s, *item)
@@ -446,14 +447,15 @@ func appSummaryField(r *http.Request, item store.AppCatalogItem, counts map[uuid
 	fields := map[string]interface{}{
 		"app_family_id": item.AppFamilyID.String(), "app_id": item.AppID.String(),
 		"name": item.Name, "description": item.Description, "fused_intelligent_classifier": item.FusedIntelligentClassifier, "version": item.Version,
-		"kind": item.Kind, "delivery_mode": item.DeliveryMode, "status": item.Status, "created_at": item.CreatedAt.Format(mcpGraphQLTimeFormat),
+		"kind": item.Kind, "delivery_mode": item.DeliveryMode, "hosted_mcp": item.HostedMCP, "status": item.Status, "created_at": item.CreatedAt.Format(mcpGraphQLTimeFormat),
 		"target_language": item.TargetLanguage, "generator_version": item.GeneratorVersion,
 		"readme": item.Readme, "selections": appSelectionFields(item), "planned_deactivation_at": planned,
 	}
 	if item.Kind == store.AppKindSDK && countsAvailable {
 		fields["downloads"] = strconv.FormatInt(counts[item.AppID], 10)
 	}
-	if item.Kind == store.AppKindMCP {
+	// Combined SDK versions expose the same Engine-owned MCP transport projection.
+	if item.Kind == store.AppKindMCP || item.HostedMCP {
 		// Transport discovery belongs to Engine projection so reverse-proxy
 		// origins and legacy compatibility never drift across CLI and UI clients.
 		transportURLs := mcpTransportURLsForApp(r, item.AppFamilyID, item.AppID, item.StableAppID)

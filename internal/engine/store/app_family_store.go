@@ -180,15 +180,16 @@ func (s *postgresStore) GetAppFamilyQuotaUsage(ctx context.Context, accountID uu
 	var usage AppFamilyQuotaUsage
 	err := s.db.QueryRow(ctx, `
 		WITH scoped_families AS (
-			SELECT family.canonical_name,
+			SELECT family.canonical_name, family.kind,
 			       EXISTS (
 				 SELECT 1
 				 FROM fused_apps app
 				 WHERE app.app_family_id = family.app_family_id
 				   AND app.account_id = family.account_id
 				   AND app.status IN ('active', 'deprecated')
-				   AND (
-				     $2 NOT IN ('api', 'sdk')
+			   AND ($2 NOT IN ('mcp', 'hosted_mcp') OR family.kind = 'mcp' OR app.hosted_mcp)
+			   AND (
+			     $2 NOT IN ('api', 'sdk')
 				     OR ($2 = 'api' AND app.sdk_generation_status = 'skipped')
 				     OR ($2 = 'sdk' AND app.sdk_generation_status IS DISTINCT FROM 'skipped')
 				   )
@@ -198,12 +199,16 @@ func (s *postgresStore) GetAppFamilyQuotaUsage(ctx context.Context, accountID uu
 			  AND family.archived_at IS NULL
 			  AND (
 			    $2 = ''
-			    OR ($2 = 'api' AND family.kind = 'sdk')
-			    OR ($2 <> 'api' AND family.kind = $2)
+		    OR ($2 = 'api' AND family.kind = 'sdk')
+		    OR ($2 IN ('mcp', 'hosted_mcp') AND family.kind IN ('mcp', 'sdk'))
+		    OR ($2 NOT IN ('api', 'mcp', 'hosted_mcp') AND family.kind = $2)
 			  )
 		)
 		SELECT COUNT(*) FILTER (WHERE invokable),
-		       COALESCE(BOOL_OR(canonical_name = $3 AND invokable), FALSE)
+		       COALESCE(BOOL_OR(canonical_name = $3 AND invokable AND (
+		         ($2 = 'hosted_mcp' AND kind = 'sdk') OR
+		         ($2 <> 'hosted_mcp' AND ($2 <> 'mcp' OR kind = 'mcp'))
+		       )), FALSE)
 		FROM scoped_families
 	`, accountID, kind, canonicalName).Scan(&usage.CurrentInvokable, &usage.TargetInvokable)
 	return usage, err
@@ -259,8 +264,11 @@ func publishAppVersionTx(ctx context.Context, tx pgx.Tx, app App) (*App, bool, e
 		if !sameImmutableAppVersion(*existing, app) {
 			return nil, false, ErrAppVersionImmutable
 		}
-		if err := promoteStableMCPVersionTx(ctx, tx, app); err != nil {
-			return nil, false, err
+		// A failed SDK build may become active later in this transaction; its MCP alias follows that transition.
+		if existing.Status.Runnable() {
+			if err := promoteStableMCPVersionTx(ctx, tx, app); err != nil {
+				return nil, false, err
+			}
 		}
 		return existing, false, nil
 	}
@@ -279,12 +287,10 @@ func publishAppVersionTx(ctx context.Context, tx pgx.Tx, app App) (*App, bool, e
 	return &app, true, nil
 }
 
-// promoteStableMCPVersionTx advances the MCP family alias in the same transaction
-// that proves the immutable version exists and is runnable.
+// promoteStableMCPVersionTx advances the shared family's MCP alias only for a runnable MCP delivery.
 func promoteStableMCPVersionTx(ctx context.Context, tx pgx.Tx, app App) error {
-	// SDK execution remains version-pinned, so only MCP publication owns a
-	// mutable transport target.
-	if app.ExpectedFamilyKind != AppKindMCP || !app.Status.Runnable() {
+	// Plain SDK versions cannot acquire an MCP route through an unrelated apply.
+	if (app.ExpectedFamilyKind != AppKindMCP && !app.HostedMCP) || !app.Status.Runnable() {
 		return nil
 	}
 	result, err := tx.Exec(ctx, `
@@ -297,7 +303,7 @@ func promoteStableMCPVersionTx(ctx context.Context, tx pgx.Tx, app App) error {
 		    END
 		FROM fused_apps app
 		WHERE family.app_family_id = $1
-		  AND family.kind = 'mcp'
+		  AND (family.kind = 'mcp' OR (family.kind = 'sdk' AND app.hosted_mcp))
 		  AND app.app_id = $2
 		  AND app.app_family_id = family.app_family_id
 		  AND app.status IN ('active', 'deprecated')
@@ -341,7 +347,7 @@ func sameImmutableAppVersion(existing, requested App) bool {
 	requested = withUnifiedDefaults(requested)
 	if existing.SourceHash != requested.SourceHash || existing.ConfigKey != requested.ConfigKey ||
 		existing.CapabilityHash != requested.CapabilityHash || existing.ScopeSchemaVersion != requested.ScopeSchemaVersion ||
-		existing.GeneratorVersion != requested.GeneratorVersion ||
+		existing.GeneratorVersion != requested.GeneratorVersion || existing.HostedMCP != requested.HostedMCP ||
 		existing.UnifiedDefinitionSchemaVersion != requested.UnifiedDefinitionSchemaVersion ||
 		existing.UnifiedDefinitionHash != requested.UnifiedDefinitionHash ||
 		existing.UnifiedCodegenDescriptorHash != requested.UnifiedCodegenDescriptorHash {
@@ -497,18 +503,18 @@ func insertApp(ctx context.Context, tx pgx.Tx, app App) error {
 			 source_hash, capability_hash, scope_schema_version, selections,
 			 unified_definition_schema_version, unified_definitions,
 			 unified_definition_hash, unified_codegen_descriptor_hash,
-			 generator_version, sdk_generation_job_id, sdk_generation_status,
+			 generator_version, sdk_generation_job_id, sdk_generation_status, hosted_mcp,
 			 status, created_by, activated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-		        NULLIF($14, ''), NULLIF($15, ''), NULLIF($16, ''), $17,
-		        NULLIF($18, '00000000-0000-0000-0000-000000000000'::uuid),
-		        CASE WHEN $17 = 'active' THEN NOW() ELSE NULL END)
+		        NULLIF($14, ''), NULLIF($15, ''), NULLIF($16, ''), $17, $18,
+		        NULLIF($19, '00000000-0000-0000-0000-000000000000'::uuid),
+		        CASE WHEN $18 = 'active' THEN NOW() ELSE NULL END)
 	`, app.AppID, app.AppFamilyID, app.AccountID, app.Version, app.ConfigKey,
 		app.SourceHash, app.CapabilityHash, app.ScopeSchemaVersion, app.Selections,
 		app.UnifiedDefinitionSchemaVersion, app.UnifiedDefinitions,
 		app.UnifiedDefinitionHash, app.UnifiedCodegenDescriptorHash,
 		app.GeneratorVersion, app.SDKGenerationJobID, app.SDKGenerationStatus,
-		app.Status, app.CreatedBy)
+		app.HostedMCP, app.Status, app.CreatedBy)
 	if err != nil {
 		return fmt.Errorf("publish app: insert: %w", err)
 	}
@@ -522,7 +528,7 @@ SELECT a.app_id, a.app_family_id, a.account_id, a.version, a.config_key,
 	       a.unified_definition_hash, a.unified_codegen_descriptor_hash,
 	       COALESCE(a.generator_version, ''),
 	       COALESCE(a.sdk_generation_job_id, ''), COALESCE(a.sdk_generation_status, ''),
-	       a.status,
+	       a.hosted_mcp, a.status,
        COALESCE(a.deprecation_message, ''), a.planned_deactivation_at,
        COALESCE(a.created_by, '00000000-0000-0000-0000-000000000000'::uuid),
 	   a.created_at, a.activated_at
@@ -582,7 +588,7 @@ func (s *postgresStore) ResolveMCPRoute(ctx context.Context, routeID uuid.UUID) 
 			  ON family.app_family_id = app.app_family_id
 			 AND family.account_id = app.account_id
 			WHERE app.app_id = $1
-			  AND family.kind = 'mcp'
+			  AND (family.kind = 'mcp' OR (family.kind = 'sdk' AND app.hosted_mcp))
 			  AND app.status IN ('active', 'deprecated')
 			UNION ALL
 			SELECT family.app_family_id, app.app_id, true AS stable, 1 AS preference
@@ -592,7 +598,7 @@ func (s *postgresStore) ResolveMCPRoute(ctx context.Context, routeID uuid.UUID) 
 			 AND app.app_family_id = family.app_family_id
 			 AND app.account_id = family.account_id
 			WHERE family.app_family_id = $1
-			  AND family.kind = 'mcp'
+			  AND (family.kind = 'mcp' OR (family.kind = 'sdk' AND app.hosted_mcp))
 			  AND app.status IN ('active', 'deprecated')
 		)
 		SELECT app_family_id, app_id, stable
@@ -743,12 +749,14 @@ func (s *postgresStore) GetMCPUnifiedOperationDescriptors(ctx context.Context, a
 				SELECT applied.resolved_payload
 				FROM fused_config_plans applied
 				WHERE applied.config_key = app.config_key AND applied.source_hash = app.source_hash
-				  AND applied.config_type = 'mcp' AND applied.status = 'applied'
+				  AND applied.config_type = family.kind AND applied.status = 'applied'
 				  AND NOT COALESCE((applied.resolved_payload->>'noop')::boolean, false)
 				ORDER BY applied.applied_at DESC, applied.created_at DESC
 				LIMIT 1
 			) plan ON true
-			WHERE app.app_id = $1 AND family.kind = 'mcp' AND app.status IN ('active', 'deprecated')
+			WHERE app.app_id = $1
+			  AND (family.kind = 'mcp' OR (family.kind = 'sdk' AND app.hosted_mcp))
+			  AND app.status IN ('active', 'deprecated')
 		), projected AS (
 			SELECT expected_hash, complete,
 			       CASE WHEN complete = 'null'::jsonb THEN complete
@@ -830,7 +838,7 @@ func scanApp(row pgx.Row) (*App, error) {
 		&a.UnifiedDefinitionSchemaVersion, &a.UnifiedDefinitions,
 		&a.UnifiedDefinitionHash, &a.UnifiedCodegenDescriptorHash,
 		&a.GeneratorVersion, &a.SDKGenerationJobID, &a.SDKGenerationStatus,
-		&a.Status, &depMsg, &a.PlannedDeactivationAt,
+		&a.HostedMCP, &a.Status, &depMsg, &a.PlannedDeactivationAt,
 		&a.CreatedBy, &a.CreatedAt, &a.ActivatedAt)
 	if err != nil {
 		return nil, err
@@ -952,7 +960,7 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 	var proj AuthProjection
 	err := s.db.QueryRow(ctx, `
 		WITH matched AS (
-			SELECT a.account_id, f.app_family_id, a.app_id, a.version, f.kind, a.status,
+			SELECT a.account_id, f.app_family_id, a.app_id, a.version, f.kind, a.hosted_mcp, a.status,
 			       t.id AS token_id, t.allow_all, t.allowed_operations, t.expires_at,
 			       t.binding_mode
 			FROM fused_apps a
@@ -970,12 +978,12 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 			WHERE token.id = matched.token_id
 			RETURNING token.id
 		)
-		SELECT account_id, app_family_id, app_id, token_id, version, kind, status,
+		SELECT account_id, app_family_id, app_id, token_id, version, kind, hosted_mcp, status,
 		       allow_all, allowed_operations, expires_at, binding_mode
 		FROM matched
 		WHERE EXISTS (SELECT 1 FROM touched)
 	`, appID, tokenHash).Scan(
-		&proj.AccountID, &proj.AppFamilyID, &proj.AppID, &proj.TokenID, &proj.Version, &proj.Kind, &proj.AppStatus,
+		&proj.AccountID, &proj.AppFamilyID, &proj.AppID, &proj.TokenID, &proj.Version, &proj.Kind, &proj.HostedMCP, &proj.AppStatus,
 		&proj.TokenPolicy.AllowAll, &proj.TokenPolicy.AllowedOperations, &proj.TokenPolicy.ExpiresAt,
 		&proj.BindingMode,
 	)

@@ -75,6 +75,8 @@ type sdkConfigDocument struct {
 	// describable via api openapi, with no downloadable artifact behind it.
 	// Mirrors cli/internal/configfile's app config generate field.
 	Generate *bool `json:"generate,omitempty"`
+	// MCP exposes this same immutable SDK/REST app version through the hosted agent transport.
+	MCP *sdkMCPDeliveryDocument `json:"mcp,omitempty"`
 	// WebhookAttachment names one kind: webhook config this SDK/MCP wants
 	// event delivery from -- mirrors cli/internal/configfile's
 	// app config webhook_attachment field-for-field (same yaml/json key),
@@ -88,6 +90,12 @@ type sdkConfigDocument struct {
 	UnifiedOperations map[string]sdkUnifiedOperationDoc `json:"unified_operations,omitempty"`
 	// Provenance is local desired state; Registry code generation still receives only public descriptors.
 	WorkflowSources []workflowSource `json:"workflow_sources,omitempty"`
+}
+
+// sdkMCPDeliveryDocument contains only metadata needed by the optional hosted MCP delivery.
+type sdkMCPDeliveryDocument struct {
+	Description                string `json:"description"`
+	FusedIntelligentClassifier bool   `json:"fused-intelligent-classifier,omitempty"`
 }
 
 const maxAppVersionLength = 128
@@ -208,6 +216,7 @@ type appResolvedPayload struct {
 	Version                        string                                 `json:"version,omitempty"`
 	Selections                     []models.SDKSelection                  `json:"selections"`
 	IncludeMCP                     bool                                   `json:"include_mcp,omitempty"`
+	HostedMCP                      bool                                   `json:"hosted_mcp,omitempty"`
 	TargetType                     string                                 `json:"target_type,omitempty"`
 	TargetLanguage                 string                                 `json:"target_language,omitempty"`
 	DefaultEngineURL               string                                 `json:"default_engine_url,omitempty"`
@@ -281,6 +290,7 @@ type sdkApplyCall struct {
 type sdkGenerationResult struct {
 	models.SDKGenerationResult
 	ExecutionToken                     string `json:"execution_token,omitempty"`
+	HostedMCP                          bool   `json:"hosted_mcp,omitempty"`
 	createdForPlan                     bool
 	registryGenerationAttempted        bool
 	registryGenerationOutcomeConfirmed bool
@@ -393,7 +403,7 @@ func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, pr
 		if result.Status == models.SDKGenerationStatusPending {
 			status = models.SDKGenerationStatusPending
 		}
-		resp := map[string]string{
+		resp := map[string]any{
 			"status":            status,
 			"generation_status": result.Status,
 			"plan_id":           planID.String(),
@@ -404,6 +414,13 @@ func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, pr
 		if result.ExecutionToken != "" {
 			resp["execution_token"] = result.ExecutionToken
 			setOneTimeSecretResponseHeaders(w)
+		}
+		// The same family and exact version own both MCP URLs when hosted delivery was selected.
+		if result.HostedMCP {
+			// The builder reveals the projected stable route only after the package stream completes.
+			stableID := result.AppID
+			resp["hosted_mcp"] = true
+			resp["mcp_transport_urls"] = mcpTransportURLsForApp(r, result.AppFamilyID, result.AppID, stableID)
 		}
 		writeJSON(w, resp)
 	}
@@ -489,6 +506,10 @@ func validateSDKConfigDocument(doc sdkConfigDocument) error {
 	if err := validateSDKIdentity(doc); err != nil {
 		return err
 	}
+	// Hosted MCP metadata and finite event scope are required before sharing this version with agents.
+	if err := validateSDKMCPDelivery(doc); err != nil {
+		return err
+	}
 	// Event selections require one explicit registration identity.
 	if err := validateWebhookAttachmentRequired(doc); err != nil {
 		return err
@@ -498,6 +519,25 @@ func validateSDKConfigDocument(doc sdkConfigDocument) error {
 		return err
 	}
 	return validateSDKUnifiedOperations(doc)
+}
+
+// validateSDKMCPDelivery admits one hosted transport only when its immutable server metadata is complete.
+func validateSDKMCPDelivery(doc sdkConfigDocument) error {
+	// SDK-only declarations retain their existing package and REST behavior.
+	if doc.MCP == nil {
+		return nil
+	}
+	// Agents select a server before discovering operations, so the shared App must describe its MCP surface.
+	if strings.TrimSpace(doc.MCP.Description) == "" || len(doc.MCP.Description) > models.MCPServerDescriptionMaxBytes {
+		return fmt.Errorf("mcp description is required and must be at most %d bytes", models.MCPServerDescriptionMaxBytes)
+	}
+	for name, service := range doc.Services {
+		// MCP event resources require a finite URI set even when SDK delivery also exists.
+		if service.WebhooksSelectAll {
+			return fmt.Errorf("mcp service %s must select explicit webhook events instead of webhooks_select_all", name)
+		}
+	}
+	return nil
 }
 
 // validateSDKIdentity admits package identity while rejecting MCP-only metadata and discovery settings.
@@ -919,6 +959,12 @@ func createSDKConfigPlan(
 	if err := enforceSDKFamilyLimit(ctx, s, call.accountID, call.document.Name, sdkConfigGeneratesPackage(call.document)); err != nil {
 		return sdkPlanResult{}, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
 	}
+	// A combined App consumes the hosted MCP allowance as well as its SDK or direct REST allowance.
+	if call.document.MCP != nil {
+		if err := enforceMCPFamilyLimit(ctx, s, call.accountID, call.document.Name, true); err != nil {
+			return sdkPlanResult{}, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
+		}
+	}
 	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
 	definition, err := resolveSDKPlanDefinition(ctx, configStore, s, registryClient, call, currentState, *bucket, bucketOverrides, appID)
 	// Incomplete pin, auth, or selection resolution cannot become a stored plan.
@@ -927,7 +973,7 @@ func createSDKConfigPlan(
 	}
 	notifications := sdkPlanNotifications(ctx, configStore, registryClient, call, definition.resolvedServices, definition.noop)
 	requiredPermissions, requiredCount, err := configPlanRequiredPermissionsWithBuckets(
-		ctx, s, appPermissionState(currentState, appID), serviceNamesFromResolved(definition.resolvedServices), definition.buckets.distinct(), call.document.Name, string(sdkConfigDeliveryMode(call.document)),
+		ctx, s, appPermissionState(currentState, appID), serviceNamesFromResolved(definition.resolvedServices), definition.buckets.distinct(), call.document.Name, string(sdkConfigDeliveryMode(call.document)), call.document.MCP != nil,
 	)
 	// A retained contract grants no additional control-plane permissions.
 	if err != nil {
@@ -1008,7 +1054,7 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 		return sdkPlanDefinition{}, immutableAppVersionError("plan_admission")
 	}
 	unchanged := current != nil && sameCanonicalAppState(current.DesiredState, desiredState)
-	noop, err := sdkPlanIsNoop(ctx, s, call.accountID, appID, unchanged, unifiedCompilation)
+	noop, err := sdkPlanIsNoop(ctx, s, call.accountID, appID, unchanged, call.document.MCP != nil, unifiedCompilation)
 	// No-op requires complete local immutable-state verification, not source-text equality alone.
 	if err != nil {
 		return sdkPlanDefinition{}, err
@@ -1016,6 +1062,12 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 	generationRequest := sdkGenerateRequest(call.document, selections, targetBindings, call.defaultEngineURL)
 	generationRequest.UnifiedOperations = unifiedCompilation.Descriptors
 	payload := resolvedSDKPayload(generationRequest, bucket.ID, appID, noop, buckets.Overrides)
+	// The hosted delivery shares the frozen physical and Unified scope; only its server metadata differs.
+	if call.document.MCP != nil {
+		payload.HostedMCP = true
+		payload.Description = strings.TrimSpace(call.document.MCP.Description)
+		payload.FusedIntelligentClassifier = call.document.MCP.FusedIntelligentClassifier
+	}
 	payload.CredentialSourceBindings = credentialSourceBindings
 	payload.UnifiedDefinitionSchemaVersion = unified.DefinitionSchemaVersion
 	payload.UnifiedDefinitions = unifiedCompilation.DefinitionJSON
@@ -1026,7 +1078,7 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 }
 
 // sdkPlanIsNoop requires canonical desired state and compiled Unified hashes to match the existing app runtime.
-func sdkPlanIsNoop(ctx context.Context, s store.Store, accountID, appID uuid.UUID, unchanged bool, compilation sdkUnifiedCompilation) (bool, error) {
+func sdkPlanIsNoop(ctx context.Context, s store.Store, accountID, appID uuid.UUID, unchanged, hostedMCP bool, compilation sdkUnifiedCompilation) (bool, error) {
 	if !unchanged || appID == uuid.Nil {
 		return false, nil
 	}
@@ -1038,6 +1090,8 @@ func sdkPlanIsNoop(ctx context.Context, s store.Store, accountID, appID uuid.UUI
 		return false, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to verify sdk runtime state"}
 	}
 	return scope.AccountID == accountID &&
+		// Delivery must match the persisted version before skipping publication and route promotion.
+		scope.HostedMCP == hostedMCP &&
 		scope.UnifiedDefinitionSchemaVersion == unified.DefinitionSchemaVersion &&
 		scope.UnifiedDefinitionHash == compilation.DefinitionHash &&
 		scope.UnifiedCodegenDescriptorHash == compilation.CodegenDescriptorHash, nil
@@ -2558,6 +2612,8 @@ func executeSDKConfigApply(
 	if err != nil {
 		return sdkGenerationResult{}, err
 	}
+	// Admission already validated this immutable payload; retain its delivery bit for the final response.
+	plannedDelivery, _ := appPayloadFromJSON(plan.ResolvedPayload)
 	lease, err := configStore.ReserveConfigPlanApply(ctx, call.planID, call.planRevision)
 	// Cross-process apply ownership must be established before Registry generation starts.
 	if err != nil {
@@ -2579,6 +2635,7 @@ func executeSDKConfigApply(
 		if applyErr != nil {
 			return result, withWorkspaceConfigErrorMetadata(applyErr, "workspace_commit", call.planID.String(), "unknown")
 		}
+		result.HostedMCP = payload.HostedMCP
 		return result, nil
 	}
 	// Publication starts conservatively fenced; a local-only result or confirmed Registry outcome can release the lease safely.
@@ -2623,6 +2680,7 @@ func executeSDKConfigApply(
 	result.AppFamilyID = familyID
 	result.AppID = appID
 	result.ExecutionToken = token
+	result.HostedMCP = plannedDelivery.HostedMCP
 	scopeSpan.SetAttributes(attribute.String("outcome", "success"))
 	return result, nil
 }
@@ -2856,6 +2914,12 @@ func reserveSDKGenerationIdentity(ctx context.Context, s store.Store, call sdkAp
 	if err := checkSDKFamilyCapacity(ctx, s, span, call.accountID, canonicalName, sdkConfigGeneratesPackage(doc)); err != nil {
 		return uuid.Nil, uuid.Nil, uuid.Nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
+	// Retry or concurrent publication must recheck the hosted transport allowance before reserving identity.
+	if doc.MCP != nil {
+		if err := enforceMCPFamilyLimit(ctx, s, call.accountID, doc.Name, true); err != nil {
+			return uuid.Nil, uuid.Nil, uuid.Nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
+		}
+	}
 
 	family, _, err := applifecycle.New(s).CreateOrGetFamily(ctx, applifecycle.CreateFamilyParams{
 		AccountID: call.accountID, Kind: store.AppKindSDK, CanonicalName: canonicalName,
@@ -3032,6 +3096,7 @@ func existingAppMatchesResolvedUnified(existing *store.App, resolved appResolved
 		descriptorHash = store.EmptyUnifiedSetHash
 	}
 	return schemaVersion == resolved.UnifiedDefinitionSchemaVersion &&
+		existing.HostedMCP == resolved.HostedMCP &&
 		definitionHash == resolved.UnifiedDefinitionHash &&
 		descriptorHash == resolved.UnifiedCodegenDescriptorHash
 }
@@ -3984,6 +4049,7 @@ type persistAppRuntimeParams struct {
 	configKey                  string
 	description                string
 	fusedIntelligentClassifier bool
+	hostedMCP                  bool
 	targetLanguage             string
 	sourceHash                 string
 	generatorVersion           string
@@ -4025,6 +4091,7 @@ func appRuntimeForApply(p persistAppRuntimeParams) (store.AppRuntime, error) {
 		Name:                           p.name,
 		Description:                    p.description,
 		FusedIntelligentClassifier:     p.fusedIntelligentClassifier,
+		HostedMCP:                      p.hostedMCP,
 		Version:                        p.version,
 		ConfigKey:                      p.configKey,
 	}, nil
@@ -4087,6 +4154,8 @@ func applyGeneratedAppRuntime(
 		version:                        doc.Version,
 		configKey:                      plan.ConfigKey,
 		description:                    payload.Description,
+		fusedIntelligentClassifier:     payload.FusedIntelligentClassifier,
+		hostedMCP:                      payload.HostedMCP,
 		targetLanguage:                 payload.TargetLanguage,
 		sourceHash:                     plan.SourceHash,
 		generatorVersion:               result.GeneratorVersion,
@@ -4188,6 +4257,14 @@ func appApplyPersistenceError(ctx context.Context, err error, appID uuid.UUID) e
 			status: http.StatusForbidden, code: "sdk_family_limit_exceeded", category: "entitlement",
 			message:     "This workspace has reached its SDK limit.",
 			remediation: "Deactivate all active or deprecated versions of an unused SDK, or upgrade the workspace plan, then retry.",
+		}
+	}
+	// A shared App cannot activate its hosted endpoint after the MCP ceiling is reached.
+	if errors.Is(err, store.ErrMCPFamilyLimitExceeded) {
+		return workspaceConfigHTTPError{
+			status: http.StatusForbidden, code: "mcp_family_limit_exceeded", category: "entitlement",
+			message:     "This workspace has reached its MCP server limit.",
+			remediation: "Deactivate an unused MCP delivery or upgrade the workspace plan, then retry.",
 		}
 	}
 	// Direct API admission has its own quota and must never be mislabeled as generated-SDK capacity.

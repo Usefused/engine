@@ -36,7 +36,7 @@ func workspacePlanRequiredPermissions(ctx context.Context, actions json.RawMessa
 	return marshalPlanRequiredPermissions(requirements, displayNames, err)
 }
 
-// configPlanRequiredPermissionsWithBuckets persists exact app type and dependency authority for apply.
+// configPlanRequiredPermissionsWithBuckets persists exact app type, optional hosted delivery, and dependency authority for apply.
 func configPlanRequiredPermissionsWithBuckets(
 	ctx context.Context,
 	s store.Store,
@@ -45,6 +45,7 @@ func configPlanRequiredPermissionsWithBuckets(
 	buckets []store.Bucket,
 	configName string,
 	appType string,
+	hostedMCP ...bool,
 ) (json.RawMessage, int, error) {
 	workspaceID, err := requiredPermissionWorkspaceID(ctx)
 	if err != nil {
@@ -55,6 +56,13 @@ func configPlanRequiredPermissionsWithBuckets(
 		return nil, 0, err
 	}
 	requirements := configMutationRequirements(workspaceID, current, familyID, appType)
+	// Adding hosted MCP must require its workspace creation grant alongside the shared App's SDK authority.
+	if len(hostedMCP) > 0 && hostedMCP[0] {
+		requirements = append(requirements, accesscontrol.Requirement{
+			Permission: accesscontrol.PermissionAppMCPCreate,
+			Resource:   accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID},
+		})
+	}
 	displayNames := map[accesscontrol.ResourceRef]string{
 		{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}: "workspace",
 	}

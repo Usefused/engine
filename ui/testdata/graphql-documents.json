@@ -1296,7 +1296,7 @@
       "file": "app/routes/integrations.sdks._index.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n    query Applications($search: String!, $archived: Boolean!, $limit: Int!, $offset: Int!) {\n      appFamilies(search: $search, archived: $archived, limit: $limit, offset: $offset) {\n        items {\n          app_family_id\n          app_id: latest_version_id\n          name\n          version: latest_version\n          version_count\n          kind\n          delivery_mode\n          target_language\n          created_at: latest_created_at\n          status: latest_status\n          archived_at\n          downloads\n        }\n        total\n      }\n    }\n  "
+      "document": "\n    query Applications($search: String!, $archived: Boolean!, $limit: Int!, $offset: Int!) {\n      appFamilies(search: $search, archived: $archived, limit: $limit, offset: $offset) {\n        items {\n          app_family_id\n          app_id: latest_version_id\n          name\n          version: latest_version\n          version_count\n          kind\n          delivery_mode\n          hosted_mcp\n          target_language\n          created_at: latest_created_at\n          status: latest_status\n          archived_at\n          downloads\n        }\n        total\n      }\n    }\n  "
     },
     {
       "endpoint": "engine",
@@ -1317,7 +1317,7 @@
       "file": "app/routes/integrations.sdks.$id.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n      query($appId: String!) {\n        app(app_id: $appId) {\n          app_id\n          app_family_id\n          name\n          description\n          version\n          kind\n          delivery_mode\n          target_language\n          created_at\n          readme\n          status\n          downloads\n          selections { service_id service_version_id schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }\n        }\n        appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }\n      }\n    "
+      "document": "\n      query($appId: String!) {\n        app(app_id: $appId) {\n          app_id\n          app_family_id\n          name\n          description\n          version\n          kind\n          delivery_mode\n          hosted_mcp\n          default_transport\n          stable\n          stable_version_id\n          transport_urls { streamable_http sse versioned_streamable_http versioned_sse }\n          target_language\n          created_at\n          readme\n          status\n          downloads\n          selections { service_id service_version_id schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }\n        }\n        appServices(app_id: $appId) { service_id service_slug service_name version select_all endpoint_count webhook_count }\n      }\n    "
     },
     {
       "endpoint": "engine",

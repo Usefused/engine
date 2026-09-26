@@ -220,6 +220,10 @@ func validateMCPServerDescription(doc sdkConfigDocument, kind string) error {
 	if kind != store.AppKindMCP.String() {
 		return nil
 	}
+	// The hosted MCP option belongs to a shared SDK/REST App, not a standalone MCP declaration.
+	if doc.MCP != nil {
+		return errors.New("mcp config must not nest an mcp delivery")
+	}
 	// MCP clients choose a server before inspecting its operations, so every new version must explain its purpose up front.
 	if strings.TrimSpace(doc.Description) == "" {
 		return errors.New("mcp config requires a server description")
@@ -538,16 +542,20 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 	}, nil
 }
 
-// enforceMCPFamilyLimit canonicalizes authored identity before applying the
-// shared invokable-family entitlement used by both app adapters.
-func enforceMCPFamilyLimit(ctx context.Context, s store.Store, accountID uuid.UUID, name string) error {
+// enforceMCPFamilyLimit counts both standalone and shared hosted MCP deliveries against one entitlement.
+func enforceMCPFamilyLimit(ctx context.Context, s store.Store, accountID uuid.UUID, name string, hosted ...bool) error {
 	canonicalName, _, err := canonical.AppName(name)
 	// Invalid authored identity must fail before any family or entitlement lookup.
 	if err != nil {
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
 	}
+	quotaClass := store.AppKindMCP.String()
+	// A shared SDK family occupies the MCP ceiling under its own SDK identity, not a same-named standalone MCP family.
+	if len(hosted) > 0 && hosted[0] {
+		quotaClass = "hosted_mcp"
+	}
 	return enforceAppFamilyCapacity(ctx, s, trace.SpanFromContext(ctx), accountID, canonicalName, appFamilyCapacityPolicy{
-		quotaClass:  store.AppKindMCP.String(),
+		quotaClass:  quotaClass,
 		resource:    "mcp_families",
 		errorCode:   "mcp_family_limit_exceeded",
 		displayName: "MCP server",
