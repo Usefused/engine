@@ -55,11 +55,11 @@ function parseArgs(args: string[]): CliPaths {
 // Ask a memory-limited child to evaluate declarations without Engine effects.
 function evaluateInChild(code: string): Promise<unknown> {
   const worker = path.join(__dirname, "manifest-worker.js");
-  // The parent deadline leaves startup margin around the worker's five-second VM limit.
+  // Shared CI hosts can delay child startup; keep a bounded deadline above the worker's five-second VM limit.
   const result = spawnSync(process.execPath, ["--max-old-space-size=128", worker], {
     input: code,
     encoding: "utf8",
-    timeout: 15000,
+    timeout: 30000,
     maxBuffer: 1024 * 1024,
     env: {},
   });
