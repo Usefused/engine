@@ -24,6 +24,18 @@ COPY runtime/mcp/tsconfig.json runtime/mcp/tsconfig.build.json ./
 COPY runtime/mcp/src ./src
 RUN npm run build
 
+# Compile reviewed Execution App source inside Engine. The compiler and its
+# pinned dependencies stay in the image, never in a tenant app sandbox.
+FROM node:24-alpine AS execution-compiler-builder
+
+WORKDIR /app/runtime/execution
+RUN apk upgrade --no-cache
+COPY runtime/execution/package.json runtime/execution/package-lock.json ./
+RUN npm ci
+COPY runtime/execution/tsconfig.json ./
+COPY runtime/execution/src ./src
+RUN npm run build && npm prune --omit=dev
+
 # Build with the patched standard library required by go.mod.
 FROM golang:1.26.6-alpine AS engine-base
 
@@ -90,6 +102,7 @@ EXPOSE 8081 50051
 FROM engine-runtime-base AS engine-runtime
 
 COPY --from=engine-headless-builder /out/fused-engine /app/fused-engine
+COPY --from=execution-compiler-builder /app/runtime/execution /app/runtime/execution
 COPY engine.yaml /app/engine.yaml
 COPY entrypoint.sh /app/entrypoint.sh
 
@@ -104,6 +117,7 @@ FROM engine-runtime-base AS embedded
 
 COPY --from=engine-embedded-builder /out/fused-engine /app/fused-engine
 COPY --from=execution-worker-builder /out/fused-execution-worker /app/fused-execution-worker
+COPY --from=execution-compiler-builder /app/runtime/execution /app/runtime/execution
 COPY engine.yaml /app/engine.yaml
 COPY entrypoint.sh /app/entrypoint.sh
 

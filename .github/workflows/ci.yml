@@ -31,6 +31,7 @@ jobs:
           cache-dependency-path: |
             ui/package-lock.json
             runtime/mcp/package-lock.json
+            runtime/execution/package-lock.json
 
       - name: Test MCP runtime
         run: |
@@ -39,6 +40,12 @@ jobs:
           npm run typecheck
           npm test
           npm run build
+
+      - name: Build Execution App compiler
+        run: |
+          cd runtime/execution
+          npm ci
+          npm test
 
       - name: Boundary guards
         run: |
@@ -79,6 +86,9 @@ jobs:
         run: |
           docker build --target full -t fused-engine:test .
           docker build --target headless -t fused-engine:test-headless .
+          # The final images must carry the compiler and its native esbuild dependency.
+          docker run --rm --entrypoint node fused-engine:test -e "require('node:fs').accessSync('/app/runtime/execution/dist/src/cli.js'); require('/app/runtime/execution/node_modules/esbuild').version"
+          docker run --rm --entrypoint node fused-engine:test-headless -e "require('node:fs').accessSync('/app/runtime/execution/dist/src/cli.js'); require('/app/runtime/execution/node_modules/esbuild').version"
 
       - name: GoReleaser config
         uses: goreleaser/goreleaser-action@v5

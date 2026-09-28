@@ -1,0 +1,20 @@
+{
+  "name": "@fused/execution",
+  "version": "0.1.0",
+  "private": true,
+  "bin": { "fused-execution-build": "dist/src/cli.js" },
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/src/index.d.ts", "default": "./dist/src/index.js" },
+    "./bundle": { "types": "./dist/src/bundle.d.ts", "default": "./dist/src/bundle.js" },
+    "./client-generator": { "types": "./dist/src/client_generator.d.ts", "default": "./dist/src/client_generator.js" }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && npm run test:complexity && node --test dist/test/*.test.js",
+    "test:complexity": "node scripts/check-complexity.cjs"
+  },
+  "dependencies": { "esbuild": "0.27.3", "zod": "4.4.3" },
+  "devDependencies": { "@types/node": "25.9.1", "typescript": "6.0.3" }
+}

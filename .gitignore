@@ -9,6 +9,7 @@ ui/.cache/
 ui-build/
 scripts/**.sql
 runtime/mcp/node_modules/
+runtime/execution/node_modules/
 
 data/
 .fused/
@@ -16,3 +17,4 @@ data/
 .env.local
 .DS_Store
 runtime/mcp/dist/**
+runtime/execution/dist/**

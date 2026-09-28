@@ -1,0 +1,24 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "Fused Greeting Smoke", "version": "1.0.0" },
+  "servers": [{ "url": "https://host.docker.internal:19083" }],
+  "paths": {
+    "/greet": {
+      "post": {
+        "operationId": "greet",
+        "summary": "Return a greeting",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object", "properties": { "name": { "type": "string" } },
+            "required": ["name"], "additionalProperties": false
+          } } }
+        },
+        "responses": { "200": { "description": "Greeting", "content": { "application/json": { "schema": {
+          "type": "object", "properties": { "greeting": { "type": "string" } },
+          "required": ["greeting"], "additionalProperties": false
+        } } } } }
+      }
+    }
+  }
+}

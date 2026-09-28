@@ -13,6 +13,8 @@ internal/engine/sandbox/sandbox
 node_modules/
 runtime/mcp/node_modules/
 runtime/mcp/dist/
+runtime/execution/node_modules/
+runtime/execution/dist/
 ui/node_modules/
 ui/build/
 ui/.cache/

@@ -1,0 +1,5 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "noEmit": true },
+  "include": ["live-greeting.ts", "live-greeting.operations.d.ts"]
+}
