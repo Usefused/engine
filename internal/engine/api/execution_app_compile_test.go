@@ -83,6 +83,28 @@ func TestExecutionCompilerSelectionsRejectsPartialScope(t *testing.T) {
 	}
 }
 
+// TestExecutionCompilerSelectionsPreservesAliasedService verifies two authored names can share one physical provider.
+func TestExecutionCompilerSelectionsPreservesAliasedService(t *testing.T) {
+	serviceID, versionID := uuid.New(), uuid.New()
+	fixture := &executionCompileSelectionStore{matches: []store.ServiceContractEndpointMatch{
+		{SelectionIndex: 1, Endpoint: fusedobject.Endpoint{ID: uuid.New(), Name: "read"}},
+		{SelectionIndex: 0, Endpoint: fusedobject.Endpoint{ID: uuid.New(), Name: "write"}},
+	}}
+	selections := []models.SDKSelection{
+		{ServiceID: serviceID, ServiceVersionID: versionID, OperationNames: []string{"write"}},
+		{ServiceID: serviceID, ServiceVersionID: versionID, OperationNames: []string{"read"}},
+	}
+	services := []sdkResolvedService{
+		{ServiceID: serviceID, ServiceVersionID: versionID, PublicTarget: "writer"},
+		{ServiceID: serviceID, ServiceVersionID: versionID, PublicTarget: "reader"},
+	}
+	pins, err := executionCompilerSelections(context.Background(), fixture, selections, services)
+	// Sorted compiler output retains each alias rather than letting service-ID map assignment choose one.
+	if err != nil || len(pins) != 2 || pins[0].Service != "reader" || pins[1].Service != "writer" {
+		t.Fatalf("aliased pins/error = %#v/%v", pins, err)
+	}
+}
+
 // TestValidateCompiledExecutionPinsRejectsRepeatedBinding requires one-to-one coverage of every reviewed operation.
 func TestValidateCompiledExecutionPinsRejectsRepeatedBinding(t *testing.T) {
 	first := executionCompilerSelection{Service: "greeting", Operation: "greet", ServiceID: uuid.New().String(), ServiceVersionID: uuid.New().String(), EndpointID: uuid.New().String()}

@@ -140,9 +140,9 @@ func executionPlanBundleForApply(doc sdkConfigDocument, artifact *executionPlanA
 
 // executionCompilerSelections uses one set-based contract read and requires an exact result for every reviewed operation.
 func executionCompilerSelections(ctx context.Context, repository store.ServiceContractEndpointSelectionBatchStore, selections []models.SDKSelection, services []sdkResolvedService) ([]executionCompilerSelection, error) {
-	keys := make(map[string]string, len(services))
-	for _, service := range services {
-		keys[service.ServiceID.String()] = service.PublicTarget
+	keys, err := executionCompilerServiceKeys(selections, services)
+	if err != nil {
+		return nil, err
 	}
 	requests := make([]store.ServiceContractEndpointSelection, 0, len(selections))
 	want := make(map[int]map[string]bool, len(selections))
@@ -165,8 +165,25 @@ func executionCompilerSelections(ctx context.Context, repository store.ServiceCo
 	return bindExecutionCompilerMatches(selections, keys, want, matches)
 }
 
+// executionCompilerServiceKeys binds authored aliases by resolver index instead of collapsing identical service IDs.
+func executionCompilerServiceKeys(selections []models.SDKSelection, services []sdkResolvedService) ([]string, error) {
+	// Resolver output preserves authored selection order, including two aliases of one service ID.
+	if len(services) != len(selections) {
+		return nil, workspaceConfigHTTPError{status: 409, message: "execution app service scope changed during planning"}
+	}
+	keys := make([]string, len(services))
+	for index, service := range services {
+		// Index binding prevents one alias from replacing a sibling with the same provider identity.
+		if service.ServiceID != selections[index].ServiceID || service.ServiceVersionID != selections[index].ServiceVersionID || service.PublicTarget == "" {
+			return nil, workspaceConfigHTTPError{status: 409, message: "execution app service scope changed during planning"}
+		}
+		keys[index] = service.PublicTarget
+	}
+	return keys, nil
+}
+
 // bindExecutionCompilerMatches checks cardinality and identity before producing a deterministic compiler specification.
-func bindExecutionCompilerMatches(selections []models.SDKSelection, keys map[string]string, want map[int]map[string]bool, matches []store.ServiceContractEndpointMatch) ([]executionCompilerSelection, error) {
+func bindExecutionCompilerMatches(selections []models.SDKSelection, keys []string, want map[int]map[string]bool, matches []store.ServiceContractEndpointMatch) ([]executionCompilerSelection, error) {
 	pins := make([]executionCompilerSelection, 0, len(matches))
 	for _, match := range matches {
 		index := match.SelectionIndex
@@ -176,7 +193,7 @@ func bindExecutionCompilerMatches(selections []models.SDKSelection, keys map[str
 		}
 		delete(want[index], match.Endpoint.Name)
 		selection := selections[index]
-		key := keys[selection.ServiceID.String()]
+		key := keys[index]
 		// A missing authored alias would make fused.fetch route to a different method name.
 		if key == "" {
 			return nil, workspaceConfigHTTPError{status: 409, message: "execution app service scope changed during planning"}
