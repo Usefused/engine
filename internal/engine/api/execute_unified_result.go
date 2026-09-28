@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/Usefused/engine/internal/engine"
+	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/executionevent"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
@@ -136,11 +137,19 @@ func classifyUnifiedPhysicalError(err error) classifiedUnifiedError {
 	if action := unifiedAuthAction(err); action != nil {
 		return classifiedUnifiedError{code: unifiedAuthErrorCode(err), action: action}
 	}
+	var limit *entitlement.LimitExceeded
 	switch {
 	case errors.Is(err, context.Canceled):
 		return classifiedUnifiedError{code: "cancelled"}
 	case errors.Is(err, context.DeadlineExceeded):
 		return classifiedUnifiedError{code: "deadline_exceeded"}
+	// Only the physical-call entitlement explains a provider admission failure;
+	// other plan limits must retain their existing generic classification.
+	case errors.As(err, &limit) && limit.Resource == "sandbox_concurrency":
+		return classifiedUnifiedError{code: "sandbox_concurrency_exceeded"}
+	// The bounded app wait queue reports overload without exposing account counts.
+	case errors.Is(err, sandbox.ErrExecutionAppPhysicalQueueFull):
+		return classifiedUnifiedError{code: "physical_queue_full"}
 	case errors.Is(err, sandbox.ErrPhysicalResponseTooLarge):
 		return classifiedUnifiedError{code: "response_too_large"}
 	case errors.Is(err, sandbox.ErrPhysicalResponseNotJSON):

@@ -75,17 +75,21 @@ type RuntimeEntitlement struct {
 	RefreshedAt                  time.Time `json:"refreshed_at,omitempty"`
 
 	// ─── Capability limits (nil = missing/unlimited, 0 = not allowed, positive = hard ceiling) ───
-	MaxBuckets            *int `json:"max_buckets,omitempty"`
-	MaxAPIFamilies        *int `json:"max_api_families,omitempty"`
-	MaxSDKFamilies        *int `json:"max_sdk_families,omitempty"`
-	MaxMCPFamilies        *int `json:"max_mcp_families,omitempty"`
-	MaxServices           *int `json:"max_services,omitempty"`
-	MaxSandboxConcurrency *int `json:"max_sandbox_concurrency,omitempty"`
+	MaxBuckets                 *int `json:"max_buckets,omitempty"`
+	MaxAPIFamilies             *int `json:"max_api_families,omitempty"`
+	MaxSDKFamilies             *int `json:"max_sdk_families,omitempty"`
+	MaxMCPFamilies             *int `json:"max_mcp_families,omitempty"`
+	MaxExecutionAppFamilies    *int `json:"max_execution_app_families,omitempty"`
+	MaxExecutionAppConcurrency *int `json:"max_execution_app_concurrency,omitempty"`
+	MaxServices                *int `json:"max_services,omitempty"`
+	MaxSandboxConcurrency      *int `json:"max_sandbox_concurrency,omitempty"`
 
 	// ─── Feature gates ───
-	DriftMonitoringEnabled  bool `json:"drift_monitoring_enabled"`
-	WebhookIngestionEnabled bool `json:"webhook_ingestion_enabled"`
-	SSOEnabled              bool `json:"sso_enabled"`
+	DriftMonitoringEnabled bool `json:"drift_monitoring_enabled"`
+	// A warm worker belongs to each eligible app and does not reserve provider-call capacity.
+	ExecutionAppAlwaysOnEnabled bool `json:"execution_app_always_on_enabled"`
+	WebhookIngestionEnabled     bool `json:"webhook_ingestion_enabled"`
+	SSOEnabled                  bool `json:"sso_enabled"`
 
 	// ─── Data governance (nil = missing, 0 = explicitly disallowed) ───
 	ExecutionRetentionDays *int `json:"execution_retention_days,omitempty"`
@@ -97,8 +101,8 @@ type RuntimeEntitlement struct {
 // IntPtr returns a pointer to v. Used for pointer-typed entitlement limit fields.
 func IntPtr(v int) *int { return &v }
 
-// Capability defaults are "commercial = unlimited" so new fields never block
-// an Engine that was working before they existed.
+// Most capability defaults are unlimited so older Registry bundles keep working;
+// the Execution App worker limit retains its prior four-slot capacity.
 func DefaultRuntimeEntitlement() RuntimeEntitlement {
 	return RuntimeEntitlement{
 		Plan:                         "commercial",
@@ -111,12 +115,15 @@ func DefaultRuntimeEntitlement() RuntimeEntitlement {
 		MaxAPIFamilies:               IntPtr(-1),
 		MaxSDKFamilies:               IntPtr(-1),
 		MaxMCPFamilies:               IntPtr(-1),
-		MaxServices:                  IntPtr(-1),
-		MaxSandboxConcurrency:        IntPtr(-1),
-		DriftMonitoringEnabled:       true,
-		WebhookIngestionEnabled:      false,
-		SSOEnabled:                   false,
-		ExecutionRetentionDays:       IntPtr(30),
+		MaxExecutionAppFamilies:      IntPtr(-1),
+		// Older Registry versions did not publish this limit; keep the existing worker capacity.
+		MaxExecutionAppConcurrency: IntPtr(4),
+		MaxServices:                IntPtr(-1),
+		MaxSandboxConcurrency:      IntPtr(-1),
+		DriftMonitoringEnabled:     true,
+		WebhookIngestionEnabled:    false,
+		SSOEnabled:                 false,
+		ExecutionRetentionDays:     IntPtr(30),
 	}
 }
 
@@ -151,11 +158,13 @@ func (e RuntimeEntitlement) withRuntimeDefaults(defaults RuntimeEntitlement) Run
 // withMissingLimitDefaults fills only absent pointer limits while preserving explicit zero-deny policies.
 func (e RuntimeEntitlement) withMissingLimitDefaults(defaults RuntimeEntitlement) RuntimeEntitlement {
 	// nil means the field was missing (older Registry or JSON zero value).
-	// Default to unlimited (-1) so missing fields never accidentally block.
+	// Inherit each field's compatibility default so older contracts retain prior behavior.
 	e.MaxBuckets = entitlementLimitOrDefault(e.MaxBuckets, defaults.MaxBuckets)
 	e.MaxAPIFamilies = entitlementLimitOrDefault(e.MaxAPIFamilies, defaults.MaxAPIFamilies)
 	e.MaxSDKFamilies = entitlementLimitOrDefault(e.MaxSDKFamilies, defaults.MaxSDKFamilies)
 	e.MaxMCPFamilies = entitlementLimitOrDefault(e.MaxMCPFamilies, defaults.MaxMCPFamilies)
+	e.MaxExecutionAppFamilies = entitlementLimitOrDefault(e.MaxExecutionAppFamilies, defaults.MaxExecutionAppFamilies)
+	e.MaxExecutionAppConcurrency = entitlementLimitOrDefault(e.MaxExecutionAppConcurrency, defaults.MaxExecutionAppConcurrency)
 	e.MaxServices = entitlementLimitOrDefault(e.MaxServices, defaults.MaxServices)
 	e.MaxSandboxConcurrency = entitlementLimitOrDefault(e.MaxSandboxConcurrency, defaults.MaxSandboxConcurrency)
 	e.ExecutionRetentionDays = entitlementLimitOrDefault(e.ExecutionRetentionDays, defaults.ExecutionRetentionDays)

@@ -25,6 +25,7 @@ fi
 # Engine-owned paths before handing notes to the release step.
 engine_paths=(
   "cmd/engine/"
+  "cmd/execution-worker/"
   "internal/engine/"
   "internal/shared/"
   "proto/engine/"

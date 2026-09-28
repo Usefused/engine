@@ -39,6 +39,23 @@ builds:
     ldflags:
       - -s -w -X github.com/Usefused/engine/cmd/engine/cmd.Version={{.Version}} -X github.com/Usefused/engine/cmd/engine/cmd.BuildHash={{.FullCommit}}
 
+  # The worker shares the Engine's release version but has no server/UI
+  # dependency graph, keeping each sandbox process within a small memory cap.
+  - id: fused-execution-worker
+    main: ./cmd/execution-worker
+    binary: fused-execution-worker
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    tags:
+      - headless
+    ldflags:
+      - -s -w
+
 dockers:
   # The full engine image
   - id: engine-full
@@ -51,6 +68,7 @@ dockers:
       - "ghcr.io/usefused/engine:{{ .Tag }}-amd64"
     ids:
       - fused-engine
+      - fused-execution-worker
     dockerfile: Dockerfile.goreleaser
     extra_files:
       - engine.yaml
@@ -69,6 +87,7 @@ dockers:
       - "ghcr.io/usefused/engine:{{ .Tag }}-arm64"
     ids:
       - fused-engine
+      - fused-execution-worker
     dockerfile: Dockerfile.goreleaser
     extra_files:
       - engine.yaml
@@ -90,6 +109,7 @@ dockers:
       - "ghcr.io/usefused/engine:{{ .Tag }}-headless-amd64"
     ids:
       - fused-engine-headless
+      - fused-execution-worker
     dockerfile: Dockerfile.goreleaser
     extra_files:
       - engine.yaml
@@ -109,6 +129,7 @@ dockers:
       - "ghcr.io/usefused/engine:{{ .Tag }}-headless-arm64"
     ids:
       - fused-engine-headless
+      - fused-execution-worker
     dockerfile: Dockerfile.goreleaser
     extra_files:
       - engine.yaml
@@ -142,6 +163,7 @@ archives:
   - id: fused-engine-archive
     ids:
       - fused-engine
+      - fused-execution-worker
     formats:
       - tar.gz
     name_template: >-
@@ -158,6 +180,7 @@ archives:
   - id: fused-engine-headless-archive
     ids:
       - fused-engine-headless
+      - fused-execution-worker
     formats:
       - tar.gz
     name_template: >-

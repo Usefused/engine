@@ -11,6 +11,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/entitlement"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/unified"
@@ -282,6 +283,38 @@ func TestUnifiedSchedulerReportsRootProjectionFailures(t *testing.T) {
 			response := executePreparedUnifiedCallWithCall(newScriptedUnifiedRuntime(), call)
 			if response.GetOutputErrorCode() != test.code || len(response.GetOutputJson()) != 0 {
 				t.Fatalf("root projection = %s / %q", response.GetOutputJson(), response.GetOutputErrorCode())
+			}
+		})
+	}
+}
+
+// TestUnifiedSchedulerReportsPhysicalAdmissionFailures verifies that bounded
+// capacity diagnostics survive target settlement without exposing error text.
+func TestUnifiedSchedulerReportsPhysicalAdmissionFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		code string
+	}{
+		{name: "plan concurrency", err: &entitlement.LimitExceeded{Resource: "sandbox_concurrency", Current: 4, Limit: 4}, code: "sandbox_concurrency_exceeded"},
+		{name: "wrapped queue full", err: errors.Join(sandbox.ErrExecutionAppPhysicalQueueFull, errors.New("private provider detail")), code: "physical_queue_full"},
+		{name: "other plan limit", err: &entitlement.LimitExceeded{Resource: "unrelated_limit", Current: 4, Limit: 4}, code: "execution_failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := newScriptedUnifiedRuntime()
+			runtime.failForward["A"] = test.err
+			call := preparedUnifiedCallFixture(t, preparedUnifiedTargetFixture(t, "A", nil, false))
+			call.output = preparedUnifiedOutputFixture(t, "${response.A.id}", `{"type":"string"}`, []string{"A"})
+			response := executePreparedUnifiedCallWithCall(runtime, call)
+			result := response.GetResults()[0]
+			// The target code is the actionable bounded diagnostic; the root cannot
+			// infer that its missing value is solely due to physical admission.
+			if result.GetErrorCode() != test.code || result.GetStatus() != "error" || len(result.GetDataJson()) != 0 || result.GetAuthAction() != nil {
+				t.Fatalf("target result = %#v", result)
+			}
+			if response.GetOutputErrorCode() != "output_mapping_failed" {
+				t.Fatalf("root output error = %q", response.GetOutputErrorCode())
 			}
 		})
 	}

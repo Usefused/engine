@@ -94,6 +94,21 @@ func TestEngineSchemaDefinesStableMCPFamilyRouting(t *testing.T) {
 	}
 }
 
+// TestEngineSchemaSelectsOneReadyExecutionAppVersion protects the family traffic pointer and safe backfill.
+func TestEngineSchemaSelectsOneReadyExecutionAppVersion(t *testing.T) {
+	families := engineSchemaTable(t, "fused_app_families")
+	assertSchemaContainsAll(t, families, "execution target schema missing %q", []string{"execution_active_app_id uuid", "execution_target_initialized boolean NOT NULL DEFAULT false"})
+	schema := strings.Join(engineSchemaQueries(), "\n")
+	assertSchemaContainsAll(t, schema, "execution target migration missing %q", []string{
+		"ALTER TABLE fused_app_families ADD COLUMN IF NOT EXISTS execution_active_app_id uuid",
+		"ALTER TABLE fused_app_families ADD COLUMN IF NOT EXISTS execution_target_initialized boolean NOT NULL DEFAULT false",
+		"JOIN fused_execution_app_bundles bundle ON bundle.app_id = app.app_id",
+		"NOT family.execution_target_initialized",
+		"FOREIGN KEY (execution_active_app_id, app_family_id)",
+		"ON DELETE SET NULL (execution_active_app_id)",
+	})
+}
+
 // TestEngineSchemaRequiresExactConnectedAuthVersions removes the v8 nullable-version compatibility state.
 func TestEngineSchemaRequiresExactConnectedAuthVersions(t *testing.T) {
 	for name, table := range map[string]string{
@@ -248,6 +263,8 @@ func TestEngineSchemaDefinesAccessAndRuntimeFoundations(t *testing.T) {
 		"'attempted', 'allowed', 'denied', 'succeeded', 'failed', 'rolled_back', 'cancelled'",
 		"CREATE TABLE IF NOT EXISTS fused_runtime_entitlements",
 		"max_api_families integer NOT NULL DEFAULT -1",
+		"max_execution_app_concurrency integer NOT NULL DEFAULT 4",
+		"ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_execution_app_concurrency integer NOT NULL DEFAULT 4",
 		"CREATE TABLE IF NOT EXISTS fused_engine_usage_accounted_events",
 		"NOT EXISTS (SELECT 1 FROM fused_engine_usage_accounted_events LIMIT 1)",
 		"CREATE TABLE IF NOT EXISTS fused_engine_usage_counter_reports",

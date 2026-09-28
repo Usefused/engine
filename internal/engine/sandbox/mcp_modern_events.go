@@ -52,71 +52,110 @@ func loadMCPEventResources(ctx context.Context, appID string, identity auth.Runt
 	if globalMCPEventRuntimeStore == nil || globalMCPEventConfigStore == nil {
 		return resources, nil
 	}
+	runtime, selections, err := loadMCPEventScope(ctx, appID, identity)
+	if err != nil {
+		return nil, err
+	}
+	hasEvents, err := selectedMCPEvents(selections)
+	if err != nil {
+		return nil, err
+	}
+	// An operation-only version needs neither attachment lookup nor broker resources.
+	if !hasEvents {
+		return resources, nil
+	}
+	attachment, err := mcpEventAttachmentLabel(ctx, runtime)
+	if err != nil {
+		return nil, err
+	}
+	return projectMCPEventResources(selections, identity, attachment)
+}
+
+// loadMCPEventScope authenticates one immutable runtime selection snapshot for event discovery.
+func loadMCPEventScope(ctx context.Context, appID string, identity auth.RuntimeIdentity) (*store.AppRuntime, []models.SDKSelection, error) {
 	parsedAppID, err := uuid.Parse(appID)
 	// Event authority repeats exact app identity validation before reading immutable scope.
 	if err != nil {
-		return nil, errors.New("invalid MCP event app identity")
+		return nil, nil, errors.New("invalid MCP event app identity")
 	}
 	runtime, err := globalMCPEventRuntimeStore.GetAppRuntime(ctx, parsedAppID)
 	// Missing runtime scope cannot be replaced by mutable workspace visibility.
 	if err != nil {
-		return nil, fmt.Errorf("load MCP event scope: %w", err)
+		return nil, nil, fmt.Errorf("load MCP event scope: %w", err)
 	}
 	// Token, tenant, family, version, and app kind must all agree before subjects are derived.
-	// A combined SDK version can deliver events only when both the runtime and token projection carry its hosted MCP marker.
-	if runtime.AppID != identity.AppID || runtime.AccountID != identity.AccountID || runtime.AppFamilyID != identity.AppFamilyID || runtime.Kind != identity.Kind || (runtime.Kind != store.AppKindMCP && (runtime.Kind != store.AppKindSDK || !runtime.HostedMCP || !identity.HostedMCP)) {
-		return nil, errors.New("MCP event scope does not match the authorized runtime")
+	if !validMCPEventRuntimeIdentity(runtime, identity) {
+		return nil, nil, errors.New("MCP event scope does not match the authorized runtime")
 	}
 	selections, err := models.DecodeAppSelections(runtime.ScopeSchemaVersion, runtime.Selections)
 	// Invalid persisted selection data fails closed before attachment state is consulted.
 	if err != nil {
-		return nil, fmt.Errorf("decode MCP event scope: %w", err)
+		return nil, nil, fmt.Errorf("decode MCP event scope: %w", err)
 	}
+	return runtime, selections, nil
+}
+
+// validMCPEventRuntimeIdentity requires exact scope identity and hosted MCP consent for alternate app kinds.
+func validMCPEventRuntimeIdentity(runtime *store.AppRuntime, identity auth.RuntimeIdentity) bool {
+	return runtime.AppID == identity.AppID && runtime.AccountID == identity.AccountID &&
+		runtime.AppFamilyID == identity.AppFamilyID && runtime.Kind == identity.Kind &&
+		(runtime.Kind == store.AppKindMCP || isHostedMCPVersion(runtime.Kind, runtime.HostedMCP) && identity.HostedMCP)
+}
+
+// selectedMCPEvents detects exact webhook names while rejecting broad select-all authority.
+func selectedMCPEvents(selections []models.SDKSelection) (bool, error) {
 	hasEvents := false
 	for _, selection := range selections {
 		// A modern acknowledgement must enumerate a finite set of authorized resource URIs.
 		if selection.WebhookSelectAll {
-			return nil, errors.New("MCP event scope cannot use webhook_select_all")
+			return false, errors.New("MCP event scope cannot use webhook_select_all")
 		}
 		// Operation-only versions require no attachment lookup or broker capability.
 		if len(selection.WebhookNames) > 0 {
 			hasEvents = true
 		}
 	}
-	// An empty selection keeps existing operation-only MCP versions valid.
-	if !hasEvents {
-		return resources, nil
-	}
+	return hasEvents, nil
+}
+
+// mcpEventAttachmentLabel admits one exact subject-safe label from applied desired state.
+func mcpEventAttachmentLabel(ctx context.Context, runtime *store.AppRuntime) (string, error) {
 	// The desired config key is the only server-owned link to the attached ingress label.
 	if strings.TrimSpace(runtime.ConfigKey) == "" {
-		return nil, errors.New("MCP event scope has no applied config identity")
+		return "", errors.New("MCP event scope has no applied config identity")
 	}
 	state, err := globalMCPEventConfigStore.GetConfigState(ctx, runtime.ConfigKey)
 	// Store failures are not equivalent to an intentionally absent attachment.
 	if err != nil {
-		return nil, fmt.Errorf("load MCP event attachment: %w", err)
+		return "", fmt.Errorf("load MCP event attachment: %w", err)
 	}
 	// Selected events without their applied desired state cannot subscribe under guessed authority.
 	if state == nil {
-		return nil, errors.New("MCP event attachment state is unavailable")
+		return "", errors.New("MCP event attachment state is unavailable")
 	}
 	var document struct {
 		WebhookAttachment string `json:"webhook_attachment"`
 	}
 	// Malformed desired state must not broaden or redirect event delivery.
 	if err := json.Unmarshal(state.DesiredState, &document); err != nil {
-		return nil, errors.New("MCP event attachment state is invalid")
+		return "", errors.New("MCP event attachment state is invalid")
 	}
 	attachment := strings.TrimSpace(document.WebhookAttachment)
 	// Planning requires the attachment, and runtime repeats the invariant before touching NATS.
 	if attachment == "" {
-		return nil, errors.New("MCP event scope has no webhook_attachment")
+		return "", errors.New("MCP event scope has no webhook_attachment")
 	}
 	safeAttachment := subjectSafeLabel(attachment)
 	// Attachment labels occupy one fixed subject segment and cannot contain NATS wildcard syntax.
 	if strings.ContainsAny(safeAttachment, "*> \t\r\n") {
-		return nil, errors.New("MCP webhook_attachment cannot be represented as an exact subscription")
+		return "", errors.New("MCP webhook_attachment cannot be represented as an exact subscription")
 	}
+	return safeAttachment, nil
+}
+
+// projectMCPEventResources builds finite exact resource and subject identities from the selected events.
+func projectMCPEventResources(selections []models.SDKSelection, identity auth.RuntimeIdentity, safeAttachment string) (map[string]mcpEventResource, error) {
+	resources := make(map[string]mcpEventResource)
 	for _, selection := range selections {
 		for _, authoredEventName := range selection.WebhookNames {
 			eventName := strings.TrimSpace(authoredEventName)

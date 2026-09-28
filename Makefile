@@ -1,14 +1,18 @@
-.PHONY: build build-headless ui-install build-ui embed-ui runtime-mcp-build run run-headless test test-headless tidy proto-gen release-local release release-with-tag docker-build docker-build-headless docker-push docker-push-headless docker-build-push docker-build-push-headless
+.PHONY: build build-headless build-execution-worker ui-install build-ui embed-ui runtime-mcp-build run run-headless test test-headless tidy proto-gen release-local release release-with-tag docker-build docker-build-headless docker-push docker-push-headless docker-build-push docker-build-push-headless
 
 VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo "0.1.0")
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo "dev")
 IMAGE_NAME ?= ghcr.io/usefused/engine
 
-build: embed-ui runtime-mcp-build
+build: embed-ui runtime-mcp-build build-execution-worker
 	go build -ldflags="-s -w -X github.com/Usefused/engine/cmd/engine/cmd.Version=$(VERSION) -X github.com/Usefused/engine/cmd/engine/cmd.BuildHash=$(COMMIT)" -o fused-engine ./cmd/engine
 
-build-headless: runtime-mcp-build
+build-headless: runtime-mcp-build build-execution-worker
 	go build -tags headless -ldflags="-s -w -X github.com/Usefused/engine/cmd/engine/cmd.Version=$(VERSION) -X github.com/Usefused/engine/cmd/engine/cmd.BuildHash=$(COMMIT)" -o fused-engine-headless ./cmd/engine
+
+# Keep the disposable authored-code process separate from the server image.
+build-execution-worker: runtime-mcp-build
+	CGO_ENABLED=0 go build -tags headless -ldflags="-s -w" -o fused-execution-worker ./cmd/execution-worker
 
 ui-install:
 	cd ui && npm ci

@@ -124,8 +124,7 @@ func MountAppExecutionRoute(router chi.Router, server *EngineGRPCServer) {
 	router.Post("/v1/apps/{app_id}/executions", server.handleRESTExecution)
 }
 
-// handleRESTExecution authenticates one exact immutable SDK app, acquires its
-// cache lifecycle, classifies the operation, and enters a canonical core.
+// handleRESTExecution authenticates one exact SDK or Execution App version and dispatches its selected operation.
 func (s *EngineGRPCServer) handleRESTExecution(writer http.ResponseWriter, request *http.Request) {
 	appID, requestErr := parseRESTAppID(chi.URLParam(request, "app_id"))
 	if requestErr != nil {
@@ -137,11 +136,30 @@ func (s *EngineGRPCServer) handleRESTExecution(writer http.ResponseWriter, reque
 		writeRESTExecutionError(writer, requestErr)
 		return
 	}
+	// Only the family-selected ready Execution App version accepts new invocations, including raw operations.
+	if scope.Kind == store.AppKindExecution {
+		if requestErr := s.admitExecutionAppTraffic(request.Context(), appID); requestErr != nil {
+			writeRESTExecutionError(writer, requestErr)
+			return
+		}
+	}
 	decoded, canonical, requestErr := decodeRESTExecutionRequest(writer, request)
 	if requestErr != nil {
 		writeRESTExecutionError(writer, requestErr)
 		return
 	}
+	// Only Execution Apps can publish authored execute; every selected raw operation retains the existing path.
+	if scope.Kind == store.AppKindExecution && decoded.Operation == "execute" {
+		if !s.tryExecutionAppRun(writer, request, scope, identity, decoded) {
+			writeRESTExecutionError(writer, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_unavailable", "execution app bundle is unavailable"))
+		}
+		return
+	}
+	s.handleRawRESTExecution(writer, request, appID, scope, identity, decoded, canonical)
+}
+
+// handleRawRESTExecution preserves the existing selected physical and Unified operation dispatcher.
+func (s *EngineGRPCServer) handleRawRESTExecution(writer http.ResponseWriter, request *http.Request, appID uuid.UUID, scope *store.AppRuntime, identity auth.RuntimeIdentity, decoded restExecutionRequest, canonical []byte) {
 	if s.restRuntime == nil || s.restRuntime.ConnectAppRuntime(request.Context(), appID) != nil {
 		writeRESTExecutionError(writer, newRESTExecutionError(http.StatusServiceUnavailable, "runtime_unavailable", "app runtime is unavailable"))
 		return
@@ -181,7 +199,7 @@ func parseRESTAppID(raw string) (uuid.UUID, *restExecutionError) {
 }
 
 // authenticateRESTApp accepts only one family execution bearer token and
-// binds it to the exact SDK AppRuntime selected by the path.
+// binds it to the exact SDK or Execution App runtime selected by the path.
 func (s *EngineGRPCServer) authenticateRESTApp(request *http.Request, appID uuid.UUID) (*store.AppRuntime, auth.RuntimeIdentity, *restExecutionError) {
 	token, err := restBearerToken(request)
 	if err != nil {
@@ -220,11 +238,11 @@ func restBearerToken(request *http.Request) (string, error) {
 	return token, nil
 }
 
-// validRESTAppScope requires one exact SDK runtime; MCP execution retains its
-// separate session and catalog boundary.
+// validRESTAppScope requires one exact SDK or Execution App runtime with matching token kind.
 func validRESTAppScope(scope *store.AppRuntime, identity auth.RuntimeIdentity, appID uuid.UUID) bool {
 	return scope != nil && scope.AppID == appID && scope.AppID == identity.AppID &&
-		scope.AccountID == identity.AccountID && scope.BucketID != uuid.Nil && scope.Kind == store.AppKindSDK
+		scope.AccountID == identity.AccountID && scope.BucketID != uuid.Nil && scope.Kind == identity.Kind &&
+		(scope.Kind == store.AppKindSDK || scope.Kind == store.AppKindExecution)
 }
 
 // decodeRESTExecutionRequest enforces one bounded canonical JSON document and

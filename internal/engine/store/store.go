@@ -27,24 +27,25 @@ var (
 	ErrInvalidEncryptedAuthMaterial      = errors.New("invalid encrypted auth material")
 
 	// App-family errors
-	ErrAppFamilyNotFound              = errors.New("app family not found")
-	ErrAppFamilyNotEmpty              = errors.New("app family still has active versions")
-	ErrAppNotFound                    = errors.New("app not found")
-	ErrAppVersionImmutable            = errors.New("app version is immutable: same version with changed source or scope")
-	ErrAppVersionExists               = errors.New("app version already exists in family")
-	ErrAppDeactivated                 = errors.New("app is deactivated")
-	ErrAppDeliveryModeMismatch        = errors.New("app delivery mode is immutable")
-	ErrAppTokenNotFound               = errors.New("app token not found")
-	ErrAppTokenNameConflict           = errors.New("a token with this name already exists for this app")
-	ErrAppTokenBindingInvalid         = errors.New("app token binding is invalid or unavailable")
-	ErrAppTombstoneExists             = errors.New("app version was deactivated and cannot be reused")
-	ErrAppKindInvalid                 = errors.New("app kind is invalid")
-	ErrAppFamilyKindMismatch          = errors.New("app kind does not match app family")
-	ErrAPIFamilyLimitExceeded         = errors.New("API family limit exceeded")
-	ErrSDKFamilyLimitExceeded         = errors.New("SDK family limit exceeded")
-	ErrMCPFamilyLimitExceeded         = errors.New("MCP family limit exceeded")
-	ErrSDKGenerationTransitionInvalid = errors.New("SDK generation transition is invalid")
-	ErrAppStatusInvalid               = errors.New("app status is invalid")
+	ErrAppFamilyNotFound               = errors.New("app family not found")
+	ErrAppFamilyNotEmpty               = errors.New("app family still has active versions")
+	ErrAppNotFound                     = errors.New("app not found")
+	ErrAppVersionImmutable             = errors.New("app version is immutable: same version with changed source or scope")
+	ErrAppVersionExists                = errors.New("app version already exists in family")
+	ErrAppDeactivated                  = errors.New("app is deactivated")
+	ErrAppDeliveryModeMismatch         = errors.New("app delivery mode is immutable")
+	ErrAppTokenNotFound                = errors.New("app token not found")
+	ErrAppTokenNameConflict            = errors.New("a token with this name already exists for this app")
+	ErrAppTokenBindingInvalid          = errors.New("app token binding is invalid or unavailable")
+	ErrAppTombstoneExists              = errors.New("app version was deactivated and cannot be reused")
+	ErrAppKindInvalid                  = errors.New("app kind is invalid")
+	ErrAppFamilyKindMismatch           = errors.New("app kind does not match app family")
+	ErrAPIFamilyLimitExceeded          = errors.New("API family limit exceeded")
+	ErrExecutionAppFamilyLimitExceeded = errors.New("Execution App family limit exceeded")
+	ErrSDKFamilyLimitExceeded          = errors.New("SDK family limit exceeded")
+	ErrMCPFamilyLimitExceeded          = errors.New("MCP family limit exceeded")
+	ErrSDKGenerationTransitionInvalid  = errors.New("SDK generation transition is invalid")
+	ErrAppStatusInvalid                = errors.New("app status is invalid")
 
 	// ErrIdempotentExecutionNotFound means there's no unexpired cached
 	// response for the given (app_id, idempotency key) -- the caller should
@@ -80,6 +81,8 @@ type AppRuntime struct {
 	UnifiedDefinitions             []byte
 	UnifiedDefinitionHash          string
 	UnifiedCodegenDescriptorHash   string
+	// BundleDigest pins the compiled capability bytes at apply time; empty means no hosted code was approved.
+	BundleDigest string
 	// Status is projected from the exact app version. Hard-deactivated versions
 	// have no runtime row, while deprecated versions remain executable until
 	// their configured deactivation is applied.
@@ -141,12 +144,14 @@ type MCPRouteTarget struct {
 // App is one immutable version within an AppFamily. Migration preserves the
 // existing version identity as AppID.
 type App struct {
-	AppID                          uuid.UUID
-	AppFamilyID                    uuid.UUID
-	AccountID                      uuid.UUID
-	Version                        string
-	ConfigKey                      string
-	SourceHash                     string
+	AppID       uuid.UUID
+	AppFamilyID uuid.UUID
+	AccountID   uuid.UUID
+	Version     string
+	ConfigKey   string
+	SourceHash  string
+	// BundleDigest is immutable code identity for an authored Execution App version.
+	BundleDigest                   string
 	CapabilityHash                 string
 	CapabilityKeys                 []string
 	ScopeSchemaVersion             int

@@ -21,11 +21,19 @@ type usageIndexMockConfigStore struct {
 	listErr error
 }
 
+// ListConfigStates mirrors the repository kind filter for bounded impact scans.
 func (m *usageIndexMockConfigStore) ListConfigStates(ctx context.Context, configType ConfigType) ([]ConfigState, error) {
 	if m.listErr != nil {
 		return nil, m.listErr
 	}
-	return m.states, nil
+	// The fixture mirrors the repository's kind filter so bounded multi-kind scans do not duplicate rows.
+	out := make([]ConfigState, 0)
+	for _, state := range m.states {
+		if state.ConfigType == configType {
+			out = append(out, state)
+		}
+	}
+	return out, nil
 }
 
 type usageIndexMockBatchStore struct {
@@ -87,6 +95,20 @@ func TestWorkspaceSDKServiceImpacts_BatchPath_SortedDedupedConfigKeys(t *testing
 	}
 	if len(batchStore.batchedAt) != 1 || len(batchStore.batchedAt[0]) != 2 {
 		t.Fatalf("expected exactly one batched lookup covering both artifacts, got %#v", batchStore.batchedAt)
+	}
+}
+
+// TestWorkspaceServiceImpactsIncludesExecution keeps service removal aware of hosted execute provider scope.
+func TestWorkspaceServiceImpactsIncludesExecution(t *testing.T) {
+	serviceID, versionID, appID := uuid.New(), uuid.New(), uuid.New()
+	configStore := &usageIndexMockConfigStore{states: []ConfigState{{ConfigKey: "execution:greeting:1.0.0", ConfigType: ConfigTypeExecution, LatestResourceID: &appID}}}
+	batchStore := &usageIndexMockBatchStore{scopes: map[uuid.UUID]*AppRuntime{appID: {
+		AppID: appID, Selections: selectionsJSON(t, []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: versionID}}),
+	}}}
+	impacts, err := WorkspaceSDKServiceImpacts(context.Background(), configStore, batchStore)
+	// Deactivating a provider must include the exact hosted App config that still selects it.
+	if err != nil || len(impacts[serviceID][versionID]) != 1 || impacts[serviceID][versionID][0] != "execution:greeting:1.0.0" {
+		t.Fatalf("Execution App impact = %#v, error = %v", impacts, err)
 	}
 }
 

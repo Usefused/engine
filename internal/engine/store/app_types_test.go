@@ -7,8 +7,9 @@ import (
 	"github.com/google/uuid"
 )
 
+// TestAppKindValid keeps the distinct hosted kind in the persisted App vocabulary.
 func TestAppKindValid(t *testing.T) {
-	for _, kind := range []AppKind{AppKindSDK, AppKindMCP} {
+	for _, kind := range []AppKind{AppKindSDK, AppKindMCP, AppKindExecution} {
 		if !kind.Valid() {
 			t.Fatalf("%q should be a valid app kind", kind)
 		}
@@ -96,11 +97,12 @@ func TestImmutableAppVersionComparesEntireRuntimeScope(t *testing.T) {
 	}
 }
 
+// TestAppKindMustMatchConfigType rejects cross-kind publication before persistence.
 func TestAppKindMustMatchConfigType(t *testing.T) {
 	for _, valid := range []struct {
 		kind       AppKind
 		configType ConfigType
-	}{{AppKindSDK, ConfigTypeSDK}, {AppKindMCP, ConfigTypeMCP}} {
+	}{{AppKindSDK, ConfigTypeSDK}, {AppKindMCP, ConfigTypeMCP}, {AppKindExecution, ConfigTypeExecution}} {
 		if !appKindMatchesConfigType(valid.kind, valid.configType) {
 			t.Fatalf("expected %s/%s to match", valid.kind, valid.configType)
 		}

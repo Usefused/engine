@@ -29,6 +29,7 @@ const (
 	ConfigTypeWorkspace ConfigType = "workspace"
 	ConfigTypeSDK       ConfigType = "sdk"
 	ConfigTypeMCP       ConfigType = "mcp"
+	ConfigTypeExecution ConfigType = "execution"
 	ConfigTypeWebhook   ConfigType = "webhook"
 )
 
@@ -88,7 +89,7 @@ const (
 var (
 	ErrConfigKeyRequired           = errors.New("config key is required")
 	ErrConfigHashRequired          = errors.New("source hash is required")
-	ErrConfigTypeInvalid           = errors.New("config type must be workspace, sdk, mcp, or webhook")
+	ErrConfigTypeInvalid           = errors.New("config type must be workspace, sdk, mcp, execution, or webhook")
 	ErrConfigJSONInvalid           = errors.New("config JSON payload is invalid")
 	ErrConfigJSONObjectRequired    = errors.New("config JSON payload must be an object")
 	ErrConfigJSONArrayRequired     = errors.New("config JSON payload must be an array")
@@ -658,7 +659,7 @@ func (r *postgresConfigRepository) ApplyAppConfigPlan(ctx context.Context, param
 	if params.Plan.ExpectedRevision <= 0 {
 		return nil, ErrConfigPlanRevisionMismatch
 	}
-	if params.Plan.State.ConfigType == ConfigTypeSDK && params.Plan.ApplyLeaseID == uuid.Nil {
+	if (params.Plan.State.ConfigType == ConfigTypeSDK || params.Plan.State.ConfigType == ConfigTypeExecution) && params.Plan.ApplyLeaseID == uuid.Nil {
 		return nil, ErrConfigPlanApplyInProgress
 	}
 	if err := validateAppApplyParams(params); err != nil {
@@ -788,24 +789,9 @@ func persistAppRuntimeTx(ctx context.Context, tx pgx.Tx, params *ApplyAppConfigP
 	if err := bindAppFamilyServiceBucketsTx(ctx, tx, familyID, params.AuthorizedServiceBuckets); err != nil {
 		return uuid.Nil, uuid.Nil, false, false, err
 	}
-	appStatus := params.AppStatus
-	// Omitted status is the established immediately-runnable MCP and terminal SDK path.
-	if appStatus == "" {
-		appStatus = AppStatusActive
-	}
-	// Every transaction that makes an SDK or direct API runnable shares the entitlement lock with background completion.
-	if params.Scope.Kind == AppKindSDK && appStatus == AppStatusActive {
-		isDirectAPI := params.SDKGenerationStatus == models.SDKGenerationStatusSkipped
-		// The terminal skip marker is the immutable proof that this app is REST-only rather than a generated package.
-		if err := admitSDKFamilyActivation(ctx, tx, params.Scope.AccountID, familyID, isDirectAPI); err != nil {
-			return uuid.Nil, uuid.Nil, false, false, err
-		}
-	}
-	// Either standalone or shared hosted MCP delivery occupies one MCP family unit when runnable.
-	if appStatus == AppStatusActive && (params.Scope.Kind == AppKindMCP || params.Scope.HostedMCP) {
-		if err := admitMCPFamilyActivation(ctx, tx, params.Scope.AccountID, familyID); err != nil {
-			return uuid.Nil, uuid.Nil, false, false, err
-		}
+	// The entitlement lock is shared by every path that can activate this version.
+	if err := admitConfiguredAppActivation(ctx, tx, familyID, *params); err != nil {
+		return uuid.Nil, uuid.Nil, false, false, err
 	}
 	appID, versionCreated, err := publishConfigAppTx(ctx, tx, familyID, *params)
 	// Publication failure rolls back quota admission and every preceding family binding.
@@ -819,6 +805,40 @@ func persistAppRuntimeTx(ctx context.Context, tx pgx.Tx, params *ApplyAppConfigP
 		return uuid.Nil, uuid.Nil, false, false, err
 	}
 	return familyID, appID, versionCreated, tokenCreated, nil
+}
+
+// admitConfiguredAppActivation reserves the applicable package-free, SDK, and hosted MCP quotas atomically.
+func admitConfiguredAppActivation(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, params ApplyAppConfigPlanParams) error {
+	status := params.AppStatus
+	// Omitted status is the established immediately-runnable terminal path.
+	if status == "" {
+		status = AppStatusActive
+	}
+	// Building SDKs consume no runnable capacity until their result is confirmed.
+	if status != AppStatusActive {
+		return nil
+	}
+	if err := admitConfiguredPrimaryCapacity(ctx, tx, familyID, params); err != nil {
+		return err
+	}
+	// Either standalone or shared hosted MCP delivery occupies one MCP unit.
+	if params.Scope.Kind == AppKindMCP || params.Scope.HostedMCP {
+		return admitMCPFamilyActivation(ctx, tx, params.Scope.AccountID, familyID)
+	}
+	return nil
+}
+
+// admitConfiguredPrimaryCapacity keeps SDK package and hosted execute quotas separate from MCP transport capacity.
+func admitConfiguredPrimaryCapacity(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, params ApplyAppConfigPlanParams) error {
+	// The skipped marker is authoritative for package-free SDK APIs only.
+	if params.Scope.Kind == AppKindSDK {
+		return admitSDKFamilyActivation(ctx, tx, params.Scope.AccountID, familyID, params.SDKGenerationStatus == models.SDKGenerationStatusSkipped)
+	}
+	// Hosted execute uses the API entitlement under a distinct family count.
+	if params.Scope.Kind == AppKindExecution {
+		return admitExecutionFamilyActivation(ctx, tx, params.Scope.AccountID, familyID)
+	}
+	return nil
 }
 
 func ensureAppFamilyOwnerBindingTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, scope AppRuntime) error {
@@ -959,6 +979,7 @@ func publishConfigAppTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, para
 		AppID: params.Scope.AppID, AppFamilyID: familyID,
 		AccountID: params.Scope.AccountID, Version: params.Scope.Version,
 		ConfigKey: params.Plan.State.ConfigKey, SourceHash: params.Plan.State.SourceHash,
+		BundleDigest:   params.Scope.BundleDigest,
 		CapabilityHash: capabilityHash, CapabilityKeys: capabilityKeys,
 		ScopeSchemaVersion: params.Scope.ScopeSchemaVersion, Selections: params.Scope.Selections,
 		UnifiedDefinitionSchemaVersion: params.Scope.UnifiedDefinitionSchemaVersion,
@@ -976,20 +997,28 @@ func publishConfigAppTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, para
 	if err != nil {
 		return uuid.Nil, false, err
 	}
+	if err := reconcilePublishedSDKStateTx(ctx, tx, app, *persisted, created); err != nil {
+		return uuid.Nil, false, err
+	}
+	return persisted.AppID, created, nil
+}
+
+// reconcilePublishedSDKStateTx lets only Registry package state change on an immutable SDK retry.
+func reconcilePublishedSDKStateTx(ctx context.Context, tx pgx.Tx, app, persisted App, created bool) error {
 	// Reapplying the same immutable SDK after a failed or pending build may
 	// replace only its mutable generation state, never its runtime scope.
 	if !created && app.ExpectedFamilyKind == AppKindSDK {
 		if err := updateSDKGenerationStateTx(ctx, tx, app); err != nil {
-			return uuid.Nil, false, err
+			return err
 		}
 		// A recovered build can become runnable during reapply, after ordinary publication promotion was deferred.
 		if app.HostedMCP && app.Status.Runnable() && !persisted.Status.Runnable() {
 			if err := promoteStableMCPVersionTx(ctx, tx, app); err != nil {
-				return uuid.Nil, false, err
+				return err
 			}
 		}
 	}
-	return persisted.AppID, created, nil
+	return nil
 }
 
 // updateSDKGenerationStateTx advances or retries package generation for one
@@ -1117,8 +1146,8 @@ func validateAppApplyParams(params ApplyAppConfigPlanParams) error {
 	if !appKindMatchesConfigType(params.Scope.Kind, params.Plan.State.ConfigType) {
 		return ErrAppKindInvalid
 	}
-	// Persistence and runtime reads share one strict selection decoder; malformed scope must never commit.
-	if _, err := models.DecodeAppSelections(params.Scope.ScopeSchemaVersion, params.Scope.Selections); err != nil {
+	// Persistence and runtime reads share one strict selection decoder for explicit provider authority.
+	if err := validateAppApplySelections(params.Scope); err != nil {
 		return err
 	}
 	// Language and token metadata remain independent of SDK package state.
@@ -1132,6 +1161,20 @@ func validateAppApplyParams(params ApplyAppConfigPlanParams) error {
 	return validateAppGenerationState(params)
 }
 
+// validateAppApplySelections requires a reviewed provider selection for every app kind.
+func validateAppApplySelections(scope AppRuntime) error {
+	selections, err := models.DecodeAppSelections(scope.ScopeSchemaVersion, scope.Selections)
+	// Missing or malformed selections cannot become an implicit provider scope.
+	if err != nil {
+		return err
+	}
+	// A pinned bundle identifies code, but never grants provider authority by itself.
+	if len(selections) == 0 {
+		return models.ErrAppSelectionSchemaMismatch
+	}
+	return nil
+}
+
 // validateAppGenerationState prevents callers from publishing runnable SDKs
 // for pending jobs or attaching package lifecycle state to MCP versions.
 func validateAppGenerationState(params ApplyAppConfigPlanParams) error {
@@ -1143,8 +1186,8 @@ func validateAppGenerationState(params ApplyAppConfigPlanParams) error {
 	if !status.Valid() {
 		return ErrAppStatusInvalid
 	}
-	// MCP has no Registry package or building state.
-	if params.Plan.State.ConfigType == ConfigTypeMCP {
+	// Hosted runtime kinds never acquire a Registry SDK package or building state.
+	if params.Plan.State.ConfigType == ConfigTypeMCP || params.Plan.State.ConfigType == ConfigTypeExecution {
 		return validateMCPGenerationState(status, params.SDKGenerationJobID, params.SDKGenerationStatus)
 	}
 	return validateSDKGenerationState(status, params.SDKGenerationJobID, params.SDKGenerationStatus)
@@ -1191,15 +1234,17 @@ func validateSDKGenerationState(status AppStatus, jobID, generationStatus string
 	return errors.New("sdk generation state is invalid")
 }
 
+// appKindMatchesConfigType prevents one config route from publishing another kind's family.
 func appKindMatchesConfigType(kind AppKind, configType ConfigType) bool {
 	return (kind == AppKindSDK && configType == ConfigTypeSDK) ||
-		(kind == AppKindMCP && configType == ConfigTypeMCP)
+		(kind == AppKindMCP && configType == ConfigTypeMCP) ||
+		(kind == AppKindExecution && configType == ConfigTypeExecution)
 }
 
 // validateAppApplyMetadata enforces adapter metadata while respecting explicit deferred token issuance.
 func validateAppApplyMetadata(params ApplyAppConfigPlanParams) error {
 	// Generated SDK identity requires a language even when token issuance is deferred.
-	if params.Plan.State.ConfigType == ConfigTypeSDK && strings.TrimSpace(params.TargetLanguage) == "" {
+	if (params.Plan.State.ConfigType == ConfigTypeSDK || params.Plan.State.ConfigType == ConfigTypeExecution) && strings.TrimSpace(params.TargetLanguage) == "" {
 		return errors.New("sdk target language is required")
 	}
 	// Hosted MCP runtimes must not inherit SDK package settings.
@@ -1225,6 +1270,12 @@ func validateAppGeneratorVersion(configType ConfigType, generatorVersion string)
 			return nil
 		}
 		return errors.New("mcp must not set a generator version")
+	case ConfigTypeExecution:
+		// Compiler bundle provenance is pinned separately from Registry SDK generator metadata.
+		if generatorVersion == "" {
+			return nil
+		}
+		return errors.New("execution must not set a generator version")
 	default:
 		return ErrConfigTypeInvalid
 	}
@@ -1929,7 +1980,7 @@ func validateConfigIdentity(configKey string, configType ConfigType, sourceHash 
 // validConfigType centralizes the persisted enum so reads and writes cannot
 // accidentally accept different config kinds as the product grows.
 func validConfigType(configType ConfigType) bool {
-	return configType == ConfigTypeWorkspace || configType == ConfigTypeSDK || configType == ConfigTypeMCP || configType == ConfigTypeWebhook
+	return configType == ConfigTypeWorkspace || configType == ConfigTypeSDK || configType == ConfigTypeMCP || configType == ConfigTypeExecution || configType == ConfigTypeWebhook
 }
 
 func normalizeJSONObject(raw json.RawMessage) (json.RawMessage, error) {

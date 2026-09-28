@@ -258,6 +258,7 @@ func runEngine() {
 	managedWebhookBroker := startWebhookRelay(ctx, database, natsClient, masterKey, managedAuthBroker, managedAuthClientDependencies, managedAuthBrokerURL)
 
 	r := buildEngineRouter(engineRouterDeps{
+		ctx:                      ctx,
 		cfg:                      cfg,
 		natsClient:               natsClient,
 		engineStore:              engineStore,
@@ -454,6 +455,7 @@ type engineWorkers struct {
 	appTokenExpiry        *worker.AppTokenExpiryWorker
 	executionEvents       *worker.ExecutionEventWorker
 	retention             *worker.ExecutionRetentionWorker
+	executionAppCleanup   *worker.ExecutionAppCleanupWorker
 	publicInsights        *worker.PublicInsightWorker
 	packageLeases         *worker.SDKPackageLeaseWorker
 	sdkGenerations        *worker.SDKGenerationFinalizer
@@ -502,6 +504,10 @@ func (w engineWorkers) stopReportingWorkers(ctx context.Context) {
 	// Retention cleanup stops after new execution persistence has ended.
 	if w.retention != nil {
 		w.retention.Stop(ctx)
+	}
+	// Capability data expires only after its own minimum retention window and active execution work drains.
+	if w.executionAppCleanup != nil {
+		w.executionAppCleanup.Stop(ctx)
 	}
 	// Public insight reporting completes its current bounded send attempt.
 	if w.publicInsights != nil {
@@ -585,12 +591,22 @@ func startEngineWorkers(ctx context.Context, engineStore store.Store, natsClient
 	retentionWorker := worker.StartDynamicExecutionRetentionWorker(ctx, engineStore, func() int {
 		return engineExecutionRetentionDays(entitlementpkg.LiveEntitlement.Load(), cfg.ExecutionRetentionDays)
 	}, cfg.ExecutionCleanupBatch)
+	cleanupStore, cleanupAvailable := engineStore.(interface {
+		store.ExecutionResultStore
+		store.ExecutionReplayEvidenceStore
+		store.ExecutionResultRecoveryStore
+	})
+	// Exact-result cleanup must run only when both result and evidence deletion share the same store.
+	var executionAppCleanup *worker.ExecutionAppCleanupWorker
+	if cleanupAvailable {
+		executionAppCleanup = worker.StartExecutionAppCleanupWorker(ctx, cleanupStore)
+	}
 	// A short bounded cleanup keeps credential hashes out of the active table
 	// soon after expiry while the separate history row remains auditable.
 	tokenExpiryWorker := worker.StartAppTokenExpiryWorker(ctx, engineStore, 250)
 	return engineWorkers{
 		appTokenInvalidations: appTokenInvalidations, appTokenExpiry: tokenExpiryWorker,
-		executionEvents: executionEventWorker, retention: retentionWorker, authEventWebhooks: authEventWebhooks,
+		executionEvents: executionEventWorker, retention: retentionWorker, executionAppCleanup: executionAppCleanup, authEventWebhooks: authEventWebhooks,
 	}
 }
 
@@ -924,6 +940,7 @@ func loadMasterKey(ctx context.Context) []byte {
 }
 
 type engineRouterDeps struct {
+	ctx                      context.Context
 	cfg                      *config.Config
 	natsClient               *messaging.NATSClient
 	engineStore              store.Store
@@ -952,8 +969,18 @@ type engineRouterDeps struct {
 	managedWebhookBroker     *webhookrelay.Broker
 }
 
-// buildEngineRouter serves API and embedded UI on one origin, so cross-origin
-// browser access is neither required nor enabled by Engine configuration.
+// probeExecutionWorkerReadiness checks the real packaged isolation path once for hosted deployments.
+func probeExecutionWorkerReadiness(check func(context.Context) bool) bool {
+	// Legacy or local Engines can serve raw operations without a hosted worker requirement.
+	if os.Getenv("FUSED_EXECUTION_APP_WORKER_REQUIRED") != "true" {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return check(ctx)
+}
+
+// buildEngineRouter mounts Engine runtime and control adapters on one process-owned origin.
 func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// Router
 	r := chi.NewRouter()
@@ -999,7 +1026,14 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	registerProxyRoutesWithRuntimeContracts(r, deps.registryProxy, deps.engineStore, deps.registryClient)
 
 	engineEnvironment := observability.EngineEnvironment()
+	workerReady := probeExecutionWorkerReadiness(sandbox.IsCapabilityWorkerAvailable)
 	r.Get("/health", func(w http.ResponseWriter, req *http.Request) {
+		// Hosted readiness must expose a missing or namespace-denied worker before accepting app traffic.
+		if !workerReady {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(healthResponse{Status: "execution worker unavailable", Plane: "engine", Environment: engineEnvironment})
+			return
+		}
 		client := &http.Client{Timeout: 2 * time.Second}
 		resp, err := client.Get(deps.cfg.Engine.RegistryEndpoint)
 		status := "ok"
@@ -1022,6 +1056,12 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	executionServer := api.NewEngineGRPCServer(
 		deps.engineStore, deps.registryClient, deps.masterKey, deps.configStore, deps.natsClient, deps.tokenValidator, deps.managedAuthConnectClient, deps.connectRedirectURI,
 	)
+	// Production startup keeps promoted Execution Apps resident only while their plan permits it.
+	if deps.ctx != nil {
+		executionServer.StartExecutionAppWarmReconciler(deps.ctx)
+	}
+	// Hosted MCP tools invoke the same durable command on this exact Engine server instance.
+	sandbox.SetMCPCapabilityAdapter(executionServer)
 	// Discovery reuses the licensed Registry client without introducing provider credentials in Engine.
 	sandbox.SetMCPOperationClassifier(deps.registryClient)
 	sandbox.InitSandbox(
@@ -1031,6 +1071,10 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// Runtime REST execution reuses the same process-wide sandbox cache and
 	// dispatcher initialized above; it never loops back through network gRPC.
 	api.MountAppExecutionRoute(r, executionServer)
+	// Hosted capabilities share this server's family-token authority and physical dispatcher.
+	api.MountExecutionAppRoutes(r, executionServer)
+	// Execution reads use the handle issued by the hosted capability route above.
+	api.MountExecutionResultRoutes(r, executionServer)
 	// SDK and MCP webhook delivery uses EngineGRPCServer.SubscribeWebhooks.
 	// Engine-native MCP GraphQL surface (list/deploy/kill/reactivate/delete +
 	// analytics) -- a distinct endpoint from POST /graphql, which is a pure

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/auth"
@@ -36,10 +37,12 @@ type EngineGRPCServer struct {
 	// (webhook_grpc_handler.go) -- resolving a connecting SDK/MCP's
 	// webhook_attachment label and bridging to the NATS JetStream durable
 	// consumer and queue group.
-	configStore    store.ConfigRepository
-	natsClient     *messaging.NATSClient
-	tokenValidator auth.TokenValidator
-	webhookStreams *webhookstream.Registry
+	configStore          store.ConfigRepository
+	natsClient           *messaging.NATSClient
+	tokenValidator       auth.TokenValidator
+	webhookStreams       *webhookstream.Registry
+	capabilityWorkerOnce sync.Once
+	capabilityWorkers    *sandbox.CapabilityWorkerManager
 }
 
 // NewEngineGRPCServer requires the process-shared validator so SDK execution,
@@ -243,21 +246,39 @@ func (s *EngineGRPCServer) authenticateAppFromGRPC(ctx context.Context) (*store.
 // authenticatedAppRuntimeFromGRPC returns the immutable app scope and validated token identity from one authentication pass.
 func (s *EngineGRPCServer) authenticatedAppRuntimeFromGRPC(ctx context.Context) (*store.AppRuntime, auth.RuntimeIdentity, error) {
 	appID, err := uuid.Parse(strings.TrimSpace(grpcAppID(ctx)))
+	// An exact version identity is required before consulting a family token.
 	if err != nil {
 		return nil, auth.RuntimeIdentity{}, status.Error(codes.Unauthenticated, "app authentication is required")
 	}
 	identity, err := s.tokenValidator.Validate(ctx, appID, grpcAPIKey(ctx))
+	// Invalid credentials cannot reveal whether a version exists.
 	if err != nil {
 		return nil, auth.RuntimeIdentity{}, status.Error(codes.Unauthenticated, "app authentication failed")
 	}
 	scope, err := s.store.GetAppRuntime(ctx, appID)
-	if err != nil || scope == nil || scope.AccountID != identity.AccountID || scope.AppID != identity.AppID || scope.AppID != appID || scope.BucketID == uuid.Nil {
+	// The persisted scope must agree with the token before any provider selection is considered.
+	if err != nil || !grpcRuntimeMatchesIdentity(scope, identity, appID) {
 		return nil, auth.RuntimeIdentity{}, status.Error(codes.PermissionDenied, "app scope is unavailable")
 	}
+	// Execution App gRPC calls share the same promoted-version boundary as REST and MCP.
+	if scope.Kind == store.AppKindExecution && s.admitExecutionAppTraffic(ctx, appID) != nil {
+		return nil, auth.RuntimeIdentity{}, status.Error(codes.PermissionDenied, "execution app version is not current")
+	}
+	// Invalid persisted selections cannot broaden provider authority at invocation time.
 	if _, err := models.DecodeAppSelections(scope.ScopeSchemaVersion, scope.Selections); err != nil {
 		return nil, auth.RuntimeIdentity{}, status.Error(codes.PermissionDenied, "app scope is unavailable")
 	}
 	return scope, identity, nil
+}
+
+// grpcRuntimeMatchesIdentity binds an authenticated version to its stored tenant, family scope, and bucket.
+func grpcRuntimeMatchesIdentity(scope *store.AppRuntime, identity auth.RuntimeIdentity, appID uuid.UUID) bool {
+	// Missing runtime state never becomes an implicit wildcard scope.
+	if scope == nil {
+		return false
+	}
+	return scope.AccountID == identity.AccountID && scope.AppID == identity.AppID &&
+		scope.AppID == appID && scope.BucketID != uuid.Nil
 }
 
 func appRuntimeSelectsService(raw []byte, serviceID uuid.UUID) bool {

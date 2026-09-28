@@ -40,6 +40,21 @@ func TestDecodeAppSelectionsRequiresExactCurrentSchema(t *testing.T) {
 	}
 }
 
+// TestDecodeAppSelectionsDistinguishesExplicitEmptyScope keeps code-only Apps distinct from omitted scope data.
+func TestDecodeAppSelectionsDistinguishesExplicitEmptyScope(t *testing.T) {
+	decoded, err := DecodeAppSelections(AppScopeSchemaVersion, []byte(`[]`))
+	// An explicit empty array grants no provider operation and can support authored execute alone.
+	if err != nil || decoded == nil || len(decoded) != 0 {
+		t.Fatalf("empty scope = %#v, error = %v", decoded, err)
+	}
+	for _, payload := range [][]byte{nil, []byte(`null`)} {
+		// Missing or null selections retain the prior fail-closed legacy rejection.
+		if _, err := DecodeAppSelections(AppScopeSchemaVersion, payload); err == nil {
+			t.Fatalf("missing scope %q was accepted", payload)
+		}
+	}
+}
+
 func TestDecodeAppSelectionsRejectsRemovedFieldAlias(t *testing.T) {
 	serviceID, serviceVersionID := uuid.New(), uuid.New()
 	payload := []byte(`[{"service_id":"` + serviceID.String() + `","service_version_id":"` + serviceVersionID.String() + `","schema_version":3,"definition_schema_version":3}]`)

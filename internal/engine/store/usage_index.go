@@ -53,9 +53,14 @@ type WorkspaceSDKSelectionMatch struct {
 // fetch, but keeps each config's full SDKSelection instead of collapsing
 // straight to a config-key list.
 func WorkspaceSDKSelectionsByServiceVersion(ctx context.Context, configStore ConfigRepository, s Store) (map[uuid.UUID]map[uuid.UUID][]WorkspaceSDKSelectionMatch, error) {
-	states, err := configStore.ListConfigStates(ctx, ConfigTypeSDK)
-	if err != nil {
-		return nil, err
+	states := make([]ConfigState, 0)
+	// Three bounded kind reads preserve removal impact for every App that holds provider authority.
+	for _, kind := range []ConfigType{ConfigTypeSDK, ConfigTypeMCP, ConfigTypeExecution} {
+		part, err := configStore.ListConfigStates(ctx, kind)
+		if err != nil {
+			return nil, err
+		}
+		states = append(states, part...)
 	}
 	appIDs, configKeys := appRuntimeStateIndex(states)
 	scopes, err := s.ListAppRuntimes(ctx, appIDs)

@@ -11,7 +11,7 @@ import (
 
 // TestNormalizeAppFamilyCatalogueView keeps UI catalogue tabs distinct from the persisted lifecycle-kind contract.
 func TestNormalizeAppFamilyCatalogueView(t *testing.T) {
-	for _, view := range []string{"", "sdk", "mcp", "api"} {
+	for _, view := range []string{"", "sdk", "mcp", "api", "execution"} {
 		// Every supported catalogue view must round-trip without broadening to another tab.
 		if normalized, ok := normalizeAppFamilyCatalogueView(view); !ok || normalized != view {
 			t.Fatalf("normalizeAppFamilyCatalogueView(%q) = %q, %t", view, normalized, ok)
@@ -25,7 +25,7 @@ func TestNormalizeAppFamilyCatalogueView(t *testing.T) {
 
 // TestAppFamilyCataloguePostgres verifies grouping, authorization, and version-view continuity on the real database.
 func TestAppFamilyCataloguePostgres(t *testing.T) {
-	for _, view := range []string{"sdk", "mcp", "api"} {
+	for _, view := range []string{"sdk", "mcp", "api", "execution"} {
 		// Every catalogue tab must use identical family counting and pagination rules.
 		t.Run(view, func(t *testing.T) { testAppFamilyCataloguePostgres(t, view) })
 	}
@@ -39,9 +39,9 @@ func testAppFamilyCataloguePostgres(t *testing.T, view string) {
 	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT account_id, owner_team_id FROM fused_app_families WHERE app_family_id=$1`, fixture.familyID).Scan(&accountID, &ownerID); err != nil {
 		t.Fatal(err)
 	}
-	persistedKind := map[string]string{"sdk": "sdk", "mcp": "mcp", "api": "sdk"}[view]
-	targetLanguage := map[string]any{"sdk": "typescript", "mcp": nil, "api": "typescript"}[view]
-	deliveryMode := map[string]any{"sdk": "sdk", "mcp": nil, "api": "api"}[view]
+	persistedKind := map[string]string{"sdk": "sdk", "mcp": "mcp", "api": "sdk", "execution": "execution"}[view]
+	targetLanguage := map[string]any{"sdk": "typescript", "mcp": nil, "api": "typescript", "execution": "typescript"}[view]
+	deliveryMode := map[string]any{"sdk": "sdk", "mcp": nil, "api": "api", "execution": nil}[view]
 	// Family language and delivery mode belong to the logical app and remain stable across all its versions.
 	if _, err := fixture.pool.Exec(fixture.ctx, `UPDATE fused_app_families SET kind=$2, display_name='Alpha:Tools', canonical_name='alpha:tools', target_language=$3, delivery_mode=$4 WHERE app_family_id=$1`, fixture.familyID, persistedKind, targetLanguage, deliveryMode); err != nil {
 		t.Fatal(err)
@@ -66,8 +66,8 @@ func testAppFamilyCataloguePostgres(t *testing.T, view string) {
 			t.Fatal(err)
 		}
 	}
-	otherKind := map[string]string{"sdk": "mcp", "mcp": "sdk", "api": "sdk"}[view]
-	otherDeliveryMode := map[string]any{"sdk": nil, "mcp": "sdk", "api": "sdk"}[view]
+	otherKind := map[string]string{"sdk": "mcp", "mcp": "sdk", "api": "sdk", "execution": "sdk"}[view]
+	otherDeliveryMode := map[string]any{"sdk": nil, "mcp": "sdk", "api": "sdk", "execution": "sdk"}[view]
 	for _, extra := range []struct {
 		account      uuid.UUID
 		kind, name   string
@@ -75,7 +75,7 @@ func testAppFamilyCataloguePostgres(t *testing.T, view string) {
 	}{{accountID, persistedKind, "beta", deliveryMode}, {accountID, otherKind, "other-kind", otherDeliveryMode}, {uuid.New(), persistedKind, "foreign", deliveryMode}} {
 		id := uuid.New()
 		// Extra families exercise kind/account filtering and retention of logical identity without live versions.
-		if _, err := fixture.pool.Exec(fixture.ctx, `INSERT INTO fused_app_families(app_family_id,account_id,kind,canonical_name,display_name,owner_team_id,target_language,delivery_mode) VALUES ($1,$2,$3,$4,$4,$5,$6,$7)`, id, extra.account, extra.kind, extra.name, ownerID, map[string]any{"sdk": "typescript", "mcp": nil}[extra.kind], extra.deliveryMode); err != nil {
+		if _, err := fixture.pool.Exec(fixture.ctx, `INSERT INTO fused_app_families(app_family_id,account_id,kind,canonical_name,display_name,owner_team_id,target_language,delivery_mode) VALUES ($1,$2,$3,$4,$4,$5,$6,$7)`, id, extra.account, extra.kind, extra.name, ownerID, map[string]any{"sdk": "typescript", "mcp": nil, "execution": "typescript"}[extra.kind], extra.deliveryMode); err != nil {
 			t.Fatal(err)
 		}
 		// Remove only this fixture's family rows after the assertions complete.

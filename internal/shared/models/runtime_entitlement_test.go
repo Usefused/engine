@@ -17,6 +17,8 @@ func TestRuntimeEntitlementNormalizedDefaultsMissingLimits(t *testing.T) {
 	assertEntitlementLimit(t, "max API families", entitlement.MaxAPIFamilies, -1)
 	assertEntitlementLimit(t, "max SDK families", entitlement.MaxSDKFamilies, -1)
 	assertEntitlementLimit(t, "max MCP families", entitlement.MaxMCPFamilies, -1)
+	assertEntitlementLimit(t, "max Execution App families", entitlement.MaxExecutionAppFamilies, -1)
+	assertEntitlementLimit(t, "max Execution App concurrency", entitlement.MaxExecutionAppConcurrency, 4)
 	assertEntitlementLimit(t, "max services", entitlement.MaxServices, -1)
 	assertEntitlementLimit(t, "max sandbox concurrency", entitlement.MaxSandboxConcurrency, -1)
 	assertEntitlementLimit(t, "execution retention days", entitlement.ExecutionRetentionDays, 30)
@@ -26,19 +28,23 @@ func TestRuntimeEntitlementNormalizedDefaultsMissingLimits(t *testing.T) {
 func TestRuntimeEntitlementNormalizedPreservesExplicitZeroLimits(t *testing.T) {
 	zero := 0
 	entitlement := (RuntimeEntitlement{
-		MaxBuckets:             &zero,
-		MaxAPIFamilies:         &zero,
-		MaxSDKFamilies:         &zero,
-		MaxMCPFamilies:         &zero,
-		MaxServices:            &zero,
-		MaxSandboxConcurrency:  &zero,
-		ExecutionRetentionDays: &zero,
+		MaxBuckets:                 &zero,
+		MaxAPIFamilies:             &zero,
+		MaxSDKFamilies:             &zero,
+		MaxMCPFamilies:             &zero,
+		MaxExecutionAppFamilies:    &zero,
+		MaxExecutionAppConcurrency: &zero,
+		MaxServices:                &zero,
+		MaxSandboxConcurrency:      &zero,
+		ExecutionRetentionDays:     &zero,
 	}).Normalized()
 
 	assertEntitlementLimit(t, "max buckets", entitlement.MaxBuckets, 0)
 	assertEntitlementLimit(t, "max API families", entitlement.MaxAPIFamilies, 0)
 	assertEntitlementLimit(t, "max SDK families", entitlement.MaxSDKFamilies, 0)
 	assertEntitlementLimit(t, "max MCP families", entitlement.MaxMCPFamilies, 0)
+	assertEntitlementLimit(t, "max Execution App families", entitlement.MaxExecutionAppFamilies, 0)
+	assertEntitlementLimit(t, "max Execution App concurrency", entitlement.MaxExecutionAppConcurrency, 0)
 	assertEntitlementLimit(t, "max services", entitlement.MaxServices, 0)
 	assertEntitlementLimit(t, "max sandbox concurrency", entitlement.MaxSandboxConcurrency, 0)
 	assertEntitlementLimit(t, "execution retention days", entitlement.ExecutionRetentionDays, 0)

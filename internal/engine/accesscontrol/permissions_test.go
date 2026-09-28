@@ -18,9 +18,9 @@ func TestPermissionCatalogueContainsUniqueValidNames(t *testing.T) {
 		}
 		seen[permission] = struct{}{}
 	}
-	// Typed app scopes replace the five broad entries without dropping unrelated permissions.
-	if len(permissions) != 42 {
-		t.Fatalf("permission catalogue contains %d entries, want 42", len(permissions))
+	// Execution Apps add five isolated scopes without changing existing grants.
+	if len(permissions) != 47 {
+		t.Fatalf("permission catalogue contains %d entries, want 47", len(permissions))
 	}
 }
 

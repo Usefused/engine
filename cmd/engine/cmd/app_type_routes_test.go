@@ -15,7 +15,7 @@ import (
 // TestAppPlanRoutesRequireTheirOwnCreateScope checks the actual middleware and shared SDK/API route in every direction.
 func TestAppPlanRoutesRequireTheirOwnCreateScope(t *testing.T) {
 	workspaceID, serviceID, bucketID := uuid.New(), uuid.New(), uuid.New()
-	for _, grantedType := range []string{"sdk", "mcp", "api", "webhook"} {
+	for _, grantedType := range []string{"sdk", "execution", "mcp", "api", "webhook"} {
 		grants := artifactPlanSelectionGrants(serviceID, bucketID)
 		grants = append(grants, accesscontrol.Grant{Permission: accesscontrol.AppPermission(grantedType, accesscontrol.PermissionAppCreate), Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}})
 		snapshot, err := accesscontrol.NewAuthorizationSnapshot(1, grants...)
@@ -24,7 +24,7 @@ func TestAppPlanRoutesRequireTheirOwnCreateScope(t *testing.T) {
 			t.Fatal(err)
 		}
 		actor := accesscontrol.Actor{WorkspaceID: workspaceID, SubjectID: uuid.New(), CredentialID: uuid.New(), CredentialSource: "oauth_client", Authorization: snapshot}
-		for _, targetType := range []string{"sdk", "mcp", "api", "webhook"} {
+		for _, targetType := range []string{"sdk", "execution", "mcp", "api", "webhook"} {
 			kind, extra := targetType, ""
 			// REST APIs must stay distinct despite sharing SDK configuration endpoints.
 			if targetType == "api" {
@@ -33,6 +33,7 @@ func TestAppPlanRoutesRequireTheirOwnCreateScope(t *testing.T) {
 			body := fmt.Sprintf(`{"config_key":"%s:typed:1.0.0","config":{"kind":"%s"%s,"bucket":"default","services":{"%s":{"version":"1.0.0"}}}}`, kind, kind, extra, acceptanceServiceName)
 			status, calls := serveArtifactPlanRoute(t, "/"+kind+"-config/plan", serviceID, bucketID, nil, actor, body)
 			// Cross-type denials must happen before the downstream handler executes.
+			t.Logf("creation grant=%s target=%s", grantedType, targetType)
 			assertArtifactPlanHTTPDecision(t, status, calls, grantedType == targetType)
 		}
 	}
@@ -50,7 +51,7 @@ func TestAppApplyRoutesUseStoredType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, grantedType := range []string{"sdk", "mcp", "api", "webhook"} {
+	for _, grantedType := range []string{"sdk", "execution", "mcp", "api", "webhook"} {
 		grants := []accesscontrol.Grant{{Permission: accesscontrol.AppPermission(grantedType, accesscontrol.PermissionAppCreate), Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}}}
 		for _, dependency := range dependencies {
 			grants = append(grants, accesscontrol.Grant(dependency))
@@ -61,7 +62,7 @@ func TestAppApplyRoutesUseStoredType(t *testing.T) {
 			t.Fatal(err)
 		}
 		actor := accesscontrol.Actor{WorkspaceID: workspaceID, SubjectID: uuid.New(), CredentialID: uuid.New(), CredentialSource: "oauth_client", Authorization: snapshot}
-		for _, targetType := range []string{"sdk", "mcp", "api", "webhook"} {
+		for _, targetType := range []string{"sdk", "execution", "mcp", "api", "webhook"} {
 			kind, extra := targetType, ""
 			// The stored delivery flag, not the shared route, distinguishes a REST API plan.
 			if targetType == "api" {
@@ -79,6 +80,7 @@ func TestAppApplyRoutesUseStoredType(t *testing.T) {
 			request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), actor))
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, request)
+			t.Logf("apply grant=%s target=%s", grantedType, targetType)
 			assertArtifactPlanHTTPDecision(t, response.Code, calls, grantedType == targetType)
 		}
 	}

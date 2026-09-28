@@ -292,6 +292,11 @@ type grpcRuntimeStore struct {
 	scope     *store.AppRuntime
 }
 
+// IsExecutionAppTrafficTarget makes this single-version runtime fixture current by default.
+func (s *grpcRuntimeStore) IsExecutionAppTrafficTarget(_ context.Context, appID uuid.UUID) (bool, error) {
+	return s.appID == appID, nil
+}
+
 func (s *grpcRuntimeStore) AuthorizeApp(_ context.Context, appID uuid.UUID, tokenHash string) (*store.AuthProjection, error) {
 	if appID != s.appID || tokenHash != auth.HashToken("fsk_test") {
 		return nil, errors.New("unauthorized")

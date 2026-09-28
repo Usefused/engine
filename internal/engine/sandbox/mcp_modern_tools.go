@@ -70,11 +70,20 @@ func handleMCPModernToolsList(ctx context.Context, span trace.Span, w http.Respo
 		writeMCPModernError(w, request.ID, -32603, "MCP tool catalogue is invalid", http.StatusInternalServerError, nil)
 		return
 	}
+	// Hosted Execution Apps add their typed execute input to this authenticated catalogue.
+	if err := appendMCPHostedCapabilityTools(ctx, result, admission); err != nil {
+		writeMCPModernError(w, request.ID, -32603, "MCP execution catalogue is unavailable", http.StatusServiceUnavailable, nil)
+		return
+	}
 	writeMCPModernResult(w, request.ID, result, admission.server)
 }
 
 // handleMCPModernToolsCall executes one tool and retains sandbox state only behind an explicit token-bound handle.
 func handleMCPModernToolsCall(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, routeID, token string, request mcpJSONRPCRequest, admission *mcpModernAdmission) {
+	// An authored execute request uses the durable Execution App command before legacy child admission.
+	if handleMCPHostedCapabilityCall(ctx, w, r, request, admission) {
+		return
+	}
 	params, arguments, handle, err := admitMCPModernToolCall(request)
 	// Invalid explicit state must fail before allocating a child or invoking provider-capable code.
 	if err != nil {
@@ -97,49 +106,20 @@ func handleMCPModernToolsCall(ctx context.Context, span trace.Span, w http.Respo
 		writeMCPModernError(w, request.ID, -32602, "unknown MCP tool", http.StatusBadRequest, nil)
 		return
 	}
-	var sess *mcpSession
-	keepState := params["name"] == "execute"
-	mintedState := keepState && handle == ""
-	// An explicit handle may continue only the exact app, token, route, and selector context that minted it.
-	if handle != "" {
-		sess = resolveMCPModernToolHandle(handle, routeID, admission, authContext)
-		if sess == nil {
-			writeMCPModernError(w, request.ID, -32602, "stateHandle is unavailable or does not belong to this request context", http.StatusNotFound, mcpModernStateUnavailableData())
-			return
-		}
-	} else {
-		var failure *mcpModernRuntimeFailure
-		sess, failure = startMCPModernToolRuntime(ctx, span, w, r, routeID, token, request, admission, keepState)
-		// Independent executions receive isolated children; only explicit state handles reuse them.
-		if failure != nil {
-			writeMCPModernRuntimeFailure(w, request.ID, failure)
-			return
-		}
-	}
-	// Stateless tools and failed state registration release their child at this request boundary.
-	if !keepState {
-		defer terminateMCPSession(sess.sessionID, "client_terminated")
-	}
-	if keepState && handle == "" {
-		var registered bool
-		handle, registered = registerMCPModernToolHandle(sess)
-		// A concurrently retired runtime must not mint a handle that can never resolve.
-		if !registered {
-			terminateMCPSession(sess.sessionID, "runtime_failed")
-			writeMCPModernError(w, request.ID, -32603, "MCP tool state could not be created", http.StatusServiceUnavailable, nil)
-			return
-		}
+	runMCPModernExecuteTool(ctx, span, w, r, routeID, token, request, admission, arguments, authContext, handle)
+}
+
+// runMCPModernExecuteTool keeps the existing script tool's state and response semantics separate from authored execution.
+func runMCPModernExecuteTool(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, routeID, token string, request mcpJSONRPCRequest, admission *mcpModernAdmission, arguments, authContext map[string]any, handle string) {
+	mintedState := handle == ""
+	sess, handle, ready := acquireMCPModernExecuteSession(ctx, span, w, r, routeID, token, request, admission, authContext, handle)
+	if !ready {
+		return
 	}
 	childRequest, err := mcpModernChildRequest(request, arguments)
 	// Adapter encoding failure is pre-provider; only a caller-visible existing handle can remain reusable.
 	if err != nil {
-		// A newly minted handle has not reached the caller and must not leave unreachable state behind.
-		if mintedState {
-			terminateMCPSession(sess.sessionID, "client_terminated")
-		} else if keepState && handle != "" {
-			touchMCPSession(sess)
-		}
-		writeMCPModernError(w, request.ID, -32602, err.Error(), http.StatusBadRequest, nil)
+		handleMCPModernChildEncodingError(w, request.ID, sess, mintedState, err)
 		return
 	}
 	response, failure := exchangeMCPModernChild(ctx, sess, childRequest)
@@ -150,24 +130,58 @@ func handleMCPModernToolsCall(ctx context.Context, span trace.Span, w http.Respo
 		return
 	}
 	stateReturned := !mintedState
-	transform := func(result map[string]any) error {
-		// Only execute reaches this path and owns cross-request sandbox state.
-		if keepState {
-			isError, _ := result["isError"].(bool)
-			// A failed first execution created no useful caller state, while an existing handle remains valid across tool errors.
-			if mintedState && isError {
-				return nil
-			}
-			attachMCPModernStateHandle(result, handle)
-			stateReturned = true
+	deliveredState := writeMCPModernChildResponse(w, request.ID, response, admission.server, func(result map[string]any) error {
+		isError, _ := result["isError"].(bool)
+		// A failed first execution has no useful caller state; existing handles remain valid across tool errors.
+		if mintedState && isError {
+			return nil
 		}
+		attachMCPModernStateHandle(result, handle)
+		stateReturned = true
 		return nil
-	}
-	deliveredState := writeMCPModernChildResponse(w, request.ID, response, admission.server, transform)
+	})
 	// A rejected first execute call cannot retain its new handle, so its otherwise unreachable child must be retired immediately.
 	if mintedState && (!deliveredState || !stateReturned) {
 		terminateMCPSession(sess.sessionID, "client_terminated")
 	}
+}
+
+// handleMCPModernChildEncodingError retires unreachable state while preserving a caller-owned handle.
+func handleMCPModernChildEncodingError(w http.ResponseWriter, requestID json.RawMessage, sess *mcpSession, mintedState bool, err error) {
+	// A newly minted handle has not reached the caller and must not leave unreachable state behind.
+	if mintedState {
+		terminateMCPSession(sess.sessionID, "client_terminated")
+	} else {
+		touchMCPSession(sess)
+	}
+	writeMCPModernError(w, requestID, -32602, err.Error(), http.StatusBadRequest, nil)
+}
+
+// acquireMCPModernExecuteSession resolves exact continuation state or starts and registers one isolated child.
+func acquireMCPModernExecuteSession(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, routeID, token string, request mcpJSONRPCRequest, admission *mcpModernAdmission, authContext map[string]any, handle string) (*mcpSession, string, bool) {
+	// An explicit handle may continue only the exact app, token, route, and selector context that minted it.
+	if handle != "" {
+		sess := resolveMCPModernToolHandle(handle, routeID, admission, authContext)
+		if sess == nil {
+			writeMCPModernError(w, request.ID, -32602, "stateHandle is unavailable or does not belong to this request context", http.StatusNotFound, mcpModernStateUnavailableData())
+			return nil, "", false
+		}
+		return sess, handle, true
+	}
+	sess, failure := startMCPModernToolRuntime(ctx, span, w, r, routeID, token, request, admission, true)
+	// Independent executions receive isolated children; only explicit state handles reuse them.
+	if failure != nil {
+		writeMCPModernRuntimeFailure(w, request.ID, failure)
+		return nil, "", false
+	}
+	handle, registered := registerMCPModernToolHandle(sess)
+	// A concurrently retired runtime must not mint a handle that can never resolve.
+	if !registered {
+		terminateMCPSession(sess.sessionID, "runtime_failed")
+		writeMCPModernError(w, request.ID, -32603, "MCP tool state could not be created", http.StatusServiceUnavailable, nil)
+		return nil, "", false
+	}
+	return sess, handle, true
 }
 
 // startMCPModernToolRuntime creates and internally initializes one isolated child without exposing a protocol session.

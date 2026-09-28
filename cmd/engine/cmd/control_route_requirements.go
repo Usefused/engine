@@ -688,7 +688,11 @@ func (r *storeBackedControlRequirementResolver) desiredConfigDocumentRequirement
 		} `json:"services"`
 	}
 	// Incomplete documents cannot safely establish service authorization targets.
-	if json.Unmarshal(raw, &doc) != nil || len(doc.Services) == 0 || r.store == nil {
+	if json.Unmarshal(raw, &doc) != nil || r.store == nil {
+		return nil, accesscontrol.ErrPolicyDenied
+	}
+	// Every app must bind at least one reviewed workspace service before it can run.
+	if len(doc.Services) == 0 {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
 	serviceNames := mapKeys(doc.Services)
@@ -768,7 +772,12 @@ func storedDesiredConfigSelectionRequirements(
 			ServiceID uuid.UUID `json:"service_id"`
 		} `json:"selections"`
 	}
-	if json.Unmarshal(plan.ResolvedPayload, &payload) != nil || len(payload.Selections) == 0 || payload.BucketID == uuid.Nil {
+	// The resolved bucket is required even when the authored app selects no provider services.
+	if json.Unmarshal(plan.ResolvedPayload, &payload) != nil || payload.BucketID == uuid.Nil {
+		return nil, accesscontrol.ErrPolicyDenied
+	}
+	// A stored plan cannot authorize an app that lost its selected service scope.
+	if len(payload.Selections) == 0 {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
 	requirements := make([]accesscontrol.Requirement, 0, len(payload.Selections)+1)
@@ -845,6 +854,8 @@ func requestMatchesConfigType(path string, configType store.ConfigType) bool {
 	switch {
 	case path == "/sdk-config/apply":
 		return configType == store.ConfigTypeSDK
+	case path == "/execution-config/apply":
+		return configType == store.ConfigTypeExecution
 	case path == "/mcp-config/apply":
 		return configType == store.ConfigTypeMCP
 	case path == "/webhook-config/apply":

@@ -383,7 +383,7 @@ WITH actor AS (
 			SELECT 1 FROM fused_role_bindings binding
 			JOIN fused_roles role ON role.id = binding.role_id AND role.scope_type = 'workspace'
 			-- This selector is advisory; plan preflight checks the chosen app's exact type.
-			JOIN fused_role_permissions permission ON permission.role_id = role.id AND permission.permission IN ('app.sdk.create', 'app.mcp.create', 'app.api.create', 'app.webhook.create')
+			JOIN fused_role_permissions permission ON permission.role_id = role.id AND permission.permission IN ('app.sdk.create', 'app.mcp.create', 'app.api.create', 'app.execution.create', 'app.webhook.create')
 			JOIN fused_workspaces workspace ON workspace.singleton_key = 1 AND workspace.id = binding.resource_id
 			WHERE binding.subject_type = 'team' AND binding.subject_id = team.id AND binding.resource_type = 'workspace'
 		)

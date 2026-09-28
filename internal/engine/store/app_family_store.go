@@ -200,13 +200,13 @@ func (s *postgresStore) GetAppFamilyQuotaUsage(ctx context.Context, accountID uu
 			  AND (
 			    $2 = ''
 		    OR ($2 = 'api' AND family.kind = 'sdk')
-		    OR ($2 IN ('mcp', 'hosted_mcp') AND family.kind IN ('mcp', 'sdk'))
+		    OR ($2 IN ('mcp', 'hosted_mcp') AND family.kind IN ('mcp', 'sdk', 'execution'))
 		    OR ($2 NOT IN ('api', 'mcp', 'hosted_mcp') AND family.kind = $2)
 			  )
 		)
 		SELECT COUNT(*) FILTER (WHERE invokable),
 		       COALESCE(BOOL_OR(canonical_name = $3 AND invokable AND (
-		         ($2 = 'hosted_mcp' AND kind = 'sdk') OR
+		         ($2 = 'hosted_mcp' AND kind IN ('sdk', 'execution')) OR
 		         ($2 <> 'hosted_mcp' AND ($2 <> 'mcp' OR kind = 'mcp'))
 		       )), FALSE)
 		FROM scoped_families
@@ -259,19 +259,28 @@ func publishAppVersionTx(ctx context.Context, tx pgx.Tx, app App) (*App, bool, e
 		return nil, false, err
 	}
 	if existing != nil {
-		// Immutable equality permits reapplying an older MCP declaration; that
-		// explicit apply must still move the stable family route back to it.
-		if !sameImmutableAppVersion(*existing, app) {
-			return nil, false, ErrAppVersionImmutable
-		}
-		// A failed SDK build may become active later in this transaction; its MCP alias follows that transition.
-		if existing.Status.Runnable() {
-			if err := promoteStableMCPVersionTx(ctx, tx, app); err != nil {
-				return nil, false, err
-			}
-		}
-		return existing, false, nil
+		return publishExistingAppVersionTx(ctx, tx, *existing, app)
 	}
+	return publishNewAppVersionTx(ctx, tx, app)
+}
+
+// publishExistingAppVersionTx verifies immutable identity before a retry may promote a stable route.
+func publishExistingAppVersionTx(ctx context.Context, tx pgx.Tx, existing, requested App) (*App, bool, error) {
+	// An older MCP declaration can be reapplied, but it may not replace code or provider scope.
+	if !sameImmutableAppVersion(existing, requested) {
+		return nil, false, ErrAppVersionImmutable
+	}
+	// A failed SDK build may become active later; only a runnable version owns the stable alias now.
+	if existing.Status.Runnable() {
+		if err := promoteStableMCPVersionTx(ctx, tx, requested); err != nil {
+			return nil, false, err
+		}
+	}
+	return &existing, false, nil
+}
+
+// publishNewAppVersionTx keeps tombstone, scope, and route publication inside one transaction.
+func publishNewAppVersionTx(ctx context.Context, tx pgx.Tx, app App) (*App, bool, error) {
 	if err := rejectTombstonedVersion(ctx, tx, app.AppFamilyID, app.Version); err != nil {
 		return nil, false, err
 	}
@@ -289,6 +298,10 @@ func publishAppVersionTx(ctx context.Context, tx pgx.Tx, app App) (*App, bool, e
 
 // promoteStableMCPVersionTx advances the shared family's MCP alias only for a runnable MCP delivery.
 func promoteStableMCPVersionTx(ctx context.Context, tx pgx.Tx, app App) error {
+	// An Execution App's stable MCP alias moves only when its ready bundle takes traffic.
+	if app.ExpectedFamilyKind == AppKindExecution {
+		return nil
+	}
 	// Plain SDK versions cannot acquire an MCP route through an unrelated apply.
 	if (app.ExpectedFamilyKind != AppKindMCP && !app.HostedMCP) || !app.Status.Runnable() {
 		return nil
@@ -303,7 +316,7 @@ func promoteStableMCPVersionTx(ctx context.Context, tx pgx.Tx, app App) error {
 		    END
 		FROM fused_apps app
 		WHERE family.app_family_id = $1
-		  AND (family.kind = 'mcp' OR (family.kind = 'sdk' AND app.hosted_mcp))
+		  AND (family.kind = 'mcp' OR (family.kind IN ('sdk', 'execution') AND app.hosted_mcp))
 		  AND app.app_id = $2
 		  AND app.app_family_id = family.app_family_id
 		  AND app.status IN ('active', 'deprecated')
@@ -345,18 +358,31 @@ func withUnifiedDefaults(app App) App {
 func sameImmutableAppVersion(existing, requested App) bool {
 	existing = withUnifiedDefaults(existing)
 	requested = withUnifiedDefaults(requested)
-	if existing.SourceHash != requested.SourceHash || existing.ConfigKey != requested.ConfigKey ||
-		existing.CapabilityHash != requested.CapabilityHash || existing.ScopeSchemaVersion != requested.ScopeSchemaVersion ||
-		existing.GeneratorVersion != requested.GeneratorVersion || existing.HostedMCP != requested.HostedMCP ||
-		existing.UnifiedDefinitionSchemaVersion != requested.UnifiedDefinitionSchemaVersion ||
-		existing.UnifiedDefinitionHash != requested.UnifiedDefinitionHash ||
-		existing.UnifiedCodegenDescriptorHash != requested.UnifiedCodegenDescriptorHash {
-		return false
-	}
-	if !sameJSONDocument(existing.Selections, requested.Selections) {
-		return false
-	}
-	return sameJSONDocument(existing.UnifiedDefinitions, requested.UnifiedDefinitions)
+	// Scalar identity and semantic JSON are checked separately to keep immutable comparison reviewable.
+	return sameImmutableAppScalars(existing, requested) &&
+		sameJSONDocument(existing.Selections, requested.Selections) &&
+		sameJSONDocument(existing.UnifiedDefinitions, requested.UnifiedDefinitions)
+}
+
+// sameImmutableAppScalars pins code bytes, source authority, and private graph hashes for one version.
+func sameImmutableAppScalars(existing, requested App) bool {
+	// The compiler output is version identity even when the caller reuses a source label.
+	return sameImmutableCodeScalars(existing, requested) && sameImmutableScopeScalars(existing, requested)
+}
+
+// sameImmutableCodeScalars binds exact compiler output to source and generation provenance.
+func sameImmutableCodeScalars(existing, requested App) bool {
+	return existing.SourceHash == requested.SourceHash && existing.BundleDigest == requested.BundleDigest &&
+		existing.ConfigKey == requested.ConfigKey && existing.GeneratorVersion == requested.GeneratorVersion &&
+		existing.UnifiedDefinitionSchemaVersion == requested.UnifiedDefinitionSchemaVersion &&
+		existing.UnifiedDefinitionHash == requested.UnifiedDefinitionHash &&
+		existing.UnifiedCodegenDescriptorHash == requested.UnifiedCodegenDescriptorHash
+}
+
+// sameImmutableScopeScalars keeps selected provider authority and hosted transport immutable per version.
+func sameImmutableScopeScalars(existing, requested App) bool {
+	return existing.CapabilityHash == requested.CapabilityHash &&
+		existing.ScopeSchemaVersion == requested.ScopeSchemaVersion && existing.HostedMCP == requested.HostedMCP
 }
 
 // sameJSONDocument compares semantic JSON so formatting changes cannot mutate immutable app identity.
@@ -500,17 +526,17 @@ func insertApp(ctx context.Context, tx pgx.Tx, app App) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO fused_apps
 			(app_id, app_family_id, account_id, version, config_key,
-			 source_hash, capability_hash, scope_schema_version, selections,
+			 source_hash, bundle_digest, capability_hash, scope_schema_version, selections,
 			 unified_definition_schema_version, unified_definitions,
 			 unified_definition_hash, unified_codegen_descriptor_hash,
 			 generator_version, sdk_generation_job_id, sdk_generation_status, hosted_mcp,
 			 status, created_by, activated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-		        NULLIF($14, ''), NULLIF($15, ''), NULLIF($16, ''), $17, $18,
-		        NULLIF($19, '00000000-0000-0000-0000-000000000000'::uuid),
-		        CASE WHEN $18 = 'active' THEN NOW() ELSE NULL END)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9, $10, $11, $12, $13, $14,
+		        NULLIF($15, ''), NULLIF($16, ''), NULLIF($17, ''), $18, $19,
+		        NULLIF($20, '00000000-0000-0000-0000-000000000000'::uuid),
+		        CASE WHEN $19 = 'active' THEN NOW() ELSE NULL END)
 	`, app.AppID, app.AppFamilyID, app.AccountID, app.Version, app.ConfigKey,
-		app.SourceHash, app.CapabilityHash, app.ScopeSchemaVersion, app.Selections,
+		app.SourceHash, app.BundleDigest, app.CapabilityHash, app.ScopeSchemaVersion, app.Selections,
 		app.UnifiedDefinitionSchemaVersion, app.UnifiedDefinitions,
 		app.UnifiedDefinitionHash, app.UnifiedCodegenDescriptorHash,
 		app.GeneratorVersion, app.SDKGenerationJobID, app.SDKGenerationStatus,
@@ -523,7 +549,7 @@ func insertApp(ctx context.Context, tx pgx.Tx, app App) error {
 
 const appSelect = `
 SELECT a.app_id, a.app_family_id, a.account_id, a.version, a.config_key,
-       a.source_hash, a.capability_hash, a.scope_schema_version, a.selections,
+       a.source_hash, COALESCE(a.bundle_digest, ''), a.capability_hash, a.scope_schema_version, a.selections,
        a.unified_definition_schema_version, a.unified_definitions,
 	       a.unified_definition_hash, a.unified_codegen_descriptor_hash,
 	       COALESCE(a.generator_version, ''),
@@ -588,7 +614,8 @@ func (s *postgresStore) ResolveMCPRoute(ctx context.Context, routeID uuid.UUID) 
 			  ON family.app_family_id = app.app_family_id
 			 AND family.account_id = app.account_id
 			WHERE app.app_id = $1
-			  AND (family.kind = 'mcp' OR (family.kind = 'sdk' AND app.hosted_mcp))
+			  AND (family.kind = 'mcp' OR (family.kind IN ('sdk', 'execution') AND app.hosted_mcp))
+			  AND (family.kind <> 'execution' OR family.execution_active_app_id = app.app_id)
 			  AND app.status IN ('active', 'deprecated')
 			UNION ALL
 			SELECT family.app_family_id, app.app_id, true AS stable, 1 AS preference
@@ -598,7 +625,8 @@ func (s *postgresStore) ResolveMCPRoute(ctx context.Context, routeID uuid.UUID) 
 			 AND app.app_family_id = family.app_family_id
 			 AND app.account_id = family.account_id
 			WHERE family.app_family_id = $1
-			  AND (family.kind = 'mcp' OR (family.kind = 'sdk' AND app.hosted_mcp))
+			  AND (family.kind = 'mcp' OR (family.kind IN ('sdk', 'execution') AND app.hosted_mcp))
+			  AND (family.kind <> 'execution' OR family.execution_active_app_id = app.app_id)
 			  AND app.status IN ('active', 'deprecated')
 		)
 		SELECT app_family_id, app_id, stable
@@ -755,7 +783,7 @@ func (s *postgresStore) GetMCPUnifiedOperationDescriptors(ctx context.Context, a
 				LIMIT 1
 			) plan ON true
 			WHERE app.app_id = $1
-			  AND (family.kind = 'mcp' OR (family.kind = 'sdk' AND app.hosted_mcp))
+			  AND (family.kind = 'mcp' OR (family.kind IN ('sdk', 'execution') AND app.hosted_mcp))
 			  AND app.status IN ('active', 'deprecated')
 		), projected AS (
 			SELECT expected_hash, complete,
@@ -834,7 +862,7 @@ func scanApp(row pgx.Row) (*App, error) {
 	var a App
 	var depMsg string
 	err := row.Scan(&a.AppID, &a.AppFamilyID, &a.AccountID, &a.Version, &a.ConfigKey,
-		&a.SourceHash, &a.CapabilityHash, &a.ScopeSchemaVersion, &a.Selections,
+		&a.SourceHash, &a.BundleDigest, &a.CapabilityHash, &a.ScopeSchemaVersion, &a.Selections,
 		&a.UnifiedDefinitionSchemaVersion, &a.UnifiedDefinitions,
 		&a.UnifiedDefinitionHash, &a.UnifiedCodegenDescriptorHash,
 		&a.GeneratorVersion, &a.SDKGenerationJobID, &a.SDKGenerationStatus,

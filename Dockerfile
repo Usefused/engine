@@ -57,6 +57,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build -tags headless \
     -ldflags="-s -w -X github.com/Usefused/engine/cmd/engine/cmd.Version=${VERSION} -X github.com/Usefused/engine/cmd/engine/cmd.BuildHash=${COMMIT}" \
     -o /out/fused-engine ./cmd/engine
 
+# The authored-code process must be a small, standalone binary so each
+# invocation does not map the full Engine server into its memory limit.
+FROM engine-source AS execution-worker-builder
+
+RUN CGO_ENABLED=0 GOOS=linux go build -tags headless \
+    -ldflags="-s -w" -o /out/fused-execution-worker ./cmd/execution-worker
+
 FROM engine-source AS engine-embedded-builder
 
 COPY --from=ui-builder /app/build/client ./ui-build
@@ -88,12 +95,15 @@ COPY entrypoint.sh /app/entrypoint.sh
 
 FROM engine-runtime AS headless
 
+COPY --from=execution-worker-builder /out/fused-execution-worker /app/fused-execution-worker
+
 ENTRYPOINT ["/sbin/tini", "--", "/app/entrypoint.sh"]
 CMD ["/app/fused-engine", "start"]
 
 FROM engine-runtime-base AS embedded
 
 COPY --from=engine-embedded-builder /out/fused-engine /app/fused-engine
+COPY --from=execution-worker-builder /out/fused-execution-worker /app/fused-execution-worker
 COPY engine.yaml /app/engine.yaml
 COPY entrypoint.sh /app/entrypoint.sh
 

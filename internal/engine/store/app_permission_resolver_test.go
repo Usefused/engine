@@ -22,12 +22,16 @@ func TestTypedAppOAuthScopePostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	families := make(map[string]uuid.UUID)
-	for _, appType := range []string{"sdk", "api", "mcp"} {
+	for _, appType := range []string{"sdk", "api", "mcp", "execution"} {
 		id := uuid.New()
 		kind, mode, language := "sdk", any(appType), any("typescript")
 		// MCP has a different persisted adapter; API remains SDK plus delivery mode.
 		if appType == "mcp" {
 			kind, mode, language = "mcp", nil, nil
+		}
+		// Execution keeps its own persisted kind and has no SDK delivery submode.
+		if appType == "execution" {
+			kind, mode, language = "execution", nil, "typescript"
 		}
 		_, err := pool.Exec(ctx, `INSERT INTO fused_app_families
 			(app_family_id,account_id,kind,delivery_mode,target_language,canonical_name,display_name,owner_subject_id)
@@ -77,7 +81,7 @@ func TestTypedAppOAuthScopePostgres(t *testing.T) {
 			}
 		}
 	}
-	for _, appType := range []string{"sdk", "api", "mcp", "webhook"} {
+	for _, appType := range []string{"sdk", "api", "mcp", "execution", "webhook"} {
 		err := authorizer.CheckAll(ctx, actor, accesscontrol.Requirement{Permission: accesscontrol.AppPermission(appType, accesscontrol.PermissionAppCreate), Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}})
 		// Full Owner authority at consent time must not widen the requested creation type.
 		if (err == nil) != (appType == "mcp") {

@@ -48,8 +48,8 @@ func AppPermission(appType string, action Permission) Permission {
 
 // AppPermissions expands an internal role template into explicit, reviewable grants.
 func AppPermissions(action Permission) []Permission {
-	permissions := make([]Permission, 0, 4)
-	for _, appType := range []string{"sdk", "mcp", "api", "webhook"} {
+	permissions := make([]Permission, 0, 5)
+	for _, appType := range []string{"sdk", "execution", "mcp", "api", "webhook"} {
 		permission := AppPermission(appType, action)
 		// Webhooks have no execution-token or app-use lifecycle to authorize.
 		if ValidatePermission(permission) == nil {
@@ -72,7 +72,7 @@ func HasAnyAppPermission(actor Actor, action Permission, resource ResourceType) 
 	return false
 }
 
-// AppTypeFromConfig distinguishes package-free API creation on the shared SDK route.
+// AppTypeFromConfig binds each configuration route to its own app permission namespace.
 func AppTypeFromConfig(configType string, raw []byte) (string, error) {
 	var document struct {
 		Kind     string `json:"kind"`
@@ -84,7 +84,7 @@ func AppTypeFromConfig(configType string, raw []byte) (string, error) {
 	}
 	// Route/plan type is authoritative; config keys and names never select permission type.
 	switch configType {
-	case "mcp", "webhook":
+	case "execution", "mcp", "webhook":
 		return configType, nil
 	case "sdk":
 		// Only an explicit package-free configuration belongs to the API namespace.
@@ -155,24 +155,29 @@ func appScope(ctx context.Context, actor Actor, action Permission, resource Reso
 	}
 	// Without a store, only IDs authorized under every type are safe to expose.
 	if actor.AppPermissions == nil {
-		candidates := make(map[uuid.UUID]bool)
-		for _, permission := range permissions {
-			for _, id := range actor.Authorization.scope(permission, resource).IDs {
-				candidates[id] = true
-			}
-		}
-		scope := AuthorizedScope{}
-		for id := range candidates {
-			allowed := true
-			for _, permission := range permissions {
-				allowed = allowed && actor.Authorization.allows(Requirement{Permission: permission, Resource: ResourceRef{Type: resource, ID: id}})
-			}
-			// Keep only the intersection, never the union, without trusted type metadata.
-			if allowed {
-				scope.IDs = append(scope.IDs, id)
-			}
-		}
-		return scope, nil
+		return localAppScopeIntersection(actor, resource, permissions), nil
 	}
 	return actor.AppPermissions.ResolveAppPermissionScope(ctx, actor.AccountID, actor.Authorization.EffectiveGrants(actor.WorkspaceID), action)
+}
+
+// localAppScopeIntersection retains only identities covered by every app-type grant when no trusted store exists.
+func localAppScopeIntersection(actor Actor, resource ResourceType, permissions []Permission) AuthorizedScope {
+	candidates := make(map[uuid.UUID]bool)
+	for _, permission := range permissions {
+		for _, id := range actor.Authorization.scope(permission, resource).IDs {
+			candidates[id] = true
+		}
+	}
+	scope := AuthorizedScope{}
+	for id := range candidates {
+		allowed := true
+		for _, permission := range permissions {
+			allowed = allowed && actor.Authorization.allows(Requirement{Permission: permission, Resource: ResourceRef{Type: resource, ID: id}})
+		}
+		// Keep only the intersection, never the union, without trusted type metadata.
+		if allowed {
+			scope.IDs = append(scope.IDs, id)
+		}
+	}
+	return scope
 }

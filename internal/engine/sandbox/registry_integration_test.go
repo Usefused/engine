@@ -131,6 +131,7 @@ func TestHTTPRegistryClient_Handshake(t *testing.T) {
 	})
 }
 
+// TestHTTPRegistryClient_HandshakeDefaultsEntitlementsForOlderRegistry preserves compatible Engine behavior across Registry upgrades.
 func TestHTTPRegistryClient_HandshakeDefaultsEntitlementsForOlderRegistry(t *testing.T) {
 	os.Setenv("FUSED_ENV", "development")
 	defer os.Unsetenv("FUSED_ENV")
@@ -148,10 +149,13 @@ func TestHTTPRegistryClient_HandshakeDefaultsEntitlementsForOlderRegistry(t *tes
 	}
 	got := result.Entitlements.Normalized()
 	want := models.DefaultRuntimeEntitlement().Normalized()
+	// A missing bundle must not silently enable persistent app workers or lose family defaults.
 	if *got.MaxBuckets != *want.MaxBuckets ||
 		*got.MaxAPIFamilies != *want.MaxAPIFamilies ||
 		*got.MaxSDKFamilies != *want.MaxSDKFamilies ||
 		*got.MaxMCPFamilies != *want.MaxMCPFamilies ||
+		*got.MaxExecutionAppFamilies != *want.MaxExecutionAppFamilies ||
+		*got.MaxExecutionAppConcurrency != *want.MaxExecutionAppConcurrency ||
 		*got.MaxServices != *want.MaxServices ||
 		*got.MaxSandboxConcurrency != *want.MaxSandboxConcurrency ||
 		*got.ExecutionRetentionDays != *want.ExecutionRetentionDays ||
@@ -161,6 +165,7 @@ func TestHTTPRegistryClient_HandshakeDefaultsEntitlementsForOlderRegistry(t *tes
 		got.HeartbeatIntervalSeconds != want.HeartbeatIntervalSeconds ||
 		got.HeartbeatStaleAfterSeconds != want.HeartbeatStaleAfterSeconds ||
 		got.DriftMonitoringEnabled != want.DriftMonitoringEnabled ||
+		got.ExecutionAppAlwaysOnEnabled != want.ExecutionAppAlwaysOnEnabled ||
 		got.WebhookIngestionEnabled != want.WebhookIngestionEnabled ||
 		got.SSOEnabled != want.SSOEnabled {
 		t.Fatalf("expected default entitlement, got %#v", result.Entitlements)

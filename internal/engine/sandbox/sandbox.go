@@ -150,12 +150,15 @@ var mcpSessions struct {
 	m map[string]*mcpSession
 }
 
-// activeExecutions tracks per-account in-flight sandbox executions for
-// MaxSandboxConcurrency enforcement. A sync.Map is chosen because account
-// count is unbounded and a coarse mutex would serialize unrelated accounts.
+// activeExecutions tracks per-account in-flight physical executions for
+// MaxSandboxConcurrency enforcement; activeExecutionMu protects its counters.
 var activeExecutions struct {
-	sync.Map // key: uuid.UUID.String() → *int64 (pointer so we can atomic increment)
+	sync.Map // key: uuid.UUID.String() → *executionCounter
 }
+
+// activeExecutionMu makes slot transfer and counter deletion atomic so a
+// waiting physical call cannot lose a released slot to a newly created counter.
+var activeExecutionMu sync.Mutex
 
 func init() {
 	mcpSessions.m = make(map[string]*mcpSession)
@@ -163,29 +166,161 @@ func init() {
 
 // executionCounter tracks a single account's in-flight executions.
 type executionCounter struct {
-	sync.Mutex
-	count int
+	count   int
+	waiters []*executionWaiter
 }
+
+// executionWaiter receives ownership of a physical slot before it wakes.
+type executionWaiter struct {
+	ready   chan struct{}
+	granted bool
+}
+
+const maxPhysicalOperationWaiters = 64
+
+// ErrPhysicalOperationQueueFull bounds memory held by stalled provider calls.
+var ErrPhysicalOperationQueueFull = errors.New("physical operation queue is full")
+
+// ErrExecutionAppPhysicalQueueFull preserves the Execution App error identity for existing callers.
+var ErrExecutionAppPhysicalQueueFull = ErrPhysicalOperationQueueFull
 
 // trackExecutionStart increments the per-account active execution count and
 // returns the new count plus a decrement function to call when execution ends.
-// If the limit is exceeded the counter is not incremented.
+// Test fixtures use this unconditionally; production admission checks first.
 func trackExecutionStart(accountID uuid.UUID) (current int, decrement func()) {
+	activeExecutionMu.Lock()
+	defer activeExecutionMu.Unlock()
 	key := accountID.String()
 	val, _ := activeExecutions.LoadOrStore(key, &executionCounter{})
 	c := val.(*executionCounter)
-	c.Lock()
 	c.count++
 	current = c.count
-	c.Unlock()
-	return current, func() {
-		c.Lock()
-		c.count--
-		remaining := c.count
-		c.Unlock()
-		if remaining <= 0 {
-			activeExecutions.Delete(key)
+	return current, func() { releaseExecutionSlot(key, c) }
+}
+
+// tryTrackExecutionStart checks and reserves an immediate SDK or MCP slot in
+// one critical section so denial cannot hand a phantom slot to a queued waiter.
+func tryTrackExecutionStart(accountID uuid.UUID, span trace.Span) (func(), error) {
+	key := accountID.String()
+	activeExecutionMu.Lock()
+	defer activeExecutionMu.Unlock()
+	value, exists := activeExecutions.Load(key)
+	current := 0
+	// A missing account has no in-flight physical operations.
+	if exists {
+		current = value.(*executionCounter).count
+	}
+	denial := entitlement.CheckLimit(span, "sandbox_concurrency", current, entitlement.LiveEntitlement.Load().MaxSandboxConcurrency)
+	// Denied calls never borrow a slot that could be transferred to a waiter.
+	if denial != nil {
+		return nil, denial
+	}
+	// Create a tracker only for an admitted physical execution.
+	if !exists {
+		value = &executionCounter{}
+		activeExecutions.Store(key, value)
+	}
+	counter := value.(*executionCounter)
+	counter.count++
+	return func() { releaseExecutionSlot(key, counter) }, nil
+}
+
+// releaseExecutionSlot hands a completed provider call's permit directly to
+// the oldest waiter, preventing transient oversubscription.
+func releaseExecutionSlot(key string, counter *executionCounter) {
+	activeExecutionMu.Lock()
+	defer activeExecutionMu.Unlock()
+	// A queued call already counted toward admission when it receives the slot.
+	if len(counter.waiters) > 0 {
+		waiter := counter.waiters[0]
+		counter.waiters = counter.waiters[1:]
+		waiter.granted = true
+		close(waiter.ready)
+		return
+	}
+	counter.count--
+	// Remove idle accounts without racing a waiter or another admission.
+	if counter.count == 0 {
+		activeExecutions.Delete(key)
+	}
+}
+
+// WithExecutionAppPhysicalQueue lets an admitted Execution App wait for
+// provider capacity using the shared bounded account queue.
+func WithExecutionAppPhysicalQueue(ctx context.Context) context.Context {
+	return withPhysicalOperationQueue(ctx)
+}
+
+type physicalOperationQueueKey struct{}
+
+// withPhysicalOperationQueue marks only trusted Engine calls for bounded waiting.
+func withPhysicalOperationQueue(ctx context.Context) context.Context {
+	return context.WithValue(ctx, physicalOperationQueueKey{}, true)
+}
+
+// trackQueuedExecutionStart reserves an available slot or waits in FIFO order
+// until completion or cancellation, with a bounded account queue.
+func trackQueuedExecutionStart(ctx context.Context, accountID uuid.UUID, span trace.Span) (func(), error) {
+	limit := entitlement.LiveEntitlement.Load().MaxSandboxConcurrency
+	// An unlimited entitlement needs no waiter allocation or scheduling.
+	if limit == nil || *limit < 0 {
+		return tryTrackExecutionStart(accountID, span)
+	}
+	// A denied entitlement cannot be satisfied by waiting or creating a tracker.
+	if *limit == 0 {
+		return nil, entitlement.CheckLimit(span, "sandbox_concurrency", 0, limit)
+	}
+	// A canceled request must not hold a queue position.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	key := accountID.String()
+	activeExecutionMu.Lock()
+	val, _ := activeExecutions.LoadOrStore(key, &executionCounter{})
+	counter := val.(*executionCounter)
+	denial := entitlement.CheckLimit(span, "sandbox_concurrency", counter.count, limit)
+	// Existing waiters keep priority when a new physical call arrives.
+	if denial == nil && len(counter.waiters) == 0 {
+		counter.count++
+		activeExecutionMu.Unlock()
+		return func() { releaseExecutionSlot(key, counter) }, nil
+	}
+	// Bounded waiting avoids unbounded worker memory under provider stalls.
+	if len(counter.waiters) >= maxPhysicalOperationWaiters {
+		activeExecutionMu.Unlock()
+		return nil, ErrPhysicalOperationQueueFull
+	}
+	waiter := &executionWaiter{ready: make(chan struct{})}
+	counter.waiters = append(counter.waiters, waiter)
+	activeExecutionMu.Unlock()
+	return waitForExecutionSlot(ctx, key, counter, waiter, span)
+}
+
+// waitForExecutionSlot ensures cancellation returns a transferred permit or
+// removes the pending waiter before it can be granted.
+func waitForExecutionSlot(ctx context.Context, key string, counter *executionCounter, waiter *executionWaiter, span trace.Span) (func(), error) {
+	started := time.Now()
+	select {
+	case <-waiter.ready:
+		span.SetAttributes(attribute.Int64("execution.physical_queue_wait_ms", time.Since(started).Milliseconds()))
+		return func() { releaseExecutionSlot(key, counter) }, nil
+	case <-ctx.Done():
+		activeExecutionMu.Lock()
+		// A simultaneous grant must be returned because the caller will not dispatch.
+		if waiter.granted {
+			activeExecutionMu.Unlock()
+			releaseExecutionSlot(key, counter)
+			return nil, ctx.Err()
 		}
+		for index, pending := range counter.waiters {
+			// The waiter list contains this identity at most once.
+			if pending == waiter {
+				counter.waiters = append(counter.waiters[:index], counter.waiters[index+1:]...)
+				break
+			}
+		}
+		activeExecutionMu.Unlock()
+		return nil, ctx.Err()
 	}
 }
 
@@ -449,22 +584,22 @@ func resolveTrackedExecutionIdentity(ctx context.Context, validator auth.TokenVa
 	if err != nil {
 		return auth.RuntimeIdentity{}, func() {}, err
 	}
-	decrement, err := trackAuthenticatedExecution(identity, span)
+	decrement, err := trackAuthenticatedExecution(ctx, identity, span)
 	return identity, decrement, err
 }
 
-// trackAuthenticatedExecution charges the authenticated account concurrency counter and rolls it back on denial.
-func trackAuthenticatedExecution(identity auth.RuntimeIdentity, span trace.Span) (func(), error) {
+// trackAuthenticatedExecution applies the provider slot policy chosen by the
+// trusted Engine path without changing the account identity being charged.
+func trackAuthenticatedExecution(ctx context.Context, identity auth.RuntimeIdentity, span trace.Span) (func(), error) {
+	// Unattributed system execution has no account entitlement to charge.
 	if identity.AccountID == uuid.Nil {
 		return func() {}, nil
 	}
-	current, decrement := trackExecutionStart(identity.AccountID)
-	limitErr := entitlement.CheckLimit(span, "sandbox_concurrency", current-1, entitlement.LiveEntitlement.Load().MaxSandboxConcurrency)
-	if limitErr != nil {
-		decrement()
-		return func() {}, limitErr
+	// Only Engine-marked children wait; unmarked direct calls keep their existing gate.
+	if ctx.Value(physicalOperationQueueKey{}) == true {
+		return trackQueuedExecutionStart(ctx, identity.AccountID, span)
 	}
-	return decrement, nil
+	return tryTrackExecutionStart(identity.AccountID, span)
 }
 
 func resolveMatchedExecutionCredentials(ctx context.Context, match *scopedEndpoint, obj *models.IntegrationObject, identity auth.RuntimeIdentity, credentials map[string]any) (map[string]any, []store.BucketValue, error) {

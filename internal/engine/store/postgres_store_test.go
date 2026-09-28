@@ -220,9 +220,12 @@ func TestRuntimeEntitlementRoundTrip(t *testing.T) {
 	entitlement.MaxAPIFamilies = models.IntPtr(4)
 	entitlement.MaxSDKFamilies = models.IntPtr(3)
 	entitlement.MaxMCPFamilies = models.IntPtr(3)
+	entitlement.MaxExecutionAppFamilies = models.IntPtr(2)
+	entitlement.MaxExecutionAppConcurrency = models.IntPtr(3)
 	entitlement.MaxServices = models.IntPtr(10)
 	entitlement.MaxSandboxConcurrency = models.IntPtr(20)
 	entitlement.DriftMonitoringEnabled = true
+	entitlement.ExecutionAppAlwaysOnEnabled = true
 	entitlement.WebhookIngestionEnabled = true
 	entitlement.PublicServiceInsightsEnabled = true
 	entitlement.SSOEnabled = true
@@ -237,7 +240,7 @@ func TestRuntimeEntitlementRoundTrip(t *testing.T) {
 	if got.Plan != "enterprise" || got.EntitlementRevision != "enterprise-revision" || got.HeartbeatIntervalSeconds != 15 {
 		t.Fatalf("unexpected entitlement: %#v", got)
 	}
-	if *got.MaxBuckets != 5 || *got.MaxAPIFamilies != 4 || *got.MaxSDKFamilies != 3 || *got.MaxMCPFamilies != 3 || *got.MaxServices != 10 || *got.MaxSandboxConcurrency != 20 {
+	if *got.MaxBuckets != 5 || *got.MaxAPIFamilies != 4 || *got.MaxSDKFamilies != 3 || *got.MaxMCPFamilies != 3 || *got.MaxExecutionAppFamilies != 2 || *got.MaxExecutionAppConcurrency != 3 || *got.MaxServices != 10 || *got.MaxSandboxConcurrency != 20 {
 		t.Fatalf("unexpected capability limits: %#v", got)
 	}
 	assertRuntimeEntitlementFeatureGates(t, got)
@@ -248,7 +251,7 @@ func TestRuntimeEntitlementRoundTrip(t *testing.T) {
 
 func assertRuntimeEntitlementFeatureGates(t *testing.T, entitlement models.RuntimeEntitlement) {
 	t.Helper()
-	if !entitlement.DriftMonitoringEnabled || !entitlement.WebhookIngestionEnabled || !entitlement.PublicServiceInsightsEnabled || !entitlement.SSOEnabled {
+	if !entitlement.DriftMonitoringEnabled || !entitlement.ExecutionAppAlwaysOnEnabled || !entitlement.WebhookIngestionEnabled || !entitlement.PublicServiceInsightsEnabled || !entitlement.SSOEnabled {
 		t.Fatalf("unexpected feature gates: %#v", entitlement)
 	}
 }

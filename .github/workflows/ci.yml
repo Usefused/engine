@@ -47,9 +47,14 @@ jobs:
           ! rg -n 'func InitRegistryPostgres|func initRegistrySchema|func registrySchemaQueries' internal/shared/db
 
       - name: Build headless
-        run: go build -tags headless -o /tmp/fused-engine-headless ./cmd/engine
+        run: |
+          go build -tags headless -o /tmp/fused-engine-headless ./cmd/engine
+          # Build the separate sandbox executable before exercising either image variant.
+          CGO_ENABLED=0 go build -tags headless -o /tmp/fused-execution-worker ./cmd/execution-worker
 
       - name: Test headless
+        env:
+          FUSED_EXECUTION_WORKER_TEST_BINARY: /tmp/fused-execution-worker
         run: go test -tags headless ./...
 
 
@@ -66,6 +71,8 @@ jobs:
           go build -o /tmp/fused-engine ./cmd/engine
 
       - name: Test embedded
+        env:
+          FUSED_EXECUTION_WORKER_TEST_BINARY: /tmp/fused-execution-worker
         run: go test ./...
 
       - name: Build Docker images

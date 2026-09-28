@@ -36,6 +36,29 @@ func TestCheckAPIFamilyCapacityReportsIndependentEntitlement(t *testing.T) {
 	assertAPIFamilyLimitError(t, err)
 }
 
+// TestExecutionAppFamilyCapacityUsesItsOwnPlanLimit keeps hosted workers out of the API quota.
+func TestExecutionAppFamilyCapacityUsesItsOwnPlanLimit(t *testing.T) {
+	accountID := uuid.New()
+	entitlement.LiveEntitlement.Store(models.RuntimeEntitlement{MaxExecutionAppFamilies: models.IntPtr(0), MaxAPIFamilies: models.IntPtr(10)})
+	t.Cleanup(entitlement.LiveEntitlement.Reset)
+	err := enforceConfiguredFamilyLimit(context.Background(), &workspaceTestStore{accountID: accountID}, accountID, sdkConfigDocument{Kind: store.AppKindExecution.String(), Name: "new-execution-app"})
+	httpErr, ok := err.(workspaceConfigHTTPError)
+	// The independent ceiling must be visible even when API capacity remains available.
+	if !ok || httpErr.code != "execution_app_family_limit_exceeded" || httpErr.category != "entitlement" {
+		t.Fatalf("execution app family quota error = %#v", err)
+	}
+}
+
+// TestExecutionAppApplyPersistenceErrorPreservesQuotaIdentity covers a concurrent family activation race.
+func TestExecutionAppApplyPersistenceErrorPreservesQuotaIdentity(t *testing.T) {
+	err := appApplyPersistenceError(context.Background(), store.ErrExecutionAppFamilyLimitExceeded, uuid.New())
+	httpErr, ok := err.(workspaceConfigHTTPError)
+	// Commit-time admission must use the same public code as plan-time admission.
+	if !ok || httpErr.code != "execution_app_family_limit_exceeded" || httpErr.category != "entitlement" {
+		t.Fatalf("execution app persistence quota error = %#v", err)
+	}
+}
+
 // TestAPIApplyPersistenceErrorPreservesQuotaIdentity covers the transaction-time race after plan admission.
 func TestAPIApplyPersistenceErrorPreservesQuotaIdentity(t *testing.T) {
 	err := appApplyPersistenceError(context.Background(), store.ErrAPIFamilyLimitExceeded, uuid.New())

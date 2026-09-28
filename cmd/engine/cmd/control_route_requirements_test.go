@@ -51,6 +51,8 @@ func TestAppAccessRequirementsUseFamilyBoundary(t *testing.T) {
 		permission accesscontrol.Permission
 	}{
 		{method: http.MethodPost, path: "/apps/" + appID.String() + "/deprecate", permission: accesscontrol.PermissionAppSDKManage},
+		// Bundle attachment must inherit the same exact family management boundary.
+		{method: http.MethodPost, path: "/apps/" + appID.String() + "/bundle", permission: accesscontrol.PermissionAppSDKManage},
 		{method: http.MethodGet, path: "/sdks/" + appID.String() + "/download", permission: accesscontrol.PermissionAppSDKRead},
 		{method: http.MethodGet, path: "/apps/" + appID.String() + "/openapi", permission: accesscontrol.PermissionAppSDKRead},
 	}
@@ -284,6 +286,7 @@ func TestDynamicDesiredConfigApplyBindsAuthorizedPlanRevision(t *testing.T) {
 		path       string
 	}{
 		{configType: store.ConfigTypeSDK, path: "/sdk-config/apply"},
+		{configType: store.ConfigTypeExecution, path: "/execution-config/apply"},
 		{configType: store.ConfigTypeMCP, path: "/mcp-config/apply"},
 		{configType: store.ConfigTypeWebhook, path: "/webhook-config/apply"},
 	} {
@@ -388,6 +391,21 @@ func TestDynamicDesiredConfigApplyChoosesCreateOrManage(t *testing.T) {
 	}
 }
 
+// TestStoredAppsRequireSelectedService keeps every app bound to reviewed provider scope.
+func TestStoredAppsRequireSelectedService(t *testing.T) {
+	bucketID := uuid.New()
+	plan := &store.ConfigPlan{
+		ResolvedPayload: []byte(`{"bucket_id":"` + bucketID.String() + `","selections":[]}`),
+	}
+	for _, configType := range []store.ConfigType{store.ConfigTypeSDK, store.ConfigTypeExecution, store.ConfigTypeMCP} {
+		plan.ConfigType = configType
+		// A digest cannot replace a selected service for either authored or generated apps.
+		if _, err := storedDesiredConfigSelectionRequirements(plan, accesscontrol.PermissionServiceConsume, accesscontrol.PermissionBucketUse); !errors.Is(err, accesscontrol.ErrPolicyDenied) {
+			t.Fatalf("empty %s scope must be denied, got %v", configType, err)
+		}
+	}
+}
+
 // TestDynamicDesiredConfigPlanResolvesSelectionsInBatches prevents per-service lookup regressions.
 func TestDynamicDesiredConfigPlanResolvesSelectionsInBatches(t *testing.T) {
 	workspaceID := uuid.New()
@@ -410,6 +428,26 @@ func TestDynamicDesiredConfigPlanResolvesSelectionsInBatches(t *testing.T) {
 	// Resolution and legacy candidate authorization remain fixed-size batches.
 	if stores.slugLoads != 1 || stores.serviceLoads != 1 || stores.batchBuckets != 1 || configStore.stateLoads != 1 || configStore.stateKey != "sdk:payments:1.0.0" {
 		t.Fatalf("service/bucket/state loads = %d/%d/%d key=%q", stores.slugLoads, stores.batchBuckets, configStore.stateLoads, configStore.stateKey)
+	}
+}
+
+// TestDynamicDesiredConfigPlanRejectsUnboundApps prevents source code from creating provider-free apps.
+func TestDynamicDesiredConfigPlanRejectsUnboundApps(t *testing.T) {
+	workspaceID := uuid.New()
+	bucketID := uuid.New()
+	stores := &controlRequirementStoreStub{buckets: []store.Bucket{{ID: bucketID, Name: "default"}}}
+	resolver := newControlRequirementResolver(stores, &controlConfigRepositoryStub{})
+	digest := "sha256:" + strings.Repeat("a", 64)
+	for _, test := range []struct{ kind, route string }{{"sdk", "/sdk-config/plan"}, {"execution", "/execution-config/plan"}} {
+		body := `{"config_key":"` + test.kind + `:greeting:1.0.0","config":{"kind":"` + test.kind + `","bucket":"default","language":"typescript","bundle_digest":"` + digest + `"}}`
+		request := httptest.NewRequest(http.MethodPost, test.route, strings.NewReader(body))
+		// Authorization must deny an unbound version before any service or bucket lookup.
+		if _, err := resolver.ResolveControlRequirements(context.Background(), accesscontrol.Actor{WorkspaceID: workspaceID}, dynamicDesiredConfigPlan, nil, request); !errors.Is(err, accesscontrol.ErrPolicyDenied) {
+			t.Fatalf("unbound %s app must be denied, got %v", test.kind, err)
+		}
+	}
+	if stores.slugLoads != 0 || stores.serviceLoads != 0 || stores.batchBuckets != 0 {
+		t.Fatalf("unbound lookups=%d/%d/%d", stores.slugLoads, stores.serviceLoads, stores.batchBuckets)
 	}
 }
 

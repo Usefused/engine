@@ -202,20 +202,22 @@ func TestValidateAppRuntimeSelectionsRequiresCompleteV3Identity(t *testing.T) {
 		SchemaVersion: models.AppSelectionSchemaVersion,
 	}
 	tests := []struct {
-		name       string
-		scope      int
-		selections []models.SDKSelection
-		wantError  bool
+		name         string
+		scope        int
+		selections   []models.SDKSelection
+		bundleDigest string
+		wantError    bool
 	}{
 		{name: "complete v3 selection", scope: models.AppScopeSchemaVersion, selections: []models.SDKSelection{valid}},
 		{name: "old scope", scope: models.AppScopeSchemaVersion - 1, selections: []models.SDKSelection{valid}, wantError: true},
 		{name: "missing selection version", scope: models.AppScopeSchemaVersion, selections: []models.SDKSelection{{ServiceID: valid.ServiceID, ServiceVersionID: valid.ServiceVersionID}}, wantError: true},
 		{name: "missing service version", scope: models.AppScopeSchemaVersion, selections: []models.SDKSelection{{ServiceID: valid.ServiceID, SchemaVersion: models.AppSelectionSchemaVersion}}, wantError: true},
 		{name: "empty selections", scope: models.AppScopeSchemaVersion, wantError: true},
+		{name: "authored code without service selection", scope: models.AppScopeSchemaVersion, selections: []models.SDKSelection{}, bundleDigest: store.ExecutionAppBundleDigest([]byte("code")), wantError: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := validateAppRuntimeSelections(test.scope, test.selections)
+			err := validateAppRuntimeSelections(test.scope, test.selections, test.bundleDigest)
 			if (err != nil) != test.wantError {
 				t.Fatalf("validateAppRuntimeSelections() error = %v, wantError %v", err, test.wantError)
 			}
@@ -228,7 +230,7 @@ func TestValidateAppRuntimeSelectionsRequiresCompleteV3Identity(t *testing.T) {
 	if err := json.Unmarshal([]byte(`[{"service_id":"`+valid.ServiceID.String()+`","service_version_id":"`+valid.ServiceVersionID.String()+`","definition_schema_version":3}]`), &removedField); err != nil {
 		t.Fatalf("decode removed selection field fixture: %v", err)
 	}
-	if err := validateAppRuntimeSelections(models.AppScopeSchemaVersion, removedField); err == nil {
+	if err := validateAppRuntimeSelections(models.AppScopeSchemaVersion, removedField, ""); err == nil {
 		t.Fatal("removed definition schema field was accepted as an alias")
 	}
 }

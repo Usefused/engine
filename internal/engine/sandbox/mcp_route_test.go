@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/google/uuid"
 )
@@ -111,5 +112,31 @@ func TestMCPStableRouteSessionSurvivesPromotion(t *testing.T) {
 	// the now-promoted family target on subsequent transport requests.
 	if err != nil || status != 200 || got.appID != oldAppID.String() || resolver.calls != 0 {
 		t.Fatalf("session auth = %#v, status %d, resolver calls %d, error %v", got, status, resolver.calls, err)
+	}
+}
+
+// TestMCPExecutionAppSessionRejectsPromotion gives Execution Apps stricter traffic ownership than MCP apps.
+func TestMCPExecutionAppSessionRejectsPromotion(t *testing.T) {
+	previousResolver, previousValidator := globalMCPRouteResolver, globalTokenValidator
+	t.Cleanup(func() { globalMCPRouteResolver, globalTokenValidator = previousResolver, previousValidator })
+	familyID, oldAppID, newAppID, tokenID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	resolver := &mcpRouteResolverStub{target: &store.MCPRouteTarget{AppFamilyID: familyID, AppID: newAppID, Stable: true}}
+	globalMCPRouteResolver = resolver
+	globalTokenValidator = &mcpModernTokenValidator{token: "family-token", identity: auth.RuntimeIdentity{
+		AppID: oldAppID, TokenID: tokenID, Kind: store.AppKindExecution, HostedMCP: true,
+	}}
+	sess := &mcpSession{
+		appID: oldAppID.String(), routeID: familyID.String(), sessionID: uuid.NewString(),
+		tokenID: tokenID, protocolVersion: "2025-06-18", transport: mcpStreamableTransport,
+		token: "family-token", idleTimer: time.AfterFunc(time.Hour, func() {}),
+	}
+	mcpSessions.Lock()
+	mcpSessions.m[sess.sessionID] = sess
+	mcpSessions.Unlock()
+	t.Cleanup(func() { terminateMCPSession(sess.sessionID, "test_cleanup") })
+	_, status, err := authenticateMCPStreamableSession(context.Background(), familyID.String(), sess.token, sess.sessionID, sess.protocolVersion)
+	// The family token remains valid, but the prior exact version no longer receives requests.
+	if err == nil || status != 401 || resolver.calls != 1 {
+		t.Fatalf("old Execution App MCP session status=%d resolver calls=%d error=%v", status, resolver.calls, err)
 	}
 }

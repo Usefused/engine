@@ -75,6 +75,8 @@ type sdkConfigDocument struct {
 	// describable via api openapi, with no downloadable artifact behind it.
 	// Mirrors cli/internal/configfile's app config generate field.
 	Generate *bool `json:"generate,omitempty"`
+	// BundleDigest is the compiler output identity approved by this immutable plan.
+	BundleDigest string `json:"bundle_digest,omitempty"`
 	// MCP exposes this same immutable SDK/REST app version through the hosted agent transport.
 	MCP *sdkMCPDeliveryDocument `json:"mcp,omitempty"`
 	// WebhookAttachment names one kind: webhook config this SDK/MCP wants
@@ -274,6 +276,7 @@ type sdkResolvedService struct {
 }
 
 type sdkApplyCall struct {
+	kind         store.ConfigType
 	apiKey       string
 	accountID    uuid.UUID
 	actor        accesscontrol.Actor
@@ -285,6 +288,15 @@ type sdkApplyCall struct {
 	// applyAppConfigRuntime, the one function shared by SDK and MCP apply
 	// that issues a family's first execution token.
 	skipToken bool
+}
+
+// applyConfigKind preserves SDK defaults for internal callers while honoring the explicit Execution route.
+func applyConfigKind(call sdkApplyCall) store.ConfigType {
+	// Existing SDK tests and background callers omit the kind because their route fixes it.
+	if call.kind == "" {
+		return store.ConfigTypeSDK
+	}
+	return call.kind
 }
 
 type sdkGenerationResult struct {
@@ -305,12 +317,22 @@ func (e sdkProxyError) Error() string { return "sdk generation proxy failed" }
 
 // SDKConfigPlanHandler handles POST /sdk-config/plan.
 func SDKConfigPlanHandler(configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, defaultEngineURLs ...string) http.HandlerFunc {
+	return appConfigPlanHandler(store.ConfigTypeSDK, configStore, s, registryClient, defaultEngineURLs...)
+}
+
+// ExecutionConfigPlanHandler plans a compiled execute under its own App family kind.
+func ExecutionConfigPlanHandler(configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient) http.HandlerFunc {
+	return appConfigPlanHandler(store.ConfigTypeExecution, configStore, s, registryClient)
+}
+
+// appConfigPlanHandler shares immutable planning without collapsing SDK and Execution App identities.
+func appConfigPlanHandler(kind store.ConfigType, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, defaultEngineURLs ...string) http.HandlerFunc {
 	defaultEngineURL := ""
 	if len(defaultEngineURLs) > 0 {
 		defaultEngineURL = strings.TrimSpace(defaultEngineURLs[0])
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.sdk_config.plan")
+		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine."+string(kind)+"_config.plan")
 		defer span.End()
 
 		actor, ok := accesscontrol.ActorFromContext(ctx)
@@ -319,7 +341,7 @@ func SDKConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
-		req, doc, err := decodeSDKConfigPlanRequest(r)
+		req, doc, err := decodeSDKOrExecutionConfigPlanRequest(r, kind)
 		if err != nil {
 			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "plan_admission", "", "not_committed"), ctx)
 			return
@@ -356,12 +378,22 @@ func SDKConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 
 // SDKConfigApplyHandler handles POST /sdk-config/apply.
 func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, proxy Forwarder, clients ...sandbox.RegistryClient) http.HandlerFunc {
+	return appConfigApplyHandler(store.ConfigTypeSDK, configStore, s, proxy, clients...)
+}
+
+// ExecutionConfigApplyHandler publishes a hosted execute without creating a Registry SDK package.
+func ExecutionConfigApplyHandler(configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient) http.HandlerFunc {
+	return appConfigApplyHandler(store.ConfigTypeExecution, configStore, s, nil, registryClient)
+}
+
+// appConfigApplyHandler retains the same plan lease and token lifecycle for both distinct App kinds.
+func appConfigApplyHandler(kind store.ConfigType, configStore store.ConfigRepository, s store.Store, proxy Forwarder, clients ...sandbox.RegistryClient) http.HandlerFunc {
 	var registryClient sandbox.RegistryClient
 	if len(clients) > 0 {
 		registryClient = clients[0]
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.sdk_config.apply")
+		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine."+string(kind)+"_config.apply")
 		defer span.End()
 
 		actor, ok := accesscontrol.ActorFromContext(ctx)
@@ -385,6 +417,7 @@ func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, pr
 			attribute.String("actor.type", string(actor.Kind)),
 		)
 		result, err := executeSDKConfigApply(ctx, configStore, s, proxy, registryClient, sdkApplyCall{
+			kind:         kind,
 			apiKey:       r.Header.Get("X-API-Key"),
 			accountID:    actor.AccountID,
 			actor:        actor,
@@ -429,6 +462,11 @@ func SDKConfigApplyHandler(configStore store.ConfigRepository, s store.Store, pr
 // decodeSDKConfigPlanRequest validates the envelope and app identity
 // before Registry lookups or plan persistence can occur.
 func decodeSDKConfigPlanRequest(r *http.Request) (SDKConfigPlanRequest, sdkConfigDocument, error) {
+	return decodeSDKOrExecutionConfigPlanRequest(r, store.ConfigTypeSDK)
+}
+
+// decodeSDKOrExecutionConfigPlanRequest validates each App kind before shared planning may create immutable state.
+func decodeSDKOrExecutionConfigPlanRequest(r *http.Request, kind store.ConfigType) (SDKConfigPlanRequest, sdkConfigDocument, error) {
 	var req SDKConfigPlanRequest
 	if err := decodeOneStrictJSON(r.Body, &req); err != nil {
 		return req, sdkConfigDocument{}, errors.New("invalid request body")
@@ -446,7 +484,7 @@ func decodeSDKConfigPlanRequest(r *http.Request) (SDKConfigPlanRequest, sdkConfi
 	if err := decodeAppConfigJSON(req.Config, &doc); err != nil {
 		return req, doc, errors.New("invalid config json")
 	}
-	if err := validateSDKConfigDocument(doc); err != nil {
+	if err := validateAuthoredAppConfigDocument(doc, kind); err != nil {
 		return req, doc, err
 	}
 	if err := validateSDKConfigKey(req.ConfigKey, doc); err != nil {
@@ -521,6 +559,85 @@ func validateSDKConfigDocument(doc sdkConfigDocument) error {
 	return validateSDKUnifiedOperations(doc)
 }
 
+// validateAuthoredAppConfigDocument keeps package-backed SDKs distinct from hosted Execution Apps.
+func validateAuthoredAppConfigDocument(doc sdkConfigDocument, kind store.ConfigType) error {
+	// The route is part of immutable family identity, so a cross-kind document must fail at admission.
+	if kind == store.ConfigTypeExecution {
+		return validateExecutionConfigDocument(doc)
+	}
+	return validateSDKConfigDocument(doc)
+}
+
+// validateExecutionConfigDocument admits one digest-pinned TypeScript execute with bounded provider scope.
+func validateExecutionConfigDocument(doc sdkConfigDocument) error {
+	// Reject invalid code identity before checking transport and provider scope.
+	if err := validateExecutionIdentityAndRuntime(doc); err != nil {
+		return err
+	}
+	if err := validateSDKMCPDelivery(doc); err != nil {
+		return err
+	}
+	// Every authored App has a reviewed provider scope for its fused.fetch calls.
+	if strings.TrimSpace(doc.Bucket) == "" {
+		return errors.New("execution config requires exactly one bucket")
+	}
+	if err := validateWorkflowSources(doc.WorkflowSources); err != nil {
+		return err
+	}
+	if err := validateWebhookAttachmentRequired(doc); err != nil {
+		return err
+	}
+	if err := validateAppServiceDocs(doc.Services); err != nil {
+		return err
+	}
+	return validateExecutionOperationScope(doc.Services)
+}
+
+// validateExecutionIdentityAndRuntime prevents package or graph declarations from entering a hosted execute plan.
+func validateExecutionIdentityAndRuntime(doc sdkConfigDocument) error {
+	// No authored code can be attached unless the compiler identity was planned exactly.
+	if !validExecutionDocumentIdentity(doc) {
+		return errors.New("execution config requires fused/v1, kind: execution, name, and SemVer version")
+	}
+	// Execution Apps use the Engine runtime, never the Registry SDK generator.
+	if doc.Language != "typescript" || doc.Generate == nil || *doc.Generate || !store.IsCanonicalExecutionAppBundleDigest(doc.BundleDigest) {
+		return errors.New("execution config requires TypeScript, generate: false, and a canonical bundle_digest")
+	}
+	// A graph would compete with the singular authored execute, while the MCP transport only exposes it.
+	if len(doc.UnifiedOperations) != 0 || doc.FusedIntelligentClassifier || strings.TrimSpace(doc.Description) != "" {
+		return errors.New("execution config contains unsupported graph or discovery fields")
+	}
+	return nil
+}
+
+// validExecutionDocumentIdentity keeps route kind, authored name, and version tied to one immutable plan.
+func validExecutionDocumentIdentity(doc sdkConfigDocument) bool {
+	return doc.APIVersion == "fused/v1" && doc.Kind == store.AppKindExecution.String() && strings.TrimSpace(doc.Name) != "" && validAppVersion(doc.Version)
+}
+
+// validateExecutionOperationScope bounds exact raw selections so bundle admission can verify one finite manifest.
+func validateExecutionOperationScope(services map[string]sdkConfigServiceDoc) error {
+	// A webhook-only selection cannot back the synchronous fused.fetch operation surface.
+	operationCount := 0
+	for _, service := range services {
+		// Explicit names reserve execute for the authored entry; select_all could include that raw name.
+		if service.SelectAll {
+			return errors.New("execution config requires explicit operations")
+		}
+		for _, operation := range service.Operations {
+			if operation == "execute" {
+				return errors.New("execution config reserves raw operation execute")
+			}
+			operationCount++
+		}
+	}
+	// The compiler manifest and Engine runtime cap one App at 64 selected operations.
+	if operationCount == 0 || operationCount > 64 {
+		return errors.New("execution config requires 1 to 64 selected operations")
+	}
+	return nil
+}
+
 // validateSDKMCPDelivery admits one hosted transport only when its immutable server metadata is complete.
 func validateSDKMCPDelivery(doc sdkConfigDocument) error {
 	// SDK-only declarations retain their existing package and REST behavior.
@@ -583,6 +700,10 @@ func validateSDKOutputFields(doc sdkConfigDocument) error {
 	// Registry generation supports only the maintained language emitters.
 	if doc.Language != "typescript" && doc.Language != "python" && doc.Language != "go" {
 		return fmt.Errorf("invalid sdk language %q", doc.Language)
+	}
+	// Compiler bundle provenance belongs to the distinct Execution App family, never an SDK version.
+	if doc.BundleDigest != "" {
+		return errors.New("bundle_digest requires kind: execution")
 	}
 	// Authored server prose has no SDK output consumer and must not become inert immutable state.
 	if strings.TrimSpace(doc.Description) != "" {
@@ -904,7 +1025,7 @@ func validAppAuthType(value string) bool {
 }
 
 func validateSDKConfigKey(configKey string, doc sdkConfigDocument) error {
-	expected := fmt.Sprintf("sdk:%s:%s", doc.Name, doc.Version)
+	expected := fmt.Sprintf("%s:%s:%s", doc.Kind, doc.Name, doc.Version)
 	// Engine enforces the same identity the CLI derives, so hand-written API
 	// callers cannot store plans under stale or ambiguous sdk:<name> keys.
 	if configKey != expected {
@@ -951,19 +1072,9 @@ func createSDKConfigPlan(
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
-	// Immutable identity outranks quota because capacity cannot make a conflicting or retired family reusable.
-	if err := preflightSDKFamilyLifecycle(ctx, s, call.accountID, call.document); err != nil {
-		return sdkPlanResult{}, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
-	}
-	// Capacity remains reviewable admission after the cheaper authoritative identity fence.
-	if err := enforceSDKFamilyLimit(ctx, s, call.accountID, call.document.Name, sdkConfigGeneratesPackage(call.document)); err != nil {
-		return sdkPlanResult{}, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
-	}
-	// A combined App consumes the hosted MCP allowance as well as its SDK or direct REST allowance.
-	if call.document.MCP != nil {
-		if err := enforceMCPFamilyLimit(ctx, s, call.accountID, call.document.Name, true); err != nil {
-			return sdkPlanResult{}, withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
-		}
+	// A plan must pass identity and quota admission before resolving its provider definition.
+	if err := admitAppPlanFamily(ctx, s, call.accountID, call.document); err != nil {
+		return sdkPlanResult{}, err
 	}
 	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
 	definition, err := resolveSDKPlanDefinition(ctx, configStore, s, registryClient, call, currentState, *bucket, bucketOverrides, appID)
@@ -973,7 +1084,7 @@ func createSDKConfigPlan(
 	}
 	notifications := sdkPlanNotifications(ctx, configStore, registryClient, call, definition.resolvedServices, definition.noop)
 	requiredPermissions, requiredCount, err := configPlanRequiredPermissionsWithBuckets(
-		ctx, s, appPermissionState(currentState, appID), serviceNamesFromResolved(definition.resolvedServices), definition.buckets.distinct(), call.document.Name, string(sdkConfigDeliveryMode(call.document)), call.document.MCP != nil,
+		ctx, s, appPermissionState(currentState, appID), serviceNamesFromResolved(definition.resolvedServices), definition.buckets.distinct(), call.document.Name, appConfigPermissionType(call.document), call.document.MCP != nil,
 	)
 	// A retained contract grants no additional control-plane permissions.
 	if err != nil {
@@ -985,7 +1096,7 @@ func createSDKConfigPlan(
 	}
 	plan, err := configStore.CreateConfigPlan(ctx, store.CreateConfigPlanParams{
 		ConfigKey:           call.request.ConfigKey,
-		ConfigType:          store.ConfigTypeSDK,
+		ConfigType:          store.ConfigType(call.document.Kind),
 		OwnerSubjectID:      call.request.OwnerSubjectID,
 		OwnerTeamID:         call.request.OwnerTeamID,
 		SourceHash:          call.request.SourceHash,
@@ -1007,16 +1118,62 @@ func createSDKConfigPlan(
 	trace.SpanFromContext(ctx).SetAttributes(attribute.Int("required_permissions_count", requiredCount))
 	return sdkPlanResult{
 		plan:          plan,
-		summary:       sdkPlanSummary(appID == uuid.Nil, !definition.noop && appID != uuid.Nil, definition.services, sdkConfigGeneratesPackage(call.document)),
+		summary:       appPlanSummary(appID == uuid.Nil, !definition.noop && appID != uuid.Nil, definition.services, call.document),
 		notifications: withAppCredentialReadinessWarning(notifications, definition.readiness),
 		readiness:     definition.readiness,
 	}, nil
+}
+
+// admitAppPlanFamily checks immutable identity before each independent family quota.
+func admitAppPlanFamily(ctx context.Context, s store.Store, accountID uuid.UUID, doc sdkConfigDocument) error {
+	// Capacity cannot make a retired or conflicting family identity reusable.
+	if err := preflightSDKFamilyLifecycle(ctx, s, accountID, doc); err != nil {
+		return withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
+	}
+	// Quota admission follows the cheaper authoritative identity fence.
+	if err := enforceConfiguredFamilyLimit(ctx, s, accountID, doc); err != nil {
+		return withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
+	}
+	// Hosted MCP delivery consumes its own allowance as well as the App allowance.
+	if doc.MCP != nil {
+		if err := enforceMCPFamilyLimit(ctx, s, accountID, doc.Name, true); err != nil {
+			return withWorkspaceConfigErrorMetadata(err, "plan_admission", "", "not_committed")
+		}
+	}
+	return nil
 }
 
 // sdkConfigGeneratesPackage preserves the historical absent-means-generate policy at the snapshot-authority boundary.
 func sdkConfigGeneratesPackage(doc sdkConfigDocument) bool {
 	// Only an explicit false selects the direct API path that executes from the admitted local runtime snapshot.
 	return doc.Generate == nil || *doc.Generate
+}
+
+// appKindFromDocument defaults legacy SDK-internal callers while preserving explicit Execution App identity.
+func appKindFromDocument(doc sdkConfigDocument) store.AppKind {
+	// Public admission requires kind, but older internal apply fixtures omit it.
+	if doc.Kind == store.AppKindExecution.String() {
+		return store.AppKindExecution
+	}
+	return store.AppKindSDK
+}
+
+// appConfigPermissionType keeps Execution App grants distinct from package-free SDK API grants.
+func appConfigPermissionType(doc sdkConfigDocument) string {
+	// The authored execute family has its own manage/use permission namespace.
+	if doc.Kind == store.AppKindExecution.String() {
+		return store.AppKindExecution.String()
+	}
+	return string(sdkConfigDeliveryMode(doc))
+}
+
+// appPlanSummary presents the persisted family kind independently of package delivery.
+func appPlanSummary(create, update bool, services []map[string]any, doc sdkConfigDocument) map[string]any {
+	// Existing SDK and API plans retain their established review keys.
+	if doc.Kind != store.AppKindExecution.String() {
+		return sdkPlanSummary(create, update, services, sdkConfigGeneratesPackage(doc))
+	}
+	return map[string]any{"create_execution": create, "update_execution": update, "services": services}
 }
 
 // resolveSDKPlanDefinition resolves sdk plan definition from immutable app scope before provider dispatch.
@@ -1373,6 +1530,7 @@ func canonicalAppDocument(doc sdkConfigDocument) sdkConfigDocument {
 	canonical.Description = strings.TrimSpace(doc.Description)
 	canonical.Language = strings.TrimSpace(doc.Language)
 	canonical.Bucket = strings.TrimSpace(doc.Bucket)
+	canonical.BundleDigest = doc.BundleDigest
 	canonical.WebhookAttachment = strings.TrimSpace(doc.WebhookAttachment)
 	canonical.UnifiedOperations = canonicalizeUnifiedOperations(doc.UnifiedOperations)
 	// Selection order does not change the identity of an installed workflow set.
@@ -1492,6 +1650,11 @@ func resolveAppAuthPoliciesWithContracts(ctx context.Context, registryClient san
 
 // resolveAppAuthPoliciesWithSourceContracts admits selected targets and credential-only sources in one local snapshot batch.
 func resolveAppAuthPoliciesWithSourceContracts(ctx context.Context, registryClient sandbox.RegistryClient, apiKey string, services []sdkResolvedService, selections []models.SDKSelection, sourceRequests []sandbox.ServiceVersionExecutionAuthSelection) (map[string]sandbox.ServiceVersionExecutionAuthContract, error) {
+	// An authored App without provider selections has no external auth authority to resolve.
+	if len(services) == 0 && len(selections) == 0 && len(sourceRequests) == 0 {
+		recordSDKAuthResolution(ctx, sdkAuthResolutionTelemetry{}, "success")
+		return map[string]sandbox.ServiceVersionExecutionAuthContract{}, nil
+	}
 	fetcher, ok := registryClient.(sdkExecutionAuthContractFetcher)
 	// Missing contract support cannot establish authority for secured selections.
 	if !ok {
@@ -1521,6 +1684,15 @@ func resolveAppAuthPoliciesWithSourceContracts(ctx context.Context, registryClie
 	for _, contract := range contracts {
 		bySelection[executionAuthContractKey(contract.ServiceID, contract.Version, contract.OperationNames, contract.SelectAll)] = contract
 	}
+	// Fail the entire plan when any selected operation lacks its admitted auth contract.
+	if err := applySelectionAuthContracts(ctx, services, selections, requests, bySelection); err != nil {
+		return nil, err
+	}
+	return bySelection, nil
+}
+
+// applySelectionAuthContracts validates the single fetched batch and records bounded auth outcomes.
+func applySelectionAuthContracts(ctx context.Context, services []sdkResolvedService, selections []models.SDKSelection, requests []sandbox.ServiceVersionExecutionAuthSelection, bySelection map[string]sandbox.ServiceVersionExecutionAuthContract) error {
 	telemetry := sdkAuthResolutionTelemetry{}
 	// Every selected service retains its own already-resolved display context.
 	for index := range selections {
@@ -1529,23 +1701,23 @@ func resolveAppAuthPoliciesWithSourceContracts(ctx context.Context, registryClie
 		if !exists {
 			recordSDKAuthResolution(ctx, telemetry, "invalid_selection")
 			httpErr, _ := appAuthPolicyPlanError(appServiceValidationError{serviceID: selections[index].ServiceID, reason: "version auth contract was not found"}, services[index])
-			return nil, httpErr
+			return httpErr
 		}
 		// Operation validation shares the same safe service-label projection as auth failures.
 		if err := validateSelectedOperations(requests[index], contract.Operations); err != nil {
 			recordSDKAuthResolution(ctx, telemetry, "invalid_selection")
 			httpErr, _ := appAuthPolicyPlanError(err, services[index])
-			return nil, httpErr
+			return httpErr
 		}
 		// Auth-policy failures retain whether the caller selection or provider contract caused the rejection.
 		if err := resolveSelectionAuthPolicy(&selections[index], contract, &telemetry); err != nil {
 			httpErr, outcome := appAuthPolicyPlanError(err, services[index])
 			recordSDKAuthResolution(ctx, telemetry, outcome)
-			return nil, httpErr
+			return httpErr
 		}
 	}
 	recordSDKAuthResolution(ctx, telemetry, "success")
-	return bySelection, nil
+	return nil
 }
 
 // appAuthSourceContractSelections builds deduplicated source-only reads from the already-batched workspace resolver.
@@ -2509,7 +2681,7 @@ func sdkGenerateRequest(doc sdkConfigDocument, selections []models.SDKSelection,
 		Version:          doc.Version,
 		Selections:       selections,
 		IncludeMCP:       false,
-		TargetType:       store.AppKindSDK.String(),
+		TargetType:       appKindFromDocument(doc).String(),
 		TargetLanguage:   doc.Language,
 		DefaultEngineURL: strings.TrimSpace(defaultEngineURL),
 		SkipPackaging:    doc.Generate != nil && !*doc.Generate,
@@ -2720,7 +2892,7 @@ func enforceSDKPlanFamilyLimit(ctx context.Context, s store.Store, accountID uui
 	if plan == nil || json.Unmarshal(plan.DesiredState, &doc) != nil {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid resolved sdk plan"}
 	}
-	return enforceSDKFamilyLimit(ctx, s, accountID, doc.Name, sdkConfigGeneratesPackage(doc))
+	return enforceConfiguredFamilyLimit(ctx, s, accountID, doc)
 }
 
 // preflightSDKPlanFamilyLifecycle decodes the reviewed document and reapplies immutable local lifecycle fences.
@@ -2879,7 +3051,7 @@ func prepareSDKGenerationForApply(
 	if err := ensureAppPayloadContractsCurrent(ctx, registryClient, call.apiKey, plan.ResolvedPayload); err != nil {
 		return sdkGenerationApplyInput{}, err
 	}
-	doc, resolvedPayload, err := decodeAppApplyPlan(ctx, configStore, s, plan, store.AppKindSDK.String())
+	doc, resolvedPayload, err := decodeAppApplyPlan(ctx, configStore, s, plan, string(applyConfigKind(call)))
 	// SDK-specific plan decoding must succeed before reserving app identity.
 	if err != nil {
 		return sdkGenerationApplyInput{}, err
@@ -2911,7 +3083,7 @@ func reserveSDKGenerationIdentity(ctx context.Context, s store.Store, call sdkAp
 		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid_app_name"}
 	}
 	// Rechecking immediately before family creation remains authoritative when capacity changed after plan or early apply admission.
-	if err := checkSDKFamilyCapacity(ctx, s, span, call.accountID, canonicalName, sdkConfigGeneratesPackage(doc)); err != nil {
+	if err := enforceConfiguredFamilyLimit(ctx, s, call.accountID, doc); err != nil {
 		return uuid.Nil, uuid.Nil, uuid.Nil, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
 	// Retry or concurrent publication must recheck the hosted transport allowance before reserving identity.
@@ -2922,14 +3094,14 @@ func reserveSDKGenerationIdentity(ctx context.Context, s store.Store, call sdkAp
 	}
 
 	family, _, err := applifecycle.New(s).CreateOrGetFamily(ctx, applifecycle.CreateFamilyParams{
-		AccountID: call.accountID, Kind: store.AppKindSDK, CanonicalName: canonicalName,
+		AccountID: call.accountID, Kind: appKindFromDocument(doc), CanonicalName: canonicalName,
 		DisplayName: displayName, TargetLanguage: doc.Language, DeliveryMode: sdkConfigDeliveryMode(doc),
 		OwnerSubjectID: planOwnerSubjectID(plan), OwnerTeamID: planOwnerTeamID(plan),
 	})
 	if err != nil {
 		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app_family_conflict"}
 	}
-	appID, existingID, err := reserveSDKVersionIdentityWithUnified(ctx, s, call.planID, family.AppFamilyID, doc.Version, plan.SourceHash, resolved)
+	appID, existingID, err := reserveSDKVersionIdentityWithUnified(ctx, s, call.planID, family.AppFamilyID, doc.Version, plan.SourceHash, doc.BundleDigest, resolved)
 	if err != nil {
 		return uuid.Nil, uuid.Nil, uuid.Nil, err
 	}
@@ -2962,6 +3134,24 @@ func checkSDKFamilyCapacity(ctx context.Context, s store.Store, span trace.Span,
 	})
 }
 
+// enforceConfiguredFamilyLimit applies each app kind's independent family entitlement.
+func enforceConfiguredFamilyLimit(ctx context.Context, s store.Store, accountID uuid.UUID, doc sdkConfigDocument) error {
+	canonicalName, _, err := canonical.AppName(doc.Name)
+	// Invalid names must fail before any quota lookup could imply a reusable family.
+	if err != nil {
+		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
+	}
+	// Hosted code has its own family quota because it occupies a warm sandbox slot.
+	if doc.Kind == store.AppKindExecution.String() {
+		return enforceAppFamilyCapacity(ctx, s, trace.SpanFromContext(ctx), accountID, canonicalName, appFamilyCapacityPolicy{
+			quotaClass: store.AppKindExecution.String(), resource: "execution_app_families", errorCode: "execution_app_family_limit_exceeded", displayName: "Execution App",
+			remediation: "Deactivate an unused Execution App or upgrade the workspace plan, then retry.",
+			limit:       entitlement.LiveEntitlement.Load().MaxExecutionAppFamilies,
+		})
+	}
+	return checkSDKFamilyCapacity(ctx, s, trace.SpanFromContext(ctx), accountID, canonicalName, sdkConfigGeneratesPackage(doc))
+}
+
 // enforceSDKFamilyLimit canonicalizes authored SDK/API identity before applying its delivery-specific family entitlement.
 func enforceSDKFamilyLimit(ctx context.Context, s store.Store, accountID uuid.UUID, name string, generatesPackage bool) error {
 	canonicalName, _, err := canonical.AppName(name)
@@ -2979,7 +3169,7 @@ func preflightSDKFamilyLifecycle(ctx context.Context, s store.Store, accountID u
 	if err != nil {
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
 	}
-	family, err := s.GetAppFamilyByIdentity(ctx, accountID, store.AppKindSDK.String(), canonicalName)
+	family, err := s.GetAppFamilyByIdentity(ctx, accountID, appKindFromDocument(doc).String(), canonicalName)
 	// A new family has no locked mode or retained tombstone to validate yet.
 	if errors.Is(err, store.ErrAppFamilyNotFound) {
 		return nil
@@ -3001,6 +3191,15 @@ func preflightSDKFamilyLifecycle(ctx context.Context, s store.Store, accountID u
 			remediation: "Choose a new app version, then retry.",
 		}
 	}
+	// Execution families have no SDK package delivery mode to fence across versions.
+	if doc.Kind == store.AppKindExecution.String() {
+		return nil
+	}
+	return validateSDKFamilyDeliveryMode(ctx, s, family, doc)
+}
+
+// validateSDKFamilyDeliveryMode keeps package and direct REST identities stable across SDK versions.
+func validateSDKFamilyDeliveryMode(ctx context.Context, s store.Store, family *store.AppFamily, doc sdkConfigDocument) error {
 	expectedMode := sdkConfigDeliveryMode(doc)
 	if family.DeliveryMode == "" {
 		hasHistory, historyErr := s.AppFamilyHasHistory(ctx, family.AppFamilyID)
@@ -3030,6 +3229,10 @@ func preflightSDKFamilyLifecycle(ctx context.Context, s store.Store, accountID u
 
 // sdkConfigDeliveryMode maps the authored generate flag to the family mode persisted at reservation.
 func sdkConfigDeliveryMode(doc sdkConfigDocument) store.AppDeliveryMode {
+	// Execution is a distinct hosted family and has no SDK package delivery submode.
+	if doc.Kind == store.AppKindExecution.String() {
+		return ""
+	}
 	// Explicit generate:false selects direct REST; absent or true retains generated-package delivery.
 	if !sdkConfigGeneratesPackage(doc) {
 		return store.AppDeliveryModeAPI
@@ -3039,7 +3242,7 @@ func sdkConfigDeliveryMode(doc sdkConfigDocument) store.AppDeliveryMode {
 
 // reserveSDKVersionIdentity persists Unified operation identity atomically while preserving immutability checks.
 func reserveSDKVersionIdentity(ctx context.Context, s store.Store, planID, familyID uuid.UUID, version, sourceHash string) (uuid.UUID, uuid.UUID, error) {
-	return reserveSDKVersionIdentityWithUnified(ctx, s, planID, familyID, version, sourceHash, appResolvedPayload{
+	return reserveSDKVersionIdentityWithUnified(ctx, s, planID, familyID, version, sourceHash, "", appResolvedPayload{
 		UnifiedDefinitionSchemaVersion: unified.DefinitionSchemaVersion,
 		UnifiedDefinitions:             json.RawMessage("[]"),
 		UnifiedDefinitionHash:          store.EmptyUnifiedSetHash,
@@ -3048,7 +3251,7 @@ func reserveSDKVersionIdentity(ctx context.Context, s store.Store, planID, famil
 }
 
 // reserveSDKVersionIdentityWithUnified persists Unified operation identity atomically while preserving immutability checks.
-func reserveSDKVersionIdentityWithUnified(ctx context.Context, s store.Store, planID, familyID uuid.UUID, version, sourceHash string, resolved appResolvedPayload) (uuid.UUID, uuid.UUID, error) {
+func reserveSDKVersionIdentityWithUnified(ctx context.Context, s store.Store, planID, familyID uuid.UUID, version, sourceHash, bundleDigest string, resolved appResolvedPayload) (uuid.UUID, uuid.UUID, error) {
 	tombstoned, err := s.AppTombstoneExists(ctx, familyID, version)
 	// Failed identity reads never prove that a version may be reused.
 	if err != nil {
@@ -3067,8 +3270,8 @@ func reserveSDKVersionIdentityWithUnified(ctx context.Context, s store.Store, pl
 	if err != nil {
 		return uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_check_app_version"}
 	}
-	// Repeat immutability at apply to close races between planning and publication.
-	if existing.SourceHash != sourceHash || !existingAppMatchesResolvedUnified(existing, resolved) {
+	// Repeat code and scope immutability at apply so a reused source label cannot swap compiler output.
+	if existing.SourceHash != sourceHash || existing.BundleDigest != bundleDigest || !existingAppMatchesResolvedUnified(existing, resolved) {
 		return uuid.Nil, uuid.Nil, immutableAppVersionError("apply_admission")
 	}
 	return existing.AppID, existing.AppID, nil
@@ -3291,6 +3494,10 @@ func sdkGenerationPayloadForPlan(payload json.RawMessage, call sdkApplyCall, app
 	request.AppID = appID
 	request.SourceHash = sourceHash
 	request.GeneratorVersion = models.SDKGeneratorVersion
+	// Execution uses the local operation resolver but has no Registry SDK generator identity.
+	if applyConfigKind(call) == store.ConfigTypeExecution {
+		request.GeneratorVersion = ""
+	}
 	out, _ := json.Marshal(request)
 	return out, nil
 }
@@ -3503,7 +3710,7 @@ func loadSDKPlanForApply(ctx context.Context, configStore store.ConfigRepository
 	if err != nil {
 		return nil, nil, planFetchHTTPError(err)
 	}
-	if err := validateSDKPlanForApply(plan, call.sourceHash); err != nil {
+	if err := validateAppPlanForApply(plan, call.sourceHash, applyConfigKind(call)); err != nil {
 		return nil, nil, workspaceConfigHTTPError{status: http.StatusConflict, message: err.Error()}
 	}
 	if call.planRevision <= 0 || plan.Revision != call.planRevision {
@@ -3520,13 +3727,18 @@ func loadSDKPlanForApply(ctx context.Context, configStore store.ConfigRepository
 }
 
 func validateSDKPlanForApply(plan *store.ConfigPlan, sourceHash string) error {
+	return validateAppPlanForApply(plan, sourceHash, store.ConfigTypeSDK)
+}
+
+// validateAppPlanForApply binds a plan to its exact route kind before any apply lease is reserved.
+func validateAppPlanForApply(plan *store.ConfigPlan, sourceHash string, kind store.ConfigType) error {
 	if plan.Status == store.ConfigPlanStatusSuperseded {
 		return errors.New("plan_superseded")
 	}
 	if plan.Status != store.ConfigPlanStatusPending {
 		return errors.New("plan_stale")
 	}
-	if plan.ConfigType != store.ConfigTypeSDK {
+	if plan.ConfigType != kind {
 		return errors.New("plan_type_mismatch")
 	}
 	if sourceHash != "" && sourceHash != plan.SourceHash {
@@ -4050,6 +4262,7 @@ type persistAppRuntimeParams struct {
 	description                string
 	fusedIntelligentClassifier bool
 	hostedMCP                  bool
+	bundleDigest               string
 	targetLanguage             string
 	sourceHash                 string
 	generatorVersion           string
@@ -4068,7 +4281,7 @@ func appRuntimeForApply(p persistAppRuntimeParams) (store.AppRuntime, error) {
 	if p.bucketID == uuid.Nil || strings.TrimSpace(p.bucketName) == "" {
 		return store.AppRuntime{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "app bucket identity unavailable"}
 	}
-	if err := validateAppRuntimeSelections(p.scopeSchemaVersion, p.selections); err != nil {
+	if err := validateAppRuntimeSelections(p.scopeSchemaVersion, p.selections, p.bundleDigest); err != nil {
 		return store.AppRuntime{}, err
 	}
 	selections, err := json.Marshal(p.selections)
@@ -4092,6 +4305,7 @@ func appRuntimeForApply(p persistAppRuntimeParams) (store.AppRuntime, error) {
 		Description:                    p.description,
 		FusedIntelligentClassifier:     p.fusedIntelligentClassifier,
 		HostedMCP:                      p.hostedMCP,
+		BundleDigest:                   p.bundleDigest,
 		Version:                        p.version,
 		ConfigKey:                      p.configKey,
 	}, nil
@@ -4099,11 +4313,33 @@ func appRuntimeForApply(p persistAppRuntimeParams) (store.AppRuntime, error) {
 
 // validateAppRuntimeSelections keeps an incomplete plan or Registry response
 // from becoming durable app state that SDK and MCP detail readers cannot use.
-func validateAppRuntimeSelections(scopeSchemaVersion int, selections []models.SDKSelection) error {
+func validateAppRuntimeSelections(scopeSchemaVersion int, selections []models.SDKSelection, _ string) error {
+	// Authored code never expands the provider scope reviewed in plan.
+	if len(selections) == 0 {
+		return appSelectionSchemaMismatchError()
+	}
 	if err := models.ValidateAppSelections(scopeSchemaVersion, selections); err != nil {
 		return appSelectionSchemaMismatchError()
 	}
 	return nil
+}
+
+// appGeneratorVersionForApply keeps compiler provenance separate from Registry SDK package versions.
+func appGeneratorVersionForApply(doc sdkConfigDocument, result sdkGenerationResult) string {
+	// Execution bundles have their own immutable digest and no SDK generator version.
+	if doc.Kind == store.AppKindExecution.String() {
+		return ""
+	}
+	return result.GeneratorVersion
+}
+
+// appGenerationStatusForApply keeps Execution App publication outside Registry package lifecycle.
+func appGenerationStatusForApply(doc sdkConfigDocument, result sdkGenerationResult) string {
+	// The skipped marker is an internal local resolution outcome, not an Execution App package state.
+	if doc.Kind == store.AppKindExecution.String() {
+		return ""
+	}
+	return result.Status
 }
 
 func appSelectionSchemaMismatchError() error {
@@ -4149,22 +4385,23 @@ func applyGeneratedAppRuntime(
 		serviceBuckets:                 serviceBuckets,
 		selections:                     selections,
 		scopeSchemaVersion:             result.ScopeSchemaVersion,
-		kind:                           store.AppKindSDK,
+		kind:                           appKindFromDocument(doc),
 		name:                           doc.Name,
 		version:                        doc.Version,
 		configKey:                      plan.ConfigKey,
 		description:                    payload.Description,
 		fusedIntelligentClassifier:     payload.FusedIntelligentClassifier,
 		hostedMCP:                      payload.HostedMCP,
+		bundleDigest:                   doc.BundleDigest,
 		targetLanguage:                 payload.TargetLanguage,
 		sourceHash:                     plan.SourceHash,
-		generatorVersion:               result.GeneratorVersion,
+		generatorVersion:               appGeneratorVersionForApply(doc, result),
 		unifiedDefinitionSchemaVersion: payload.UnifiedDefinitionSchemaVersion,
 		unifiedDefinitions:             payload.UnifiedDefinitions,
 		unifiedDefinitionHash:          payload.UnifiedDefinitionHash,
 		unifiedCodegenDescriptorHash:   payload.UnifiedCodegenDescriptorHash,
 		generationJobID:                result.JobID,
-		generationStatus:               result.Status,
+		generationStatus:               appGenerationStatusForApply(doc, result),
 	})
 }
 
@@ -4273,6 +4510,14 @@ func appApplyPersistenceError(ctx context.Context, err error, appID uuid.UUID) e
 			status: http.StatusForbidden, code: "api_family_limit_exceeded", category: "entitlement",
 			message:     "This workspace has reached its API limit.",
 			remediation: "Deactivate all active or deprecated versions of an unused API, or upgrade the workspace plan, then retry.",
+		}
+	}
+	// A concurrent Execution App activation must report its own plan ceiling.
+	if errors.Is(err, store.ErrExecutionAppFamilyLimitExceeded) {
+		return workspaceConfigHTTPError{
+			status: http.StatusForbidden, code: "execution_app_family_limit_exceeded", category: "entitlement",
+			message:     "This workspace has reached its Execution App limit.",
+			remediation: "Deactivate an unused Execution App or upgrade the workspace plan, then retry.",
 		}
 	}
 	// Bucket reassignment is an immutable family conflict rather than an internal persistence failure.

@@ -202,11 +202,24 @@ func validateMCPToken(ctx context.Context, appIDHex, token string) (auth.Runtime
 	// Every session passes through the process-shared validator. Valid entries
 	// are bounded to 30 seconds and precise revoke events evict them immediately.
 	identity, err := globalTokenValidator.Validate(ctx, appID, token)
-	// MCP transport never accepts an ordinary SDK credential even when it names a runnable SDK version.
-	if err != nil || (identity.Kind != store.AppKindMCP && (identity.Kind != store.AppKindSDK || !identity.HostedMCP)) {
+	// MCP transport accepts an MCP app or a separately opted-in SDK or Execution App version.
+	if err != nil || (identity.Kind != store.AppKindMCP && !isHostedMCPVersion(identity.Kind, identity.HostedMCP)) {
 		return auth.RuntimeIdentity{}, auth.ErrUnauthorized
 	}
+	// Long-lived sessions validate again per message; promotion must revoke their old version's traffic.
+	if identity.Kind == store.AppKindExecution {
+		target, routeErr := resolveMCPRoute(ctx, appIDHex)
+		// A stale pinned version cannot keep dispatching raw tools through a cached family token.
+		if routeErr != nil || target == nil || target.AppID != identity.AppID {
+			return auth.RuntimeIdentity{}, auth.ErrUnauthorized
+		}
+	}
 	return identity, nil
+}
+
+// isHostedMCPVersion restricts alternate MCP delivery to exact app kinds that can opt in at apply.
+func isHostedMCPVersion(kind store.AppKind, enabled bool) bool {
+	return enabled && (kind == store.AppKindSDK || kind == store.AppKindExecution)
 }
 
 // mcpSessionContext preserves credential expiry without imposing an age limit on active work.

@@ -11,7 +11,7 @@ import (
 // TestAppCreationPermissionsAreIsolated exercises every pair of types, not only positive names.
 func TestAppCreationPermissionsAreIsolated(t *testing.T) {
 	workspace := ResourceRef{Type: ResourceWorkspace, ID: uuid.New()}
-	for _, ownType := range []string{"sdk", "mcp", "api", "webhook"} {
+	for _, ownType := range []string{"sdk", "execution", "mcp", "api", "webhook"} {
 		permission := AppPermission(ownType, PermissionAppCreate)
 		snapshot, err := NewAuthorizationSnapshot(1, Grant{Permission: permission, Resource: workspace})
 		// Fixture construction must use the same strict grant catalogue as production.
@@ -19,7 +19,7 @@ func TestAppCreationPermissionsAreIsolated(t *testing.T) {
 			t.Fatal(err)
 		}
 		actor := Actor{Authorization: snapshot}
-		for _, targetType := range []string{"sdk", "mcp", "api", "webhook"} {
+		for _, targetType := range []string{"sdk", "execution", "mcp", "api", "webhook"} {
 			err := (SnapshotAuthorizer{}).CheckAll(t.Context(), actor, Requirement{Permission: AppPermission(targetType, PermissionAppCreate), Resource: workspace})
 			// Only the explicitly granted type may pass a workspace creation check.
 			if (err == nil) != (ownType == targetType) {
@@ -40,6 +40,8 @@ func TestAppConfigPermissionType(t *testing.T) {
 	for _, test := range []struct{ route, document, want string }{
 		{"sdk", `{"kind":"sdk"}`, "sdk"},
 		{"sdk", `{"kind":"sdk","generate":false}`, "api"},
+		{"execution", `{"kind":"execution"}`, "execution"},
+		{"execution", `{"kind":"sdk"}`, ""},
 		{"mcp", `{"kind":"mcp"}`, "mcp"},
 		{"webhook", `{"kind":"webhook"}`, "webhook"},
 		{"mcp", `{"kind":"sdk"}`, ""},

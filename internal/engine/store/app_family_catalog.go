@@ -39,6 +39,7 @@ const appFamilyCatalogWhere = `
    OR ($2 = 'mcp' AND family.kind = 'mcp')
    OR ($2 = 'sdk' AND family.kind = 'sdk' AND COALESCE(family.delivery_mode, 'sdk') = 'sdk')
    OR ($2 = 'api' AND family.kind = 'sdk' AND family.delivery_mode = 'api')
+   OR ($2 = 'execution' AND family.kind = 'execution')
  )
  AND ($3 = '' OR family.display_name ILIKE '%' || $3 || '%')
  AND (($4 AND family.archived_at IS NOT NULL) OR (NOT $4 AND family.archived_at IS NULL))
@@ -53,6 +54,8 @@ func normalizeAppFamilyCatalogueView(kind string) (string, bool) {
 		return AppKindSDK.String(), true
 	case string(AppKindMCP):
 		return AppKindMCP.String(), true
+	case string(AppKindExecution):
+		return AppKindExecution.String(), true
 	case string(AppDeliveryModeAPI):
 		// Direct REST is a delivery mode of an SDK-kind family, not a third lifecycle kind.
 		return string(AppDeliveryModeAPI), true

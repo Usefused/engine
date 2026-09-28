@@ -10,9 +10,10 @@ import (
 var ErrAppSelectionSchemaMismatch = errors.New("app_selection_schema_version_mismatch")
 
 // ValidateAppSelections keeps every persisted app consumer on one exact
-// selection contract instead of letting a missing field decode as a legacy zero.
+// selection contract while allowing an explicit empty set for authored code-only Apps.
 func ValidateAppSelections(scopeSchemaVersion int, selections []SDKSelection) error {
-	if scopeSchemaVersion != AppScopeSchemaVersion || len(selections) == 0 {
+	// Nil means omitted or JSON null; only an explicit [] can represent a code-only scope.
+	if scopeSchemaVersion != AppScopeSchemaVersion || selections == nil {
 		return ErrAppSelectionSchemaMismatch
 	}
 	for _, selection := range selections {

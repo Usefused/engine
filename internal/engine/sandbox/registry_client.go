@@ -289,9 +289,12 @@ type rawRuntimeEntitlement struct {
 	MaxAPIFamilies               *int   `json:"max_api_families,omitempty"`
 	MaxSDKFamilies               *int   `json:"max_sdk_families,omitempty"`
 	MaxMCPFamilies               *int   `json:"max_mcp_families,omitempty"`
+	MaxExecutionAppFamilies      *int   `json:"max_execution_app_families,omitempty"`
+	MaxExecutionAppConcurrency   *int   `json:"max_execution_app_concurrency,omitempty"`
 	MaxServices                  *int   `json:"max_services,omitempty"`
 	MaxSandboxConcurrency        *int   `json:"max_sandbox_concurrency,omitempty"`
 	DriftMonitoringEnabled       bool   `json:"drift_monitoring_enabled"`
+	ExecutionAppAlwaysOnEnabled  bool   `json:"execution_app_always_on_enabled"`
 	WebhookIngestionEnabled      bool   `json:"webhook_ingestion_enabled"`
 	SSOEnabled                   bool   `json:"sso_enabled"`
 	ExecutionRetentionDays       *int   `json:"execution_retention_days,omitempty"`
@@ -2288,9 +2291,12 @@ func RuntimeEntitlementFromHandshake(raw *rawRuntimeEntitlement) models.RuntimeE
 	entitlement.MaxAPIFamilies = raw.MaxAPIFamilies
 	entitlement.MaxSDKFamilies = raw.MaxSDKFamilies
 	entitlement.MaxMCPFamilies = raw.MaxMCPFamilies
+	entitlement.MaxExecutionAppFamilies = raw.MaxExecutionAppFamilies
+	entitlement.MaxExecutionAppConcurrency = raw.MaxExecutionAppConcurrency
 	entitlement.MaxServices = raw.MaxServices
 	entitlement.MaxSandboxConcurrency = raw.MaxSandboxConcurrency
 	entitlement.DriftMonitoringEnabled = raw.DriftMonitoringEnabled
+	entitlement.ExecutionAppAlwaysOnEnabled = raw.ExecutionAppAlwaysOnEnabled
 	entitlement.WebhookIngestionEnabled = raw.WebhookIngestionEnabled
 	entitlement.SSOEnabled = raw.SSOEnabled
 	entitlement.ExecutionRetentionDays = raw.ExecutionRetentionDays
