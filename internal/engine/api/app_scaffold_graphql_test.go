@@ -21,15 +21,16 @@ import (
 
 type appScaffoldGraphQLStore struct {
 	store.Store
-	resolved      []store.AppScaffoldResolvedSelection
-	metadata      map[store.ServiceContractMetadataRef]*fusedobject.ServiceMetadata
-	endpoints     []store.ServiceContractEndpointMatch
-	overrides     map[store.WorkspaceExecutionPolicyRef]*store.WorkspaceExecutionPolicyOverride
-	scope         accesscontrol.AuthorizedScope
-	resolveCalls  int
-	metadataCalls int
-	endpointCalls int
-	policyCalls   int
+	resolved       []store.AppScaffoldResolvedSelection
+	metadata       map[store.ServiceContractMetadataRef]*fusedobject.ServiceMetadata
+	endpoints      []store.ServiceContractEndpointMatch
+	overrides      map[store.WorkspaceExecutionPolicyRef]*store.WorkspaceExecutionPolicyOverride
+	scope          accesscontrol.AuthorizedScope
+	resolveCalls   int
+	metadataCalls  int
+	endpointCalls  int
+	endpointInputs []store.ServiceContractEndpointSelection
+	policyCalls    int
 }
 
 // ResolveAuthorizedAppScaffoldSelections captures the authorization scope and
@@ -52,8 +53,10 @@ func (s *appScaffoldGraphQLStore) ListServiceContractMetadata(_ context.Context,
 
 // ListServiceContractEndpointsForSelections records the single SQL-selected
 // endpoint batch call without broad catalogue filtering in the mock.
-func (s *appScaffoldGraphQLStore) ListServiceContractEndpointsForSelections(_ context.Context, _ []store.ServiceContractEndpointSelection, _ []string) ([]store.ServiceContractEndpointMatch, error) {
+func (s *appScaffoldGraphQLStore) ListServiceContractEndpointsForSelections(_ context.Context, selections []store.ServiceContractEndpointSelection, _ []string) ([]store.ServiceContractEndpointMatch, error) {
 	s.endpointCalls++
+	// Preserve the exact SQL request so tests catch broad reads followed by Go filtering.
+	s.endpointInputs = selections
 	return s.endpoints, nil
 }
 

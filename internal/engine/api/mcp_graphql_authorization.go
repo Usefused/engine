@@ -74,9 +74,11 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		// Prompt may discover Registry operations before workspace activation, using the same catalogue grant as search.
 		"classifyPromptOperation": permissions(accesscontrol.PermissionCatalogueRead),
 		"appScaffoldRequirements": collectionPermissions(accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),
-		"currentActorAccess":      authenticatedOnly(),
-		"app":                     collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
-		"apps":                    collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
+		// Compiler IDs are scoped to the same authorized workspace services as scaffolding.
+		"executionBuildSelections": collectionPermissions(accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),
+		"currentActorAccess":       authenticatedOnly(),
+		"app":                      collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
+		"apps":                     collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
 		// Family rows and totals obey the same app.read scope as exact versions.
 		"appFamilies": collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),
 		"appVersions": collectionPermissions(accesscontrol.ResourceApp, accesscontrol.PermissionAppRead),

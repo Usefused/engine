@@ -432,11 +432,12 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 		Name: "EngineQuery",
 		Fields: graphql.Fields{
 			// Prompt discovery shares the Registry classifier without accepting arbitrary candidate payloads.
-			"classifyPromptOperation": classifyPromptOperationGraphQLField(registryClient),
-			"appScaffoldRequirements": appScaffoldRequirementsGraphQLField(s),
-			"currentActorAccess":      currentActorAccessGraphQLField(),
-			"app":                     appGraphQLField(s, packageDownloads),
-			"apps":                    appsGraphQLField(s, packageDownloads),
+			"classifyPromptOperation":  classifyPromptOperationGraphQLField(registryClient),
+			"appScaffoldRequirements":  appScaffoldRequirementsGraphQLField(s),
+			"executionBuildSelections": executionBuildSelectionsGraphQLField(s),
+			"currentActorAccess":       currentActorAccessGraphQLField(),
+			"app":                      appGraphQLField(s, packageDownloads),
+			"apps":                     appsGraphQLField(s, packageDownloads),
 			// Application grouping includes latest presentation metadata while detail reads stay exact-version scoped.
 			"appFamilies":                 appFamiliesGraphQLField(s, packageDownloads),
 			"appVersions":                 appVersionsGraphQLField(s, packageDownloads),
