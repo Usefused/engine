@@ -107,6 +107,78 @@ func TestApplyAppConfigPlanRejectsSDKWithoutPlanLease(t *testing.T) {
 	}
 }
 
+// TestApplyExecutionAppConfigPlanPublishesCompiledBundleAtomically covers the plan-to-traffic transaction with a real PostgreSQL repository.
+func TestApplyExecutionAppConfigPlanPublishesCompiledBundleAtomically(t *testing.T) {
+	fixture := newConcurrentArtifactApplyFixture(t, ConfigTypeExecution)
+	bundle := ExecutionAppBundle{AppID: fixture.params.Scope.AppID, SourceHash: fixture.params.Plan.State.SourceHash, BundleJS: "globalThis.FusedExecutionApp={};", Manifest: json.RawMessage(`{"schemaVersion":1}`)}
+	fixture.params.Scope.BundleDigest = ExecutionAppBundleDigest([]byte(bundle.BundleJS))
+	fixture.params.ExecutionBundle = &bundle
+	fixture.params.TokenHash = "execution-bundle-" + uuid.NewString()
+	result, err := fixture.repository.ApplyAppConfigPlan(fixture.ctx, fixture.params)
+	// Apply may report success only after the exact bundle and traffic pointer commit together.
+	if err != nil {
+		t.Fatalf("ApplyAppConfigPlan: %v", err)
+	}
+	appStore := NewPostgresStore(fixture.pool).(*postgresStore)
+	active, err := appStore.IsExecutionAppTrafficTarget(fixture.ctx, result.AppID)
+	// The family pointer is the runtime route authority for SDK/REST/MCP calls.
+	if err != nil || !active {
+		t.Fatalf("active target = %t, err = %v", active, err)
+	}
+	stored, err := appStore.GetExecutionAppBundle(fixture.ctx, result.AppID)
+	// The returned version must already have its immutable compiled code.
+	if err != nil || stored.BundleJS != bundle.BundleJS {
+		t.Fatalf("stored bundle = %#v, err = %v", stored, err)
+	}
+}
+
+// TestApplyExecutionAppConfigPlanRollsBackBundleFailure proves a late artifact failure cannot publish an app or applied plan.
+func TestApplyExecutionAppConfigPlanRollsBackBundleFailure(t *testing.T) {
+	fixture := newConcurrentArtifactApplyFixture(t, ConfigTypeExecution)
+	bundle := ExecutionAppBundle{AppID: fixture.params.Scope.AppID, SourceHash: "different-source", BundleJS: "globalThis.FusedExecutionApp={};", Manifest: json.RawMessage(`{"schemaVersion":1}`)}
+	fixture.params.Scope.BundleDigest = ExecutionAppBundleDigest([]byte(bundle.BundleJS))
+	fixture.params.ExecutionBundle = &bundle
+	fixture.params.TokenHash = "execution-rollback-" + uuid.NewString()
+	tx, err := fixture.repository.db.Begin(fixture.ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+	defer tx.Rollback(fixture.ctx)
+	// Calling the inner transaction helper injects a late bundle write failure after app publication logic.
+	if _, err := lockAuthorizationState(fixture.ctx, tx); err != nil {
+		t.Fatalf("lock authorization: %v", err)
+	}
+	_, err = applyAppConfigPlanTx(fixture.ctx, tx, &fixture.params)
+	if err == nil {
+		t.Fatal("late bundle mismatch was admitted")
+	}
+	if err := tx.Rollback(fixture.ctx); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	assertExecutionBundleApplyRolledBack(t, fixture)
+}
+
+// assertExecutionBundleApplyRolledBack verifies no app, artifact, or applied plan survived the failed transaction.
+func assertExecutionBundleApplyRolledBack(t *testing.T, fixture concurrentArtifactApplyFixture) {
+	t.Helper()
+	var apps, bundles int
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT COUNT(*) FROM fused_apps WHERE app_id=$1`, fixture.params.Scope.AppID).Scan(&apps); err != nil {
+		t.Fatalf("count apps: %v", err)
+	}
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT COUNT(*) FROM fused_execution_app_bundles WHERE app_id=$1`, fixture.params.Scope.AppID).Scan(&bundles); err != nil {
+		t.Fatalf("count bundles: %v", err)
+	}
+	// Both rows must be absent because the bundle and app shared one transaction.
+	if apps != 0 || bundles != 0 {
+		t.Fatalf("rolled-back rows: apps=%d bundles=%d", apps, bundles)
+	}
+	plan, err := fixture.repository.GetConfigPlan(fixture.ctx, fixture.params.Plan.PlanID)
+	// A failed attachment cannot mark the reviewed plan applied.
+	if err != nil || plan.Status != ConfigPlanStatusPending {
+		t.Fatalf("plan after rollback = %#v, err=%v", plan, err)
+	}
+}
+
 // TestValidateSDKGenerationStateAdmitsDirectAPIWithoutJob protects the package-free state rejected by the live apply path.
 func TestValidateSDKGenerationStateAdmitsDirectAPIWithoutJob(t *testing.T) {
 	tests := []struct {
@@ -315,12 +387,7 @@ func newConcurrentArtifactApplyFixture(t *testing.T, configType ConfigType) conc
 		t.Fatalf("ReserveConfigPlanApply: %v", err)
 	}
 	appID := uuid.New()
-	generatorVersion := ""
-	targetLanguage := ""
-	if configType == ConfigTypeSDK {
-		generatorVersion = "registry-generator-v1"
-		targetLanguage = "typescript"
-	}
+	generatorVersion, targetLanguage := artifactFixtureCompilerIdentity(configType)
 	version := uuid.NewString()
 	return concurrentArtifactApplyFixture{
 		ctx: ctx, repository: repository, pool: pool,
@@ -344,6 +411,18 @@ func newConcurrentArtifactApplyFixture(t *testing.T, configType ConfigType) conc
 			SDKGenerationStatus:       conditionalSDKGenerationStatus(configType),
 		},
 	}
+}
+
+// artifactFixtureCompilerIdentity preserves each app kind's real language and generator ownership.
+func artifactFixtureCompilerIdentity(configType ConfigType) (string, string) {
+	// Registry generates SDK packages, while Engine-hosted code compiles locally without generator metadata.
+	if configType == ConfigTypeSDK {
+		return "registry-generator-v1", "typescript"
+	}
+	if configType == ConfigTypeExecution {
+		return "", "typescript"
+	}
+	return "", ""
 }
 
 // validConcurrentAppSelections keeps concurrency fixtures on the same strict schema as runtime reads.

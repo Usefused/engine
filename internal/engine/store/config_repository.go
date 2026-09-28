@@ -279,6 +279,8 @@ type ApplyAppConfigPlanParams struct {
 	AppStatus           AppStatus
 	SDKGenerationJobID  string
 	SDKGenerationStatus string
+	// ExecutionBundle is published with app identity so a failed activation rolls back the version and plan together.
+	ExecutionBundle *ExecutionAppBundle
 }
 
 type ApplyAppConfigPlanResult struct {
@@ -714,6 +716,15 @@ func applyAppConfigPlanTx(ctx context.Context, tx pgx.Tx, params *ApplyAppConfig
 	if err != nil {
 		return nil, err
 	}
+	// A source-authored Execution App becomes a traffic target only with its exact compiled artifact.
+	if params.ExecutionBundle != nil {
+		if err := createExecutionAppBundleTx(ctx, tx, *params.ExecutionBundle); err != nil {
+			return nil, err
+		}
+		if err := promoteExecutionAppVersionTx(ctx, tx, familyID, appID); err != nil {
+			return nil, err
+		}
+	}
 	state, err := upsertConfigState(ctx, tx, params.Plan.State)
 	if err != nil {
 		return nil, err
@@ -1142,6 +1153,9 @@ func validateAppApplyParams(params ApplyAppConfigPlanParams) error {
 	if err := validateAppApplyScopeIdentity(params.Scope, params.AuthorizedBucketName); err != nil {
 		return err
 	}
+	if err := validatePlannedExecutionBundle(params); err != nil {
+		return err
+	}
 	// Adapter kind cannot be inferred from generation metadata or config key text.
 	if !appKindMatchesConfigType(params.Scope.Kind, params.Plan.State.ConfigType) {
 		return ErrAppKindInvalid
@@ -1159,6 +1173,20 @@ func validateAppApplyParams(params ApplyAppConfigPlanParams) error {
 		return err
 	}
 	return validateAppGenerationState(params)
+}
+
+// validatePlannedExecutionBundle binds the optional Engine-compiled artifact to one reviewed app version.
+func validatePlannedExecutionBundle(params ApplyAppConfigPlanParams) error {
+	// Precompiled applications retain the explicit attach path after apply.
+	if params.ExecutionBundle == nil {
+		return nil
+	}
+	bundle := *params.ExecutionBundle
+	// A source, identity, or digest mismatch must fail before opening the publication transaction.
+	if params.Scope.Kind != AppKindExecution || bundle.AppID != params.Scope.AppID || bundle.SourceHash != params.Plan.State.SourceHash || ExecutionAppBundleDigest([]byte(bundle.BundleJS)) != params.Scope.BundleDigest {
+		return ErrExecutionAppBundleDigestMismatch
+	}
+	return validateExecutionAppBundle(bundle)
 }
 
 // validateAppApplySelections requires a reviewed provider selection for every app kind.
@@ -1396,7 +1424,7 @@ func markConfigPlanApplied(ctx context.Context, tx pgx.Tx, params ApplyConfigPla
 		WHERE id = $1 AND config_key = $2
 		  AND config_type = $3 AND source_hash = $4 AND base_generation = $5
 		  AND revision = $6
-		  AND (config_type NOT IN ('workspace', 'sdk') OR apply_lease_id = $7)
+		  AND (config_type NOT IN ('workspace', 'sdk', 'execution') OR apply_lease_id = $7)
 		  AND status = 'pending'
 	`, params.PlanID, params.State.ConfigKey, params.State.ConfigType,
 		params.State.SourceHash, params.BaseGeneration, params.ExpectedRevision, nullableApplyLease(params.ApplyLeaseID))

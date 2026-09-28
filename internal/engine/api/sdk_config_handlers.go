@@ -77,6 +77,8 @@ type sdkConfigDocument struct {
 	Generate *bool `json:"generate,omitempty"`
 	// BundleDigest is the compiler output identity approved by this immutable plan.
 	BundleDigest string `json:"bundle_digest,omitempty"`
+	// Source is compiled by Engine during plan; authored code never runs in the CLI.
+	Source string `json:"source,omitempty"`
 	// MCP exposes this same immutable SDK/REST app version through the hosted agent transport.
 	MCP *sdkMCPDeliveryDocument `json:"mcp,omitempty"`
 	// WebhookAttachment names one kind: webhook config this SDK/MCP wants
@@ -231,6 +233,7 @@ type appResolvedPayload struct {
 	UnifiedDefinitionHash          string                                 `json:"unified_definition_hash,omitempty"`
 	UnifiedCodegenDescriptorHash   string                                 `json:"unified_codegen_descriptor_hash,omitempty"`
 	UnifiedOperations              *models.SDKUnifiedOperationDescriptors `json:"unified_operations,omitempty"`
+	ExecutionBundle                *executionPlanArtifact                 `json:"execution_bundle,omitempty"`
 }
 
 type sdkPlanCall struct {
@@ -600,8 +603,11 @@ func validateExecutionIdentityAndRuntime(doc sdkConfigDocument) error {
 		return errors.New("execution config requires fused/v1, kind: execution, name, and SemVer version")
 	}
 	// Execution Apps use the Engine runtime, never the Registry SDK generator.
-	if doc.Language != "typescript" || doc.Generate == nil || *doc.Generate || !store.IsCanonicalExecutionAppBundleDigest(doc.BundleDigest) {
-		return errors.New("execution config requires TypeScript, generate: false, and a canonical bundle_digest")
+	if doc.Language != "typescript" || doc.Generate == nil || *doc.Generate {
+		return errors.New("execution config requires TypeScript and generate: false")
+	}
+	if err := validateExecutionSourceMode(doc); err != nil {
+		return err
 	}
 	// A graph would compete with the singular authored execute, while the MCP transport only exposes it.
 	if len(doc.UnifiedOperations) != 0 || doc.FusedIntelligentClassifier || strings.TrimSpace(doc.Description) != "" {
@@ -704,6 +710,10 @@ func validateSDKOutputFields(doc sdkConfigDocument) error {
 	// Compiler bundle provenance belongs to the distinct Execution App family, never an SDK version.
 	if doc.BundleDigest != "" {
 		return errors.New("bundle_digest requires kind: execution")
+	}
+	// Authored code belongs to Engine-hosted Execution Apps, not generated SDK packages.
+	if strings.TrimSpace(doc.Source) != "" {
+		return errors.New("source requires kind: execution")
 	}
 	// Authored server prose has no SDK output consumer and must not become inert immutable state.
 	if strings.TrimSpace(doc.Description) != "" {
@@ -1190,13 +1200,9 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 	}
 	targetBindings, credentialSourceBindings := splitAppContractBindings(bindings, resolvedServices)
 	selections = finalizeAppSelections(selections, targetBindings)
-	unifiedCompilation, err := compileSDKUnifiedOperations(ctx, s, call.document, selections, resolvedServices)
-	// Unified mappings must bind to those same local physical selections.
+	artifact, unifiedCompilation, err := compileAppPlanDeclarations(ctx, s, call.document, appID, selections, resolvedServices, &stateDoc)
+	// Both authored runtime code and declarative operations must bind to the same selected scope.
 	if err != nil {
-		return sdkPlanDefinition{}, err
-	}
-	// A direct REST API must prove its exact immutable OpenAPI projection before a plan can become apply authority.
-	if err := validateDirectAPIOpenAPIPlan(ctx, s, call.document, appID, selections, unifiedCompilation); err != nil {
 		return sdkPlanDefinition{}, err
 	}
 	readiness, err := inspectAppBucketReadiness(ctx, s, buckets, selections, appReadinessServiceNames(append(append([]sdkResolvedService{}, resolvedServices...), credentialSources...), nil))
@@ -1230,8 +1236,28 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 	payload.UnifiedDefinitions = unifiedCompilation.DefinitionJSON
 	payload.UnifiedDefinitionHash = unifiedCompilation.DefinitionHash
 	payload.UnifiedCodegenDescriptorHash = unifiedCompilation.CodegenDescriptorHash
+	payload.ExecutionBundle = artifact
 	resolvedPayload, _ := json.Marshal(payload)
 	return sdkPlanDefinition{services: services, resolvedServices: resolvedServices, desiredState: desiredState, resolvedPayload: resolvedPayload, noop: noop, readiness: readiness, buckets: buckets}, nil
+}
+
+// compileAppPlanDeclarations checks both hosted code and existing declarative outputs against one resolved scope.
+func compileAppPlanDeclarations(ctx context.Context, s store.Store, doc sdkConfigDocument, appID uuid.UUID, selections []models.SDKSelection, services []sdkResolvedService, stateDoc *sdkConfigDocument) (*executionPlanArtifact, sdkUnifiedCompilation, error) {
+	artifact, err := compileExecutionPlanAndPinDigest(ctx, s, doc, selections, services, stateDoc)
+	// A hosted plan cannot become durable until authored code compiles against its exact selected operations.
+	if err != nil {
+		return nil, sdkUnifiedCompilation{}, err
+	}
+	unifiedCompilation, err := compileSDKUnifiedOperations(ctx, s, doc, selections, services)
+	// Unified mappings must bind to those same local physical selections.
+	if err != nil {
+		return nil, sdkUnifiedCompilation{}, err
+	}
+	// A direct REST API must prove its exact immutable OpenAPI projection before a plan can become apply authority.
+	if err := validateDirectAPIOpenAPIPlan(ctx, s, doc, appID, selections, unifiedCompilation); err != nil {
+		return nil, sdkUnifiedCompilation{}, err
+	}
+	return artifact, unifiedCompilation, nil
 }
 
 // sdkPlanIsNoop requires canonical desired state and compiled Unified hashes to match the existing app runtime.
@@ -1531,6 +1557,7 @@ func canonicalAppDocument(doc sdkConfigDocument) sdkConfigDocument {
 	canonical.Language = strings.TrimSpace(doc.Language)
 	canonical.Bucket = strings.TrimSpace(doc.Bucket)
 	canonical.BundleDigest = doc.BundleDigest
+	canonical.Source = doc.Source
 	canonical.WebhookAttachment = strings.TrimSpace(doc.WebhookAttachment)
 	canonical.UnifiedOperations = canonicalizeUnifiedOperations(doc.UnifiedOperations)
 	// Selection order does not change the identity of an installed workflow set.
@@ -4274,6 +4301,7 @@ type persistAppRuntimeParams struct {
 	unifiedDefinitions             json.RawMessage
 	unifiedDefinitionHash          string
 	unifiedCodegenDescriptorHash   string
+	executionBundle                *store.ExecutionAppBundle
 }
 
 // appRuntimeForApply copies compiled private definitions and hashes into the immutable runtime record.
@@ -4375,6 +4403,11 @@ func applyGeneratedAppRuntime(
 	for serviceID, ref := range payload.ServiceBuckets {
 		serviceBuckets[serviceID] = store.AppServiceBucketBinding{BucketID: ref.BucketID, BucketName: ref.BucketName}
 	}
+	executionBundle, err := executionPlanBundleForApply(doc, payload.ExecutionBundle, plan.SourceHash, result.AppID)
+	// The plan-owned artifact is checked again before the app publication transaction.
+	if err != nil {
+		return "", uuid.Nil, uuid.Nil, false, err
+	}
 	return applyAppConfigPlan(ctx, configStore, s, call, plan, persistAppRuntimeParams{
 		accountID:                      call.accountID,
 		appID:                          result.AppID,
@@ -4402,6 +4435,7 @@ func applyGeneratedAppRuntime(
 		unifiedCodegenDescriptorHash:   payload.UnifiedCodegenDescriptorHash,
 		generationJobID:                result.JobID,
 		generationStatus:               appGenerationStatusForApply(doc, result),
+		executionBundle:                executionBundle,
 	})
 }
 
@@ -4412,13 +4446,14 @@ func applyAppConfigPlan(ctx context.Context, configStore store.ConfigRepository,
 		return "", uuid.Nil, uuid.Nil, false, err
 	}
 	return applyAppConfigRuntime(ctx, configStore, s, call, plan, scope, params.bucketName, params.serviceBuckets, params.targetLanguage, params.generatorVersion, sdkApplyGenerationState{
-		jobID: params.generationJobID, status: params.generationStatus,
+		jobID: params.generationJobID, status: params.generationStatus, executionBundle: params.executionBundle,
 	})
 }
 
 type sdkApplyGenerationState struct {
-	jobID  string
-	status string
+	jobID           string
+	status          string
+	executionBundle *store.ExecutionAppBundle
 }
 
 // applyAppConfigRuntime atomically publishes app scope, plan state, and the
@@ -4464,6 +4499,7 @@ func applyAppConfigRuntime(ctx context.Context, configStore store.ConfigReposito
 		AppStatus:           appStatus,
 		SDKGenerationJobID:  generation.jobID,
 		SDKGenerationStatus: generation.status,
+		ExecutionBundle:     generation.executionBundle,
 	})
 	if err != nil {
 		return "", uuid.Nil, uuid.Nil, false, appApplyPersistenceError(ctx, err, scope.AppID)
