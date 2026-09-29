@@ -1,6 +1,9 @@
 # REST app execution
 
-The Engine exposes one data-plane REST route for an immutable SDK app:
+The Engine exposes one data-plane REST route for an immutable SDK or Execution
+App version. This page first describes physical and Unified SDK operations;
+Execution App requests use the same path with the authored `execute` contract
+described below.
 
 ```http
 POST /v1/apps/{app_id}/executions
@@ -9,7 +12,7 @@ Content-Type: application/json
 Idempotency-Key: issue-from-search-42
 ```
 
-The bearer credential is an app-family execution token, not a workspace API key, control-plane credential, provider token, or MCP session token. The Engine validates the token against the exact `app_id` in the path and accepts only SDK app runtimes. Responses use `Cache-Control: no-store`.
+The bearer credential is an app-family execution token, not a workspace API key, control-plane credential, provider token, or MCP session token. The Engine validates the token against the exact `app_id` in the path. Responses use `Cache-Control: no-store`.
 
 ## Request
 
@@ -106,9 +109,49 @@ Errors are bounded Engine-owned envelopes. Provider bodies and tokens are never 
 }
 ```
 
-Actionable connection, reconnect, resource-selection, and environment failures include only safe routing details. Authentication failures are `401`; a valid token without the requested SDK app scope is `403 app_scope_unavailable`; token policy denial is `403 operation_not_allowed`; missing operations are `404 operation_not_found`.
+Actionable connection, reconnect, resource-selection, and environment failures include only safe routing details. Authentication failures are `401`; a valid token without the requested app scope is `403 app_scope_unavailable`; token policy denial is `403 operation_not_allowed`; missing operations are `404 operation_not_found`.
 
 Physical executions and every Unified child publish normal execution receipts with `transport = "rest"`. Unified orchestration does not publish a duplicate wrapper receipt.
+
+## Execution Apps on the same route
+
+A `kind: execution` App runs one TypeScript `execute({ input })`. Send its
+Zod-validated input using the same POST path:
+
+```json
+{"operation":"execute","input":{"name":"Jane"}}
+```
+
+The REST request cannot supply `selector`, `selectors`, `targets`, or
+`pagination`; authored code selects its workspace operations and may pass a
+page bound to `fused.fetch`. Only the current App version in a family accepts
+new traffic. A prior version returns `409 app_version_not_current`, while its
+retained results remain readable until expiration.
+
+An accepted execution receives a durable `executionId`, `status`, typed
+`output`, one stored `data` JSON document, and a caller-held `readHandle`.
+Queued or running executions return HTTP 202; a terminal execution may return
+HTTP 200 with `status: "failed"`, so check the recorded status. The data
+document is limited to 512 KiB, and terminal results are retained for at
+least 24 hours.
+
+```http
+GET /v1/apps/{app_id}/executions/{execution_id}
+Authorization: Bearer <family-execution-token>
+X-Execution-Read-Handle: <handle-from-execute>
+```
+
+Search uses `GET /v1/apps/{app_id}/executions` with a URL-encoded `where` JSON
+object such as `{"data.customerId":"cus_123"}`. It requires an app token
+with the `execution:read` grant and accepts only data
+paths declared in the compiled App's `fetch.searchable` list. The search page
+defaults to 20 results and accepts `limit` from 1 to 100.
+
+`POST /v1/apps/{app_id}/executions/{execution_id}/replay` uses the same token
+and read handle to run against recorded calls without provider effects.
+`POST /v1/apps/{app_id}/executions/{execution_id}/rerun` uses the retained
+input and calls providers again; it also requires an `Idempotency-Key`.
+Both actions create a new execution and require the current App version.
 
 ## Export an OpenAPI document
 
