@@ -1,4 +1,5 @@
-import { useMemo, useRef, type CSSProperties, type UIEvent } from "react";
+import { useLayoutEffect, useMemo, useRef, type CSSProperties, type UIEvent, type KeyboardEvent } from "react";
+import { indentCode } from "~/lib/code-indentation";
 import SyntaxHighlighter from "react-syntax-highlighter/dist/esm/prism-light.js";
 import typescript from "react-syntax-highlighter/dist/esm/languages/prism/typescript.js";
 
@@ -38,6 +39,9 @@ interface TypeScriptEditorProps {
 
 /** Keeps native text editing accessible while a synchronized TypeScript layer supplies syntax colors. */
 export function TypeScriptEditor({ id, value, onChange, disabled }: TypeScriptEditorProps) {
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const pendingSelection = useRef<{ start: number; end: number; direction: "forward" | "backward" | "none" } | null>(null);
+  const escapeTab = useRef(false);
   const highlight = useRef<HTMLDivElement>(null);
   const gutter = useRef<HTMLDivElement>(null);
   const lineCount = value.split("\n").length;
@@ -55,6 +59,36 @@ export function TypeScriptEditor({ id, value, onChange, disabled }: TypeScriptEd
   /** Passes every edit through the existing source state so previous compilation plans are invalidated. */
   function updateSource(event: React.ChangeEvent<HTMLTextAreaElement>) { onChange(event.target.value); }
 
+  // Restore selection after React commits the controlled value, including backward block selections.
+  useLayoutEffect(() => {
+    const selection = pendingSelection.current;
+    // Ordinary edits retain the browser's native caret behavior.
+    if (selection && textarea.current) {
+      textarea.current.setSelectionRange(selection.start, selection.end, selection.direction);
+      pendingSelection.current = null;
+    }
+  }, [value]);
+
+  /** Tab edits indentation; Escape then Tab provides a keyboard route out of the editor. */
+  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    // Release the next Tab so keyboard-only users are never trapped in source editing.
+    if (event.key === "Escape") {
+      escapeTab.current = true;
+      return;
+    }
+    const releaseTab = escapeTab.current;
+    escapeTab.current = false;
+    // Preserve platform shortcuts, composition, disabled state, and focus navigation after Escape.
+    if (event.key !== "Tab" || releaseTab || event.ctrlKey || event.metaKey || event.altKey || event.nativeEvent.isComposing || disabled) return;
+    event.preventDefault();
+    const element = event.currentTarget;
+    const edit = indentCode(value, element.selectionStart, element.selectionEnd, event.shiftKey);
+    // Outdenting an already flush-left line should not invalidate a compilation plan.
+    if (edit.value === value) return;
+    pendingSelection.current = { start: edit.start, end: edit.end, direction: element.selectionDirection };
+    onChange(edit.value);
+  }
+
   return <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm focus-within:border-violet-300 focus-within:ring-2 focus-within:ring-violet-100">
     <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-2.5">
       <div className="flex items-center gap-2.5"><span aria-hidden="true" className="rounded bg-blue-600 px-1 py-0.5 text-[10px] font-bold leading-none text-white">TS</span><span className="font-mono text-xs font-medium text-slate-700">app.ts</span></div>
@@ -63,8 +97,8 @@ export function TypeScriptEditor({ id, value, onChange, disabled }: TypeScriptEd
     <div className="fused-typescript-editor relative h-96 text-slate-800" style={textMetrics}>
       <div ref={highlight} aria-hidden="true" className="fused-code-highlight pointer-events-none absolute inset-0 overflow-hidden">{highlighted}</div>
       <div ref={gutter} aria-hidden="true" className="fused-code-highlight pointer-events-none absolute inset-y-0 left-0 z-10 w-10 overflow-hidden border-r border-slate-100 bg-slate-50 text-right text-slate-400"><pre className="m-0 py-4 pr-2" style={textMetrics}>{Array.from({ length: lineCount }, (_, index) => index + 1).join("\n")}</pre></div>
-      <textarea id={id} aria-label="TypeScript source" value={value} onChange={updateSource} onScroll={syncScroll} disabled={disabled} spellCheck={false} autoCapitalize="off" autoComplete="off" autoCorrect="off" wrap="off" placeholder="Generated TypeScript will appear here…" className="absolute inset-0 m-0 h-full w-full resize-none overflow-auto border-0 bg-transparent text-transparent caret-slate-900 outline-none placeholder:text-slate-400 selection:bg-violet-200/60 disabled:cursor-wait" style={{ ...textMetrics, padding: "16px 16px 16px 56px" }} />
+      <textarea ref={textarea} id={id} aria-label="TypeScript source" aria-describedby={`${id}-help`} onKeyDown={handleKeyDown} value={value} onChange={updateSource} onScroll={syncScroll} disabled={disabled} spellCheck={false} autoCapitalize="off" autoComplete="off" autoCorrect="off" wrap="off" placeholder="Generated TypeScript will appear here…" className="absolute inset-0 m-0 h-full w-full resize-none overflow-auto border-0 bg-transparent text-transparent caret-slate-900 outline-none placeholder:text-slate-400 selection:bg-violet-200/60 disabled:cursor-wait" style={{ ...textMetrics, padding: "16px 16px 16px 56px" }} />
     </div>
-    <div aria-hidden="true" className="border-t border-slate-100 px-4 py-1.5 text-right text-[10px] font-normal text-slate-400">{lineCount} lines</div>
+    <div className="flex justify-between gap-4 border-t border-slate-100 px-4 py-1.5 text-[10px] font-normal text-slate-400"><span id={`${id}-help`}>Tab to indent · Shift+Tab to outdent · Esc then Tab to leave</span><span aria-hidden="true">{lineCount} lines</span></div>
   </div>;
 }
