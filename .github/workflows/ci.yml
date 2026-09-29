@@ -59,14 +59,18 @@ jobs:
           # Build the separate sandbox executable before exercising either image variant.
           CGO_ENABLED=0 go build -tags headless -o /tmp/fused-execution-worker ./cmd/execution-worker
 
-      # Ubuntu can allow user-namespace creation yet deny chroot inside it; authorize only the packaged CI worker.
+      # Namespace authority is decided in the spawning test process; scope Ubuntu's exception to CI tests and their worker.
       - name: Configure CI worker AppArmor profile
         run: |
           set -euo pipefail
+          mkdir -p /tmp/fused-ci-go-tests
           sudo tee /etc/apparmor.d/fused-ci-execution-worker >/dev/null <<'PROFILE'
           abi <abi/4.0>,
           include <tunables/global>
           profile fused-ci-execution-worker /tmp/fused-execution-worker flags=(unconfined) {
+            userns,
+          }
+          profile fused-ci-go-tests /tmp/fused-ci-go-tests/go-build*/b*/*.test flags=(unconfined) {
             userns,
           }
           PROFILE
@@ -74,6 +78,7 @@ jobs:
 
       - name: Test headless
         env:
+          GOTMPDIR: /tmp/fused-ci-go-tests
           FUSED_EXECUTION_WORKER_TEST_BINARY: /tmp/fused-execution-worker
         run: go test -tags headless ./...
 
@@ -105,6 +110,7 @@ jobs:
 
       - name: Test embedded
         env:
+          GOTMPDIR: /tmp/fused-ci-go-tests
           FUSED_EXECUTION_WORKER_TEST_BINARY: /tmp/fused-execution-worker
         run: go test ./...
 
