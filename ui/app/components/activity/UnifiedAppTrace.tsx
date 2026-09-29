@@ -1,10 +1,12 @@
 import { Activity } from "lucide-react";
 import type { EngineExecutionEventEntry } from "~/lib/api";
 import { unifiedAppTraceRows } from "~/lib/unified-app-trace";
+import { unifiedAppFailureStage } from "~/lib/unified-app-outcome";
 
-// UnifiedAppTrace displays the same phase measurements emitted to OTEL using authorized durable receipt data.
+// UnifiedAppTrace combines durable phase durations with explicit failure evidence, without accessing private errors.
 export function UnifiedAppTrace({ event, consumerName }: { event: EngineExecutionEventEntry; consumerName: string }) {
   const phases = unifiedAppTraceRows(event);
+  const failedStage = unifiedAppFailureStage(event);
   // Historical receipts cannot supply an invented validation or authored-code breakdown.
   if (phases.length === 0) return null;
   return <section className="mt-6 min-w-0" aria-label="App execution trace">
@@ -15,12 +17,13 @@ export function UnifiedAppTrace({ event, consumerName }: { event: EngineExecutio
         <span className="text-xs tabular-nums text-slate-600">{event.latency_ms} ms total</span>
       </div>
       <ol className="divide-y divide-slate-100">
+        {/* Only the explicitly recorded failure stage receives an error marker; timing alone cannot prove failure. */}
         {phases.map((phase) => <li key={phase.name} className="px-3 py-3">
-          <div className="flex items-center justify-between gap-3 text-xs"><span className="text-slate-700">{phase.label}</span><span className="shrink-0 tabular-nums text-slate-500">{phase.duration_ms.toLocaleString(undefined, { maximumFractionDigits: 2 })} ms</span></div>
-          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100" aria-hidden="true"><div className="h-full rounded-full bg-violet-500" style={{ width: `${phase.percent}%`, minWidth: "2px" }} /></div>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className="text-slate-700">{phase.label}{phase.name === failedStage ? <span className="ml-2 font-semibold text-red-700">Failed</span> : null}</span><span className="shrink-0 tabular-nums text-slate-500">{phase.duration_ms.toLocaleString(undefined, { maximumFractionDigits: 2 })} ms</span></div>
+          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100" aria-hidden="true"><div className={`h-full rounded-full ${phase.name === failedStage ? "bg-red-500" : "bg-violet-500"}`} style={{ width: `${phase.percent}%`, minWidth: "2px" }} /></div>
         </li>)}
       </ol>
     </div>
-    <p className="mt-2 text-[11px] leading-5 text-slate-500">TypeScript execution includes awaited provider calls. Total time also includes startup, queueing, and saving the result.</p>
+    <p className="mt-2 text-[11px] leading-5 text-slate-500">TypeScript time includes awaited provider calls.</p>
   </section>;
 }

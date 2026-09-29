@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// TestAppPhaseMeasurementsMatchOTELAndReceipt verifies the UI projection is durable and independent of exporter storage.
+// TestAppPhaseMeasurementsMatchOTELAndReceipt verifies ordinary receipts retain safe failure evidence independently of the exporter.
 func TestAppPhaseMeasurementsMatchOTELAndReceipt(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
@@ -32,15 +32,39 @@ func TestAppPhaseMeasurementsMatchOTELAndReceipt(t *testing.T) {
 	if err := json.Unmarshal(host.phaseTimings(), &timings); err != nil || timings["unified_app_compilation"] != 1 {
 		t.Fatalf("incorrect durable timings: %v %v", timings, err)
 	}
+	// The failed-stage label is useful to ordinary readers but contains no authored error material.
+	if host.receiptFailureReason() != "unified_app_compilation_failed" {
+		t.Fatal("failed phase missing from ordinary receipt")
+	}
 	spans := recorder.Ended()
 	// Duplicate completion reports do not duplicate spans; both projections preserve the same real duration.
-	if len(spans) != 1 || spans[0].Name() != "engine.unified_app.compilation" || spans[0].EndTime().Sub(spans[0].StartTime()) != time.Millisecond || spans[0].Parent().SpanID() != parent.SpanContext().SpanID() || spans[0].Status().Code != codes.Error {
-		t.Fatalf("incorrect phase spans: %#v", spans)
+	if len(spans) != 1 {
+		t.Fatalf("expected one phase span, got %d", len(spans))
 	}
+	assertFailedCompilationSpan(t, spans[0], parent.SpanContext().SpanID().String())
 	invalid := NewRecordingCapabilityHost(nil)
 	invalid.RecordExecutionPhases(ctx, []executionappvm.PhaseTiming{{Name: "private input sentinel", StartedAt: start}})
 	// Worker-supplied labels outside the closed stage list cannot enter activity or telemetry.
-	if len(invalid.phaseTimings()) != 0 || len(recorder.Ended()) != 1 {
+	if len(invalid.phaseTimings()) != 0 || invalid.receiptFailureReason() != "" || len(recorder.Ended()) != 1 {
 		t.Fatal("untrusted stage was retained")
+	}
+}
+
+// assertFailedCompilationSpan checks that the observed worker phase keeps its duration, failure and parent trace.
+func assertFailedCompilationSpan(t *testing.T, span sdktrace.ReadOnlySpan, parentID string) {
+	t.Helper()
+	// All fields come from the one recorded worker phase, rather than synthesized UI evidence.
+	if span.Name() != "engine.unified_app.compilation" || span.EndTime().Sub(span.StartTime()) != time.Millisecond || span.Parent().SpanID().String() != parentID || span.Status().Code != codes.Error {
+		t.Fatalf("incorrect phase span: %#v", span)
+	}
+}
+
+// TestAppPhaseFailureRequiresEvidence prevents partial timing from being interpreted as a failed stage.
+func TestAppPhaseFailureRequiresEvidence(t *testing.T) {
+	host := NewRecordingCapabilityHost(nil)
+	host.RecordExecutionPhases(context.Background(), []executionappvm.PhaseTiming{{Name: "compilation", StartedAt: time.Now(), Duration: time.Millisecond}})
+	// A measured stage may have completed before an unrelated interruption; no failed flag means no attribution.
+	if host.receiptFailureReason() != "" {
+		t.Fatal("completed stage was incorrectly marked failed")
 	}
 }

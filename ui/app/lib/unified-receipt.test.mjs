@@ -6,6 +6,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import * as helpers from "./unified-receipt.ts";
+import * as traceHelpers from "./unified-app-trace.ts";
+import * as outcomeHelpers from "./unified-app-outcome.ts";
 
 const require = createRequire(import.meta.url);
 
@@ -14,19 +16,24 @@ function source(path) {
   return readFileSync(new URL(path, import.meta.url), "utf8");
 }
 
-// loadDetails compiles the real JSX component for server-render coverage without adding a browser test dependency.
-function loadDetails() {
-  const output = ts.transpileModule(source("../components/activity/UnifiedExecutionDetails.tsx"), {
+// loadDetails compiles the real receipt and trace JSX so ordinary rendering has no API or diagnostics dependency.
+function loadDetails(path = "../components/activity/UnifiedExecutionDetails.tsx") {
+  const output = ts.transpileModule(source(path), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
   }).outputText;
   const exports = {};
-  // Replace only the app alias; all framework imports resolve through the real installed dependencies.
-  const resolve = (name) => name === "~/lib/unified-receipt" ? helpers : require(name);
+  // App aliases use real local implementations; framework imports keep their installed behavior.
+  const resolve = (name) => {
+    const local = { "~/lib/unified-receipt": helpers, "~/lib/unified-app-trace": traceHelpers, "~/lib/unified-app-outcome": outcomeHelpers };
+    // Nested trace rendering exercises the actual failure marker, not a placeholder component.
+    if (name === "~/components/activity/UnifiedAppTrace") return loadDetails("../components/activity/UnifiedAppTrace.tsx");
+    return local[name] ?? require(name);
+  };
   new Function("require", "exports", output)(resolve, exports);
-  return exports.UnifiedExecutionDetails;
+  return exports;
 }
 
-const UnifiedExecutionDetails = loadDetails();
+const { UnifiedExecutionDetails } = loadDetails();
 
 // parentFixture models bounded orchestration evidence, including a skipped step and compensation of a completed step.
 function parentFixture(overrides = {}) {
@@ -92,10 +99,27 @@ test("renders SDK and MCP parent receipts with clickable forward and rollback ev
     assert.match(html, /aria-label="Inspect rollback execution first"/);
     assert.doesNotMatch(html, /aria-label="Inspect (?:forward|rollback) execution (?:second|third)"/);
     assert.match(html, /Compensates first/);
-    assert.match(html, /original outcome/);
+    assert.match(html, /Operation results are shown below/);
     assert.match(html, /75 ms/);
     assert.doesNotMatch(html, /Provider round trip|Engine work/);
   }
+});
+
+// The ordinary receipt remains useful with no diagnostics client and never renders accidental private fields.
+test("ordinary app receipt explains a failed stage with version and provider outcomes", () => {
+  const event = parentFixture({ app_version: "1.0.0", failure_reason: "unified_app_execute_failed", failure_code: "execution_failed",
+    error: "PRIVATE_EXCEPTION", request: "PRIVATE_REQUEST", response: "PRIVATE_RESPONSE",
+    timings: [{ name: "unified_app_execute", duration_ms: 40 }],
+  });
+  const html = renderParent(event, [childFixture("forward", { operation: "getCustomer", provider_http_status: 200, attempt_count: 1 })]);
+  assert.match(html, /Failed · Run TypeScript/);
+  assert.match(html, /stopped while running its code/);
+  assert.match(html, /Execution trace/);
+  assert.match(html, /bg-red-500/);
+  assert.match(html, /1\.0\.0/);
+  assert.match(html, /getCustomer/);
+  assert.match(html, /HTTP 200/);
+  assert.doesNotMatch(html, /PRIVATE_|Private diagnostics|Rollback executions/);
 });
 
 // Metadata is rendered as text and even accidental payload properties are excluded from this audit-only projection.

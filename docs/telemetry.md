@@ -105,3 +105,17 @@ Drain/stop old Engine producers and consumers before starting the new binaries;
 do not overlap old and new replicas on the same execution/session consumer
 queues. Engine startup applies the forward migration automatically. No
 historical client metadata or detailed timings can be recovered retroactively.
+
+## Unified App receipt details
+
+Ordinary app/activity readers can inspect app identity, version, total duration,
+measured execution phases, and recorded operation outcomes without private
+payload access. Failed receipts retain an observed worker failure stage as a
+fixed `unified_app_<phase>_failed` value in `failure_reason`; the UI translates
+that value into a short explanation and marks the corresponding trace stage.
+Absent stage evidence remains unknown, and interrupted provider work must not
+imply that retrying is safe.
+
+Raw error messages, stacks, requests, and responses remain available only through
+**Private diagnostics**, with `app.unified_app.diagnostics.read` checked by Engine
+on every read. These payloads are never added to ordinary receipts or OTEL.

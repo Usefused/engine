@@ -32,11 +32,28 @@ func (s *EngineGRPCServer) publishUnifiedAppReceipt(ctx context.Context, spec ca
 	if recorder != nil {
 		event.UnifiedSteps = recorder.receiptSteps()
 		event.Timings = recorder.phaseTimings()
+		// Only a failed durable outcome may expose a bounded worker failure stage to ordinary receipt readers.
+		if event.Status == models.EngineExecutionStatusFailed {
+			event.FailureReason = recorder.receiptFailureReason()
+		}
 	}
 	// The existing publisher owns deduplication and never carries diagnostic payloads.
 	if err := executionevent.Publish(ctx, event); err != nil {
 		trace.SpanFromContext(ctx).SetStatus(codes.Error, "execution_receipt_unavailable")
 	}
+}
+
+// receiptFailureReason retains the observed stage without copying private exception text into activity.
+func (host *recordingCapabilityHost) receiptFailureReason() string {
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	for _, phase := range host.phases {
+		// A completed stage must not be blamed merely because it was the last timing received.
+		if phase.Failed {
+			return "unified_app_" + telemetryFailurePhase(phase.Name) + "_failed"
+		}
+	}
+	return ""
 }
 
 // unifiedAppReceipt contains bounded summary metadata while sensitive values stay encrypted on the result.
