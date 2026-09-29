@@ -622,13 +622,13 @@ func engineSchemaQueries() []string {
 			ended_at timestamp with time zone NOT NULL,
 			created_at timestamp with time zone DEFAULT NOW(),
 			idempotency_replayed boolean NOT NULL DEFAULT false,
-			CONSTRAINT chk_fused_execution_app_identity CHECK (
+			CONSTRAINT chk_fused_unified_app_identity CHECK (
 				transport NOT IN ('sdk', 'mcp', 'rest') OR (
 					app_family_id IS NOT NULL AND app_id IS NOT NULL
 					AND NULLIF(BTRIM(app_version), '') IS NOT NULL
 				)
 			),
-			CONSTRAINT chk_fused_execution_app_version_length CHECK (
+			CONSTRAINT chk_fused_unified_app_version_length CHECK (
 				app_version IS NULL OR CHAR_LENGTH(app_version) <= 128
 			)
 		);`,
@@ -717,12 +717,12 @@ func engineSchemaQueries() []string {
 			max_api_families integer NOT NULL DEFAULT -1,
 			max_sdk_families integer NOT NULL DEFAULT -1,
 			max_mcp_families integer NOT NULL DEFAULT -1,
-			max_execution_app_families integer NOT NULL DEFAULT -1,
-			max_execution_app_concurrency integer NOT NULL DEFAULT 4,
+			max_unified_app_families integer NOT NULL DEFAULT -1,
+			max_unified_app_concurrency integer NOT NULL DEFAULT 4,
 			max_services integer NOT NULL DEFAULT -1,
 			max_sandbox_concurrency integer NOT NULL DEFAULT -1,
 			drift_monitoring_enabled boolean NOT NULL DEFAULT false,
-			execution_app_always_on_enabled boolean NOT NULL DEFAULT false,
+			unified_app_always_on_enabled boolean NOT NULL DEFAULT false,
 			webhook_ingestion_enabled boolean NOT NULL DEFAULT false,
 			sso_enabled boolean NOT NULL DEFAULT false,
 			execution_retention_days integer NOT NULL DEFAULT 30,
@@ -731,19 +731,19 @@ func engineSchemaQueries() []string {
 		// Existing Engines gain an independent direct-API ceiling without changing their effective capacity before the next Registry heartbeat.
 		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_api_families integer NOT NULL DEFAULT -1;`,
 		// A missing family ceiling remains unlimited until Registry refreshes an existing Engine.
-		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_execution_app_families integer NOT NULL DEFAULT -1;`,
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_unified_app_families integer NOT NULL DEFAULT -1;`,
 		// Existing workers already admit four concurrent invocations; migration must preserve that behavior.
-		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_execution_app_concurrency integer NOT NULL DEFAULT 4;`,
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_unified_app_concurrency integer NOT NULL DEFAULT 4;`,
 		// Existing Engines keep the warm-worker gate closed until the Registry issues their plan contract.
-		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS execution_app_always_on_enabled boolean NOT NULL DEFAULT false;`,
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS unified_app_always_on_enabled boolean NOT NULL DEFAULT false;`,
 		// A default unlimited row makes activation transactions total before the
 		// first handshake; Registry bootstrap atomically overwrites it with the licensed contract.
 		`INSERT INTO fused_runtime_entitlements (
 			singleton_key, entitlement_revision, plan, heartbeat_required, usage_reporting,
 			public_service_insights_enabled, heartbeat_interval_seconds,
 			heartbeat_stale_after_seconds, refreshed_at, max_buckets,
-			max_api_families, max_sdk_families, max_mcp_families, max_execution_app_families, max_execution_app_concurrency, max_services, max_sandbox_concurrency,
-			drift_monitoring_enabled, execution_app_always_on_enabled, webhook_ingestion_enabled, sso_enabled,
+			max_api_families, max_sdk_families, max_mcp_families, max_unified_app_families, max_unified_app_concurrency, max_services, max_sandbox_concurrency,
+			drift_monitoring_enabled, unified_app_always_on_enabled, webhook_ingestion_enabled, sso_enabled,
 			execution_retention_days
 		) VALUES (
 			1, '', 'commercial', true, 'aggregate', false, 60, 300, NOW(),
@@ -948,7 +948,7 @@ func engineSchemaQueries() []string {
 		`CREATE TABLE IF NOT EXISTS fused_config_states (
 			id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			config_key        text NOT NULL,
-			config_type       text NOT NULL CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'execution', 'webhook')),
+			config_type       text NOT NULL CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'unified_app', 'webhook')),
 			owner_subject_id  uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT,
 			owner_team_id     uuid REFERENCES fused_teams(id) ON DELETE RESTRICT,
 			source_hash       text NOT NULL,
@@ -962,17 +962,17 @@ func engineSchemaQueries() []string {
 			UNIQUE(config_key),
 			CONSTRAINT chk_fused_config_states_owner CHECK (
 				(config_type = 'workspace' AND owner_subject_id IS NULL AND owner_team_id IS NULL) OR
-				(config_type IN ('sdk', 'mcp', 'execution', 'webhook') AND
+				(config_type IN ('sdk', 'mcp', 'unified_app', 'webhook') AND
 				 (owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1)
 			)
 		);`,
 		// Live config state must admit the same distinct hosted App kind as a fresh database.
 		`ALTER TABLE fused_config_states DROP CONSTRAINT IF EXISTS fused_config_states_config_type_check;
-		ALTER TABLE fused_config_states ADD CONSTRAINT fused_config_states_config_type_check CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'execution', 'webhook'));
+		ALTER TABLE fused_config_states ADD CONSTRAINT fused_config_states_config_type_check CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'unified_app', 'webhook'));
 		ALTER TABLE fused_config_states DROP CONSTRAINT IF EXISTS chk_fused_config_states_owner;
 		ALTER TABLE fused_config_states ADD CONSTRAINT chk_fused_config_states_owner CHECK (
 			(config_type = 'workspace' AND owner_subject_id IS NULL AND owner_team_id IS NULL) OR
-			(config_type IN ('sdk', 'mcp', 'execution', 'webhook') AND
+			(config_type IN ('sdk', 'mcp', 'unified_app', 'webhook') AND
 			 (owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1)
 		);`,
 		`CREATE OR REPLACE FUNCTION fused_reject_config_identity_change()
@@ -999,7 +999,7 @@ func engineSchemaQueries() []string {
 		`CREATE TABLE IF NOT EXISTS fused_config_plans (
 			id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			config_key       text NOT NULL,
-			config_type      text NOT NULL CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'execution', 'webhook')),
+			config_type      text NOT NULL CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'unified_app', 'webhook')),
 			owner_subject_id uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT,
 			owner_team_id    uuid REFERENCES fused_teams(id) ON DELETE RESTRICT,
 			source_hash      text NOT NULL,
@@ -1021,17 +1021,17 @@ func engineSchemaQueries() []string {
 			superseded_at    timestamptz,
 			CONSTRAINT chk_fused_config_plans_owner CHECK (
 				(config_type = 'workspace' AND owner_subject_id IS NULL AND owner_team_id IS NULL) OR
-				(config_type IN ('sdk', 'mcp', 'execution', 'webhook') AND
+				(config_type IN ('sdk', 'mcp', 'unified_app', 'webhook') AND
 				 (owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1)
 			)
 		);`,
 		// Plan receipts use the same kind and owner invariant before apply can reserve a lease.
 		`ALTER TABLE fused_config_plans DROP CONSTRAINT IF EXISTS fused_config_plans_config_type_check;
-		ALTER TABLE fused_config_plans ADD CONSTRAINT fused_config_plans_config_type_check CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'execution', 'webhook'));
+		ALTER TABLE fused_config_plans ADD CONSTRAINT fused_config_plans_config_type_check CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'unified_app', 'webhook'));
 		ALTER TABLE fused_config_plans DROP CONSTRAINT IF EXISTS chk_fused_config_plans_owner;
 		ALTER TABLE fused_config_plans ADD CONSTRAINT chk_fused_config_plans_owner CHECK (
 			(config_type = 'workspace' AND owner_subject_id IS NULL AND owner_team_id IS NULL) OR
-			(config_type IN ('sdk', 'mcp', 'execution', 'webhook') AND
+			(config_type IN ('sdk', 'mcp', 'unified_app', 'webhook') AND
 			 (owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1)
 		);`,
 		// A database-owned revision detects direct configuration writes between partial apply attempts.
@@ -1306,15 +1306,15 @@ func engineSchemaQueries() []string {
 		`CREATE TABLE IF NOT EXISTS fused_app_families (
 			app_family_id       uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id          uuid NOT NULL,
-			kind                text NOT NULL CHECK (kind IN ('sdk', 'mcp', 'execution')),
+			kind                text NOT NULL CHECK (kind IN ('sdk', 'mcp', 'unified_app')),
 			canonical_name      text NOT NULL,
 			display_name        text NOT NULL,
 			target_language     text,
 			delivery_mode       text,
 			mcp_stable_app_id       uuid,
 			mcp_stable_route_initialized boolean NOT NULL DEFAULT false,
-			execution_active_app_id uuid,
-			execution_target_initialized boolean NOT NULL DEFAULT false,
+			unified_active_app_id uuid,
+			unified_target_initialized boolean NOT NULL DEFAULT false,
 			owner_subject_id    uuid REFERENCES fused_subjects(id) ON DELETE RESTRICT,
 			owner_team_id       uuid REFERENCES fused_teams(id) ON DELETE RESTRICT,
 			archived_at          timestamptz,
@@ -1326,12 +1326,12 @@ func engineSchemaQueries() []string {
 				(owner_team_id IS NOT NULL)::int = 1
 			),
 			CONSTRAINT chk_fused_app_families_language CHECK (
-				(kind IN ('sdk', 'execution') AND target_language IS NOT NULL)
+				(kind IN ('sdk', 'unified_app') AND target_language IS NOT NULL)
 				OR (kind = 'mcp' AND target_language IS NULL)
 			),
 			CONSTRAINT chk_fused_app_families_delivery_mode CHECK (
 				(kind = 'sdk' AND (delivery_mode IS NULL OR delivery_mode IN ('sdk', 'api')))
-				OR (kind IN ('mcp', 'execution') AND delivery_mode IS NULL)
+				OR (kind IN ('mcp', 'unified_app') AND delivery_mode IS NULL)
 			),
 			CONSTRAINT chk_fused_app_families_stable_mcp CHECK (
 				mcp_stable_app_id IS NULL OR mcp_stable_route_initialized
@@ -1351,19 +1351,19 @@ func engineSchemaQueries() []string {
 				ON fused_app_families(account_id, kind, canonical_name)
 				WHERE archived_at IS NULL;
 		END $$;`,
-		// Existing databases need the same family-kind admission as fresh installs before an Execution App can apply.
+		// Existing databases need the same family-kind admission as fresh installs before a Unified App can apply.
 		`DO $$
 		BEGIN
 			ALTER TABLE fused_app_families DROP CONSTRAINT IF EXISTS fused_app_families_kind_check;
-			ALTER TABLE fused_app_families ADD CONSTRAINT fused_app_families_kind_check CHECK (kind IN ('sdk', 'mcp', 'execution'));
+			ALTER TABLE fused_app_families ADD CONSTRAINT fused_app_families_kind_check CHECK (kind IN ('sdk', 'mcp', 'unified_app'));
 			ALTER TABLE fused_app_families DROP CONSTRAINT IF EXISTS chk_fused_app_families_language;
 			ALTER TABLE fused_app_families ADD CONSTRAINT chk_fused_app_families_language CHECK (
-				(kind IN ('sdk', 'execution') AND target_language IS NOT NULL) OR (kind = 'mcp' AND target_language IS NULL)
+				(kind IN ('sdk', 'unified_app') AND target_language IS NOT NULL) OR (kind = 'mcp' AND target_language IS NULL)
 			);
 			ALTER TABLE fused_app_families DROP CONSTRAINT IF EXISTS chk_fused_app_families_delivery_mode;
 			ALTER TABLE fused_app_families ADD CONSTRAINT chk_fused_app_families_delivery_mode CHECK (
 				(kind = 'sdk' AND (delivery_mode IS NULL OR delivery_mode IN ('sdk', 'api')))
-				OR (kind IN ('mcp', 'execution') AND delivery_mode IS NULL)
+				OR (kind IN ('mcp', 'unified_app') AND delivery_mode IS NULL)
 			);
 		END $$;`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_app_families_account_kind
@@ -1561,49 +1561,49 @@ func engineSchemaQueries() []string {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_fused_apps_app_family_identity
 			ON fused_apps(app_id, app_family_id);`,
 		// Bundles are immutable version artifacts and follow the exact app version lifecycle.
-		`CREATE TABLE IF NOT EXISTS fused_execution_app_bundles (
+		`CREATE TABLE IF NOT EXISTS fused_unified_app_bundles (
 			app_id uuid PRIMARY KEY REFERENCES fused_apps(app_id) ON DELETE CASCADE,
 			bundle_js text NOT NULL CHECK (octet_length(bundle_js) <= 2097152),
 			manifest jsonb NOT NULL,
 			source_hash text NOT NULL,
 			created_at timestamptz NOT NULL DEFAULT NOW()
 		);`,
-		// A family selects one ready Execution App version. Backfill only families
+		// A family selects one ready Unified App version. Backfill only families
 		// without a target so restarts never undo an explicit later promotion.
 		`DO $$
 		BEGIN
 			LOCK TABLE fused_app_families IN SHARE ROW EXCLUSIVE MODE;
-			ALTER TABLE fused_app_families ADD COLUMN IF NOT EXISTS execution_active_app_id uuid;
-			ALTER TABLE fused_app_families ADD COLUMN IF NOT EXISTS execution_target_initialized boolean NOT NULL DEFAULT false;
+			ALTER TABLE fused_app_families ADD COLUMN IF NOT EXISTS unified_active_app_id uuid;
+			ALTER TABLE fused_app_families ADD COLUMN IF NOT EXISTS unified_target_initialized boolean NOT NULL DEFAULT false;
 			-- Existing promoted pointers are intentional even if their marker predates this schema.
 			UPDATE fused_app_families
-			SET execution_target_initialized = true
-			WHERE kind = 'execution' AND execution_active_app_id IS NOT NULL
-			  AND NOT execution_target_initialized;
+			SET unified_target_initialized = true
+			WHERE kind = 'unified_app' AND unified_active_app_id IS NOT NULL
+			  AND NOT unified_target_initialized;
 			WITH ready AS (
 				SELECT DISTINCT ON (app.app_family_id) app.app_family_id, app.app_id
 				FROM fused_apps app
-				JOIN fused_execution_app_bundles bundle ON bundle.app_id = app.app_id
+				JOIN fused_unified_app_bundles bundle ON bundle.app_id = app.app_id
 				WHERE app.status IN ('active', 'deprecated')
 				ORDER BY app.app_family_id, app.activated_at DESC NULLS LAST, app.created_at DESC, app.app_id DESC
 			)
 			UPDATE fused_app_families family
-			SET execution_active_app_id = ready.app_id,
-			    execution_target_initialized = true
+			SET unified_active_app_id = ready.app_id,
+			    unified_target_initialized = true
 			FROM ready
-			WHERE family.kind = 'execution' AND family.app_family_id = ready.app_family_id
-			  AND NOT family.execution_target_initialized;
+			WHERE family.kind = 'unified_app' AND family.app_family_id = ready.app_family_id
+			  AND NOT family.unified_target_initialized;
 			-- Empty families are initialized too, so a later restart cannot infer a target.
 			UPDATE fused_app_families
-			SET execution_target_initialized = true
-			WHERE kind = 'execution' AND NOT execution_target_initialized;
+			SET unified_target_initialized = true
+			WHERE kind = 'unified_app' AND NOT unified_target_initialized;
 			-- Legacy MCP promotions may have run before a bundle was ready; restore the selected version's route.
 			UPDATE fused_app_families family
 			SET mcp_stable_app_id = CASE WHEN app.hosted_mcp THEN app.app_id ELSE NULL END,
 			    mcp_stable_route_initialized = true
 			FROM fused_apps app
-			WHERE family.kind = 'execution'
-			  AND family.execution_active_app_id = app.app_id
+			WHERE family.kind = 'unified_app'
+			  AND family.unified_active_app_id = app.app_id
 			  AND family.mcp_stable_app_id IS DISTINCT FROM CASE WHEN app.hosted_mcp THEN app.app_id ELSE NULL END;
 			IF NOT EXISTS (
 				SELECT 1 FROM pg_constraint
@@ -1612,14 +1612,14 @@ func engineSchemaQueries() []string {
 			) THEN
 				ALTER TABLE fused_app_families
 				ADD CONSTRAINT fk_fused_app_families_execution_active
-				FOREIGN KEY (execution_active_app_id, app_family_id)
+				FOREIGN KEY (unified_active_app_id, app_family_id)
 				REFERENCES fused_apps(app_id, app_family_id)
-				ON DELETE SET NULL (execution_active_app_id);
+				ON DELETE SET NULL (unified_active_app_id);
 			END IF;
 		END $$;`,
 		// Result rows keep sensitive execution state after an app version is deactivated.
 		// Queryable JSONB relies on the Engine database's encryption at rest.
-		`CREATE TABLE IF NOT EXISTS fused_execution_app_results (
+		`CREATE TABLE IF NOT EXISTS fused_unified_app_results (
 			id uuid PRIMARY KEY,
 			account_id uuid NOT NULL,
 			app_family_id uuid NOT NULL,
@@ -1647,27 +1647,29 @@ func engineSchemaQueries() []string {
 			CHECK ((status IN ('queued', 'running') AND completed_at IS NULL AND expires_at IS NULL)
 				OR (status IN ('succeeded', 'failed', 'indeterminate') AND completed_at IS NOT NULL AND expires_at >= completed_at + INTERVAL '24 hours'))
 		);`,
-		`ALTER TABLE fused_execution_app_results ADD COLUMN IF NOT EXISTS idempotency_key_hash text;`,
+		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS idempotency_key_hash text;`,
 		// A deployed app has one authored execute contract, so this pre-release column must not split its result identity.
-		`ALTER TABLE fused_execution_app_results DROP COLUMN IF EXISTS capability;`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_execution_app_results_scope
-			ON fused_execution_app_results(account_id, app_id, created_at DESC, id DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_execution_app_results_status
-			ON fused_execution_app_results(account_id, app_id, status, created_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_execution_app_results_expiry
-			ON fused_execution_app_results(expires_at) WHERE expires_at IS NOT NULL;`,
+		`ALTER TABLE fused_unified_app_results DROP COLUMN IF EXISTS capability;`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_results_scope
+			ON fused_unified_app_results(account_id, app_id, created_at DESC, id DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_results_status
+			ON fused_unified_app_results(account_id, app_id, status, created_at DESC);`,
+		// Private diagnostics share the result retention and never enter execution-event payloads.
+		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS diagnostic_dek text, ADD COLUMN IF NOT EXISTS diagnostic_payload text;`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_results_expiry
+			ON fused_unified_app_results(expires_at) WHERE expires_at IS NOT NULL;`,
 		// Stale recovery finds only pending rows by their last state transition without scanning retained history.
-		`CREATE INDEX IF NOT EXISTS idx_fused_execution_app_results_pending_age
-			ON fused_execution_app_results(updated_at, id) WHERE status IN ('queued','running');`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_execution_app_results_data
-			ON fused_execution_app_results USING GIN (data jsonb_path_ops);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_results_pending_age
+			ON fused_unified_app_results(updated_at, id) WHERE status IN ('queued','running');`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_results_data
+			ON fused_unified_app_results USING GIN (data jsonb_path_ops);`,
 		// One token's repeated rerun submission returns the first execution instead of dispatching twice.
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_execution_app_results_rerun
-			ON fused_execution_app_results(account_id, app_id, app_token_id, source_execution_id, idempotency_key_hash)
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_unified_app_results_rerun
+			ON fused_unified_app_results(account_id, app_id, app_token_id, source_execution_id, idempotency_key_hash)
 			WHERE mode = 'rerun';`,
 		// Replay evidence is encrypted independently of queryable result data and expires with its terminal execution.
-		`CREATE TABLE IF NOT EXISTS fused_execution_app_replay_evidence (
-			execution_id uuid PRIMARY KEY REFERENCES fused_execution_app_results(id) ON DELETE CASCADE,
+		`CREATE TABLE IF NOT EXISTS fused_unified_app_replay_evidence (
+			execution_id uuid PRIMARY KEY REFERENCES fused_unified_app_results(id) ON DELETE CASCADE,
 			account_id uuid NOT NULL,
 			app_id uuid NOT NULL,
 			encrypted_dek text NOT NULL,
@@ -1676,8 +1678,8 @@ func engineSchemaQueries() []string {
 			expires_at timestamptz NOT NULL,
 			CHECK (octet_length(encrypted_history) <= 1572864)
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_fused_execution_app_replay_expiry
-			ON fused_execution_app_replay_evidence(expires_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_replay_expiry
+			ON fused_unified_app_replay_evidence(expires_at);`,
 		// Existing Engines gain one stable MCP pointer in place. The initialization
 		// marker lets startup choose one initial target without later undoing an
 		// intentional deactivation that cleared the pointer. One table lock closes

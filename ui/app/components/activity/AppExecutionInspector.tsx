@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ExecutionDiagnostics } from "~/components/activity/ExecutionDiagnostics";
 import { ExecutionDetails } from "~/components/AnalyticsTab";
 import { ExecutionDetailsDrawer } from "~/components/activity/ExecutionDetailsDrawer";
 import { UnifiedExecutionDetails } from "~/components/activity/UnifiedExecutionDetails";
@@ -74,5 +75,7 @@ export function AppExecutionInspector({ event, appId, consumerName, onClose }: A
       {/* Historical versions still belong to this authorized app family and retain its consumer label. */}
       <ExecutionDetails event={selected} appNames={new Map([[selected.app_id || appId, consumerName]])} />
     </>}
+    {/* Hosted run diagnostics require a separate grant, even when ordinary receipts are visible. */}
+    {selected.execution_kind === "unified" ? <ExecutionDiagnostics event={selected} /> : null}
   </ExecutionDetailsDrawer>;
 }

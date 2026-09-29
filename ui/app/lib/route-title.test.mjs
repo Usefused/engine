@@ -23,7 +23,7 @@ test("titles every primary Engine route", () => {
 
 // Builder titles distinguish an explicit adapter while leaving untyped entry neutral.
 test("titles route-specific creation and detail pages", () => {
-  assert.equal(routeTitle("/integrations/builder"), "Create app - Fused");
+  assert.equal(routeTitle("/integrations/builder"), "Create App - Fused");
   assert.equal(routeTitle("/integrations/builder", "?tab=sdk"), "Create SDK - Fused");
   assert.equal(routeTitle("/integrations/builder", "?tab=api"), "Create REST API - Fused");
   assert.equal(routeTitle("/integrations/builder", "?tab=mcp"), "Create MCP server - Fused");

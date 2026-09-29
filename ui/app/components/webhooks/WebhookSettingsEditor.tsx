@@ -1,3 +1,4 @@
+import { Select } from "../forms/Select.ts";
 import { useEffect, useState } from "react";
 import { updateWebhookSetting, webhookDiscriminatorText, webhookDiscriminatorValue, webhookRecord, type WebhookDocument, type WebhookEditorDraft } from "~/lib/webhook-editor-draft";
 import { webhookFieldClass } from "./WebhookEventEditor";
@@ -42,7 +43,7 @@ function VerificationFields({ config, onChange }: { config: WebhookDocument; onC
     onChange({ auth_type: type, auth_location: "header", auth_key_name: "" });
   }
   return <div className="space-y-3">
-    <label className="block text-sm">Verification method<select className={webhookFieldClass} value={authType} onChange={(e) => changeType(e.target.value)}><option value="none">None</option><option value="static_token">Static token</option><option value="hmac_signature">HMAC signature</option><option value="signature_header">Signature headers</option></select></label>
+    <label className="block text-sm">Verification method<Select className={webhookFieldClass} value={authType} onChange={(e) => changeType(e.target.value)}><option value="none">None</option><option value="static_token">Static token</option><option value="hmac_signature">HMAC signature</option><option value="signature_header">Signature headers</option></Select></label>
     {authType !== "none" && <VerificationKeyFields config={config} onChange={onChange} />}
     <p className="text-xs text-slate-500">Changing verification affects service users. This form never asks for the token or signing secret itself.</p>
   </div>;
@@ -52,7 +53,7 @@ function VerificationFields({ config, onChange }: { config: WebhookDocument; onC
 function VerificationKeyFields({ config, onChange }: { config: WebhookDocument; onChange: (next: WebhookDocument) => void }) {
   const signature = config.auth_type !== "static_token";
   return <div className="space-y-3">
-    <label className="block text-sm">Incoming credential location<select className={webhookFieldClass} value={String(config.auth_location ?? "header")} onChange={(e) => onChange({ ...config, auth_location: e.target.value })}><option value="header">Header</option><option value="query">Query parameter</option></select></label>
+    <label className="block text-sm">Incoming credential location<Select className={webhookFieldClass} value={String(config.auth_location ?? "header")} onChange={(e) => onChange({ ...config, auth_location: e.target.value })}><option value="header">Header</option><option value="query">Query parameter</option></Select></label>
     <label className="block text-sm">Incoming field name<input className={webhookFieldClass} value={String(config.auth_key_name ?? "")} onChange={(e) => onChange({ ...config, auth_key_name: e.target.value })} placeholder="X-Webhook-Signature" /></label>
     {signature && <details><summary className="cursor-pointer text-sm text-slate-600">Advanced verification headers</summary><label className="mt-3 block text-sm">Signature header<input className={webhookFieldClass} value={String(config.signature_header ?? "")} onChange={(e) => onChange({ ...config, signature_header: e.target.value })} /></label><label className="mt-3 block text-sm">Required verification headers (comma separated)<input className={webhookFieldClass} value={verificationHeadersText(config)} onChange={(e) => onChange({ ...config, verification_headers: e.target.value.split(",").map((name) => name.trim()).filter(Boolean) })} /></label></details>}
   </div>;

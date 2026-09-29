@@ -1,3 +1,5 @@
+import { unifiedAppTraceRows } from "~/lib/unified-app-trace";
+import { UnifiedAppTrace } from "~/components/activity/UnifiedAppTrace";
 import { CheckCircle2, ChevronRight, Loader2, Server, XCircle } from "lucide-react";
 import type { EngineExecutionEventEntry, UnifiedExecutionStep } from "~/lib/api";
 import { unifiedPhaseSummary, unifiedStepKey, unifiedStepStatus, type UnifiedStepRow } from "~/lib/unified-receipt";
@@ -56,6 +58,7 @@ function UnifiedPhase({ phase, rows, onSelect }: { phase: UnifiedExecutionStep["
 export function UnifiedExecutionDetails({ event, consumerName, rows, loading, unavailable, onRetry, onSelect }: UnifiedExecutionDetailsProps) {
   // The parent's outcome remains failed even when all required compensation succeeds.
   const successful = event.status === "success";
+  const hosted = unifiedAppTraceRows(event).length > 0;
   return <section className="border-y border-slate-200 py-6" aria-label="Unified execution receipt details">
     <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
       <div><div className="text-xs font-medium text-blue-700">Unified execution receipt</div><h3 className="mt-1 break-words font-mono text-sm font-semibold text-slate-950">{event.operation}</h3></div>
@@ -67,13 +70,15 @@ export function UnifiedExecutionDetails({ event, consumerName, rows, loading, un
     {/* Persisted failure codes describe orchestration only and never include provider bodies. */}
     {event.failure_code ? <p className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{event.failure_code}</p> : null}
     <dl className="mt-6 grid gap-4 sm:grid-cols-3"><ReceiptField label="Consumer" value={consumerName} /><ReceiptField label="Access path" value={event.transport.toUpperCase()} /><ReceiptField label="Total elapsed" value={`${event.latency_ms} ms`} /></dl>
-    <p className="mt-4 text-xs leading-5 text-slate-500">One Unified call, with each dispatched operation recorded below. Total elapsed time includes orchestration and overlapping work; it is not the sum of child durations. Rollback compensates completed work without changing the original outcome.</p>
+    <p className="mt-4 text-xs leading-5 text-slate-500">{hosted ? "Provider calls are recorded below. Their durations can overlap and are included in TypeScript execution time." : "One Unified call, with each dispatched operation recorded below. Total elapsed time includes orchestration and overlapping work; it is not the sum of child durations. Rollback compensates completed work without changing the original outcome."}</p>
+    <UnifiedAppTrace event={event} consumerName={consumerName} />
     {/* Loading and unavailable states cannot silently imply that every child was skipped. */}
     {loading ? <p role="status" className="mt-4 flex items-center gap-2 text-xs text-slate-500"><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading execution receipts…</p> : null}
     {unavailable ? <p role="status" className="mt-4 text-xs text-slate-500">Child receipts are unavailable.</p> : null}
     <p className="mt-3 text-xs text-slate-500">Receipt delivery may lag behind completion. <button type="button" disabled={loading} className="font-medium text-blue-700 hover:underline disabled:opacity-50" onClick={onRetry}>Refresh receipts</button></p>
     <UnifiedPhase phase="forward" rows={rows} onSelect={onSelect} />
-    <UnifiedPhase phase="rollback" rows={rows} onSelect={onSelect} />
+    {/* Hosted TypeScript has no implicit rollback scheduler to report. */}
+    {!hosted ? <UnifiedPhase phase="rollback" rows={rows} onSelect={onSelect} /> : null}
     <dl className="mt-6 grid gap-4 border-t border-slate-200 pt-5 sm:grid-cols-3"><ReceiptField label="Started" value={new Date(event.started_at).toLocaleString()} /><ReceiptField label="Trace ID" value={event.trace_id || "Not recorded"} /><ReceiptField label="Receipt ID" value={event.id} /></dl>
   </section>;
 }

@@ -33,10 +33,9 @@ type artifactReferenceGraphQLTestStore struct {
 
 type appSelectionGraphQLTestStore struct {
 	*artifactReferenceGraphQLTestStore
-	item                 store.AppCatalogItem
-	operationSelections  []store.ServiceContractEndpointSelection
-	operationMatches     []store.ServiceContractEndpointMatch
-	unifiedOperationList *models.SDKUnifiedOperationDescriptors
+	item                store.AppCatalogItem
+	operationSelections []store.ServiceContractEndpointSelection
+	operationMatches    []store.ServiceContractEndpointMatch
 }
 
 // GetAuthorizedApp returns one exact app catalogue projection so the GraphQL contract test does not reconstruct selections from runtime fixtures.
@@ -53,11 +52,6 @@ func (s *appSelectionGraphQLTestStore) GetAuthorizedApp(_ context.Context, accou
 func (s *appSelectionGraphQLTestStore) ListServiceContractEndpointsForSelections(_ context.Context, selections []store.ServiceContractEndpointSelection, _ []string) ([]store.ServiceContractEndpointMatch, error) {
 	s.operationSelections = append([]store.ServiceContractEndpointSelection(nil), selections...)
 	return append([]store.ServiceContractEndpointMatch(nil), s.operationMatches...), nil
-}
-
-// GetMCPUnifiedOperationDescriptors returns the exact public descriptor fixture without exposing private mappings.
-func (s *appSelectionGraphQLTestStore) GetMCPUnifiedOperationDescriptors(_ context.Context, _ uuid.UUID, _ bool, _ []string) (*models.SDKUnifiedOperationDescriptors, error) {
-	return s.unifiedOperationList, nil
 }
 
 func (s *artifactReferenceGraphQLTestStore) ListAuthorizedAppsByAccount(_ context.Context, accountID uuid.UUID, _ accesscontrol.AuthorizedScope, kind, _, _ string, _, _ int) ([]store.AppCatalogItem, int, error) {
@@ -1396,8 +1390,8 @@ func TestAppSelectionGraphQLReturnsOperationNames(t *testing.T) {
 	}
 }
 
-// TestMCPAppOperationsExpandsPhysicalAndUnifiedCatalogue verifies one exact read exposes every callable operation type.
-func TestMCPAppOperationsExpandsPhysicalAndUnifiedCatalogue(t *testing.T) {
+// TestMCPAppOperationsExpandsPhysicalCatalogue verifies one exact read exposes physical calls only.
+func TestMCPAppOperationsExpandsPhysicalCatalogue(t *testing.T) {
 	fixture := newMCPAppOperationsGraphQLFixture()
 	handler := mountMCPGraphQLTestHandler(t, fixture)
 	data := doMCPGraphQLRequest(t, handler, `query { mcpAppOperations(app_id: "`+fixture.item.AppID.String()+`") { mcp_id version_id name version total operations { operation_id kind service_id service_version_id } } }`)
@@ -1408,7 +1402,7 @@ func TestMCPAppOperationsExpandsPhysicalAndUnifiedCatalogue(t *testing.T) {
 	assertMCPAppOperationsGraphQLBatch(t, fixture)
 }
 
-// newMCPAppOperationsGraphQLFixture creates select-all, explicit, and Unified operation state under one authorized exact version.
+// newMCPAppOperationsGraphQLFixture creates select-all and explicit operation state under one authorized exact version.
 func newMCPAppOperationsGraphQLFixture() *appSelectionGraphQLTestStore {
 	accountID, appID, familyID := uuid.New(), uuid.New(), uuid.New()
 	firstServiceID, firstVersionID := uuid.New(), uuid.New()
@@ -1428,7 +1422,6 @@ func newMCPAppOperationsGraphQLFixture() *appSelectionGraphQLTestStore {
 			{SelectionIndex: 1, Endpoint: fusedobject.Endpoint{Name: "tickets.create"}},
 			{SelectionIndex: 0, Endpoint: fusedobject.Endpoint{Name: "customers.list"}},
 		},
-		unifiedOperationList: &models.SDKUnifiedOperationDescriptors{SchemaVersion: models.SDKUnifiedDescriptorSchemaVersion, Operations: []models.SDKUnifiedOperationDescriptor{{Name: "support.resolve"}}},
 	}
 }
 
@@ -1436,26 +1429,24 @@ func newMCPAppOperationsGraphQLFixture() *appSelectionGraphQLTestStore {
 func assertMCPAppOperationsGraphQLIdentity(t *testing.T, fixture *appSelectionGraphQLTestStore, catalogue map[string]any, operations []any) {
 	t.Helper()
 	// The response is exact-version bound and sorted by public operation ID for stable automation.
-	if catalogue["mcp_id"] != fixture.item.AppFamilyID.String() || catalogue["version_id"] != fixture.item.AppID.String() || catalogue["total"] != float64(3) || len(operations) != 3 {
+	if catalogue["mcp_id"] != fixture.item.AppFamilyID.String() || catalogue["version_id"] != fixture.item.AppID.String() || catalogue["total"] != float64(2) || len(operations) != 2 {
 		t.Fatalf("unexpected MCP operation catalogue: %#v", catalogue)
 	}
 }
 
-// assertMCPAppOperationsGraphQLEntries verifies deterministic names, kinds, and safe physical-only provenance.
+// assertMCPAppOperationsGraphQLEntries verifies deterministic physical names, kinds, and provenance.
 func assertMCPAppOperationsGraphQLEntries(t *testing.T, fixture *appSelectionGraphQLTestStore, operations []any) {
 	t.Helper()
 	first := operations[0].(map[string]any)
 	second := operations[1].(map[string]any)
-	third := operations[2].(map[string]any)
-	// All public invocation names must sort consistently across physical and Unified operation kinds.
+	// Public invocation names sort consistently across selected physical calls.
 	if first["operation_id"] != "customers.list" || first["kind"] != appOperationKindPhysical ||
-		second["operation_id"] != "support.resolve" || second["kind"] != appOperationKindUnified ||
-		third["operation_id"] != "tickets.create" || third["kind"] != appOperationKindPhysical {
+		second["operation_id"] != "tickets.create" || second["kind"] != appOperationKindPhysical {
 		t.Fatalf("unexpected sorted MCP operations: %#v", operations)
 	}
-	// Unified rows intentionally omit private target identity while physical rows retain immutable provenance.
+	// Physical rows retain immutable service and version provenance.
 	firstSelection := fixture.item.Selections[0]
-	if second["service_id"] != "" || first["service_id"] != firstSelection.ServiceID.String() || first["service_version_id"] != firstSelection.ServiceVersionID.String() {
+	if first["service_id"] != firstSelection.ServiceID.String() || first["service_version_id"] != firstSelection.ServiceVersionID.String() {
 		t.Fatalf("unexpected MCP operation provenance: %#v", operations)
 	}
 }
@@ -1469,13 +1460,15 @@ func assertMCPAppOperationsGraphQLBatch(t *testing.T, fixture *appSelectionGraph
 	}
 }
 
-// TestMergeMCPAppOperationsRejectsDuplicateInvocationNames keeps an ambiguous MCP runtime from advertising a misleading allowlist.
+// TestMergeMCPAppOperationsRejectsDuplicateInvocationNames keeps duplicate physical rows out of the allowlist.
 func TestMergeMCPAppOperationsRejectsDuplicateInvocationNames(t *testing.T) {
 	selection := models.SDKSelection{ServiceID: uuid.New(), ServiceVersionID: uuid.New()}
 	_, err := mergeMCPAppOperations([]models.SDKSelection{selection}, []store.ServiceContractEndpointMatch{{
 		SelectionIndex: 0, Endpoint: fusedobject.Endpoint{Name: "support.resolve"},
-	}}, &models.SDKUnifiedOperationDescriptors{Operations: []models.SDKUnifiedOperationDescriptor{{Name: "support.resolve"}}})
-	// A duplicate public name would route nondeterministically between physical and Unified execution.
+	}, {
+		SelectionIndex: 0, Endpoint: fusedobject.Endpoint{Name: "support.resolve"},
+	}})
+	// A duplicate public name would route nondeterministically between physical selections.
 	if err == nil || !strings.Contains(err.Error(), "duplicated") {
 		t.Fatalf("duplicate MCP operation error = %v", err)
 	}

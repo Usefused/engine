@@ -1,3 +1,4 @@
+import { Select } from "../forms/Select.ts";
 import { createElement, type ChangeEvent, type ReactElement } from "react";
 import type { AppBuildSelector, AppOwningTeam } from "../../lib/app-builder-contract";
 
@@ -34,7 +35,7 @@ function ownerTeamControl(props: AppOwnerControlsProps): ReactElement {
     null,
     createElement("label", { className: "mb-1 block text-sm font-medium text-slate-700" }, "Owning team"),
     createElement(
-      "select",
+      Select,
       {
         value: props.ownerTeamId,
         onChange: (event: ChangeEvent<HTMLSelectElement>) => props.onOwnerTeamChange(event.target.value),
@@ -70,7 +71,7 @@ function bucketControl(props: AppOwnerControlsProps): ReactElement {
         : null
     ),
     createElement(
-      "select",
+      Select,
       {
         required: true,
         value: props.bucketId,

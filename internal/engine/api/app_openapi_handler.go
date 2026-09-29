@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/Usefused/engine/internal/engine/store"
-	"github.com/Usefused/engine/internal/engine/unified"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
@@ -35,7 +34,7 @@ type appOpenAPIOperation struct {
 	responseSchema map[string]any
 }
 
-// AppOpenAPIHandler exports one exact SDK or Execution App as an OpenAPI 3.1 document.
+// AppOpenAPIHandler exports one exact SDK or Unified App as an OpenAPI 3.1 document.
 func AppOpenAPIHandler(engineStore store.Store, contracts appOpenAPIContractStore) http.HandlerFunc {
 	return func(response http.ResponseWriter, request *http.Request) {
 		actor, app, err := lifecycleActorAndApp(request.Context(), engineStore, request)
@@ -52,7 +51,7 @@ func AppOpenAPIHandler(engineStore store.Store, contracts appOpenAPIContractStor
 			writeSDKConfigError(response, workspaceConfigHTTPError{status: http.StatusServiceUnavailable, message: "app schema export is unavailable"})
 			return
 		}
-		bundles, _ := engineStore.(store.ExecutionAppBundleStore)
+		bundles, _ := engineStore.(store.UnifiedAppBundleStore)
 		document, err := buildAppOpenAPIDocumentWithBundle(request.Context(), contracts, bundles, app, family, request.URL.Query().Get("operation"))
 		if err != nil {
 			writeSDKConfigError(response, err)
@@ -65,7 +64,7 @@ func AppOpenAPIHandler(engineStore store.Store, contracts appOpenAPIContractStor
 	}
 }
 
-// loadAppOpenAPIFamily verifies one exact SDK or Execution App family in the authenticated workspace.
+// loadAppOpenAPIFamily verifies one exact SDK or Unified App family in the authenticated workspace.
 func loadAppOpenAPIFamily(ctx context.Context, engineStore store.Store, accountID uuid.UUID, app *store.App) (*store.AppFamily, error) {
 	if app == nil || app.AppFamilyID == uuid.Nil {
 		return nil, workspaceConfigHTTPError{status: http.StatusNotFound, message: "app not found"}
@@ -75,11 +74,11 @@ func loadAppOpenAPIFamily(ctx context.Context, engineStore store.Store, accountI
 		return nil, workspaceConfigHTTPError{status: http.StatusNotFound, message: "app family not found"}
 	}
 	if !validAppOpenAPIFamilyIdentity(family, app, accountID) {
-		return nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "OpenAPI export requires an SDK or Execution App"}
+		return nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "OpenAPI export requires an SDK or Unified App"}
 	}
-	// An Execution App without approved hosted code cannot advertise only its internal service scope.
-	if family.Kind == store.AppKindExecution && app.BundleDigest == "" {
-		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "Execution App bundle is unavailable"}
+	// A Unified App without approved hosted code cannot advertise only its internal service scope.
+	if family.Kind == store.AppKindUnifiedApp && app.BundleDigest == "" {
+		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "Unified App bundle is unavailable"}
 	}
 	if !app.Status.Runnable() {
 		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "OpenAPI export requires a runnable app version"}
@@ -90,7 +89,7 @@ func loadAppOpenAPIFamily(ctx context.Context, engineStore store.Store, accountI
 // validAppOpenAPIFamilyIdentity keeps kind and tenant checks together before any schema projection.
 func validAppOpenAPIFamilyIdentity(family *store.AppFamily, app *store.App, accountID uuid.UUID) bool {
 	return family.AppFamilyID == app.AppFamilyID && family.AccountID == accountID && family.AccountID == app.AccountID &&
-		(family.Kind == store.AppKindSDK || family.Kind == store.AppKindExecution)
+		(family.Kind == store.AppKindSDK || family.Kind == store.AppKindUnifiedApp)
 }
 
 // buildAppOpenAPIDocument composes the one stable REST route from immutable
@@ -100,7 +99,7 @@ func buildAppOpenAPIDocument(ctx context.Context, contracts appOpenAPIContractSt
 }
 
 // buildAppOpenAPIDocumentWithBundle adds the exact authored execute contract to the existing SDK export.
-func buildAppOpenAPIDocumentWithBundle(ctx context.Context, contracts appOpenAPIContractStore, bundles store.ExecutionAppBundleStore, app *store.App, family *store.AppFamily, operationFilter string) ([]byte, error) {
+func buildAppOpenAPIDocumentWithBundle(ctx context.Context, contracts appOpenAPIContractStore, bundles store.UnifiedAppBundleStore, app *store.App, family *store.AppFamily, operationFilter string) ([]byte, error) {
 	filter, err := validateAppOpenAPIOperationFilter(operationFilter)
 	if err != nil {
 		return nil, err
@@ -109,7 +108,7 @@ func buildAppOpenAPIDocumentWithBundle(ctx context.Context, contracts appOpenAPI
 	if err != nil {
 		return nil, err
 	}
-	authored, err := executionAppOpenAPIOperationForFamily(ctx, bundles, app, family)
+	authored, err := unifiedAppOpenAPIOperationForFamily(ctx, bundles, app, family)
 	if err != nil {
 		return nil, err
 	}
@@ -130,13 +129,13 @@ func buildAppOpenAPIDocumentWithBundle(ctx context.Context, contracts appOpenAPI
 	return encoded, nil
 }
 
-// executionAppOpenAPIOperationForFamily keeps SDK export limited to its existing raw operation contract.
-func executionAppOpenAPIOperationForFamily(ctx context.Context, bundles store.ExecutionAppBundleStore, app *store.App, family *store.AppFamily) (*appOpenAPIOperation, error) {
-	// Only the distinct Execution App kind can publish a typed authored execute branch.
-	if family.Kind != store.AppKindExecution {
+// unifiedAppOpenAPIOperationForFamily keeps SDK export limited to its existing raw operation contract.
+func unifiedAppOpenAPIOperationForFamily(ctx context.Context, bundles store.UnifiedAppBundleStore, app *store.App, family *store.AppFamily) (*appOpenAPIOperation, error) {
+	// Only the distinct Unified App kind can publish a typed authored execute branch.
+	if family.Kind != store.AppKindUnifiedApp {
 		return nil, nil
 	}
-	return executionAppOpenAPIOperation(ctx, bundles, app)
+	return hostedUnifiedAppOpenAPIOperation(ctx, bundles, app)
 }
 
 // appendAuthoredOpenAPIOperation applies the same exact filter and collision rule as raw operations.
@@ -150,13 +149,13 @@ func appendAuthoredOpenAPIOperation(export *appOpenAPIExport, authored *appOpenA
 	return err
 }
 
-// executionAppOpenAPIOperation projects the persisted descriptor only when its bytes match the planned app version.
-func executionAppOpenAPIOperation(ctx context.Context, bundles store.ExecutionAppBundleStore, app *store.App) (*appOpenAPIOperation, error) {
+// hostedUnifiedAppOpenAPIOperation projects the persisted descriptor only when its bytes match the planned app version.
+func hostedUnifiedAppOpenAPIOperation(ctx context.Context, bundles store.UnifiedAppBundleStore, app *store.App) (*appOpenAPIOperation, error) {
 	// An app without approved hosted code retains its ordinary raw operation catalogue.
 	if app == nil || app.BundleDigest == "" {
 		return nil, nil
 	}
-	manifest, err := verifiedExecutionAppOpenAPIManifest(ctx, bundles, app)
+	manifest, err := verifiedUnifiedAppOpenAPIManifest(ctx, bundles, app)
 	if err != nil {
 		return nil, err
 	}
@@ -169,37 +168,37 @@ func executionAppOpenAPIOperation(ctx context.Context, bundles store.ExecutionAp
 			"type": "object", "additionalProperties": false, "required": []string{"operation", "input"},
 			"properties": map[string]any{"operation": map[string]any{"type": "string", "const": "execute"}, "input": input},
 		},
-		responseSchema: executionAppOpenAPIResponseSchema(output),
+		responseSchema: unifiedAppOpenAPIResponseSchema(output),
 	}, nil
 }
 
-// verifiedExecutionAppOpenAPIManifest reads only code pinned to the immutable app source and digest.
-func verifiedExecutionAppOpenAPIManifest(ctx context.Context, bundles store.ExecutionAppBundleStore, app *store.App) (*executionAppManifest, error) {
+// verifiedUnifiedAppOpenAPIManifest reads only code pinned to the immutable app source and digest.
+func verifiedUnifiedAppOpenAPIManifest(ctx context.Context, bundles store.UnifiedAppBundleStore, app *store.App) (*unifiedAppManifest, error) {
 	// Missing immutable storage must not publish an unverified authored contract.
 	if bundles == nil {
 		return nil, unavailableAppOpenAPISchemaError()
 	}
-	bundle, err := bundles.GetExecutionAppBundle(ctx, app.AppID)
-	if err != nil || bundle == nil || bundle.SourceHash != app.SourceHash || store.ExecutionAppBundleDigest([]byte(bundle.BundleJS)) != app.BundleDigest {
+	bundle, err := bundles.GetUnifiedAppBundle(ctx, app.AppID)
+	if err != nil || bundle == nil || bundle.SourceHash != app.SourceHash || store.UnifiedAppBundleDigest([]byte(bundle.BundleJS)) != app.BundleDigest {
 		return nil, unavailableAppOpenAPISchemaError()
 	}
-	manifest, err := parseExecutionAppManifest(bundle.Manifest)
+	manifest, err := parseUnifiedAppManifest(bundle.Manifest)
 	if err != nil {
 		return nil, unavailableAppOpenAPISchemaError()
 	}
 	return manifest, nil
 }
 
-// executionAppOpenAPIResponseSchema describes the durable execution metadata and typed authored output.
-func executionAppOpenAPIResponseSchema(output map[string]any) map[string]any {
+// unifiedAppOpenAPIResponseSchema describes the durable execution metadata and typed authored output.
+func unifiedAppOpenAPIResponseSchema(output map[string]any) map[string]any {
 	return map[string]any{
-		"type": "object", "required": []string{"executionId", "appId", "version", "status", "mode", "data", "createdAt"},
+		"type": "object", "required": []string{"executionId", "appId", "version", "status", "mode", "createdAt"},
 		"properties": map[string]any{
 			"executionId": map[string]any{"type": "string", "format": "uuid"},
 			"appId":       map[string]any{"type": "string", "format": "uuid"},
 			"version":     map[string]any{"type": "string"}, "status": map[string]any{"type": "string"},
 			"mode": map[string]any{"type": "string"}, "output": output,
-			"data": map[string]any{}, "readHandle": map[string]any{"type": "string"},
+			"readHandle":        map[string]any{"type": "string"},
 			"sourceExecutionId": map[string]any{"type": "string", "format": "uuid"},
 			"createdAt":         map[string]any{"type": "string", "format": "date-time"},
 			"completedAt":       map[string]any{"type": "string", "format": "date-time"},
@@ -207,8 +206,7 @@ func executionAppOpenAPIResponseSchema(output map[string]any) map[string]any {
 	}
 }
 
-// loadAppOpenAPIOperations uses one endpoint query and, when required, one
-// dictionary batch before combining integrity-checked Unified definitions.
+// loadAppOpenAPIOperations exports selected physical operations after graph retirement.
 func loadAppOpenAPIOperations(ctx context.Context, contracts appOpenAPIContractStore, app *store.App, operationFilter string) (*appOpenAPIExport, error) {
 	if app == nil || app.ScopeSchemaVersion != models.AppScopeSchemaVersion {
 		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app scope is incompatible"}
@@ -217,7 +215,7 @@ func loadAppOpenAPIOperations(ctx context.Context, contracts appOpenAPIContractS
 	if err != nil {
 		return nil, err
 	}
-	// Every SDK and Execution App version has selected provider scope; empty scope is invalid.
+	// Every SDK and Unified App version has selected provider scope; empty scope is invalid.
 	if len(selections) == 0 {
 		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app selections are unavailable"}
 	}
@@ -236,13 +234,8 @@ func loadAppOpenAPIOperations(ctx context.Context, contracts appOpenAPIContractS
 	if err != nil {
 		return nil, err
 	}
-	unifiedScope := &appOpenAPISchemaScope{export: export, namespace: "Unified_" + strings.ReplaceAll(app.AppID.String(), "-", "") + "_"}
-	unifiedOperations, err := unifiedAppOpenAPIOperations(app, operationFilter, unifiedScope)
-	if err != nil {
-		return nil, err
-	}
-	export.operations, err = rejectAmbiguousAppOpenAPIOperations(append(export.operations, unifiedOperations...))
-	// Relocation errors remain fail-closed even when an otherwise valid operation exists.
+	// Exact physical names still need one collision check before public export.
+	export.operations, err = rejectAmbiguousAppOpenAPIOperations(export.operations)
 	if err != nil {
 		return nil, err
 	}
@@ -425,36 +418,6 @@ func missingEndpointID(expected []uuid.UUID, found map[uuid.UUID]struct{}) bool 
 	return false
 }
 
-// unifiedAppOpenAPIOperations verifies the complete persisted definition set
-// before projecting only the requested credential-free public operation.
-func unifiedAppOpenAPIOperations(app *store.App, operationFilter string, scope *appOpenAPISchemaScope) ([]appOpenAPIOperation, error) {
-	if len(app.UnifiedDefinitions) == 0 {
-		return nil, nil
-	}
-	// A stored definition dialect must match the only projection semantics this Engine can verify.
-	if app.UnifiedDefinitionSchemaVersion != unified.DefinitionSchemaVersion {
-		return nil, invalidAppOpenAPIProjectionError("Unified definitions are incompatible")
-	}
-	hash, err := unifiedCanonicalHash(app.UnifiedDefinitions)
-	// Corrupt or replaced bytes cannot be exposed under the app's immutable operation identity.
-	if err != nil || hash != app.UnifiedDefinitionHash {
-		return nil, invalidAppOpenAPIProjectionError("Unified definitions failed integrity validation")
-	}
-	definitions, err := unified.DecodeDefinitions(app.UnifiedDefinitions, unified.DefaultLimits())
-	// Invalid private definitions cannot be simplified into a public schema without changing their meaning.
-	if err != nil {
-		return nil, invalidAppOpenAPIProjectionError("Unified definitions are invalid")
-	}
-	operations := make([]appOpenAPIOperation, 0, len(definitions))
-	for _, definition := range definitions {
-		if operationFilter != "" && definition.Name != operationFilter {
-			continue
-		}
-		operations = append(operations, unifiedAppOpenAPIOperation(definition, scope))
-	}
-	return operations, nil
-}
-
 // rejectAmbiguousAppOpenAPIOperations keeps the discriminator honest when an
 // app contains duplicate physical names or a physical/Unified collision.
 func rejectAmbiguousAppOpenAPIOperations(operations []appOpenAPIOperation) ([]appOpenAPIOperation, error) {
@@ -513,76 +476,21 @@ func physicalAppOpenAPIOperation(endpoint fusedobject.Endpoint, scope *appOpenAP
 	}
 	return appOpenAPIOperation{
 		name:           endpoint.Name,
-		requestSchema:  executionRequestSchema(endpoint.Name, input, false, nil),
+		requestSchema:  executionRequestSchema(endpoint.Name, input),
 		responseSchema: physicalOpenAPIResponseSchema(endpoint, scope),
 	}, nil
 }
 
-// unifiedAppOpenAPIOperation projects one private definition without exposing
-// its mappings, dependency expressions, or provider routing identities.
-func unifiedAppOpenAPIOperation(definition unified.OperationDefinition, scope *appOpenAPISchemaScope) appOpenAPIOperation {
-	targets := make([]string, 0, len(definition.Bindings))
-	services := make(map[string]struct{}, len(definition.Bindings))
-	for _, binding := range definition.Bindings {
-		targets = append(targets, binding.PublicTarget)
-		service := binding.ServiceTarget
-		if service == "" {
-			service = binding.PublicTarget
-		}
-		services[service] = struct{}{}
-	}
-	input := scope.schema(&fusedobject.SchemaContract{Raw: definition.InputSchema})
-	response := unifiedOpenAPIResponseSchema(definition.Name, targets)
-	if definition.Output != nil {
-		response = scope.schema(&fusedobject.SchemaContract{Raw: definition.Output.Schema})
-	}
-	return appOpenAPIOperation{
-		name:           definition.Name,
-		requestSchema:  executionRequestSchema(definition.Name, input, true, unifiedRoutingSchema(targets, services)),
-		responseSchema: response,
-	}
-}
-
-// executionRequestSchema creates one discriminator branch for the stable REST
-// envelope while keeping physical and Unified routing fields distinct.
-func executionRequestSchema(operation string, input map[string]any, isUnified bool, routing map[string]any) map[string]any {
+// executionRequestSchema describes the physical execution envelope exported by the app.
+func executionRequestSchema(operation string, input map[string]any) map[string]any {
 	properties := map[string]any{
 		"operation": map[string]any{"type": "string", "const": operation, "enum": []string{operation}},
 		"input":     input,
 	}
 	required := []string{"operation", "input"}
-	if isUnified {
-		properties["targets"] = routing["targets"]
-		properties["selectors"] = routing["selectors"]
-		properties["target_pagination"] = routing["target_pagination"]
-		required = append(required, "targets")
-	} else {
-		properties["selector"] = map[string]any{"$ref": "#/components/schemas/ExecutionSelector"}
-		properties["pagination"] = map[string]any{"$ref": "#/components/schemas/PaginationIntent"}
-	}
+	properties["selector"] = map[string]any{"$ref": "#/components/schemas/ExecutionSelector"}
+	properties["pagination"] = map[string]any{"$ref": "#/components/schemas/PaginationIntent"}
 	return map[string]any{"type": "object", "additionalProperties": false, "required": required, "properties": properties}
-}
-
-// unifiedRoutingSchema emits only declared public targets and service selector
-// namespaces; private binding identities never enter the document.
-func unifiedRoutingSchema(targets []string, services map[string]struct{}) map[string]any {
-	sort.Strings(targets)
-	selectorProperties := make(map[string]any, len(services))
-	for service := range services {
-		selectorProperties[service] = map[string]any{"$ref": "#/components/schemas/ExecutionSelector"}
-	}
-	paginationProperties := make(map[string]any, len(targets))
-	for _, target := range targets {
-		paginationProperties[target] = map[string]any{"$ref": "#/components/schemas/PaginationIntent"}
-	}
-	return map[string]any{
-		"targets": map[string]any{
-			"type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true,
-			"items": map[string]any{"type": "string", "enum": targets},
-		},
-		"selectors":         map[string]any{"type": "object", "additionalProperties": false, "properties": selectorProperties},
-		"target_pagination": map[string]any{"type": "object", "additionalProperties": false, "properties": paginationProperties},
-	}
 }
 
 // physicalOpenAPIInputSchema flattens declared provider parameters and body
@@ -952,9 +860,9 @@ func unifiedAuthActionOpenAPISchema() map[string]any {
 // all exact app operations, setup guidance, and stable shared selector/error components.
 func composeAppOpenAPIDocument(app *store.App, family *store.AppFamily, export *appOpenAPIExport) map[string]any {
 	securityName, bearerFormat := "SDKExecutionToken", "Fused SDK execution token"
-	// A distinct Execution App kind should not advertise an SDK credential type in its public contract.
-	if family.Kind == store.AppKindExecution {
-		securityName, bearerFormat = "ExecutionAppToken", "Fused Execution App token"
+	// A distinct Unified App kind should not advertise an SDK credential type in its public contract.
+	if family.Kind == store.AppKindUnifiedApp {
+		securityName, bearerFormat = "UnifiedAppToken", "Fused Unified App token"
 	}
 	components := map[string]any{
 		"ExecutionSelector": executionSelectorOpenAPISchema(),

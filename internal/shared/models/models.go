@@ -75,21 +75,21 @@ type RuntimeEntitlement struct {
 	RefreshedAt                  time.Time `json:"refreshed_at,omitempty"`
 
 	// ─── Capability limits (nil = missing/unlimited, 0 = not allowed, positive = hard ceiling) ───
-	MaxBuckets                 *int `json:"max_buckets,omitempty"`
-	MaxAPIFamilies             *int `json:"max_api_families,omitempty"`
-	MaxSDKFamilies             *int `json:"max_sdk_families,omitempty"`
-	MaxMCPFamilies             *int `json:"max_mcp_families,omitempty"`
-	MaxExecutionAppFamilies    *int `json:"max_execution_app_families,omitempty"`
-	MaxExecutionAppConcurrency *int `json:"max_execution_app_concurrency,omitempty"`
-	MaxServices                *int `json:"max_services,omitempty"`
-	MaxSandboxConcurrency      *int `json:"max_sandbox_concurrency,omitempty"`
+	MaxBuckets               *int `json:"max_buckets,omitempty"`
+	MaxAPIFamilies           *int `json:"max_api_families,omitempty"`
+	MaxSDKFamilies           *int `json:"max_sdk_families,omitempty"`
+	MaxMCPFamilies           *int `json:"max_mcp_families,omitempty"`
+	MaxUnifiedAppFamilies    *int `json:"max_unified_app_families,omitempty"`
+	MaxUnifiedAppConcurrency *int `json:"max_unified_app_concurrency,omitempty"`
+	MaxServices              *int `json:"max_services,omitempty"`
+	MaxSandboxConcurrency    *int `json:"max_sandbox_concurrency,omitempty"`
 
 	// ─── Feature gates ───
 	DriftMonitoringEnabled bool `json:"drift_monitoring_enabled"`
 	// A warm worker belongs to each eligible app and does not reserve provider-call capacity.
-	ExecutionAppAlwaysOnEnabled bool `json:"execution_app_always_on_enabled"`
-	WebhookIngestionEnabled     bool `json:"webhook_ingestion_enabled"`
-	SSOEnabled                  bool `json:"sso_enabled"`
+	UnifiedAppAlwaysOnEnabled bool `json:"unified_app_always_on_enabled"`
+	WebhookIngestionEnabled   bool `json:"webhook_ingestion_enabled"`
+	SSOEnabled                bool `json:"sso_enabled"`
 
 	// ─── Data governance (nil = missing, 0 = explicitly disallowed) ───
 	ExecutionRetentionDays *int `json:"execution_retention_days,omitempty"`
@@ -102,7 +102,7 @@ type RuntimeEntitlement struct {
 func IntPtr(v int) *int { return &v }
 
 // Most capability defaults are unlimited so older Registry bundles keep working;
-// the Execution App worker limit retains its prior four-slot capacity.
+// the Unified App worker limit retains its prior four-slot capacity.
 func DefaultRuntimeEntitlement() RuntimeEntitlement {
 	return RuntimeEntitlement{
 		Plan:                         "commercial",
@@ -115,15 +115,15 @@ func DefaultRuntimeEntitlement() RuntimeEntitlement {
 		MaxAPIFamilies:               IntPtr(-1),
 		MaxSDKFamilies:               IntPtr(-1),
 		MaxMCPFamilies:               IntPtr(-1),
-		MaxExecutionAppFamilies:      IntPtr(-1),
+		MaxUnifiedAppFamilies:        IntPtr(-1),
 		// Older Registry versions did not publish this limit; keep the existing worker capacity.
-		MaxExecutionAppConcurrency: IntPtr(4),
-		MaxServices:                IntPtr(-1),
-		MaxSandboxConcurrency:      IntPtr(-1),
-		DriftMonitoringEnabled:     true,
-		WebhookIngestionEnabled:    false,
-		SSOEnabled:                 false,
-		ExecutionRetentionDays:     IntPtr(30),
+		MaxUnifiedAppConcurrency: IntPtr(4),
+		MaxServices:              IntPtr(-1),
+		MaxSandboxConcurrency:    IntPtr(-1),
+		DriftMonitoringEnabled:   true,
+		WebhookIngestionEnabled:  false,
+		SSOEnabled:               false,
+		ExecutionRetentionDays:   IntPtr(30),
 	}
 }
 
@@ -163,8 +163,8 @@ func (e RuntimeEntitlement) withMissingLimitDefaults(defaults RuntimeEntitlement
 	e.MaxAPIFamilies = entitlementLimitOrDefault(e.MaxAPIFamilies, defaults.MaxAPIFamilies)
 	e.MaxSDKFamilies = entitlementLimitOrDefault(e.MaxSDKFamilies, defaults.MaxSDKFamilies)
 	e.MaxMCPFamilies = entitlementLimitOrDefault(e.MaxMCPFamilies, defaults.MaxMCPFamilies)
-	e.MaxExecutionAppFamilies = entitlementLimitOrDefault(e.MaxExecutionAppFamilies, defaults.MaxExecutionAppFamilies)
-	e.MaxExecutionAppConcurrency = entitlementLimitOrDefault(e.MaxExecutionAppConcurrency, defaults.MaxExecutionAppConcurrency)
+	e.MaxUnifiedAppFamilies = entitlementLimitOrDefault(e.MaxUnifiedAppFamilies, defaults.MaxUnifiedAppFamilies)
+	e.MaxUnifiedAppConcurrency = entitlementLimitOrDefault(e.MaxUnifiedAppConcurrency, defaults.MaxUnifiedAppConcurrency)
 	e.MaxServices = entitlementLimitOrDefault(e.MaxServices, defaults.MaxServices)
 	e.MaxSandboxConcurrency = entitlementLimitOrDefault(e.MaxSandboxConcurrency, defaults.MaxSandboxConcurrency)
 	e.ExecutionRetentionDays = entitlementLimitOrDefault(e.ExecutionRetentionDays, defaults.ExecutionRetentionDays)
@@ -1021,7 +1021,7 @@ type ServiceChangelogConfigType string
 
 const (
 	ServiceChangelogConfigTypeVersion           ServiceChangelogConfigType = "version"
-	ServiceChangelogConfigTypeExecutionPolicy   ServiceChangelogConfigType = "execution_policy"
+	ServiceChangelogConfigTypeExecutionPolicy  ServiceChangelogConfigType = "execution_policy"
 	ServiceChangelogConfigTypeConnectionProfile ServiceChangelogConfigType = "connection_profile"
 )
 
@@ -1184,53 +1184,9 @@ type SDKContractBinding struct {
 	RuntimeContractHash string `json:"runtime_contract_hash,omitempty"`
 }
 
-// SDKUnifiedDescriptorSchemaVersion identifies the credential-free generator
-// contract that permits binding and final-operation output schemas together.
-const SDKUnifiedDescriptorSchemaVersion = 3
-
-// SDKUnifiedOperationDescriptors is the credential-free contract Registry
-// needs to render Unified methods. Runtime mappings stay Engine-local so a
-// generated package cannot become a second execution policy.
-type SDKUnifiedOperationDescriptors struct {
-	SchemaVersion int                             `json:"schema_version"`
-	Operations    []SDKUnifiedOperationDescriptor `json:"operations"`
-}
-
-// SDKUnifiedOperationDescriptor describes one generated public method. Its
-// OutputSchema types the exact final return value; executable mappings remain
-// in the Engine-private definition.
-type SDKUnifiedOperationDescriptor struct {
-	Name         string                       `json:"name"`
-	Description  string                       `json:"description,omitempty"`
-	InputSchema  json.RawMessage              `json:"input_schema"`
-	OutputSchema json.RawMessage              `json:"output_schema,omitempty"`
-	Targets      []SDKUnifiedTargetDescriptor `json:"targets"`
-}
-
-// SDKUnifiedTargetDescriptor exposes the immutable physical identity and
-// caller-visible binding result schema needed for safe client generation.
-type SDKUnifiedTargetDescriptor struct {
-	PublicTarget     string                        `json:"public_target"`
-	ServiceTarget    string                        `json:"service_target,omitempty"`
-	OperationID      string                        `json:"operation_id"`
-	ServiceID        uuid.UUID                     `json:"service_id"`
-	ServiceVersionID uuid.UUID                     `json:"service_version_id"`
-	EndpointID       uuid.UUID                     `json:"endpoint_id"`
-	DependsOn        []string                      `json:"depends_on,omitempty"`
-	Rollback         *SDKUnifiedRollbackDescriptor `json:"rollback,omitempty"`
-	OutputSchema     json.RawMessage               `json:"output_schema,omitempty"`
-}
-
-// SDKUnifiedRollbackDescriptor exposes only the exact public operation
-// identity required for code generation validation; its mapping stays private.
-type SDKUnifiedRollbackDescriptor struct {
-	OperationID      string    `json:"operation_id"`
-	ServiceID        uuid.UUID `json:"service_id"`
-	ServiceVersionID uuid.UUID `json:"service_version_id"`
-	EndpointID       uuid.UUID `json:"endpoint_id"`
-}
-
 type SDKGenerationRequest struct {
+	// UnifiedApps carries public hosted contracts, never source or execution tokens.
+	UnifiedApps []UnifiedAppBinding `json:"unified_apps,omitempty"`
 	Name             string         `json:"name"`
 	Description      string         `json:"description"`
 	Version          string         `json:"version"`
@@ -1250,9 +1206,8 @@ type SDKGenerationRequest struct {
 	// validated here -- selections, generator version, scope schema version --
 	// comes from Registry request preparation, so the published version is
 	// identical either way; only codegen and upload are skipped.
-	SkipPackaging     bool                            `json:"skip_packaging"`
-	ContractBindings  []SDKContractBinding            `json:"contract_bindings,omitempty"`
-	UnifiedOperations *SDKUnifiedOperationDescriptors `json:"unified_operations,omitempty"`
+	SkipPackaging    bool                 `json:"skip_packaging"`
+	ContractBindings []SDKContractBinding `json:"contract_bindings,omitempty"`
 }
 
 type SDKGenerationResult struct {

@@ -60,17 +60,17 @@ test("keeps the Registry repo-boundary manifest synchronized when present", (t) 
   }
 });
 
-// Exact UI transport totals include bucket consent through the same Engine mutation as CLI connect.
+// Exact UI transport totals include Unified App describe, template discovery, and app detail contracts.
 test("accounts for every current UI GraphQL call and document variant", () => {
   const scan = scanCurrentUI();
   // Exact totals ensure every static query remains represented in schema validation.
-  assert.equal(scan.call_count, 92);
-  assert.equal(scan.calls.length, 92);
-  assert.equal(scan.document_count, 110);
-  assert.equal(scan.documents.length, 110);
-  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 21);
-  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 89);
-  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 110);
+  assert.equal(scan.call_count, 104);
+  assert.equal(scan.calls.length, 104);
+  assert.equal(scan.document_count, 122);
+  assert.equal(scan.documents.length, 122);
+  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 28);
+  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 94);
+  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 122);
 });
 
 test("resolves imported fragments and expands conditional and map variants", () => {

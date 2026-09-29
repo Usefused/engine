@@ -1,3 +1,4 @@
+import { Select } from "../forms/Select.ts";
 import { FormEvent } from "react";
 import { Pencil, X } from "lucide-react";
 import { type AuthConfig, type OAuth2FlowContract, type OAuth2FlowName, type Service } from "~/lib/api";
@@ -99,6 +100,7 @@ interface OAuth2FlowFieldsProps extends OAuth2FlowEditorProps {
   flow: OAuth2FlowContract;
 }
 
+/** Uses the shared select while keeping selection state and actions owned by this page. */
 function OAuth2FlowFields({ auth, name, flow, onChange }: OAuth2FlowFieldsProps) {
   const scopes = oauth2ScopeNames(flow);
   const update = (next: OAuth2FlowContract) => onChange(updateOAuth2Flow(auth, name, next));
@@ -107,7 +109,7 @@ function OAuth2FlowFields({ auth, name, flow, onChange }: OAuth2FlowFieldsProps)
       <div className="flex gap-3">
         <div className="flex-1">
           <label className="block text-xs font-medium text-slate-600 mb-1">OAuth2 Flow</label>
-          <select
+          <Select
             value={name}
             onChange={(event) => onChange(renameOAuth2Flow(auth, name, event.target.value as OAuth2FlowName))}
             className="w-full text-sm border border-slate-200 rounded-md px-3 py-2"
@@ -117,7 +119,7 @@ function OAuth2FlowFields({ auth, name, flow, onChange }: OAuth2FlowFieldsProps)
                 {candidate}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
         <button type="button" onClick={() => onChange(removeOAuth2Flow(auth, name))} className="self-end p-2 text-slate-400 hover:text-red-500" title="Remove OAuth2 flow">
           <X className="h-4 w-4" />
@@ -200,6 +202,7 @@ interface EditableAuthConfigProps {
   onRemove: () => void;
 }
 
+/** Uses the shared select while keeping selection state and actions owned by this page. */
 function EditableAuthConfig({ auth, onChange, onRemove }: EditableAuthConfigProps) {
   return (
     <div className="flex flex-col gap-3 p-4 border border-slate-100 bg-slate-50 rounded-lg relative">
@@ -209,13 +212,13 @@ function EditableAuthConfig({ auth, onChange, onRemove }: EditableAuthConfigProp
       <div className="flex flex-col sm:flex-row gap-4">
         <div className="flex-1">
           <label className="block text-xs font-medium text-slate-600 mb-1">Type</label>
-          <select value={editorAuthType(auth.type)} onChange={(event) => onChange({ ...auth, type: event.target.value })} className="w-full text-sm border-slate-200 rounded-md focus:border-blue-500 focus:ring-blue-500">
+          <Select value={editorAuthType(auth.type)} onChange={(event) => onChange({ ...auth, type: event.target.value })} className="w-full text-sm border-slate-200 rounded-md focus:border-blue-500 focus:ring-blue-500">
             <option value="apiKey">API Key</option>
             <option value="http">HTTP</option>
             <option value="oauth">OAuth2</option>
             <option value="oidc">OpenID Connect</option>
             <option value="mtls">Mutual TLS</option>
-          </select>
+          </Select>
         </div>
         {isHTTPConfigType(auth.type) && (
           <div className="flex-1">
@@ -227,11 +230,11 @@ function EditableAuthConfig({ auth, onChange, onRemove }: EditableAuthConfigProp
           <>
             <div className="flex-1">
               <label className="block text-xs font-medium text-slate-600 mb-1">Location</label>
-              <select value={auth.location || "header"} onChange={(event) => onChange({ ...auth, location: event.target.value })} className="w-full text-sm border-slate-200 rounded-md focus:border-blue-500 focus:ring-blue-500">
+              <Select value={auth.location || "header"} onChange={(event) => onChange({ ...auth, location: event.target.value })} className="w-full text-sm border-slate-200 rounded-md focus:border-blue-500 focus:ring-blue-500">
                 <option value="header">Header</option>
                 <option value="query">Query</option>
                 <option value="cookie">Cookie</option>
-              </select>
+              </Select>
             </div>
             <div className="flex-1">
               <label className="block text-xs font-medium text-slate-600 mb-1">Key Name</label>

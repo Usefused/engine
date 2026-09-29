@@ -15,7 +15,7 @@ describe("Fixture", () => {
   it("resolves a registered operationId", () => {
     const f = new Fixture([
       { operation_id: "a", service_id: "s", name: "A", method: "GET", path: "/a", responses: {}, pagination: noPagination },
-    ], [], {}, testServer);
+    ], {}, testServer);
     expect(f.resolve("a")?.path).toBe("/a");
     expect(f.server.description).toBe(testServer.description);
   });
@@ -23,7 +23,7 @@ describe("Fixture", () => {
   it("does not resolve an unregistered operationId -- tier 1 enforcement point", () => {
     const f = new Fixture([
       { operation_id: "a", service_id: "s", name: "A", method: "GET", path: "/a", responses: {}, pagination: noPagination },
-    ], [], {}, testServer);
+    ], {}, testServer);
     expect(f.resolve("b")).toBeUndefined();
   });
 
@@ -33,7 +33,7 @@ describe("Fixture", () => {
         new Fixture([
           // @ts-expect-error -- deliberately malformed for the test
           { service_id: "s", name: "A", method: "GET", path: "/a", responses: {}, pagination: noPagination },
-        ], [], {}, testServer),
+        ], {}, testServer),
     ).toThrow(/operation_id/);
   });
 
@@ -43,19 +43,8 @@ describe("Fixture", () => {
         new Fixture([
           { operation_id: "dup", service_id: "s", name: "A", method: "GET", path: "/a", responses: {}, pagination: noPagination },
           { operation_id: "dup", service_id: "s", name: "B", method: "GET", path: "/b", responses: {}, pagination: noPagination },
-        ], [], {}, testServer),
+        ], {}, testServer),
     ).toThrow(/duplicate operation_id/);
-  });
-
-  it("rejects exact physical and Unified name collisions", () => {
-    expect(
-      () => new Fixture(
-        [{ operation_id: "sync", service_id: "s", name: "Sync", method: "POST", path: "/sync", responses: {}, pagination: noPagination }],
-        [{ name: "sync", input_schema: {}, targets: [] }],
-        {},
-        testServer,
-      ),
-    ).toThrow(/collision/);
   });
 
   it("rejects physical operations without explicit pagination metadata", () => {
@@ -63,12 +52,12 @@ describe("Fixture", () => {
       () => new Fixture([
         // @ts-expect-error -- omission must fail runtime admission as well as static typing.
         { operation_id: "missing", service_id: "s", name: "Missing", method: "GET", path: "/missing", responses: {} },
-      ], [], {}, testServer),
+      ], {}, testServer),
     ).toThrow(/pagination metadata/);
   });
 
   it("rejects missing server metadata", () => {
-    expect(() => new Fixture([], [], {}, undefined)).toThrow(/server metadata/);
+    expect(() => new Fixture([], {}, undefined)).toThrow(/server metadata/);
   });
 });
 
@@ -110,14 +99,4 @@ describe("loadFixture", () => {
     expect(() => loadFixture(file)).toThrow(/operations/);
   });
 
-  it("loads the shared Unified descriptor without reshaping its schemas", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "fixture-test-"));
-    const file = path.join(dir, "fixture.json");
-    writeFileSync(file, JSON.stringify({
-      server: testServer,
-      operations: [],
-      unified_operations: { schema_version: 3, operations: [{ name: "sync", input_schema: { type: "object" }, targets: [] }] },
-    }));
-    expect(loadFixture(file).resolveUnified("sync")?.input_schema).toEqual({ type: "object" });
-  });
 });

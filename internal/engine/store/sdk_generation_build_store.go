@@ -21,10 +21,10 @@ const sdkGenerationBuildSelect = `
 	       COALESCE((plan.resolved_payload->>'skip_sandbox')::boolean, false),
 	       COALESCE(plan.resolved_payload->>'default_engine_url', ''),
 	       COALESCE(plan.resolved_payload->'contract_bindings', '[]'::jsonb),
-	       COALESCE(plan.resolved_payload->'unified_operations', 'null'::jsonb),
 	       plan.id, COALESCE(app.sdk_generation_job_id, ''),
 	       app.account_id,
-	       COALESCE(app.sdk_generation_status, '')
+	       COALESCE(app.sdk_generation_status, ''),
+           COALESCE(plan.resolved_payload->'unified_apps', '[]'::jsonb)
 	FROM fused_apps app
 	JOIN fused_app_families family
 	  ON family.app_family_id = app.app_family_id
@@ -98,13 +98,13 @@ type sdkGenerationBuildScanner interface {
 // while keeping its JSON validation identical for both callers.
 func scanSDKGenerationBuild(row sdkGenerationBuildScanner) (*SDKGenerationBuild, error) {
 	var build SDKGenerationBuild
-	var selections, bindings, unifiedOperations []byte
+	var selections, bindings, attachments []byte
 	var planID uuid.UUID
 	err := row.Scan(
 		&build.Request.Name, &build.Request.Version, &build.Request.AppFamilyID, &build.Request.AppID,
 		&build.Request.SourceHash, &build.Request.GeneratorVersion, &build.Request.TargetLanguage,
 		&selections, &build.Request.Description, &build.Request.IncludeMCP, &build.Request.SkipSandbox,
-		&build.Request.DefaultEngineURL, &bindings, &unifiedOperations, &planID, &build.JobID, &build.AccountID, &build.Status,
+		&build.Request.DefaultEngineURL, &bindings, &planID, &build.JobID, &build.AccountID, &build.Status, &attachments,
 	)
 	if err != nil {
 		return nil, err
@@ -115,11 +115,9 @@ func scanSDKGenerationBuild(row sdkGenerationBuildScanner) (*SDKGenerationBuild,
 	if err := json.Unmarshal(bindings, &build.Request.ContractBindings); err != nil {
 		return nil, fmt.Errorf("decode SDK package contract bindings: %w", err)
 	}
-	// A null descriptor means the immutable SDK has no Unified operations.
-	if string(unifiedOperations) != "null" {
-		if err := json.Unmarshal(unifiedOperations, &build.Request.UnifiedOperations); err != nil {
-			return nil, fmt.Errorf("decode SDK package unified operations: %w", err)
-		}
+	// Recovery must replay the same hosted methods as the originally submitted package.
+	if err := json.Unmarshal(attachments, &build.Request.UnifiedApps); err != nil {
+		return nil, fmt.Errorf("decode SDK hosted app bindings: %w", err)
 	}
 	build.Request.IdempotencyKey = planID.String()
 	build.Request.TargetType = AppKindSDK.String()
@@ -259,7 +257,7 @@ func admitMCPFamilyActivation(ctx context.Context, tx pgx.Tx, accountID, familyI
 			       ) AS invokable
 			FROM fused_app_families family
 			WHERE family.account_id = $1 AND family.archived_at IS NULL
-			  AND family.kind IN ('mcp', 'sdk', 'execution')
+			  AND family.kind IN ('mcp', 'sdk', 'unified_app')
 		)
 		SELECT COUNT(*) FILTER (WHERE invokable),
 		       COALESCE(BOOL_OR(app_family_id = $2 AND invokable), FALSE),
@@ -289,16 +287,16 @@ func admitSDKFamilyActivation(ctx context.Context, tx pgx.Tx, accountID, familyI
 	return admitPackageFamilyActivation(ctx, tx, accountID, familyID, AppKindSDK, directAPI)
 }
 
-// admitExecutionFamilyActivation reserves the Execution App's independent family quota.
+// admitExecutionFamilyActivation reserves the Unified App's independent family quota.
 func admitExecutionFamilyActivation(ctx context.Context, tx pgx.Tx, accountID, familyID uuid.UUID) error {
-	return admitPackageFamilyActivation(ctx, tx, accountID, familyID, AppKindExecution, false)
+	return admitPackageFamilyActivation(ctx, tx, accountID, familyID, AppKindUnifiedApp, false)
 }
 
 // admitPackageFamilyActivation serializes both package and Engine-hosted activations against their existing entitlement.
 func admitPackageFamilyActivation(ctx context.Context, tx pgx.Tx, accountID, familyID uuid.UUID, kind AppKind, directAPI bool) error {
 	var limit int
 	err := tx.QueryRow(ctx, `
-		SELECT CASE WHEN $2 = 'execution' THEN max_execution_app_families
+		SELECT CASE WHEN $2 = 'unified_app' THEN max_unified_app_families
 		            WHEN $1 THEN max_api_families ELSE max_sdk_families END
 		FROM fused_runtime_entitlements
 		WHERE singleton_key = 1
@@ -324,7 +322,7 @@ func admitPackageFamilyActivation(ctx context.Context, tx pgx.Tx, accountID, fam
 				   AND app.account_id = family.account_id
 				   AND app.status IN ('active', 'deprecated')
 				   AND (
-				     $4 = 'execution'
+				     $4 = 'unified_app'
 				     OR ($3 AND app.sdk_generation_status = 'skipped')
 				     OR (NOT $3 AND app.sdk_generation_status IS DISTINCT FROM 'skipped')
 				   )
@@ -352,8 +350,8 @@ func admitPackageFamilyActivation(ctx context.Context, tx pgx.Tx, accountID, fam
 	// Only a genuinely new runnable family is rejected at the selected delivery-class ceiling.
 	if current >= limit {
 		// Adapter-specific errors preserve stable remediation and telemetry at the API boundary.
-		if kind == AppKindExecution {
-			return ErrExecutionAppFamilyLimitExceeded
+		if kind == AppKindUnifiedApp {
+			return ErrUnifiedAppFamilyLimitExceeded
 		}
 		if directAPI {
 			return ErrAPIFamilyLimitExceeded

@@ -8,7 +8,7 @@ import (
 
 // TestValidateAppApplySelectionsRejectsEmptyScope keeps compiler identity separate from provider authority.
 func TestValidateAppApplySelectionsRejectsEmptyScope(t *testing.T) {
-	digest := ExecutionAppBundleDigest([]byte("authored execute"))
+	digest := UnifiedAppBundleDigest([]byte("authored execute"))
 	base := AppRuntime{Kind: AppKindSDK, ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: []byte(`[]`), BundleDigest: digest}
 	for _, testCase := range []struct {
 		name, digest string
@@ -16,12 +16,12 @@ func TestValidateAppApplySelectionsRejectsEmptyScope(t *testing.T) {
 		selections   []byte
 		wantError    bool
 	}{
-		{name: "authored Execution App", kind: AppKindExecution, digest: digest, selections: []byte(`[]`), wantError: true},
+		{name: "authored Unified App", kind: AppKindUnifiedApp, digest: digest, selections: []byte(`[]`), wantError: true},
 		{name: "SDK carrying digest", kind: AppKindSDK, digest: digest, selections: []byte(`[]`), wantError: true},
 		{name: "raw SDK", kind: AppKindSDK, selections: []byte(`[]`), wantError: true},
 		{name: "MCP", kind: AppKindMCP, digest: digest, selections: []byte(`[]`), wantError: true},
-		{name: "missing selection field", kind: AppKindExecution, digest: digest, selections: nil, wantError: true},
-		{name: "null selection field", kind: AppKindExecution, digest: digest, selections: []byte(`null`), wantError: true},
+		{name: "missing selection field", kind: AppKindUnifiedApp, digest: digest, selections: nil, wantError: true},
+		{name: "null selection field", kind: AppKindUnifiedApp, digest: digest, selections: []byte(`null`), wantError: true},
 	} {
 		// Publication never infers provider authority from an absent or wrong-kind scope.
 		t.Run(testCase.name, func(t *testing.T) {

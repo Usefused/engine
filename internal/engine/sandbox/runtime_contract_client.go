@@ -27,19 +27,40 @@ const (
 
 var errRuntimeContractsResponseLimit = errors.New("runtime_contract_response_limit_exceeded: Registry response exceeds the 128 MiB limit; request fewer service versions")
 
+// FetchRuntimeContract reads one exact version and retains generation input for callers that need an SDK pin.
 func (c *HTTPRegistryClient) FetchRuntimeContract(ctx context.Context, serviceID, serviceVersionID uuid.UUID, version, apiKey string) (*store.ServiceContractSnapshot, error) {
 	snapshots, err := c.FetchRuntimeContracts(ctx, []store.WorkspaceServiceVersion{{ServiceID: serviceID, ServiceVersionID: serviceVersionID, Version: version}}, apiKey)
 	if err != nil {
 		return nil, err
 	}
+	// An empty successful response cannot establish executable authority for the exact requested version.
 	if len(snapshots) != 1 {
 		return nil, fmt.Errorf("FetchRuntimeContract: service %s version %s not found", serviceID, serviceVersionID)
 	}
 	return &snapshots[0], nil
 }
 
+// FetchRuntimeContractForActivation reads only execution authority when a user adds a service to the workspace.
+func (c *HTTPRegistryClient) FetchRuntimeContractForActivation(ctx context.Context, serviceID, serviceVersionID uuid.UUID, version, apiKey string) (*store.ServiceContractSnapshot, error) {
+	snapshots, err := c.fetchRuntimeContracts(ctx, []store.WorkspaceServiceVersion{{ServiceID: serviceID, ServiceVersionID: serviceVersionID, Version: version}}, apiKey, false)
+	// Transport and admission failures must stop before Engine writes workspace membership.
+	if err != nil {
+		return nil, err
+	}
+	// A missing exact version cannot activate even when Registry returned a valid empty batch.
+	if len(snapshots) != 1 {
+		return nil, fmt.Errorf("FetchRuntimeContractForActivation: service %s version %s not found", serviceID, serviceVersionID)
+	}
+	return &snapshots[0], nil
+}
+
 // FetchRuntimeContracts admits arbitrarily large selections through bounded Registry batches without per-service retries.
 func (c *HTTPRegistryClient) FetchRuntimeContracts(ctx context.Context, versions []store.WorkspaceServiceVersion, apiKey string) ([]store.ServiceContractSnapshot, error) {
+	return c.fetchRuntimeContracts(ctx, versions, apiKey, true)
+}
+
+// fetchRuntimeContracts keeps runtime admission identical while selecting whether Registry must archive SDK inputs.
+func (c *HTTPRegistryClient) fetchRuntimeContracts(ctx context.Context, versions []store.WorkspaceServiceVersion, apiKey string, retainGeneration bool) ([]store.ServiceContractSnapshot, error) {
 	// Empty selections perform no network or Registry work.
 	if len(versions) == 0 {
 		return nil, nil
@@ -58,7 +79,7 @@ func (c *HTTPRegistryClient) FetchRuntimeContracts(ctx context.Context, versions
 			return nil, err
 		}
 		end := min(start+registryServiceVersionBatchSize, len(versions))
-		batch, err := c.fetchRuntimeContractBatch(requestCtx, versions[start:end], apiKey)
+		batch, err := c.fetchRuntimeContractBatch(requestCtx, versions[start:end], apiKey, retainGeneration)
 		// A typed rejection retains earlier admitted snapshots only for the explicit owned-service recovery path.
 		if err != nil {
 			var rejected *runtimeContractRejections
@@ -75,9 +96,9 @@ func (c *HTTPRegistryClient) FetchRuntimeContracts(ctx context.Context, versions
 	return snapshots, nil
 }
 
-// fetchRuntimeContractBatch performs one complete Registry admission within its service-version bound.
-func (c *HTTPRegistryClient) fetchRuntimeContractBatch(ctx context.Context, versions []store.WorkspaceServiceVersion, apiKey string) ([]store.ServiceContractSnapshot, error) {
-	req, err := c.buildRuntimeContractsRequest(ctx, versions, apiKey)
+// fetchRuntimeContractBatch requests one exact projection and its optional generation archive.
+func (c *HTTPRegistryClient) fetchRuntimeContractBatch(ctx context.Context, versions []store.WorkspaceServiceVersion, apiKey string, retainGeneration bool) ([]store.ServiceContractSnapshot, error) {
+	req, err := c.buildRuntimeContractsRequest(ctx, versions, apiKey, retainGeneration)
 	// Request construction failure cannot be repaired by dropping selected versions.
 	if err != nil {
 		return nil, err
@@ -161,10 +182,11 @@ func boundedPassiveCount(value int) int {
 	return value
 }
 
-func (c *HTTPRegistryClient) buildRuntimeContractsRequest(ctx context.Context, versions []store.WorkspaceServiceVersion, apiKey string) (*http.Request, error) {
+// buildRuntimeContractsRequest carries archive intent explicitly to Registry without changing execution admission.
+func (c *HTTPRegistryClient) buildRuntimeContractsRequest(ctx context.Context, versions []store.WorkspaceServiceVersion, apiKey string, retainGeneration bool) (*http.Request, error) {
 	req, err := c.newGraphQLRequest(ctx, graphqlQuery{
 		Query:     runtimeContractsQuery,
-		Variables: runtimeContractBatchVariables(versions),
+		Variables: runtimeContractBatchVariables(versions, retainGeneration),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("FetchRuntimeContracts: create request: %w", err)
@@ -176,22 +198,24 @@ func (c *HTTPRegistryClient) buildRuntimeContractsRequest(ctx context.Context, v
 	return req, nil
 }
 
-func runtimeContractBatchVariables(versions []store.WorkspaceServiceVersion) map[string]interface{} {
+// runtimeContractBatchVariables binds exact version IDs and the caller's archive intent.
+func runtimeContractBatchVariables(versions []store.WorkspaceServiceVersion, retainGeneration bool) map[string]interface{} {
 	refs := make([]ServiceVersionRef, 0, len(versions))
 	for _, version := range versions {
 		refs = append(refs, ServiceVersionRef{ServiceID: version.ServiceID, Version: version.ServiceVersionID.String()})
 	}
 	support := fusedobject.EngineExecutionContractSupport()
 	return map[string]interface{}{
-		"refs":                    refs,
-		"engine_contract_version": support.ContractVersion,
-		"engine_capabilities":     support.RequiredCapabilities,
+		"refs":                       refs,
+		"engine_contract_version":    support.ContractVersion,
+		"engine_capabilities":        support.RequiredCapabilities,
+		"retain_generation_contract": retainGeneration,
 	}
 }
 
 const runtimeContractsQuery = `
-	query EngineRuntimeContracts($refs: [ServiceVersionRefInput!]!, $engine_contract_version: Int!, $engine_capabilities: [String!]!) {
-		serviceRuntimeContracts(refs: $refs, engine_contract_version: $engine_contract_version, engine_capabilities: $engine_capabilities) {
+	query EngineRuntimeContracts($refs: [ServiceVersionRefInput!]!, $engine_contract_version: Int!, $engine_capabilities: [String!]!, $retain_generation_contract: Boolean!) {
+		serviceRuntimeContracts(refs: $refs, engine_contract_version: $engine_contract_version, engine_capabilities: $engine_capabilities, retain_generation_contract: $retain_generation_contract) {
 			contract_version
 			required_capabilities
 			service_id

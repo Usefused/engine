@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const componentPath = fileURLToPath(import.meta.resolve("../components/mcp/McpTransportEndpoints.tsx"));
 const detailsPath = fileURLToPath(import.meta.resolve("../routes/integrations.mcp_.$id.tsx"));
-const builderPath = fileURLToPath(import.meta.resolve("../routes/integrations.builder.tsx"));
+const builderPath = fileURLToPath(import.meta.resolve("../components/apps/AppServiceBuilder.tsx"));
 const generationPanelPath = fileURLToPath(import.meta.resolve("../components/consumer/ConsumerGenerationPanel.tsx"));
 
 test("keeps stable endpoints on Overview and pinned endpoints in version History", async () => {

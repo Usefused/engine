@@ -16,7 +16,6 @@ export interface ExecutionResult {
   sourceExecutionId?: string;
   readHandle?: string;
   output?: ExecutionOutput;
-  data: unknown;
   error?: { code: string; message: string };
   createdAt: string;
   completedAt?: string;
@@ -50,7 +49,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 class ExecutionTransport {
   private readonly baseUrl: string;
   private readonly fetcher: FetchLike;
-  // Bind this client to one exact immutable Execution App version and family token.
+  // Bind this client to one exact immutable Unified App version and family token.
   constructor(private readonly options: FusedExecutionClientOptions) {
     // Credentials and app identity must be explicit before any request can run.
     if (!options.baseUrl || !options.appId || !options.token) throw new Error("Fused Execution client requires baseUrl, appId, and token");

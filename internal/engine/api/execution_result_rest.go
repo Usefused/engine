@@ -25,7 +25,6 @@ type executionResultView struct {
 	Version           string                  `json:"version"`
 	Status            string                  `json:"status"`
 	Output            json.RawMessage         `json:"output,omitempty"`
-	Data              json.RawMessage         `json:"data"`
 	Error             *restExecutionErrorBody `json:"error,omitempty"`
 	Mode              string                  `json:"mode"`
 	SourceExecutionID *uuid.UUID              `json:"sourceExecutionId,omitempty"`
@@ -43,12 +42,12 @@ func MountExecutionResultRoutes(router chi.Router, server *EngineGRPCServer) {
 	router.Get("/v1/apps/{app_id}/executions", server.handleExecutionResultSearch)
 }
 
-// publicExecutionResult projects only fields intended for callers and never returns input or read-handle hashes.
+// publicExecutionResult projects the authored output without exposing stored search data, input, or read-handle hashes.
 func publicExecutionResult(record *store.ExecutionResult) executionResultView {
 	view := executionResultView{
 		ExecutionID: record.ID, AppID: record.AppID, Version: record.AppVersion,
 		Status: record.Status, Output: record.Output,
-		Data: record.Data, Mode: record.Mode, SourceExecutionID: record.SourceExecutionID,
+		Mode: record.Mode, SourceExecutionID: record.SourceExecutionID,
 		CreatedAt: record.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 	}
 	// A terminal error contains only the bounded public code and message saved by Engine.
@@ -177,9 +176,9 @@ func executionSearchWhere(values []string) (map[string]json.RawMessage, *restExe
 	return where, nil
 }
 
-// searchablePathsForExecutionApp extracts policy only from the persisted immutable bundle.
-func searchablePathsForExecutionApp(manifest json.RawMessage) ([]string, error) {
-	decoded, err := parseExecutionAppManifest(manifest)
+// searchablePathsForUnifiedApp extracts policy only from the persisted immutable bundle.
+func searchablePathsForUnifiedApp(manifest json.RawMessage) ([]string, error) {
+	decoded, err := parseUnifiedAppManifest(manifest)
 	if err != nil {
 		return nil, err
 	}
@@ -228,17 +227,17 @@ func (s *EngineGRPCServer) searchExecutionResults(ctx context.Context, accountID
 	if !ok {
 		return nil, newRESTExecutionError(http.StatusServiceUnavailable, "runtime_unavailable", "execution results are unavailable")
 	}
-	bundles, ok := s.store.(store.ExecutionAppBundleStore)
+	bundles, ok := s.store.(store.UnifiedAppBundleStore)
 	if !ok {
 		return nil, newRESTExecutionError(http.StatusServiceUnavailable, "runtime_unavailable", "execution bundle is unavailable")
 	}
-	bundle, err := bundles.GetExecutionAppBundle(ctx, appID)
+	bundle, err := bundles.GetUnifiedAppBundle(ctx, appID)
 	if err != nil {
 		return nil, newRESTExecutionError(http.StatusServiceUnavailable, "runtime_unavailable", "execution bundle is unavailable")
 	}
-	paths, err := searchablePathsForExecutionApp(bundle.Manifest)
+	paths, err := searchablePathsForUnifiedApp(bundle.Manifest)
 	if err != nil {
-		return nil, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "execution app is unavailable for search")
+		return nil, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "unified app is unavailable for search")
 	}
 	items, err := results.SearchExecutionResults(ctx, store.ExecutionResultSearch{
 		AccountID: accountID, AppID: appID,

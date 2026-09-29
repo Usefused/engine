@@ -20,7 +20,7 @@ import (
 type capabilityRouteStore struct {
 	store.Store
 	mu           sync.Mutex
-	bundle       store.ExecutionAppBundle
+	bundle       store.UnifiedAppBundle
 	activeAppID  uuid.UUID
 	record       store.ExecutionResult
 	records      map[uuid.UUID]store.ExecutionResult
@@ -34,24 +34,24 @@ type blockingCapabilityRuntime struct {
 	release chan struct{}
 }
 
-// TestExecutionAppRejectsUnboundManifest keeps authored code inside a selected workspace operation scope.
-func TestExecutionAppRejectsUnboundManifest(t *testing.T) {
-	_, err := parseExecutionAppManifest(json.RawMessage(`{"schemaVersion":1,"inputSchema":{"type":"object"},"outputSchema":{"type":"object"},"searchable":[],"selectedOperations":[]}`))
+// TestUnifiedAppRejectsUnboundManifest keeps authored code inside a selected workspace operation scope.
+func TestUnifiedAppRejectsUnboundManifest(t *testing.T) {
+	_, err := parseUnifiedAppManifest(json.RawMessage(`{"schemaVersion":1,"inputSchema":{"type":"object"},"outputSchema":{"type":"object"},"searchable":[],"selectedOperations":[]}`))
 	// A valid schema alone cannot establish an executable app version.
 	if err == nil {
-		t.Fatal("unbound execution app manifest was admitted")
+		t.Fatal("unbound unified app manifest was admitted")
 	}
 }
 
-// TestExecutionAppKeepsSelectedRawRESTOperation proves authored execute does not replace physical access.
-func TestExecutionAppKeepsSelectedRawRESTOperation(t *testing.T) {
+// TestUnifiedAppKeepsSelectedRawRESTOperation proves authored execute does not replace physical access.
+func TestUnifiedAppKeepsSelectedRawRESTOperation(t *testing.T) {
 	runtime := &restRuntimeTestDouble{physicalFound: true}
 	server, appID := newRESTPhysicalServer(runtime)
 	fixture := server.store.(*grpcRuntimeStore)
-	fixture.scope.Kind = store.AppKindExecution
-	server.tokenValidator = unifiedTestValidator{identity: auth.RuntimeIdentity{
+	fixture.scope.Kind = store.AppKindUnifiedApp
+	server.tokenValidator = appTestValidator{identity: auth.RuntimeIdentity{
 		AccountID: fixture.accountID, AppID: appID, AppFamilyID: uuid.New(),
-		Kind: store.AppKindExecution, Status: store.AppStatusActive, TokenPolicy: store.AppTokenPolicy{AllowAll: true},
+		Kind: store.AppKindUnifiedApp, Status: store.AppStatusActive, TokenPolicy: store.AppTokenPolicy{AllowAll: true},
 	}}
 	response := performRESTExecution(t, server, appID, "fsk_test", `{"operation":"issues.get","input":{"id":7}}`, "")
 	// Selected physical calls still use the Engine dispatcher and its request-scoped cache.
@@ -60,8 +60,8 @@ func TestExecutionAppKeepsSelectedRawRESTOperation(t *testing.T) {
 	}
 }
 
-// TestExecutionAppOldVersionRejectsNewTraffic keeps an exact token from reopening a promoted sibling.
-func TestExecutionAppOldVersionRejectsNewTraffic(t *testing.T) {
+// TestUnifiedAppOldVersionRejectsNewTraffic keeps an exact token from reopening a promoted sibling.
+func TestUnifiedAppOldVersionRejectsNewTraffic(t *testing.T) {
 	router, fixture, appID := newCapabilityRouteFixture(&restRuntimeTestDouble{}, nil)
 	fixture.activeAppID = uuid.New()
 	request := httptest.NewRequest(http.MethodPost, "/v1/apps/"+appID.String()+"/executions", strings.NewReader(`{"operation":"execute","input":{"value":"old"}}`))
@@ -96,26 +96,26 @@ func newCapabilityRouteFixture(baseRuntime *restRuntimeTestDouble, runtime restE
 	}
 	base := server.store.(*grpcRuntimeStore)
 	base.scope.Version = "1.0.0"
-	base.scope.Kind = store.AppKindExecution
+	base.scope.Kind = store.AppKindUnifiedApp
 	identity := auth.RuntimeIdentity{
 		AccountID: base.accountID, AppFamilyID: uuid.New(), AppID: appID,
-		TokenID: uuid.New(), AppVersion: "1.0.0", Kind: store.AppKindExecution, Status: store.AppStatusActive,
+		TokenID: uuid.New(), AppVersion: "1.0.0", Kind: store.AppKindUnifiedApp, Status: store.AppStatusActive,
 		TokenPolicy: store.AppTokenPolicy{AllowAll: true},
 	}
-	server.tokenValidator = unifiedTestValidator{identity: identity}
+	server.tokenValidator = appTestValidator{identity: identity}
 	manifest := `{"schemaVersion":1,"inputSchema":{"type":"object"},"outputSchema":{"type":"object"},"searchable":["value"],"selectedOperations":[{"service":"crm","operation":"createIssue","serviceId":"11111111-1111-4111-8111-111111111111","serviceVersionId":"22222222-2222-4222-8222-222222222222","endpointId":"33333333-3333-4333-8333-333333333333"}]}`
-	bundle := `globalThis.FusedExecutionApp={input:{parse(v){if(typeof v.value!=="string")throw Error("invalid");return v}},output:{parse(v){if(typeof v.value!=="string")throw Error("invalid");return v}},async execute({input}){await __fusedHost.dbSet(JSON.stringify({value:input.value}));return {value:input.value}}};`
-	fixture := &capabilityRouteStore{Store: base, activeAppID: appID, bundle: store.ExecutionAppBundle{AppID: appID, SourceHash: "sha256:test", BundleJS: bundle, Manifest: json.RawMessage(manifest)}}
+	bundle := `globalThis.FusedUnifiedApp={input:{parse(v){if(typeof v.value!=="string")throw Error("invalid");return v}},output:{parse(v){if(typeof v.value!=="string")throw Error("invalid");return v}},async execute({input}){await __fusedHost.dbSet(JSON.stringify({value:input.value}));return {value:input.value}}};`
+	fixture := &capabilityRouteStore{Store: base, activeAppID: appID, bundle: store.UnifiedAppBundle{AppID: appID, SourceHash: "sha256:test", BundleJS: bundle, Manifest: json.RawMessage(manifest)}}
 	server.store = fixture
 	router := chi.NewRouter()
 	MountAppExecutionRoute(router, server)
-	MountExecutionAppRoutes(router, server)
+	MountUnifiedAppRoutes(router, server)
 	MountExecutionResultRoutes(router, server)
 	return router, fixture, appID
 }
 
-// IsExecutionAppTrafficTarget models the persisted family pointer for route admission tests.
-func (fixture *capabilityRouteStore) IsExecutionAppTrafficTarget(_ context.Context, appID uuid.UUID) (bool, error) {
+// IsUnifiedAppTrafficTarget models the persisted family pointer for route admission tests.
+func (fixture *capabilityRouteStore) IsUnifiedAppTrafficTarget(_ context.Context, appID uuid.UUID) (bool, error) {
 	return fixture.activeAppID == appID, nil
 }
 
@@ -125,20 +125,20 @@ func (fixture *capabilityRouteStore) GetApp(_ context.Context, appID uuid.UUID) 
 	if appID != fixture.bundle.AppID {
 		return nil, store.ErrAppNotFound
 	}
-	return &store.App{AppID: appID, SourceHash: fixture.bundle.SourceHash, BundleDigest: store.ExecutionAppBundleDigest([]byte(fixture.bundle.BundleJS))}, nil
+	return &store.App{AppID: appID, SourceHash: fixture.bundle.SourceHash, BundleDigest: store.UnifiedAppBundleDigest([]byte(fixture.bundle.BundleJS))}, nil
 }
 
-// GetExecutionAppBundle supplies the exact script and descriptor for the authenticated app version.
-func (fixture *capabilityRouteStore) GetExecutionAppBundle(_ context.Context, appID uuid.UUID) (*store.ExecutionAppBundle, error) {
+// GetUnifiedAppBundle supplies the exact script and descriptor for the authenticated app version.
+func (fixture *capabilityRouteStore) GetUnifiedAppBundle(_ context.Context, appID uuid.UUID) (*store.UnifiedAppBundle, error) {
 	// A sibling version cannot inherit this test bundle.
 	if appID != fixture.bundle.AppID {
-		return nil, store.ErrExecutionAppBundleNotFound
+		return nil, store.ErrUnifiedAppBundleNotFound
 	}
 	return &fixture.bundle, nil
 }
 
-// CreateExecutionAppBundle is unused because deployment is a separate control mutation.
-func (*capabilityRouteStore) CreateExecutionAppBundle(context.Context, store.ExecutionAppBundle) error {
+// CreateUnifiedAppBundle is unused because deployment is a separate control mutation.
+func (*capabilityRouteStore) CreateUnifiedAppBundle(context.Context, store.UnifiedAppBundle) error {
 	return errors.New("test fixture does not deploy bundles")
 }
 
@@ -236,6 +236,19 @@ func (*capabilityRouteStore) DeleteExpiredExecutionResults(context.Context, time
 	return 0, errors.New("test fixture does not sweep")
 }
 
+// TestProjectCapabilityExecutionKeepsSearchDataPrivate verifies the POST projection without requiring an isolated worker.
+func TestProjectCapabilityExecutionKeepsSearchDataPrivate(t *testing.T) {
+	record := &store.ExecutionResult{Output: json.RawMessage(`{"customerId":"cus_123"}`), Data: json.RawMessage(`{"customerId":"cus_123"}`)}
+	encoded, err := json.Marshal(projectCapabilityExecution(record, "caller-handle"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The caller receives output and its handle while the persisted document stays out of the POST body.
+	if !strings.Contains(string(encoded), `"output":{"customerId":"cus_123"}`) || !strings.Contains(string(encoded), `"readHandle":"caller-handle"`) || strings.Contains(string(encoded), `"data":`) || string(record.Data) != `{"customerId":"cus_123"}` {
+		t.Fatalf("execution response leaked stored data or lost output: %s", encoded)
+	}
+}
+
 // TestCapabilityExecutionPersistsTypedOutputAndData exercises the authenticated public route and real JavaScript runner.
 func TestCapabilityExecutionPersistsTypedOutputAndData(t *testing.T) {
 	requireCapabilityWorkerForDarwin(t)
@@ -247,8 +260,8 @@ func TestCapabilityExecutionPersistsTypedOutputAndData(t *testing.T) {
 	assertCapabilityRerunDuplicate(t, router, runtime, appID, result, rerun)
 }
 
-// TestExecutionAppPromotionRetainsHistoricalFetch keeps completed results readable after the version stops taking traffic.
-func TestExecutionAppPromotionRetainsHistoricalFetch(t *testing.T) {
+// TestUnifiedAppPromotionRetainsHistoricalFetch keeps completed results readable after the version stops taking traffic.
+func TestUnifiedAppPromotionRetainsHistoricalFetch(t *testing.T) {
 	requireCapabilityWorkerForDarwin(t)
 	runtime := &restRuntimeTestDouble{}
 	router, fixture, appID := newCapabilityRouteFixture(runtime, nil)
@@ -268,8 +281,8 @@ func TestExecutionAppPromotionRetainsHistoricalFetch(t *testing.T) {
 	}
 }
 
-// TestExecutionAppHasNoNamedCapabilityRoute keeps one app-level execute entrypoint on the SDK REST surface.
-func TestExecutionAppHasNoNamedCapabilityRoute(t *testing.T) {
+// TestUnifiedAppHasNoNamedCapabilityRoute keeps one app-level execute entrypoint on the SDK REST surface.
+func TestUnifiedAppHasNoNamedCapabilityRoute(t *testing.T) {
 	router, _, appID := newCapabilityRouteFixture(&restRuntimeTestDouble{}, nil)
 	request := httptest.NewRequest(http.MethodPost, "/v1/apps/"+appID.String()+"/capabilities/echo/executions", strings.NewReader(`{"input":{}}`))
 	response := httptest.NewRecorder()
@@ -280,7 +293,7 @@ func TestExecutionAppHasNoNamedCapabilityRoute(t *testing.T) {
 	}
 }
 
-// invokeCapabilityRouteForTest checks the first durable handle and validated output.
+// invokeCapabilityRouteForTest checks the durable handle and output while keeping the stored search document out of the response.
 func invokeCapabilityRouteForTest(t *testing.T, router *chi.Mux, fixture *capabilityRouteStore, appID uuid.UUID) capabilityExecutionEnvelope {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodPost, "/v1/apps/"+appID.String()+"/executions", strings.NewReader(`{"operation":"execute","input":{"value":"Jane"}}`))
@@ -288,7 +301,7 @@ func invokeCapabilityRouteForTest(t *testing.T, router *chi.Mux, fixture *capabi
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
-	// The route must return one durable ID, a read handle, typed output, and stored JSONB data.
+	// The route returns the typed output while retaining the search document only in storage.
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -296,7 +309,7 @@ func invokeCapabilityRouteForTest(t *testing.T, router *chi.Mux, fixture *capabi
 	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.ExecutionID == uuid.Nil || len(result.ReadHandle) != 64 || result.Status != "succeeded" || string(result.Output) != `{"value":"Jane"}` || string(result.Data) != `{"value":"Jane"}` {
+	if result.ExecutionID == uuid.Nil || len(result.ReadHandle) != 64 || result.Status != "succeeded" || string(result.Output) != `{"value":"Jane"}` || string(fixture.record.Data) != `{"value":"Jane"}` || strings.Contains(recorder.Body.String(), `"data":`) {
 		t.Fatalf("execution result = %+v", result)
 	}
 	// Storage must hold only a digest of the caller's one-time read handle.
@@ -306,7 +319,7 @@ func invokeCapabilityRouteForTest(t *testing.T, router *chi.Mux, fixture *capabi
 	return result
 }
 
-// assertCapabilityResultFetch proves authorized reads and wrong-handle isolation without another execution.
+// assertCapabilityResultFetch proves authorized output reads, private search data, and wrong-handle isolation without another execution.
 func assertCapabilityResultFetch(t *testing.T, router *chi.Mux, runtime *restRuntimeTestDouble, appID uuid.UUID, result capabilityExecutionEnvelope) {
 	t.Helper()
 	read := httptest.NewRequest(http.MethodGet, "/v1/apps/"+appID.String()+"/executions/"+result.ExecutionID.String(), nil)
@@ -314,9 +327,9 @@ func assertCapabilityResultFetch(t *testing.T, router *chi.Mux, runtime *restRun
 	read.Header.Set("X-Execution-Read-Handle", result.ReadHandle)
 	readResponse := httptest.NewRecorder()
 	router.ServeHTTP(readResponse, read)
-	// Fetch by ID must recover the same data and output without running authored code again.
+	// Fetch by ID returns the output while keeping the stored search document private.
 	// A selected app acquires the workspace operation cache even when this run only writes data.
-	if readResponse.Code != http.StatusOK || !strings.Contains(readResponse.Body.String(), `"value":"Jane"`) || runtime.connects != 1 {
+	if readResponse.Code != http.StatusOK || !strings.Contains(readResponse.Body.String(), `"value":"Jane"`) || strings.Contains(readResponse.Body.String(), `"data":`) || runtime.connects != 1 {
 		t.Fatalf("read status=%d body=%s connects=%d", readResponse.Code, readResponse.Body.String(), runtime.connects)
 	}
 	read.Header.Set("X-Execution-Read-Handle", strings.Repeat("0", 64))

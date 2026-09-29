@@ -1,3 +1,4 @@
+import { Select } from "./forms/Select.ts";
 import { Link } from "@remix-run/react";
 import { useEffect, useState, type ReactNode } from "react";
 import {
@@ -212,7 +213,7 @@ function OutboundActivity(props: LocalActivityProps) {
     <section aria-label="Outbound calls" className="min-w-0 space-y-5">
       {props.res.service.is_owner ? (
         <div className="flex justify-end">
-          <select
+          <Select
             value={props.source}
             onChange={(event) => props.setSource(event.target.value as "local" | "cross-engine")}
             aria-label="Outbound analytics source"
@@ -220,7 +221,7 @@ function OutboundActivity(props: LocalActivityProps) {
           >
             <option value="local">Workspace calls</option>
             <option value="cross-engine">Aggregate usage</option>
-          </select>
+          </Select>
         </div>
       ) : null}
       {props.source === "cross-engine" ? (
@@ -232,6 +233,7 @@ function OutboundActivity(props: LocalActivityProps) {
   );
 }
 
+/** Uses the shared select while keeping selection state and actions owned by this page. */
 function LocalOutboundActivity(props: LocalActivityProps) {
   return (
     <>
@@ -242,7 +244,7 @@ function LocalOutboundActivity(props: LocalActivityProps) {
           <p className="mt-1 text-xs text-slate-500">One receipt for every request Fused sends to this service.</p>
         </div>
         <div className="flex flex-col gap-2 min-[420px]:flex-row">
-          <select
+          <Select
             value={props.executionTransport}
             onChange={(event) => props.setExecutionTransport(event.target.value)}
             aria-label="Filter by consumer type"
@@ -251,8 +253,8 @@ function LocalOutboundActivity(props: LocalActivityProps) {
             <option value="">All consumers</option>
             <option value="sdk">SDKs</option>
             <option value="mcp">MCP servers</option>
-          </select>
-          <select
+          </Select>
+          <Select
             value={props.executionStatus}
             onChange={(event) => props.setExecutionStatus(event.target.value)}
             aria-label="Filter by result"
@@ -261,7 +263,7 @@ function LocalOutboundActivity(props: LocalActivityProps) {
             <option value="">All results</option>
             <option value="success">Successful</option>
             <option value="failed">Failed</option>
-          </select>
+          </Select>
         </div>
       </div>
       <ExecutionHistory
@@ -579,12 +581,13 @@ function TimingRow({ label, value, total }: { label: string; value?: number | nu
   );
 }
 
+/** Lists every app consumer with navigation to its own runtime detail surface. */
 function Consumers({ consumers }: { consumers: ServiceConsumerEntry[] }) {
   return (
     <section className="border-t border-slate-200 pt-7">
       <div className="mb-4">
         <h2 className="text-sm font-semibold text-slate-950">Consumers</h2>
-        <p className="mt-1 text-xs text-slate-500">SDKs and MCP servers currently configured to use this service.</p>
+        <p className="mt-1 text-xs text-slate-500">Apps currently configured to use this service.</p>
       </div>
       {consumers.length > 0 ? (
         <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
@@ -600,12 +603,12 @@ function Consumers({ consumers }: { consumers: ServiceConsumerEntry[] }) {
                     <ConsumerIcon className="h-4 w-4 shrink-0 text-slate-400" />
                     <div className="min-w-0">
                       <Link
-                        to={consumer.kind === "mcp" ? `/integrations/mcp/${consumer.id}` : `/integrations/sdks/${consumer.id}`}
+                        to={consumerDetailPath(consumer)}
                         className="block truncate text-sm font-medium text-blue-700 hover:underline"
                       >
                         {consumer.name}
                       </Link>
-                      <div className="mt-0.5 text-xs text-slate-500">{consumer.kind.toUpperCase()} · {selection}</div>
+                      <div className="mt-0.5 text-xs text-slate-500">{consumerTypeLabel(consumer.kind)} · {selection}</div>
                     </div>
                   </div>
                   <div className="flex items-center gap-4 pl-7 text-xs sm:pl-0">
@@ -621,7 +624,7 @@ function Consumers({ consumers }: { consumers: ServiceConsumerEntry[] }) {
           </div>
         </div>
       ) : (
-        <div className="border-y border-slate-200 py-8 text-sm text-slate-500">No SDK or MCP server currently uses this service.</div>
+        <div className="border-y border-slate-200 py-8 text-sm text-slate-500">No app currently uses this service.</div>
       )}
     </section>
   );
@@ -641,3 +644,14 @@ function PageButton({ label, disabled, onClick, icon: Icon }: { label: string; d
     </button>
   );
 }
+
+/** Preserves exact app-version navigation for every supported service consumer. */
+function consumerDetailPath(consumer: ServiceConsumerEntry): string {
+  // Unified Apps have source-specific detail and analytics surfaces.
+  if (consumer.kind === "unified_app") return `/integrations/unified-apps/${consumer.id}`;
+  // MCP keeps its transport controls while SDK and REST share their existing detail route.
+  return consumer.kind === "mcp" ? `/integrations/mcp/${consumer.id}` : `/integrations/sdks/${consumer.id}`;
+}
+
+/** Converts the persisted hosted-source kind into the product's readable name. */
+function consumerTypeLabel(kind: ServiceConsumerEntry["kind"]): string { return kind === "unified_app" ? "Unified App" : kind.toUpperCase(); }

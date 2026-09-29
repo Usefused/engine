@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
+	"github.com/dop251/goja/parser"
 )
 
 const (
@@ -53,7 +54,7 @@ func RunInProcess(ctx context.Context, bundle []byte, input json.RawMessage, hos
 }
 
 // RunInProcessWithDeterminism installs Engine-provided sources before evaluating authored code.
-func RunInProcessWithDeterminism(ctx context.Context, bundle []byte, input json.RawMessage, host Host, control Determinism) (json.RawMessage, error) {
+func RunInProcessWithDeterminism(ctx context.Context, bundle []byte, input json.RawMessage, host Host, control Determinism) (output json.RawMessage, runErr error) {
 	if err := validateCapabilityScriptRequest(bundle, input, host); err != nil {
 		return nil, err
 	}
@@ -65,6 +66,8 @@ func RunInProcessWithDeterminism(ctx context.Context, bundle []byte, input json.
 	defer cancel()
 	// Each invocation gets new globals; no provider credential or Node module enters the interpreter.
 	vm := goja.New()
+	// Inline-only maps apply to dynamically evaluated source as well as the immutable bundle.
+	vm.SetParserOptions(parser.WithSourceMapLoader(rejectExternalSourceMap))
 	vm.SetTimeSource(func() time.Time { return time.UnixMilli(control.StartedAtUnixMs).UTC() })
 	vm.SetRandSource(capabilityRandomSource(control.RandomSeed))
 	vm.SetMaxCallStackSize(512)
@@ -78,13 +81,24 @@ func RunInProcessWithDeterminism(ctx context.Context, bundle []byte, input json.
 	if err := session.installGlobals(input); err != nil {
 		return nil, err
 	}
-	program, err := goja.Compile("fused-capability.js", string(bundle), true)
+	clock := &phaseClock{}
+	// Observations are returned through trusted IPC and never consume an authored host-call ordinal.
+	defer func() {
+		if observer, ok := host.(PhaseObserver); ok {
+			observer.RecordExecutionPhases(ctx, clock.finish(runErr != nil))
+		}
+	}()
+	_ = vm.Set("__fusedExecutionPhaseTiming", clock.next)
+	clock.next("compilation")
+	program, err := compileDiagnosticBundle("fused-capability.js", string(bundle))
 	// Compilation never falls back to interpreting request data as JavaScript.
 	if err != nil {
-		return nil, errors.New("capability bundle is invalid")
+		return nil, runtimeDiagnostic(err, "compilation")
 	}
+	clock.next("initialization")
+	// Initialization errors retain private source context before any authored execute call.
 	if _, err := vm.RunProgram(program); err != nil {
-		return nil, errors.New("capability bundle initialization failed")
+		return nil, runtimeDiagnostic(err, "initialization")
 	}
 	return invokeCapabilityScript(ctx, vm, session.results)
 }
@@ -192,10 +206,17 @@ func scheduleCapabilityHostCall(ctx context.Context, vm *goja.Runtime, results c
 // invokeCapabilityScript validates Zod input and output around the authored execute function.
 func invokeCapabilityScript(ctx context.Context, vm *goja.Runtime, results <-chan capabilityHostResult) (json.RawMessage, error) {
 	const invocation = `(async () => {
-		const app = globalThis.FusedExecutionApp;
+		const app = globalThis.FusedUnifiedApp;
 		if (!app || !app.input || !app.output || typeof app.execute !== "function") throw new Error("capability unavailable");
+		globalThis.__fusedExecutionPhase = "input_validation";
+        globalThis.__fusedExecutionPhaseTiming("input_validation");
 		const input = app.input.parse(JSON.parse(fusedInputJSON));
+		globalThis.__fusedExecutionPhase = "execute";
+        globalThis.__fusedExecutionPhaseTiming("execute");
 		const output = await app.execute({ input });
+		globalThis.__fusedExecutionPhase = "output_validation";
+        globalThis.__fusedExecutionPhaseTiming("output_validation");
+		globalThis.__fusedRawOutput = JSON.stringify(output);
 		return JSON.stringify(app.output.parse(output));
 	})()`
 	value, err := vm.RunString(invocation)
@@ -209,6 +230,10 @@ func invokeCapabilityScript(ctx context.Context, vm *goja.Runtime, results <-cha
 	}
 	if err := waitCapabilityPromise(ctx, vm, promise, results); err != nil {
 		return nil, err
+	}
+	// Rejected promises retain private exception details before the public result projection.
+	if promise.State() == goja.PromiseStateRejected {
+		return nil, exceptionDiagnostic(vm, promise.Result())
 	}
 	return decodeCapabilityPromise(promise)
 }

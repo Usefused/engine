@@ -1,3 +1,4 @@
+import { Select } from "../forms/Select.ts";
 import { useEffect, useMemo, useState } from "react";
 import { Code2, Loader2, Pencil, RotateCcw, Save, Shield, X } from "lucide-react";
 import { api, type AuthConfig, type WorkspaceConnectionProfile } from "~/lib/api";
@@ -209,13 +210,13 @@ function AuthTypeSelect({ authTypes, authType, setAuthType }: {
   return (
     <label className="mt-4 block text-xs font-medium text-slate-700">
       Authentication family
-      <select
+      <Select
         value={authType}
         onChange={(event) => setAuthType(event.target.value)}
         className="mt-1 block w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
       >
         {authTypes.map((value) => <option key={value} value={value}>{value.toUpperCase()}</option>)}
-      </select>
+      </Select>
     </label>
   );
 }

@@ -53,6 +53,9 @@ func TestAppAccessRequirementsUseFamilyBoundary(t *testing.T) {
 		{method: http.MethodPost, path: "/apps/" + appID.String() + "/deprecate", permission: accesscontrol.PermissionAppSDKManage},
 		// Bundle attachment must inherit the same exact family management boundary.
 		{method: http.MethodPost, path: "/apps/" + appID.String() + "/bundle", permission: accesscontrol.PermissionAppSDKManage},
+		// New traffic routes inherit the persisted family kind rather than granting a generic app permission.
+		{method: http.MethodPost, path: "/apps/" + appID.String() + "/promote", permission: accesscontrol.PermissionAppSDKManage},
+		{method: http.MethodGet, path: "/apps/" + appID.String() + "/traffic", permission: accesscontrol.PermissionAppSDKRead},
 		{method: http.MethodGet, path: "/sdks/" + appID.String() + "/download", permission: accesscontrol.PermissionAppSDKRead},
 		{method: http.MethodGet, path: "/apps/" + appID.String() + "/openapi", permission: accesscontrol.PermissionAppSDKRead},
 	}
@@ -286,7 +289,7 @@ func TestDynamicDesiredConfigApplyBindsAuthorizedPlanRevision(t *testing.T) {
 		path       string
 	}{
 		{configType: store.ConfigTypeSDK, path: "/sdk-config/apply"},
-		{configType: store.ConfigTypeExecution, path: "/execution-config/apply"},
+		{configType: store.ConfigTypeUnifiedApp, path: "/unified-app-config/apply"},
 		{configType: store.ConfigTypeMCP, path: "/mcp-config/apply"},
 		{configType: store.ConfigTypeWebhook, path: "/webhook-config/apply"},
 	} {
@@ -397,7 +400,7 @@ func TestStoredAppsRequireSelectedService(t *testing.T) {
 	plan := &store.ConfigPlan{
 		ResolvedPayload: []byte(`{"bucket_id":"` + bucketID.String() + `","selections":[]}`),
 	}
-	for _, configType := range []store.ConfigType{store.ConfigTypeSDK, store.ConfigTypeExecution, store.ConfigTypeMCP} {
+	for _, configType := range []store.ConfigType{store.ConfigTypeSDK, store.ConfigTypeUnifiedApp, store.ConfigTypeMCP} {
 		plan.ConfigType = configType
 		// A digest cannot replace a selected service for either authored or generated apps.
 		if _, err := storedDesiredConfigSelectionRequirements(plan, accesscontrol.PermissionServiceConsume, accesscontrol.PermissionBucketUse); !errors.Is(err, accesscontrol.ErrPolicyDenied) {
@@ -438,7 +441,7 @@ func TestDynamicDesiredConfigPlanRejectsUnboundApps(t *testing.T) {
 	stores := &controlRequirementStoreStub{buckets: []store.Bucket{{ID: bucketID, Name: "default"}}}
 	resolver := newControlRequirementResolver(stores, &controlConfigRepositoryStub{})
 	digest := "sha256:" + strings.Repeat("a", 64)
-	for _, test := range []struct{ kind, route string }{{"sdk", "/sdk-config/plan"}, {"execution", "/execution-config/plan"}} {
+	for _, test := range []struct{ kind, route string }{{"sdk", "/sdk-config/plan"}, {"unified_app", "/unified-app-config/plan"}} {
 		body := `{"config_key":"` + test.kind + `:greeting:1.0.0","config":{"kind":"` + test.kind + `","bucket":"default","language":"typescript","bundle_digest":"` + digest + `"}}`
 		request := httptest.NewRequest(http.MethodPost, test.route, strings.NewReader(body))
 		// Authorization must deny an unbound version before any service or bucket lookup.

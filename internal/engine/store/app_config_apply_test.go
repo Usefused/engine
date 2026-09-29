@@ -107,11 +107,11 @@ func TestApplyAppConfigPlanRejectsSDKWithoutPlanLease(t *testing.T) {
 	}
 }
 
-// TestApplyExecutionAppConfigPlanPublishesCompiledBundleAtomically covers the plan-to-traffic transaction with a real PostgreSQL repository.
-func TestApplyExecutionAppConfigPlanPublishesCompiledBundleAtomically(t *testing.T) {
-	fixture := newConcurrentArtifactApplyFixture(t, ConfigTypeExecution)
-	bundle := ExecutionAppBundle{AppID: fixture.params.Scope.AppID, SourceHash: fixture.params.Plan.State.SourceHash, BundleJS: "globalThis.FusedExecutionApp={};", Manifest: json.RawMessage(`{"schemaVersion":1}`)}
-	fixture.params.Scope.BundleDigest = ExecutionAppBundleDigest([]byte(bundle.BundleJS))
+// TestApplyUnifiedAppConfigPlanPublishesCompiledBundleAtomically covers the plan-to-traffic transaction with a real PostgreSQL repository.
+func TestApplyUnifiedAppConfigPlanPublishesCompiledBundleAtomically(t *testing.T) {
+	fixture := newConcurrentArtifactApplyFixture(t, ConfigTypeUnifiedApp)
+	bundle := UnifiedAppBundle{AppID: fixture.params.Scope.AppID, SourceHash: fixture.params.Plan.State.SourceHash, BundleJS: "globalThis.FusedUnifiedApp={};", Manifest: json.RawMessage(`{"schemaVersion":1}`)}
+	fixture.params.Scope.BundleDigest = UnifiedAppBundleDigest([]byte(bundle.BundleJS))
 	fixture.params.ExecutionBundle = &bundle
 	fixture.params.TokenHash = "execution-bundle-" + uuid.NewString()
 	result, err := fixture.repository.ApplyAppConfigPlan(fixture.ctx, fixture.params)
@@ -120,23 +120,23 @@ func TestApplyExecutionAppConfigPlanPublishesCompiledBundleAtomically(t *testing
 		t.Fatalf("ApplyAppConfigPlan: %v", err)
 	}
 	appStore := NewPostgresStore(fixture.pool).(*postgresStore)
-	active, err := appStore.IsExecutionAppTrafficTarget(fixture.ctx, result.AppID)
+	active, err := appStore.IsUnifiedAppTrafficTarget(fixture.ctx, result.AppID)
 	// The family pointer is the runtime route authority for SDK/REST/MCP calls.
 	if err != nil || !active {
 		t.Fatalf("active target = %t, err = %v", active, err)
 	}
-	stored, err := appStore.GetExecutionAppBundle(fixture.ctx, result.AppID)
+	stored, err := appStore.GetUnifiedAppBundle(fixture.ctx, result.AppID)
 	// The returned version must already have its immutable compiled code.
 	if err != nil || stored.BundleJS != bundle.BundleJS {
 		t.Fatalf("stored bundle = %#v, err = %v", stored, err)
 	}
 }
 
-// TestApplyExecutionAppConfigPlanRollsBackBundleFailure proves a late artifact failure cannot publish an app or applied plan.
-func TestApplyExecutionAppConfigPlanRollsBackBundleFailure(t *testing.T) {
-	fixture := newConcurrentArtifactApplyFixture(t, ConfigTypeExecution)
-	bundle := ExecutionAppBundle{AppID: fixture.params.Scope.AppID, SourceHash: "different-source", BundleJS: "globalThis.FusedExecutionApp={};", Manifest: json.RawMessage(`{"schemaVersion":1}`)}
-	fixture.params.Scope.BundleDigest = ExecutionAppBundleDigest([]byte(bundle.BundleJS))
+// TestApplyUnifiedAppConfigPlanRollsBackBundleFailure proves a late artifact failure cannot publish an app or applied plan.
+func TestApplyUnifiedAppConfigPlanRollsBackBundleFailure(t *testing.T) {
+	fixture := newConcurrentArtifactApplyFixture(t, ConfigTypeUnifiedApp)
+	bundle := UnifiedAppBundle{AppID: fixture.params.Scope.AppID, SourceHash: "different-source", BundleJS: "globalThis.FusedUnifiedApp={};", Manifest: json.RawMessage(`{"schemaVersion":1}`)}
+	fixture.params.Scope.BundleDigest = UnifiedAppBundleDigest([]byte(bundle.BundleJS))
 	fixture.params.ExecutionBundle = &bundle
 	fixture.params.TokenHash = "execution-rollback-" + uuid.NewString()
 	tx, err := fixture.repository.db.Begin(fixture.ctx)
@@ -165,7 +165,7 @@ func assertExecutionBundleApplyRolledBack(t *testing.T, fixture concurrentArtifa
 	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT COUNT(*) FROM fused_apps WHERE app_id=$1`, fixture.params.Scope.AppID).Scan(&apps); err != nil {
 		t.Fatalf("count apps: %v", err)
 	}
-	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT COUNT(*) FROM fused_execution_app_bundles WHERE app_id=$1`, fixture.params.Scope.AppID).Scan(&bundles); err != nil {
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT COUNT(*) FROM fused_unified_app_bundles WHERE app_id=$1`, fixture.params.Scope.AppID).Scan(&bundles); err != nil {
 		t.Fatalf("count bundles: %v", err)
 	}
 	// Both rows must be absent because the bundle and app shared one transaction.
@@ -419,7 +419,7 @@ func artifactFixtureCompilerIdentity(configType ConfigType) (string, string) {
 	if configType == ConfigTypeSDK {
 		return "registry-generator-v1", "typescript"
 	}
-	if configType == ConfigTypeExecution {
+	if configType == ConfigTypeUnifiedApp {
 		return "", "typescript"
 	}
 	return "", ""

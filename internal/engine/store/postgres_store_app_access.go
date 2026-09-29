@@ -130,17 +130,21 @@ func ownershipAllowed(found bool, decision AppOwnershipDecision) bool {
 	return found && decision.MembershipAllowed && len(decision.ActorMissing) == 0 && len(decision.TeamMissing) == 0
 }
 
+// ListAppBuildSelectors exposes only usable resources, with the accessible default bucket first.
 func (s *postgresStore) ListAppBuildSelectors(ctx context.Context, input AppSelectorQuery) (AppSelectorPage, error) {
+	// Invalid selectors must never reach the authorization query.
 	if err := validateSelectorQuery(input); err != nil {
 		return AppSelectorPage{}, err
 	}
 	permission := accesscontrol.PermissionServiceConsume
 	query := appServiceSelectorSQL
+	// Bucket usage has its own grants and default metadata.
 	if input.ResourceType == accesscontrol.ResourceBucket {
 		permission = accesscontrol.PermissionBucketUse
 		query = appBucketSelectorSQL
 	}
 	rows, err := s.db.Query(ctx, query, input.ActorSubjectID, input.OwnerTeamID, permission, input.Search, input.Limit, input.Offset)
+	// Failed authorization reads cannot produce selectable resources.
 	if err != nil {
 		return AppSelectorPage{}, fmt.Errorf("list app build selectors: %w", err)
 	}
@@ -149,11 +153,14 @@ func (s *postgresStore) ListAppBuildSelectors(ctx context.Context, input AppSele
 	for rows.Next() {
 		var resourceID *uuid.UUID
 		var displayName *string
-		if err := rows.Scan(&resourceID, &displayName, &page.Total); err != nil {
+		var isDefault bool
+		// Keep the total-only empty page distinct from a usable resource.
+		if err := rows.Scan(&resourceID, &displayName, &isDefault, &page.Total); err != nil {
 			return AppSelectorPage{}, fmt.Errorf("scan app build selector: %w", err)
 		}
+		// The summary row carries no item when no resource is accessible.
 		if resourceID != nil {
-			page.Items = append(page.Items, AppBuildSelector{Resource: accesscontrol.ResourceRef{Type: input.ResourceType, ID: *resourceID}, DisplayName: *displayName})
+			page.Items = append(page.Items, AppBuildSelector{Resource: accesscontrol.ResourceRef{Type: input.ResourceType, ID: *resourceID}, DisplayName: *displayName, IsDefault: isDefault})
 		}
 	}
 	return page, rows.Err()
@@ -335,13 +342,13 @@ filtered AS (
 ), page AS (
 	SELECT * FROM filtered ORDER BY service_name, service_id LIMIT $5 OFFSET $6
 ), summary AS (SELECT COUNT(*)::int AS total FROM filtered)
-SELECT page.service_id, page.service_name, summary.total FROM summary LEFT JOIN page ON true
+SELECT page.service_id, page.service_name, false, summary.total FROM summary LEFT JOIN page ON true
 ORDER BY page.service_name, page.service_id`
 
 const appBucketSelectorSQL = appSelectorAuthorizationSQL + `
 ,
 filtered AS (
-	SELECT bucket.id, bucket.name FROM fused_buckets bucket
+	SELECT bucket.id, bucket.name, bucket.is_default FROM fused_buckets bucket
 	WHERE ($4 = '' OR bucket.name ILIKE '%' || $4 || '%')
 		AND (SELECT allowed FROM owner_eligible)
 		AND EXISTS (SELECT 1 FROM actor_grants effective WHERE effective.resource_type = 'workspace'
@@ -350,10 +357,10 @@ filtered AS (
 			SELECT 1 FROM team_grants effective WHERE effective.resource_type = 'workspace'
 				OR (effective.resource_type = 'bucket' AND effective.resource_id = bucket.id)))
 ), page AS (
-	SELECT * FROM filtered ORDER BY name, id LIMIT $5 OFFSET $6
+	SELECT * FROM filtered ORDER BY is_default DESC, name, id LIMIT $5 OFFSET $6
 ), summary AS (SELECT COUNT(*)::int AS total FROM filtered)
-SELECT page.id, page.name, summary.total FROM summary LEFT JOIN page ON true
-ORDER BY page.name, page.id`
+SELECT page.id, page.name, COALESCE(page.is_default, false), summary.total FROM summary LEFT JOIN page ON true
+ORDER BY page.is_default DESC, page.name, page.id`
 
 const appOwningTeamAuthorizationSQL = `
 WITH actor AS (
@@ -383,7 +390,7 @@ WITH actor AS (
 			SELECT 1 FROM fused_role_bindings binding
 			JOIN fused_roles role ON role.id = binding.role_id AND role.scope_type = 'workspace'
 			-- This selector is advisory; plan preflight checks the chosen app's exact type.
-			JOIN fused_role_permissions permission ON permission.role_id = role.id AND permission.permission IN ('app.sdk.create', 'app.mcp.create', 'app.api.create', 'app.execution.create', 'app.webhook.create')
+			JOIN fused_role_permissions permission ON permission.role_id = role.id AND permission.permission IN ('app.sdk.create', 'app.mcp.create', 'app.api.create', 'app.unified_app.create', 'app.webhook.create')
 			JOIN fused_workspaces workspace ON workspace.singleton_key = 1 AND workspace.id = binding.resource_id
 			WHERE binding.subject_type = 'team' AND binding.subject_id = team.id AND binding.resource_type = 'workspace'
 		)

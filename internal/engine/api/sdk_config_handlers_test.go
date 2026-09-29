@@ -213,7 +213,7 @@ func TestValidateAppRuntimeSelectionsRequiresCompleteV3Identity(t *testing.T) {
 		{name: "missing selection version", scope: models.AppScopeSchemaVersion, selections: []models.SDKSelection{{ServiceID: valid.ServiceID, ServiceVersionID: valid.ServiceVersionID}}, wantError: true},
 		{name: "missing service version", scope: models.AppScopeSchemaVersion, selections: []models.SDKSelection{{ServiceID: valid.ServiceID, SchemaVersion: models.AppSelectionSchemaVersion}}, wantError: true},
 		{name: "empty selections", scope: models.AppScopeSchemaVersion, wantError: true},
-		{name: "authored code without service selection", scope: models.AppScopeSchemaVersion, selections: []models.SDKSelection{}, bundleDigest: store.ExecutionAppBundleDigest([]byte("code")), wantError: true},
+		{name: "authored code without service selection", scope: models.AppScopeSchemaVersion, selections: []models.SDKSelection{}, bundleDigest: store.UnifiedAppBundleDigest([]byte("code")), wantError: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

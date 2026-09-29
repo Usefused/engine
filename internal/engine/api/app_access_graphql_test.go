@@ -198,3 +198,26 @@ func TestAppAccessGraphQLPolicyTraversesFragmentsAndMultipleRoots(t *testing.T) 
 		t.Fatalf("plan = requirements %#v/root fields %d", plan.requirements, plan.rootFields)
 	}
 }
+
+// TestAppBucketSelectorDefaultMetadata keeps auto-selection tied to authorized Engine metadata.
+func TestAppBucketSelectorDefaultMetadata(t *testing.T) {
+	actor := controlTestOwnerActor(uuid.New())
+	bucketID := uuid.New()
+	repository := &appAccessGraphQLStore{selectorPage: store.AppSelectorPage{Items: []store.AppBuildSelector{{Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: bucketID}, DisplayName: "Workspace credentials", IsDefault: true}}, Total: 1}}
+	schema, err := newMCPGraphQLSchema(nil, repository, nil, nil, nil, nil, nil)
+	// Schema construction must expose metadata through the existing authorized selector.
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := graphql.Do(graphql.Params{Schema: schema, RequestString: `{appBuildSelectors(resource_type:BUCKET,limit:100,offset:0){items{resource_id is_default}}}`, Context: accesscontrol.ContextWithActor(context.Background(), actor)})
+	// No selector failure can be interpreted as permission to use the default.
+	if len(result.Errors) != 0 {
+		t.Fatal(result.Errors)
+	}
+	page := result.Data.(map[string]interface{})["appBuildSelectors"].(map[string]interface{})
+	item := page["items"].([]interface{})[0].(map[string]interface{})
+	// A renamed default still has stable metadata and is fetched in one actor-scoped query.
+	if item["is_default"] != true || item["resource_id"] != bucketID.String() || repository.selectorCalls != 1 || repository.selectorQuery.ActorSubjectID != actor.SubjectID {
+		t.Fatalf("unexpected bucket selector: %#v", item)
+	}
+}

@@ -1,3 +1,4 @@
+import { Select } from "../components/forms/Select.ts";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import type { MetaFunction } from "@remix-run/react";
 import { KeyRound, Plus, Ban, X } from "lucide-react";
@@ -160,6 +161,7 @@ function OAuthClientsManager({ canManage }: { canManage: boolean }) {
   );
 }
 
+/** Uses the shared select while keeping selection state and actions owned by this page. */
 function OAuthClientCreateForm(props: {
   name: string;
   clientType: OAuthClientType;
@@ -183,10 +185,10 @@ function OAuthClientCreateForm(props: {
         </label>
         <label className="flex flex-col gap-1">
           <span className="text-xs font-medium text-slate-700">Client type</span>
-          <select value={props.clientType} onChange={(event) => props.onClientType(event.target.value as OAuthClientType)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm">
+          <Select value={props.clientType} onChange={(event) => props.onClientType(event.target.value as OAuthClientType)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm">
             <option value="CONFIDENTIAL">Confidential (server-side app, gets a secret)</option>
             <option value="PUBLIC">Public (native/SPA, PKCE only)</option>
-          </select>
+          </Select>
         </label>
         <label className="flex flex-col gap-1 md:col-span-2">
           <span className="text-xs font-medium text-slate-700">Redirect URIs (one per line)</span>

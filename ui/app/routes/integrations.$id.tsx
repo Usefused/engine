@@ -1086,7 +1086,8 @@ function useIntegrationDetailModel() {
     setIsClientFetchingTab(true);
     try {
       const consumers = await api.workspace.listServiceConsumers(serviceId);
-      setDependentSDKs(consumers.filter((consumer) => consumer.kind === "sdk"));
+      // Hosted source apps share the app consumer group while MCP retains its transport grouping.
+      setDependentSDKs(consumers.filter((consumer) => consumer.kind !== "mcp"));
       setDependentMCPs(consumers.filter((consumer) => consumer.kind === "mcp"));
     } catch (e) {
       console.error(e);

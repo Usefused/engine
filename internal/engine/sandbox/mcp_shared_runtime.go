@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,9 +19,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otelcodes "go.opentelemetry.io/otel/codes"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 )
 
 // maxMCPPhysicalResultBytes bounds both buffered provider bytes and the exact
@@ -32,11 +29,8 @@ const maxMCPPhysicalResultBytes = 1 << 20
 // mcpPaginationIntentUnknown fails closed if a newer Engine reason reaches an older MCP adapter.
 const mcpPaginationIntentUnknown = "mcp_pagination_intent_invalid: omit pagination, then use search_docs to confirm whether this operation supports a lower pagination.maxPages bound"
 
-// mcpUnifiedPhysicalPaginationCode identifies one reviewed call-shape rejection before the Unified coordinator starts.
-const mcpUnifiedPhysicalPaginationCode = "mcp_physical_pagination_not_allowed_for_unified"
-
 // mcpCallRequest preserves params as JSON until exact catalogue kind is known,
-// avoiding numeric changes to Unified input while retaining physical map decoding.
+// retaining exact input bytes until physical parameter decoding.
 type mcpCallRequest struct {
 	OperationID string                       `json:"operation_id"`
 	Params      json.RawMessage              `json:"params"`
@@ -46,58 +40,6 @@ type mcpCallRequest struct {
 // mcpPhysicalPaginationIntent mirrors the generated SDK's provider-neutral page ceiling without entering provider params.
 type mcpPhysicalPaginationIntent struct {
 	MaxPages int `json:"maxPages"`
-}
-
-// mcpUnifiedInvocation is the SDK-equivalent public call shape; transport
-// identity and gRPC metadata remain Engine-owned and cannot be model-authored.
-type mcpUnifiedInvocation struct {
-	Input          json.RawMessage                       `json:"input"`
-	Targets        []string                              `json:"targets"`
-	Selectors      map[string]mcpUnifiedSelector         `json:"selectors,omitempty"`
-	Pagination     map[string]mcpUnifiedPaginationIntent `json:"pagination,omitempty"`
-	IdempotencyKey string                                `json:"idempotencyKey,omitempty"`
-}
-
-// mcpUnifiedSelector accepts only the generated TypeScript SDK's camelCase routing vocabulary.
-type mcpUnifiedSelector struct {
-	Environment string `json:"environment,omitempty"`
-	EndUserRef  string `json:"endUserRef,omitempty"`
-	AuthType    string `json:"authType,omitempty"`
-	AuthName    string `json:"authName,omitempty"`
-	ResourceID  string `json:"resourceId,omitempty"`
-}
-
-// mcpUnifiedPaginationIntent exposes only the caller-owned page ceiling.
-type mcpUnifiedPaginationIntent struct {
-	MaxPages uint32 `json:"maxPages"`
-}
-
-// mcpUnifiedResult is the exact generated-SDK all-settled target wire shape.
-type mcpUnifiedResult struct {
-	Target     string                `json:"target"`
-	Status     string                `json:"status"`
-	Data       json.RawMessage       `json:"data"`
-	ErrorCode  *string               `json:"errorCode"`
-	AuthAction *mcpUnifiedAuthAction `json:"authAction"`
-}
-
-// mcpUnifiedRollback is the exact generated-SDK compensation wire shape.
-type mcpUnifiedRollback struct {
-	Target      string                `json:"target"`
-	Status      string                `json:"status"`
-	ErrorCode   *string               `json:"errorCode"`
-	TriggeredBy []string              `json:"triggeredBy"`
-	AuthAction  *mcpUnifiedAuthAction `json:"authAction"`
-}
-
-// mcpUnifiedAuthAction omits optional recovery fields exactly as generated SDKs do.
-type mcpUnifiedAuthAction struct {
-	Action       string `json:"action"`
-	BucketID     string `json:"bucketId"`
-	ServiceID    string `json:"serviceId"`
-	EndUserRef   string `json:"endUserRef"`
-	ConnectionID string `json:"connectionId,omitempty"`
-	Reason       string `json:"reason,omitempty"`
 }
 
 // mcpCallResponse mirrors callClient.ts's CallResponse -- exactly one of
@@ -168,13 +110,6 @@ func mcpCallHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Exact catalogue kind selects the adapter; invocation shape never grants
-	// access to a private definition or changes physical dispatch behavior.
-	if descriptor, unified := resolveSessionFixtureUnifiedOperation(sess, req.OperationID); unified {
-		handleMCPResolvedUnifiedCall(w, r, sess, descriptor, req)
-		return
-	}
-
 	op, ok := resolveSessionFixtureOperation(sess, req.OperationID)
 	// Unknown names remain indistinguishable from entries outside this session.
 	if !ok {
@@ -211,18 +146,6 @@ func mcpCallHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeMCPCallResult(w, http.StatusOK, mcpCallResponse{Result: result})
-}
-
-// handleMCPResolvedUnifiedCall prevents physical-only options from being ignored by the logical adapter.
-func handleMCPResolvedUnifiedCall(w http.ResponseWriter, r *http.Request, sess *mcpSession, descriptor *models.SDKUnifiedOperationDescriptor, request mcpCallRequest) {
-	// Unified pagination remains target-keyed inside params to preserve SDK-equivalent graph semantics.
-	if request.Pagination != nil {
-		publicOperationID := fmt.Sprintf("%q", request.OperationID)
-		message := fmt.Sprintf("%s: operation %s is Unified; use call(%s, params) without physical pagination options and keep any target-keyed pagination inside params.pagination", mcpUnifiedPhysicalPaginationCode, publicOperationID, publicOperationID)
-		writeMCPCallResult(w, http.StatusBadRequest, mcpCorrectArgumentsResponse(mcpUnifiedPhysicalPaginationCode, message))
-		return
-	}
-	handleMCPUnifiedCall(w, r, sess, descriptor, request)
 }
 
 // mcpCorrectArgumentsResponse creates the one closed bridge recovery proven to stop before provider or coordinator execution.
@@ -309,67 +232,6 @@ func mcpSessionRequestContext(parent context.Context, sess *mcpSession) (context
 		stopCancellation()
 		cancel()
 	}
-}
-
-// resolveSessionFixtureUnifiedOperation keeps logical lookup inside the same
-// immutable session fixture and fails closed when a stale session lacks it.
-func resolveSessionFixtureUnifiedOperation(sess *mcpSession, operationID string) (*models.SDKUnifiedOperationDescriptor, bool) {
-	// Missing fixture state cannot authorize a fallback to private definitions.
-	if sess == nil || sess.fixture == nil {
-		return nil, false
-	}
-	return sess.fixture.ResolveUnified(operationID)
-}
-
-// handleMCPUnifiedCall adapts one public invocation to the existing Engine
-// ExecuteUnified method without owning compilation, authorization, or scheduling.
-func handleMCPUnifiedCall(w http.ResponseWriter, r *http.Request, sess *mcpSession, descriptor *models.SDKUnifiedOperationDescriptor, request mcpCallRequest) {
-	invocation, err := decodeMCPUnifiedInvocation(request.Params)
-	// Malformed public options stop before trusted metadata or runtime state is attached.
-	if err != nil {
-		writeMCPCallResult(w, http.StatusBadRequest, mcpCallResponse{Error: "invalid Unified invocation"})
-		return
-	}
-	selectors := make(map[string]*enginev1.ExecutionSelectors, len(invocation.Selectors))
-	// Public target keys and their strict leaf values map without policy decisions.
-	for target, value := range invocation.Selectors {
-		selectors[target] = &enginev1.ExecutionSelectors{Environment: value.Environment, EndUserRef: value.EndUserRef, AuthType: value.AuthType, AuthName: value.AuthName, ResourceId: value.ResourceID}
-	}
-	pagination := make(map[string]*enginev1.PaginationIntent, len(invocation.Pagination))
-	// Pagination remains independently keyed for canonical preflight validation.
-	for target, value := range invocation.Pagination {
-		pagination[target] = &enginev1.PaginationIntent{MaxPages: value.MaxPages}
-	}
-	ctx := ContextWithMCPExecutionTransport(r.Context())
-	ctx = metadata.NewIncomingContext(ctx, metadata.Pairs("x-app-id", sess.appID, "x-api-key", sess.token))
-	// Initialization injects the existing method value; absence is a bounded server failure, not a fallback executor.
-	if globalMCPUnifiedExecute == nil {
-		writeMCPCallResult(w, http.StatusServiceUnavailable, mcpCallResponse{Error: "unified_execution_unavailable"})
-		return
-	}
-	response, err := globalMCPUnifiedExecute(ctx, &enginev1.ExecuteUnifiedRequest{
-		Operation: request.OperationID, Targets: invocation.Targets, InputJson: invocation.Input,
-		TargetSelectors: selectors, TargetPagination: pagination, IdempotencyKey: invocation.IdempotencyKey,
-	})
-	// Runtime failures are collapsed to bounded codes so private definitions and provider errors never cross MCP.
-	if err != nil {
-		httpStatus, code := boundedMCPUnifiedError(err)
-		writeMCPCallResult(w, httpStatus, mcpCallResponse{Error: code})
-		return
-	}
-	// Unified all-settled results surface the first blocked connection while retaining conservative replay state.
-	if requirement, providerExecution := firstMCPUnifiedAuthRequirement(response); requirement != nil {
-		statusCode, failure := startMCPConnectedAuthResponse(r.Context(), sess, *requirement, providerExecution)
-		writeMCPCallResult(w, statusCode, failure)
-		return
-	}
-	result, httpStatus, code := projectMCPUnifiedResponse(descriptor, response)
-	// Configured output failures remain bounded while successful output keeps its authored JSON shape.
-	if code != "" {
-		writeMCPCallResult(w, httpStatus, mcpCallResponse{Error: code})
-		return
-	}
-	writeMCPCallResult(w, http.StatusOK, mcpCallResponse{Result: result})
 }
 
 // mcpConnectedAuthResponse recognizes only Engine-owned typed failures and leaves every other error unchanged.
@@ -535,228 +397,6 @@ func mcpAuthSessionUnavailableResponse(code, providerExecution string) (int, mcp
 		Code:  code, RecoveryAction: "do_not_replay", ExecuteRequest: "do_not_replay",
 		ProviderExecution: providerExecution, AutomaticReplay: &automaticReplay,
 	}
-}
-
-// firstMCPUnifiedAuthRequirement chooses one deterministic remediation and reports whether sibling work may have run.
-func firstMCPUnifiedAuthRequirement(response *enginev1.ExecuteUnifiedResponse) (*mcpConnectedAuthRequirement, string) {
-	// A missing response cannot carry trusted target remediation.
-	if response == nil {
-		return nil, "not_started"
-	}
-	selected, providerMayHaveRun := firstMCPUnifiedForwardAuthRequirement(response.GetResults())
-	rollbackRequirement := firstMCPUnifiedRollbackAuthRequirement(response.GetRollbackResults())
-	// Forward response order remains authoritative before compensation order when both need different grants.
-	if selected == nil {
-		selected = rollbackRequirement
-	}
-	// Output production or failure proves the coordinator advanced beyond a solely auth-blocked graph.
-	if len(response.GetOutputJson()) != 0 || response.GetOutputErrorCode() != "" {
-		providerMayHaveRun = true
-	}
-	// Rollback activity proves the coordinator entered provider-capable work even if no forward result succeeded.
-	if len(response.GetRollbackResults()) != 0 {
-		providerMayHaveRun = true
-	}
-	// Only a graph composed entirely of auth-blocked and skipped forward work is safe to retry automatically.
-	if providerMayHaveRun {
-		return selected, "unknown"
-	}
-	return selected, "not_started"
-}
-
-// firstMCPUnifiedForwardAuthRequirement selects one forward action and proves whether a sibling may have dispatched.
-func firstMCPUnifiedForwardAuthRequirement(results []*enginev1.UnifiedTargetResult) (*mcpConnectedAuthRequirement, bool) {
-	var selected *mcpConnectedAuthRequirement
-	providerMayHaveRun := false
-	for _, result := range results {
-		var requirement *mcpConnectedAuthRequirement
-		// Only an error result can consistently carry a pre-provider connected-auth action.
-		if result.GetStatus() == "error" {
-			requirement = mcpConnectedAuthRequirementFromUnified(result.GetErrorCode(), result.GetAuthAction())
-		}
-		// Connected-auth errors are proven pre-provider and do not alone make graph replay uncertain.
-		if requirement != nil {
-			// Response order makes the first complete remediation deterministic for the client.
-			if selected == nil {
-				selected = requirement
-			}
-			continue
-		}
-		// Success and unclassified errors may both follow provider dispatch; skipped work is the sole safe sibling state.
-		if result.GetStatus() != "skipped" {
-			providerMayHaveRun = true
-		}
-	}
-	return selected, providerMayHaveRun
-}
-
-// firstMCPUnifiedRollbackAuthRequirement surfaces one compensation-time connection action in scheduler order.
-func firstMCPUnifiedRollbackAuthRequirement(results []*enginev1.UnifiedRollbackResult) *mcpConnectedAuthRequirement {
-	for _, result := range results {
-		// Only a failed rollback can consistently carry actionable connected-auth metadata.
-		if result.GetStatus() != "error" {
-			continue
-		}
-		requirement := mcpConnectedAuthRequirementFromUnified(result.GetErrorCode(), result.GetAuthAction())
-		// The first complete action is deterministic and sufficient for one browser handoff.
-		if requirement != nil {
-			return requirement
-		}
-	}
-	return nil
-}
-
-// mcpConnectedAuthRequirementFromUnified validates the closed action vocabulary before starting consent.
-func mcpConnectedAuthRequirementFromUnified(code string, action *enginev1.UnifiedAuthAction) *mcpConnectedAuthRequirement {
-	// Only the two connected-auth states may initiate browser consent.
-	if action == nil || (code != "connection_required" && code != "reconnect_required") {
-		return nil
-	}
-	requirement := &mcpConnectedAuthRequirement{Code: code, Action: action.GetAction(), BucketID: action.GetBucketId(), ServiceID: action.GetServiceId(), EndUserRef: action.GetEndUserRef()}
-	// Unified diagnostics must agree across code, action, and exact routing identities before starting consent.
-	if !validMCPConnectedAuthRequirement(*requirement) {
-		return nil
-	}
-	return requirement
-}
-
-// decodeMCPUnifiedInvocation preserves exact input JSON and supplies the same
-// per-logical-call UUID default generated SDKs use when the caller omits a key.
-func decodeMCPUnifiedInvocation(raw json.RawMessage) (mcpUnifiedInvocation, error) {
-	var invocation mcpUnifiedInvocation
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&invocation); err != nil {
-		return invocation, err
-	}
-	// Exactly one document prevents ignored suffixes from escaping the audited request identity.
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return invocation, fmt.Errorf("Unified invocation must contain one JSON document")
-	}
-	// Only absence defaults like the SDK; present whitespace must fail canonical
-	// validation instead of being rewritten into a different request identity.
-	if invocation.IdempotencyKey == "" {
-		invocation.IdempotencyKey = uuid.NewString()
-	}
-	return invocation, nil
-}
-
-// boundedMCPUnifiedError maps only gRPC classes to stable public failures and
-// deliberately excludes raw errors, operation names, selectors, and values.
-func boundedMCPUnifiedError(err error) (int, string) {
-	// Engine status class is enough for client recovery without exposing internals.
-	switch status.Code(err) {
-	case codes.InvalidArgument:
-		return http.StatusBadRequest, "unified_request_invalid"
-	case codes.Unauthenticated, codes.PermissionDenied:
-		return http.StatusForbidden, "unified_execution_denied"
-	case codes.ResourceExhausted:
-		return http.StatusTooManyRequests, "unified_execution_limited"
-	case codes.DeadlineExceeded, codes.Canceled:
-		return http.StatusGatewayTimeout, "unified_execution_timeout"
-	case codes.FailedPrecondition, codes.Unavailable:
-		return http.StatusServiceUnavailable, "unified_execution_unavailable"
-	default:
-		return http.StatusBadGateway, "unified_execution_failed"
-	}
-}
-
-// projectMCPUnifiedResponse returns configured output verbatim or the same
-// camelCase all-settled fallback generated SDKs expose.
-func projectMCPUnifiedResponse(descriptor *models.SDKUnifiedOperationDescriptor, response *enginev1.ExecuteUnifiedResponse) (json.RawMessage, int, string) {
-	// A missing coordinator response is an Engine failure, never a successful null result.
-	if response == nil {
-		return nil, http.StatusBadGateway, "unified_execution_failed"
-	}
-	// Output mapping errors are Engine-owned bounded codes already validated by the executor.
-	if response.OutputErrorCode != "" {
-		return nil, http.StatusUnprocessableEntity, response.OutputErrorCode
-	}
-	outputConfigured := descriptor != nil && len(descriptor.OutputSchema) != 0
-	// A configured output is authoritative and may never silently fall back to target data.
-	if outputConfigured {
-		if len(response.OutputJson) == 0 {
-			return nil, http.StatusUnprocessableEntity, "output_unavailable"
-		}
-		return json.RawMessage(response.OutputJson), 0, ""
-	}
-	results := make([]mcpUnifiedResult, 0, len(response.Results))
-	for _, item := range response.Results {
-		results = append(results, projectMCPUnifiedResult(item))
-	}
-	rollbacks := make([]mcpUnifiedRollback, 0, len(response.RollbackResults))
-	for _, item := range response.RollbackResults {
-		rollbacks = append(rollbacks, projectMCPUnifiedRollback(item))
-	}
-	encoded, err := json.Marshal(struct {
-		Results   []mcpUnifiedResult   `json:"results"`
-		Rollbacks []mcpUnifiedRollback `json:"rollbacks"`
-	}{Results: results, Rollbacks: rollbacks})
-	// Projection has no cyclic values; failure is still bounded defensively.
-	if err != nil {
-		return nil, http.StatusBadGateway, "unified_projection_failed"
-	}
-	return encoded, 0, ""
-}
-
-// projectMCPUnifiedResult mirrors generated SDK normalization so malformed
-// internal statuses and absent bounded codes cannot widen the public contract.
-func projectMCPUnifiedResult(item *enginev1.UnifiedTargetResult) mcpUnifiedResult {
-	result := mcpUnifiedResult{Target: item.GetTarget(), Status: "error", Data: json.RawMessage("null"), ErrorCode: optionalMCPString("execution_failed")}
-	// Success alone may expose data; all other states redact provider output.
-	if item.GetStatus() == "success" {
-		result.Status, result.ErrorCode = "success", nil
-		// Empty successful provider bodies become JSON null in every generated SDK.
-		if len(item.GetDataJson()) != 0 {
-			result.Data = json.RawMessage(item.GetDataJson())
-		}
-		return result
-	}
-	// Skipped targets use the SDK fallback and never present a recovery action.
-	if item.GetStatus() == "skipped" {
-		result.Status, result.ErrorCode = "skipped", optionalMCPString(defaultMCPCode(item.GetErrorCode(), "dependency_failed"))
-		return result
-	}
-	result.ErrorCode = optionalMCPString(defaultMCPCode(item.GetErrorCode(), "execution_failed"))
-	result.AuthAction = publicMCPAuthAction(item.GetAuthAction())
-	return result
-}
-
-// projectMCPUnifiedRollback mirrors the SDK's two-state compensation result.
-func projectMCPUnifiedRollback(item *enginev1.UnifiedRollbackResult) mcpUnifiedRollback {
-	result := mcpUnifiedRollback{Target: item.GetTarget(), Status: "error", ErrorCode: optionalMCPString(defaultMCPCode(item.GetErrorCode(), "rollback_failed")), TriggeredBy: append([]string{}, item.GetTriggeredBy()...), AuthAction: publicMCPAuthAction(item.GetAuthAction())}
-	// Successful compensation cannot carry a failure code or recovery action.
-	if item.GetStatus() == "success" {
-		result.Status, result.ErrorCode, result.AuthAction = "success", nil, nil
-	}
-	return result
-}
-
-// defaultMCPCode supplies the same bounded fallback used by generated SDKs.
-func defaultMCPCode(value, fallback string) string {
-	// Engine-provided bounded codes remain authoritative when present.
-	if value != "" {
-		return value
-	}
-	return fallback
-}
-
-// publicMCPAuthAction projects non-secret routing recovery fields with SDK camelCase names.
-func publicMCPAuthAction(action *enginev1.UnifiedAuthAction) *mcpUnifiedAuthAction {
-	// Absent or non-actionable guidance must remain JSON null, matching generated SDK fallbacks.
-	if action == nil || action.GetAction() == "" {
-		return nil
-	}
-	return &mcpUnifiedAuthAction{Action: action.Action, BucketID: action.BucketId, ServiceID: action.ServiceId, EndUserRef: action.EndUserRef, ConnectionID: action.ConnectionId, Reason: action.Reason}
-}
-
-// optionalMCPString preserves the SDK's null-vs-bounded-error-code distinction.
-func optionalMCPString(value string) *string {
-	// Successful targets and rollbacks do not manufacture an error code.
-	if value == "" {
-		return nil
-	}
-	return &value
 }
 
 // resolveSessionFixtureOperation requires the app-derived session

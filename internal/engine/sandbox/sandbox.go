@@ -101,7 +101,6 @@ var globalMCPRouteResolver MCPRouteResolver
 var globalMCPEventRuntimeStore MCPEventRuntimeStore
 var globalMCPEventConfigStore MCPEventConfigStore
 var globalSecretResolver SecretResolver
-var globalMCPUnifiedExecute MCPUnifiedExecuteFunc
 var globalMCPConnectSessionStart MCPConnectSessionStartFunc
 
 // MCPRouteResolver maps a stable MCP family URL to one immutable runtime at
@@ -119,10 +118,6 @@ type MCPEventRuntimeStore interface {
 type MCPEventConfigStore interface {
 	GetConfigState(context.Context, string) (*store.ConfigState, error)
 }
-
-// MCPUnifiedExecuteFunc is the existing Engine ExecuteUnified method value;
-// injecting it avoids a second graph executor and keeps the package boundary acyclic.
-type MCPUnifiedExecuteFunc func(context.Context, *enginev1.ExecuteUnifiedRequest) (*enginev1.ExecuteUnifiedResponse, error)
 
 // MCPConnectSessionStartFunc reuses the authenticated Engine connect-session
 // mutation without introducing a second MCP-specific OAuth implementation.
@@ -181,8 +176,8 @@ const maxPhysicalOperationWaiters = 64
 // ErrPhysicalOperationQueueFull bounds memory held by stalled provider calls.
 var ErrPhysicalOperationQueueFull = errors.New("physical operation queue is full")
 
-// ErrExecutionAppPhysicalQueueFull preserves the Execution App error identity for existing callers.
-var ErrExecutionAppPhysicalQueueFull = ErrPhysicalOperationQueueFull
+// ErrUnifiedAppPhysicalQueueFull preserves the Unified App error identity for existing callers.
+var ErrUnifiedAppPhysicalQueueFull = ErrPhysicalOperationQueueFull
 
 // trackExecutionStart increments the per-account active execution count and
 // returns the new count plus a decrement function to call when execution ends.
@@ -245,9 +240,9 @@ func releaseExecutionSlot(key string, counter *executionCounter) {
 	}
 }
 
-// WithExecutionAppPhysicalQueue lets an admitted Execution App wait for
+// WithUnifiedAppPhysicalQueue lets an admitted Unified App wait for
 // provider capacity using the shared bounded account queue.
-func WithExecutionAppPhysicalQueue(ctx context.Context) context.Context {
+func WithUnifiedAppPhysicalQueue(ctx context.Context) context.Context {
 	return withPhysicalOperationQueue(ctx)
 }
 
@@ -345,7 +340,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 // InitSandbox wires the process-owned physical, event, and logical execution edges used by SDK and MCP transports.
-func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, routeResolver MCPRouteResolver, eventRuntimeStore MCPEventRuntimeStore, eventConfigStore MCPEventConfigStore, resolver SecretResolver, rateLimits store.ProviderRateLimitStore, enginePort string, unifiedExecute MCPUnifiedExecuteFunc, connectSessionStart MCPConnectSessionStartFunc) {
+func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, routeResolver MCPRouteResolver, eventRuntimeStore MCPEventRuntimeStore, eventConfigStore MCPEventConfigStore, resolver SecretResolver, rateLimits store.ProviderRateLimitStore, enginePort string, connectSessionStart MCPConnectSessionStartFunc) {
 	cfg = appCfg
 	globalNATSClient = nc
 	globalObjectCache = cache
@@ -360,7 +355,6 @@ func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, 
 	globalMCPEventConfigStore = eventConfigStore
 	SetSecretResolver(resolver)
 	globalEnginePort = enginePort
-	globalMCPUnifiedExecute = unifiedExecute
 	globalMCPConnectSessionStart = connectSessionStart
 
 	// Initialise rate limiters from config.

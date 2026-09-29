@@ -1,3 +1,4 @@
+import { Select } from "../forms/Select.ts";
 import { useState } from "react";
 import { Search, Loader2 } from "lucide-react";
 import { api } from "~/lib/api";
@@ -34,12 +35,12 @@ export function WorkflowAppDestination({ appID, onSelect, disabled }: { appID: s
         </button>
       </div>
       <label className="block text-xs text-slate-500">Destination
-        <select aria-label="Destination" value={appID} disabled={disabled || busy} onChange={(event) => onSelect(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 p-2 text-sm text-slate-700">
+        <Select aria-label="Destination" value={appID} disabled={disabled || busy} onChange={(event) => onSelect(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 p-2 text-sm text-slate-700">
           <option value="">Create a new app</option>
           {/* A deep-linked source remains selectable before the optional search has run. */}
           {appID && !items.some((item) => item.latest_version_id === appID) && <option value={appID}>Current app</option>}
           {items.map((item) => <option key={item.latest_version_id} value={item.latest_version_id}>{item.name} · {item.kind} · {item.latest_version}</option>)}
-        </select>
+        </Select>
       </label>
       {/* A failed lookup never changes the app selected in the URL. */}
       {error && <p role="alert" className="text-sm text-red-700">{error}</p>}

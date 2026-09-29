@@ -72,9 +72,9 @@ var dynamicControlRequirements = map[string]dynamicRequirementKind{
 	http.MethodPatch + " /config/plans/{plan_id}/actions":   dynamicConfigPlanAction,
 	http.MethodPost + " /sdk-config/plan":                   dynamicDesiredConfigPlan,
 	http.MethodPost + " /sdk-config/apply":                  dynamicDesiredConfigApply,
-	// Execution Apps share app lifecycle while retaining their own creation authority.
-	http.MethodPost + " /execution-config/plan":              dynamicDesiredConfigPlan,
-	http.MethodPost + " /execution-config/apply":             dynamicDesiredConfigApply,
+	// Unified Apps share app lifecycle while retaining their own creation authority.
+	http.MethodPost + " /unified-app-config/plan":            dynamicDesiredConfigPlan,
+	http.MethodPost + " /unified-app-config/apply":           dynamicDesiredConfigApply,
 	http.MethodGet + " /sdk-config/generation/{app_id}":      dynamicAppAccess,
 	http.MethodPost + " /mcp-config/plan":                    dynamicDesiredConfigPlan,
 	http.MethodPost + " /mcp-config/apply":                   dynamicDesiredConfigApply,
@@ -84,7 +84,10 @@ var dynamicControlRequirements = map[string]dynamicRequirementKind{
 	http.MethodPost + " /integrations/{service_id}/generate": dynamicSDKGenerate,
 	http.MethodPost + " /apps/{app_id}/deprecate":            dynamicAppAccess,
 	// A bundle changes hosted behavior and therefore requires the exact family's manage permission.
-	http.MethodPost + " /apps/{app_id}/bundle":      dynamicAppAccess,
+	http.MethodPost + " /apps/{app_id}/bundle": dynamicAppAccess,
+	// Traffic discovery and promotion use the same family boundary and durable control audit.
+	http.MethodGet + " /apps/{app_id}/traffic":      dynamicAppAccess,
+	http.MethodPost + " /apps/{app_id}/promote":     dynamicAppAccess,
 	http.MethodPost + " /apps/{app_id}/undeprecate": dynamicAppAccess,
 	http.MethodDelete + " /apps/{app_id}/":          dynamicAppAccess,
 	http.MethodGet + " /apps/{app_id}/openapi":      dynamicAppAccess,
@@ -184,12 +187,15 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodPatch, "/config/plans/{plan_id}/actions", false, nil},
 	{http.MethodPost, "/sdk-config/plan", false, nil},
 	{http.MethodPost, "/sdk-config/apply", false, nil},
-	{http.MethodPost, "/execution-config/plan", false, nil},
-	{http.MethodPost, "/execution-config/apply", false, nil},
+	{http.MethodPost, "/unified-app-config/plan", false, nil},
+	{http.MethodPost, "/unified-app-config/apply", false, nil},
 	{http.MethodGet, "/sdk-config/generation/{app_id}", false, nil},
 	{http.MethodPost, "/apps/{app_id}/deprecate", false, nil},
 	// The dynamic resolver maps this exact version to its family and concrete SDK/API manage grant.
 	{http.MethodPost, "/apps/{app_id}/bundle", false, nil},
+	// Explicitly admit these routes to authorization and mutation auditing.
+	{http.MethodGet, "/apps/{app_id}/traffic", false, nil},
+	{http.MethodPost, "/apps/{app_id}/promote", false, nil},
 	{http.MethodPost, "/apps/{app_id}/undeprecate", false, nil},
 	{http.MethodDelete, "/apps/{app_id}/", false, nil},
 	// Family deletion uses the stable family ID directly, so policy resolution needs no version lookup.
@@ -604,7 +610,7 @@ func requiresSensitiveReadAudit(requirements []accesscontrol.Requirement) bool {
 			accesscontrol.PermissionCredentialsMetadataRead,
 			accesscontrol.PermissionAppTokensManage,
 			accesscontrol.PermissionAppSDKTokensManage,
-			accesscontrol.PermissionAppExecutionTokensManage,
+			accesscontrol.PermissionAppUnifiedAppTokensManage,
 			accesscontrol.PermissionAppMCPTokensManage,
 			accesscontrol.PermissionAppAPITokensManage,
 			accesscontrol.PermissionConnectionRead,

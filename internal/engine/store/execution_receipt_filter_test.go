@@ -142,3 +142,25 @@ func assertUnifiedProviderAnalytics(t *testing.T, fixture executionActivityFixtu
 		t.Fatal("service activity did not retain physical child")
 	}
 }
+
+// TestHostedAppAnalyticsCountsPreProviderFailures counts one logical invocation without inflating provider usage.
+func TestHostedAppAnalyticsCountsPreProviderFailures(t *testing.T) {
+	fixture := newExecutionActivityFixture(t)
+	teamID := seedAppOwnerTeam(t, fixture.ctx, fixture.pool)
+	seedExecutionQuotaFamily(t, fixture.ctx, fixture.pool, fixture.event.AccountID, teamID, fixture.event.AppFamilyID, fixture.event.AppID)
+	parent, child := unifiedReceiptStoreEvents(fixture.event)
+	failed := parent
+	failed.ID = uuid.New()
+	failed.Status = "failed"
+	failed.FailureCode = "input_validation_failed"
+	failed.UnifiedSteps = nil
+	// The successful run performs one provider call, while input rejection performs none.
+	if err := fixture.repository.BatchCreateEngineExecutionEvents(fixture.ctx, []models.EngineExecutionEvent{parent, child, failed}); err != nil {
+		t.Fatal(err)
+	}
+	analytics, err := fixture.repository.GetEngineExecutionAnalyticsByApp(fixture.ctx, EngineExecutionFilter{AccountID: parent.AccountID, AppFamilyID: parent.AppFamilyID, AppID: parent.AppID})
+	// Both authored runs appear once, but service analytics still count only the actual call.
+	if err != nil || analytics.TotalCalls != 2 || analytics.FailedCalls != 1 || len(analytics.ByService) != 1 || analytics.ByService[0].TotalCalls != 1 {
+		t.Fatalf("incorrect logical/provider totals: %#v %v", analytics, err)
+	}
+}

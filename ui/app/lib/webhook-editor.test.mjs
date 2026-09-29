@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import ts from "typescript";
 import { createElement } from "react";
+import { Select } from "../components/forms/Select.ts";
 import { renderToStaticMarkup } from "react-dom/server";
 import * as draftContract from "./webhook-editor-draft.ts";
 import * as importContract from "./webhook-editor-import.ts";
@@ -19,7 +20,13 @@ function loadModule(path, modules) {
   const source = readFileSync(new URL(path, import.meta.url), "utf8");
   const output = ts.transpileModule(source, { fileName: path, compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const module = { exports: {} };
-  const dependency = (name) => modules[name] ?? require(name);
+  // Resolve the real shared control; fixture substitutions remain limited to page IO and hooks.
+  const dependency = (name) => {
+    // Transpiled component imports resolve from their source directory, not this test directory.
+    if (name === "../forms/Select.ts") return { Select };
+    // Existing fixtures take precedence over installed dependencies.
+    return modules[name] ?? require(name);
+  };
   new Function("require", "module", "exports", output)(dependency, module, module.exports);
   return module.exports;
 }
@@ -191,6 +198,8 @@ function eventFormControls(element) {
   // Arrays and function components are expanded exactly far enough to reach their host controls.
   if (Array.isArray(element)) return element.flatMap(eventFormControls);
   if (typeof element.type === "function") return eventFormControls(element.type(element.props));
+  // Expand the shared ref-forwarding component to test its actual native change handler.
+  if (element.type === Select) return eventFormControls(Select.render(element.props, null));
   return [element, ...eventFormControls(element.props?.children)];
 }
 

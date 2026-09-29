@@ -15,49 +15,49 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-type executionAppSource struct {
+type unifiedAppSource struct {
 	scope    *store.AppRuntime
 	identity auth.RuntimeIdentity
 	appID    uuid.UUID
 	result   *store.ExecutionResult
 }
 
-// loadExecutionAppSource enforces the same app token and read handle for rerun and replay.
-func (s *EngineGRPCServer) loadExecutionAppSource(ctx context.Context, request *http.Request) (executionAppSource, *restExecutionError) {
+// loadUnifiedAppSource enforces the same app token and read handle for rerun and replay.
+func (s *EngineGRPCServer) loadUnifiedAppSource(ctx context.Context, request *http.Request) (unifiedAppSource, *restExecutionError) {
 	appID, requestErr := parseRESTAppID(chi.URLParam(request, "app_id"))
 	if requestErr != nil {
-		return executionAppSource{}, requestErr
+		return unifiedAppSource{}, requestErr
 	}
 	scope, identity, requestErr := s.authenticateRESTApp(request.WithContext(ctx), appID)
 	if requestErr != nil {
-		return executionAppSource{}, requestErr
+		return unifiedAppSource{}, requestErr
 	}
-	// Rerun and replay belong to authored Execution Apps, never ordinary SDK raw results.
-	if scope.Kind != store.AppKindExecution {
-		return executionAppSource{}, newRESTExecutionError(http.StatusForbidden, "app_scope_unavailable", "Execution App scope is unavailable")
+	// Rerun and replay belong to authored Unified Apps, never ordinary SDK raw results.
+	if scope.Kind != store.AppKindUnifiedApp {
+		return unifiedAppSource{}, newRESTExecutionError(http.StatusForbidden, "app_scope_unavailable", "Unified App scope is unavailable")
 	}
 	// A retained source is readable after promotion, but replay and rerun create new traffic.
-	if requestErr := s.admitExecutionAppTraffic(ctx, appID); requestErr != nil {
-		return executionAppSource{}, requestErr
+	if requestErr := s.admitUnifiedAppTraffic(ctx, appID); requestErr != nil {
+		return unifiedAppSource{}, requestErr
 	}
 	sourceID, err := uuid.Parse(chi.URLParam(request, "execution_id"))
 	// A malformed source cannot select another app's retained input or replay evidence.
 	if err != nil || sourceID == uuid.Nil {
-		return executionAppSource{}, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "execution_id must be a UUID")
+		return unifiedAppSource{}, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "execution_id must be a UUID")
 	}
 	result, requestErr := s.authorizedExecutionResult(ctx, request, identity.AccountID, appID, sourceID)
 	if requestErr != nil {
-		return executionAppSource{}, requestErr
+		return unifiedAppSource{}, requestErr
 	}
-	return executionAppSource{scope: scope, identity: identity, appID: appID, result: result}, nil
+	return unifiedAppSource{scope: scope, identity: identity, appID: appID, result: result}, nil
 }
 
 // handleCapabilityRerun starts a new live execution from retained input only after explicit caller authorization.
 func (s *EngineGRPCServer) handleCapabilityRerun(writer http.ResponseWriter, request *http.Request) {
-	ctx, span := otel.Tracer("engine").Start(request.Context(), "engine.execution_app.rerun")
+	ctx, span := otel.Tracer("engine").Start(request.Context(), "engine.unified_app.rerun")
 	defer span.End()
 	span.SetAttributes(attribute.String("execution.trigger", "caller"), attribute.String("execution.mode", "rerun"))
-	source, requestErr := s.loadExecutionAppSource(ctx, request)
+	source, requestErr := s.loadUnifiedAppSource(ctx, request)
 	if requestErr != nil {
 		writeCapabilityError(writer, span, requestErr)
 		return
@@ -72,10 +72,10 @@ func (s *EngineGRPCServer) handleCapabilityRerun(writer http.ResponseWriter, req
 		writeCapabilityError(writer, span, requestErr)
 		return
 	}
-	bundle, manifest, found, requestErr := s.findExecutionAppBundle(ctx, source.appID)
+	bundle, manifest, found, requestErr := s.findUnifiedAppBundle(ctx, source.appID)
 	// Rerun requires the same exact-version authored bundle that created the source.
 	if !found && requestErr == nil {
-		requestErr = newRESTExecutionError(http.StatusNotFound, "bundle_not_found", "execution app bundle is unavailable")
+		requestErr = newRESTExecutionError(http.StatusNotFound, "bundle_not_found", "unified app bundle is unavailable")
 	}
 	if requestErr != nil {
 		writeCapabilityError(writer, span, requestErr)

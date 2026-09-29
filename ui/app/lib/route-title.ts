@@ -5,8 +5,8 @@ const TITLES: Record<string, string> = {
   "/terms-of-service": "Terms of Service - Fused",
   "/integrations": "Services - Fused",
   "/integrations/sdks": "Apps - Fused",
-  "/integrations/workflows": "Workflows - Fused",
-  "/integrations/workflows/install": "Add workflows - Fused",
+  "/integrations/unified-apps/templates": "Unified App templates - Fused",
+  "/integrations/unified-apps/new": "Create Unified App - Fused",
   "/integrations/mcp": "Apps - Fused",
   "/integrations/access/people": "People - Fused",
   "/integrations/access/teams": "Teams - Fused",
@@ -24,7 +24,7 @@ function builderTitle(search: string): string {
   if (mode === "api") return "Create REST API - Fused";
   // SDK is explicit too; an absent or invalid choice remains the neutral chooser.
   if (mode === "sdk") return "Create SDK - Fused";
-  return "Create app - Fused";
+  return "Create App - Fused";
 }
 
 /** Resolves a concise browser title for every primary Engine UI route. */
@@ -34,8 +34,8 @@ export function routeTitle(pathname: string, search = ""): string {
     return builderTitle(search);
   }
   if (TITLES[normalizedPath]) return TITLES[normalizedPath];
-  // Workflow detail pages are Engine-owned catalogue pages.
-  if (normalizedPath.startsWith("/integrations/workflows/")) return "Workflow details - Fused";
+  // Hosted app details use their own product title.
+  if (normalizedPath.startsWith("/integrations/unified-apps/")) return "Unified App details - Fused";
   if (/^\/integrations\/mcp\/[^/]+\/analytics$/.test(normalizedPath)) {
     return "MCP server activity - Fused";
   }

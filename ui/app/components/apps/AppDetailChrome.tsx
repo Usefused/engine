@@ -109,12 +109,12 @@ export function AppVersionSwitcher({ label, versions, currentId, onSelect }: App
   );
 }
 
-/** Renders the common primary app-detail tab treatment from adapter-owned tab choices. */
+/** Keeps primary detail tabs touch-friendly on phones while retaining the compact desktop treatment. */
 export function AppDetailTabs<T extends string>({ label, active, tabs, onChange }: AppDetailTabsProps<T>) {
   return (
     <nav aria-label={label} className="flex max-w-full overflow-x-auto whitespace-nowrap rounded-lg bg-slate-100/80 p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {tabs.map((tab) => (
-        <button key={tab.value} type="button" onClick={() => onChange(tab.value)} className={`shrink-0 cursor-pointer rounded-md px-4 py-1.5 text-sm font-medium transition-all ${tab.value === active ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
+        <button key={tab.value} type="button" onClick={() => onChange(tab.value)} className={`shrink-0 cursor-pointer rounded-md px-3 py-3 text-sm font-medium transition-all sm:px-4 sm:py-1.5 ${tab.value === active ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
           {tab.label}
         </button>
       ))}

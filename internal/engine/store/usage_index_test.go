@@ -101,14 +101,14 @@ func TestWorkspaceSDKServiceImpacts_BatchPath_SortedDedupedConfigKeys(t *testing
 // TestWorkspaceServiceImpactsIncludesExecution keeps service removal aware of hosted execute provider scope.
 func TestWorkspaceServiceImpactsIncludesExecution(t *testing.T) {
 	serviceID, versionID, appID := uuid.New(), uuid.New(), uuid.New()
-	configStore := &usageIndexMockConfigStore{states: []ConfigState{{ConfigKey: "execution:greeting:1.0.0", ConfigType: ConfigTypeExecution, LatestResourceID: &appID}}}
+	configStore := &usageIndexMockConfigStore{states: []ConfigState{{ConfigKey: "unified_app:greeting:1.0.0", ConfigType: ConfigTypeUnifiedApp, LatestResourceID: &appID}}}
 	batchStore := &usageIndexMockBatchStore{scopes: map[uuid.UUID]*AppRuntime{appID: {
 		AppID: appID, Selections: selectionsJSON(t, []models.SDKSelection{{ServiceID: serviceID, ServiceVersionID: versionID}}),
 	}}}
 	impacts, err := WorkspaceSDKServiceImpacts(context.Background(), configStore, batchStore)
 	// Deactivating a provider must include the exact hosted App config that still selects it.
-	if err != nil || len(impacts[serviceID][versionID]) != 1 || impacts[serviceID][versionID][0] != "execution:greeting:1.0.0" {
-		t.Fatalf("Execution App impact = %#v, error = %v", impacts, err)
+	if err != nil || len(impacts[serviceID][versionID]) != 1 || impacts[serviceID][versionID][0] != "unified_app:greeting:1.0.0" {
+		t.Fatalf("Unified App impact = %#v, error = %v", impacts, err)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 )
 
 type processHost struct {
+	phases    []PhaseTiming
 	ctx       context.Context
 	writer    *frameWriter
 	requestID uint64
@@ -158,10 +159,11 @@ func (worker *loadedWorker) start(frame Frame) error {
 // execute gives each request new JavaScript globals while reusing the confined process.
 func (worker *loadedWorker) execute(ctx context.Context, frame Frame, host *processHost) {
 	output, err := RunInProcessWithDeterminism(ctx, worker.bundle, frame.Input, host, frame.Determinism)
-	result := Frame{Kind: "done", RequestID: frame.RequestID, Value: output}
-	// Authored errors do not expose source or private values across the IPC boundary.
+	result := Frame{Kind: "done", RequestID: frame.RequestID, Value: output, Phases: host.phases}
+	// Trusted IPC separates encrypted diagnostics from safe public errors.
 	if err != nil {
-		result.Error = err.Error()
+		result.Error = "capability execution failed"
+		result.Diagnostic = PrivateDiagnostic(err)
 	}
 	worker.mutex.Lock()
 	request := worker.active[frame.RequestID]
@@ -214,6 +216,7 @@ func executeCapabilityWorkerRequest(ctx context.Context, scanner interface {
 	Bytes() []byte
 }, writer *frameWriter, request Frame) int {
 	var output json.RawMessage
+	var phases []PhaseTiming
 	var err error
 	// Inspect has no host IPC, so declarations cannot use provider or database operations.
 	switch request.Kind {
@@ -223,14 +226,16 @@ func executeCapabilityWorkerRequest(ctx context.Context, scanner interface {
 		host := &processHost{ctx: ctx, writer: writer, pending: make(map[uint64]chan Frame)}
 		go host.readReplies(scanner)
 		output, err = RunInProcessWithDeterminism(ctx, request.Bundle, request.Input, host, request.Determinism)
+		phases = host.phases
 	default:
 		// The worker accepts only the two parent-declared evaluation modes.
 		return 1
 	}
-	result := Frame{Kind: "done", Value: output}
-	// Public errors remain generic because authored exceptions can include private input.
+	result := Frame{Kind: "done", Value: output, Phases: phases}
+	// Private details travel only in the separate diagnostic field for encrypted retention.
 	if err != nil {
-		result.Error = err.Error()
+		result.Error = "capability execution failed"
+		result.Diagnostic = PrivateDiagnostic(err)
 	}
 	if writer.write(result) != nil {
 		// A result that cannot cross IPC must never be reported as a successful execution.
@@ -320,17 +325,19 @@ func (host *processHost) DBSet(ctx context.Context, data json.RawMessage) error 
 
 // Frame is the bounded JSON protocol shared with the trusted Engine parent.
 type Frame struct {
-	Kind        string          `json:"kind"`
-	RequestID   uint64          `json:"requestId,omitempty"`
-	ID          uint64          `json:"id,omitempty"`
-	Ordinal     int             `json:"ordinal,omitempty"`
-	Method      string          `json:"method,omitempty"`
-	Bundle      []byte          `json:"bundle,omitempty"`
-	Input       json.RawMessage `json:"input,omitempty"`
-	Payload     json.RawMessage `json:"payload,omitempty"`
-	Value       json.RawMessage `json:"value,omitempty"`
-	Error       string          `json:"error,omitempty"`
-	Determinism Determinism     `json:"determinism,omitempty"`
+	Phases      []PhaseTiming    `json:"phases,omitempty"`
+	Kind        string           `json:"kind"`
+	RequestID   uint64           `json:"requestId,omitempty"`
+	ID          uint64           `json:"id,omitempty"`
+	Ordinal     int              `json:"ordinal,omitempty"`
+	Method      string           `json:"method,omitempty"`
+	Bundle      []byte           `json:"bundle,omitempty"`
+	Input       json.RawMessage  `json:"input,omitempty"`
+	Payload     json.RawMessage  `json:"payload,omitempty"`
+	Value       json.RawMessage  `json:"value,omitempty"`
+	Diagnostic  *DiagnosticError `json:"diagnostic,omitempty"`
+	Error       string           `json:"error,omitempty"`
+	Determinism Determinism      `json:"determinism,omitempty"`
 }
 
 const maxFrameBytes = 5 << 20
@@ -362,4 +369,9 @@ func decodeFrame(raw []byte) (Frame, error) {
 		return frame, errors.New("capability worker protocol failed")
 	}
 	return frame, nil
+}
+
+// RecordExecutionPhases adds real timing metadata to the completion frame without exposing a new author effect.
+func (host *processHost) RecordExecutionPhases(_ context.Context, phases []PhaseTiming) {
+	host.phases = phases
 }

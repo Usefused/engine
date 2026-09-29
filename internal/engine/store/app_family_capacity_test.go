@@ -35,7 +35,7 @@ func TestGetAppFamilyQuotaUsage(t *testing.T) {
 	mcpFamilyID, otherFamilyID, directAPIFamilyID := uuid.New(), uuid.New(), uuid.New()
 	activeAppID, activeSiblingAppID, deprecatedAppID := uuid.New(), uuid.New(), uuid.New()
 	buildingAppID, mcpAppID, otherAppID, directAPIAppID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	executionFamilyID, executionAppID := uuid.New(), uuid.New()
+	executionFamilyID, unifiedAppID := uuid.New(), uuid.New()
 	familyIDs := []uuid.UUID{activeFamilyID, deprecatedFamilyID, buildingFamilyID, retainedFamilyID, mcpFamilyID, otherFamilyID, directAPIFamilyID, executionFamilyID}
 	t.Cleanup(func() {
 		// Tombstones outlive app rows, so cleanup removes history before family identity.
@@ -80,14 +80,14 @@ func TestGetAppFamilyQuotaUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed app versions: %v", err)
 	}
-	seedExecutionQuotaFamily(t, ctx, pool, accountID, teamID, executionFamilyID, executionAppID)
+	seedExecutionQuotaFamily(t, ctx, pool, accountID, teamID, executionFamilyID, unifiedAppID)
 
 	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, AppKindSDK.String(), "active-sdk", 2, true)
 	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, "api", "direct-api", 1, true)
-	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, AppKindExecution.String(), "authored-execute", 1, true)
+	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, AppKindUnifiedApp.String(), "authored-execute", 1, true)
 	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, AppKindSDK.String(), "retained-sdk", 2, false)
 	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, AppKindMCP.String(), "active-mcp", 1, true)
-	// An unfiltered projection includes SDK, API, MCP, and the separate Execution App family.
+	// An unfiltered projection includes SDK, API, MCP, and the separate Unified App family.
 	assertAppFamilyQuotaUsage(t, ctx, repository, accountID, "", "active-mcp", 5, true)
 	assertAppFamilyQuotaUsage(t, ctx, repository, otherAccountID, AppKindSDK.String(), "other-sdk", 1, true)
 
@@ -117,12 +117,12 @@ func TestGetAppFamilyQuotaUsage(t *testing.T) {
 // seedExecutionQuotaFamily adds one ready hosted app without changing SDK or MCP fixture identities.
 func seedExecutionQuotaFamily(t *testing.T, ctx context.Context, pool *pgxpool.Pool, accountID, teamID, familyID, appID uuid.UUID) {
 	t.Helper()
-	// Execution App family capacity is independent of SDK delivery modes.
-	if _, err := pool.Exec(ctx, `INSERT INTO fused_app_families(app_family_id,account_id,kind,canonical_name,display_name,target_language,owner_team_id) VALUES ($1,$2,'execution','authored-execute','Authored Execute','typescript',$3)`, familyID, accountID, teamID); err != nil {
+	// Unified App family capacity is independent of SDK delivery modes.
+	if _, err := pool.Exec(ctx, `INSERT INTO fused_app_families(app_family_id,account_id,kind,canonical_name,display_name,target_language,owner_team_id) VALUES ($1,$2,'unified_app','authored-execute','Authored Execute','typescript',$3)`, familyID, accountID, teamID); err != nil {
 		t.Fatalf("seed execution family: %v", err)
 	}
 	// One active version makes the family countable in the unfiltered quota view.
-	if _, err := pool.Exec(ctx, `INSERT INTO fused_apps(app_id,app_family_id,account_id,version,config_key,status) VALUES ($1,$2,$3,'1.0.0','execution:authored-execute:1.0.0','active')`, appID, familyID, accountID); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO fused_apps(app_id,app_family_id,account_id,version,config_key,status) VALUES ($1,$2,$3,'1.0.0','unified_app:authored-execute:1.0.0','active')`, appID, familyID, accountID); err != nil {
 		t.Fatalf("seed execution version: %v", err)
 	}
 }

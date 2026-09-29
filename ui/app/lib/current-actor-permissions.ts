@@ -53,5 +53,5 @@ export function hasResourcePermission(
 
 /** Tests navigation or discovery access without treating one app type as every type. */
 export function hasAnyAppPermission(access: CurrentActorAccess | null, action: string): boolean {
-  return ["sdk", "mcp", "api", "webhook"].some((kind) => hasAnyPermission(access, `app.${kind}.${action}`));
+  return ["sdk", "mcp", "api", "unified_app", "webhook"].some((kind) => hasAnyPermission(access, `app.${kind}.${action}`));
 }

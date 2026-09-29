@@ -888,6 +888,19 @@ export interface UnifiedExecutionStep {
   error_code?: string;
 }
 
+export interface PrivateExecutionDiagnostics {
+  execution_id: string;
+  version: string;
+  request: unknown;
+  response?: unknown;
+  diagnostics: {
+    error?: { phase: string; message: string; stack?: string; response?: string; truncated?: boolean };
+    calls: { ordinal: number; request: string; response: string; error?: string; truncated?: boolean }[];
+    incomplete: boolean;
+    truncated: boolean;
+  };
+}
+
 export interface EngineExecutionEventEntry {
   id: string;
   execution_kind?: "physical" | "unified";
@@ -900,7 +913,7 @@ export interface EngineExecutionEventEntry {
   app_family_id?: string;
   app_id?: string;
   app_version?: string;
-  app_kind?: "sdk" | "mcp" | "webhook";
+  app_kind?: "sdk" | "mcp" | "unified_app" | "webhook";
   transport: "sdk" | "mcp" | "rest" | "webhook";
   provider_protocol?: "rest" | "graphql";
   direction: "inbound" | "outbound";
@@ -1080,7 +1093,7 @@ export interface ServiceConsumerEntry {
   id: string;
   name: string;
   version?: string;
-  kind: "sdk" | "mcp";
+  kind: "sdk" | "mcp" | "unified_app";
   active: boolean;
   service_version_id: string;
   select_all: boolean;
@@ -1348,17 +1361,23 @@ export const api = {
     }).then(unwrapGraphQLResponse),
 
   appConfig: {
+    // Private bodies require a fresh Engine permission check and never enter activity queries.
+    diagnostics: (appID: string, executionID: string) => req<PrivateExecutionDiagnostics>(`/apps/${encodeURIComponent(appID)}/executions/${encodeURIComponent(executionID)}/diagnostics`),
+    // Read the authoritative serving pointer before offering an explicit traffic switch.
+    traffic: (appID: string) => req<{ app_family_id: string; active_app_id: string }>(`/apps/${encodeURIComponent(appID)}/traffic`),
+    // Compare against the reviewed pointer so another deployment cannot be silently overwritten.
+    promote: (appID: string, expected: string) => req<{ app_family_id: string; active_app_id: string }>(`/apps/${encodeURIComponent(appID)}/promote`, { method: "POST", body: JSON.stringify({ expected_active_app_id: expected }) }),
     // Exact private source is Engine-local and requires app edit authority.
     source: <T>(appID: string) => req<T>(`/apps/${encodeURIComponent(appID)}/config`),
-    // plan validates a versioned SDK or MCP config without changing active state.
-    plan: <T>(kind: "sdk" | "mcp", input: {
+    // plan validates an immutable app config without changing active state.
+    plan: <T>(kind: "sdk" | "mcp" | "unified-app", input: {
       owner_team?: string;
       config_key: string;
       source_hash: string;
       config: Record<string, unknown>;
     }) => req<T>(`/${kind}-config/plan`, { method: "POST", body: JSON.stringify(input) }),
     // apply activates a previously validated immutable config plan.
-    apply: <T>(kind: "sdk" | "mcp", input: { plan_id: string; source_hash: string }) =>
+    apply: <T>(kind: "sdk" | "mcp" | "unified-app", input: { plan_id: string; source_hash: string }) =>
       req<T>(`/${kind}-config/apply`, { method: "POST", body: JSON.stringify(input) }),
   },
 

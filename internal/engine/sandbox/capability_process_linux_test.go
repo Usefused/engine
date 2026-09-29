@@ -13,7 +13,7 @@ import (
 
 // TestInspectCapabilityBundleInIsolatedWorker exercises a large authored bundle in the real Linux child.
 func TestInspectCapabilityBundleInIsolatedWorker(t *testing.T) {
-	const declaration = `globalThis.FusedExecutionManifest={schemaVersion:1,inputSchema:{type:"object"},outputSchema:{type:"object"},searchable:[],selectedOperations:[]};globalThis.FusedExecutionApp={input:{parse(v){return v}},output:{parse(v){return v}},execute:async()=>({})};`
+	const declaration = `globalThis.FusedExecutionManifest={schemaVersion:1,inputSchema:{type:"object"},outputSchema:{type:"object"},searchable:[],selectedOperations:[]};globalThis.FusedUnifiedApp={input:{parse(v){return v}},output:{parse(v){return v}},execute:async()=>({})};`
 	// The large bundle catches worker limits that a tiny availability probe cannot reveal.
 	bundle := []byte(declaration + strings.Repeat("/* bundled dependency padding */", 25000))
 	manifest, err := InspectCapabilityBundle(context.Background(), bundle)
@@ -36,7 +36,7 @@ func TestRunCapabilityScriptInIsolatedWorker(t *testing.T) {
 	if !IsCapabilityWorkerAvailable(context.Background()) && linuxCapabilityNamespaceDenied(t) {
 		t.Skip("Linux host policy denies worker namespaces")
 	}
-	const bundle = `globalThis.FusedExecutionApp={input:{parse(v){return v}},output:{parse(v){return v}},async execute({input}){const found=JSON.parse(await __fusedHost.fetch(JSON.stringify({input:{value:input.name}})));await __fusedHost.dbSet(JSON.stringify({id:found.id}));return {id:found.id}}};`
+	const bundle = `globalThis.FusedUnifiedApp={input:{parse(v){return v}},output:{parse(v){return v}},async execute({input}){const found=JSON.parse(await __fusedHost.fetch(JSON.stringify({input:{value:input.name}})));await __fusedHost.dbSet(JSON.stringify({id:found.id}));return {id:found.id}}};`
 	host := &capabilityScriptTestHost{}
 	output, err := RunCapabilityScript(context.Background(), []byte(bundle), json.RawMessage(`{"name":"Jane"}`), host)
 	// The isolated child must complete the same JSON-only provider and storage round trip as a live execution.

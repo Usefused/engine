@@ -7,6 +7,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/executionappvm"
 	"github.com/google/uuid"
 )
 
@@ -128,7 +129,8 @@ func executeCapabilityPhysicalValue(
 	}
 	// Validation remains inside the physical boundary so result failures produce one failed child receipt.
 	if err := executeResolvedPhysicalBoundary(ctx, dispatcher, identity, operation, request, stream, validate); err != nil {
-		return nil, err
+		// Only the privileged recording host receives provider bodies; ordinary errors remain safe.
+		return nil, &executionappvm.DiagnosticError{Phase: "provider", Message: executionappvm.BoundDiagnostic(err.Error()), Response: executionappvm.BoundDiagnostic(stream.String()), Truncated: len(stream.Bytes()) > 65536 || len(err.Error()) > 65536}
 	}
 	return result, nil
 }

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { toJsonSchemaCompat } from "@modelcontextprotocol/sdk/server/zod-json-schema-compat.js";
-import type { Fixture, FixtureOperation, FixtureUnifiedOperation, FixtureSchemaContract } from "./fixture.js";
+import type { Fixture, FixtureOperation, FixtureSchemaContract } from "./fixture.js";
 import { searchDocs, type DocumentationSection } from "./searchDocs.js";
 import { serializeBoundedJson, DOCUMENTATION_OUTPUT_POLICY } from "./outputLimits.js";
 import { SEARCH_DOCS_DEFINITION, EXECUTE_DEFINITION } from "./toolDefinitions.js";
@@ -9,7 +9,6 @@ import { SEARCH_DOCS_DEFINITION, EXECUTE_DEFINITION } from "./toolDefinitions.js
 interface Catalogue {
   classifier_operation_names?: string[];
   operations?: FixtureOperation[] | null;
-  unified_operations?: { operations: FixtureUnifiedOperation[] };
   schema_definitions?: Record<string, Record<string, FixtureSchemaContract>>;
 }
 
@@ -28,12 +27,10 @@ export function search(catalogue: Catalogue, arguments_: unknown) {
     return { content: [{ type: "text", text: "Invalid search_docs arguments" }], isError: true };
   }
   const operations = catalogue.operations ?? [];
-  const unifiedOperations = catalogue.unified_operations?.operations ?? [];
   const physical = new Map(operations.map(operation => [operation.operation_id, operation]));
-  const unified = new Map(unifiedOperations.map(operation => [operation.name, operation]));
   // Go has already validated and scoped this catalogue; these indexes carry no execution state or credentials.
-  const fixture = { operations, unifiedOperations, schemaDefinitions: catalogue.schema_definitions ?? {},
-    resolve: (id: string) => physical.get(id), resolveUnified: (id: string) => unified.get(id),
+  const fixture = { operations, schemaDefinitions: catalogue.schema_definitions ?? {},
+    resolve: (id: string) => physical.get(id),
   } as Fixture;
   const result = searchDocs(fixture, { ...args.data, section: args.data.section as DocumentationSection | undefined }, catalogue.classifier_operation_names);
   const output = serializeBoundedJson(result, DOCUMENTATION_OUTPUT_POLICY);

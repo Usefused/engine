@@ -1,4 +1,4 @@
-# Execution App compiler snapshot
+# Unified App compiler snapshot
 
 The source of truth is the Registry repository's `execution/` package at the
 Git revision in `SOURCE_REVISION`. Engine vendors the pinned package because

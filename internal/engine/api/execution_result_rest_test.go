@@ -5,7 +5,22 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/Usefused/engine/internal/engine/store"
 )
+
+// TestPublicExecutionResultKeepsSearchDataPrivate preserves stored search data without returning it in reads or search results.
+func TestPublicExecutionResultKeepsSearchDataPrivate(t *testing.T) {
+	record := &store.ExecutionResult{Output: json.RawMessage(`{"customerId":"cus_123"}`), Data: json.RawMessage(`{"customerId":"cus_123"}`)}
+	encoded, err := json.Marshal(publicExecutionResult(record))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both GET and search use this projection, so the stored document must not appear in either result shape.
+	if !strings.Contains(string(encoded), `"output":{"customerId":"cus_123"}`) || strings.Contains(string(encoded), `"data":`) || string(record.Data) != `{"customerId":"cus_123"}` {
+		t.Fatalf("public result leaked stored data or lost output: %s", encoded)
+	}
+}
 
 // TestExecutionReadHandleDigest requires one fixed-size caller-held credential.
 func TestExecutionReadHandleDigest(t *testing.T) {
@@ -24,13 +39,13 @@ func TestExecutionReadHandleDigest(t *testing.T) {
 // TestSearchablePathsUseImmutableAppDescriptor rejects a search policy outside the exact app bundle.
 func TestSearchablePathsUseImmutableAppDescriptor(t *testing.T) {
 	manifest := json.RawMessage(`{"schemaVersion":1,"inputSchema":{"type":"object"},"outputSchema":{"type":"object"},"searchable":["customer.id"],"selectedOperations":[{"service":"crm","operation":"readCustomer","serviceId":"11111111-1111-4111-8111-111111111111","serviceVersionId":"22222222-2222-4222-8222-222222222222","endpointId":"33333333-3333-4333-8333-333333333333"}]}`)
-	paths, err := searchablePathsForExecutionApp(manifest)
+	paths, err := searchablePathsForUnifiedApp(manifest)
 	if err != nil || len(paths) != 1 || paths[0] != "customer.id" {
 		t.Fatalf("expected persisted allowlist, got %v, %v", paths, err)
 	}
 	// A legacy named surface must not supply the app-level search allowlist.
 	legacy := json.RawMessage(`{"schemaVersion":1,"capabilities":[{"name":"onboard","searchable":["customer.id"]}]}`)
-	if _, err := searchablePathsForExecutionApp(legacy); err == nil {
+	if _, err := searchablePathsForUnifiedApp(legacy); err == nil {
 		t.Fatal("legacy capability manifest must fail closed")
 	}
 }

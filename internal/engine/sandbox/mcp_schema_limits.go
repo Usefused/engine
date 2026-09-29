@@ -75,16 +75,6 @@ func validateMCPFixtureSchemas(fixture *Fixture) error {
 			return err
 		}
 	}
-	// An absent logical descriptor is the canonical empty logical schema set.
-	if fixture.UnifiedOperations == nil {
-		return validateMCPSharedSchemaReferences(fixture)
-	}
-	for index := range fixture.UnifiedOperations.Operations {
-		// Unified descriptors are documentation schemas, not a separate trust boundary.
-		if err := admission.admitUnifiedOperation(&fixture.UnifiedOperations.Operations[index]); err != nil {
-			return err
-		}
-	}
 	return validateMCPSharedSchemaReferences(fixture)
 }
 
@@ -121,29 +111,6 @@ func (a *mcpSchemaAdmission) admitOperation(operation *FixtureOperation) error {
 		}
 	}
 	return a.drainEncodings()
-}
-
-// admitUnifiedOperation applies the same raw-JSON policy to the public input,
-// final output, and per-target binding result schemas.
-func (a *mcpSchemaAdmission) admitUnifiedOperation(operation *models.SDKUnifiedOperationDescriptor) error {
-	if err := a.admitRawSchema(operation.InputSchema); err != nil {
-		return err
-	}
-	// Omitted output schemas intentionally represent all-settled methods.
-	if len(operation.OutputSchema) > 0 {
-		if err := a.admitRawSchema(operation.OutputSchema); err != nil {
-			return err
-		}
-	}
-	for index := range operation.Targets {
-		// Target output contracts remain model-visible even when no final output is configured.
-		if len(operation.Targets[index].OutputSchema) > 0 {
-			if err := a.admitRawSchema(operation.Targets[index].OutputSchema); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 // admitParameter admits direct and content-based schemas without guessing

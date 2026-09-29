@@ -72,7 +72,7 @@ func archiveAppFamilyTx(ctx context.Context, tx pgx.Tx, accountID, appFamilyID u
 		SET archived_at = clock_timestamp(),
 		    archived_by_subject_id = NULLIF($2, '00000000-0000-0000-0000-000000000000'::uuid),
 		    mcp_stable_app_id = NULL,
-		    execution_active_app_id = NULL,
+		    unified_active_app_id = NULL,
 		    updated_at = clock_timestamp()
 		WHERE app_family_id = $1 AND archived_at IS NULL
 	`, appFamilyID, actor.SubjectID)

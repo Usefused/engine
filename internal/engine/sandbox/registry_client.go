@@ -289,12 +289,12 @@ type rawRuntimeEntitlement struct {
 	MaxAPIFamilies               *int   `json:"max_api_families,omitempty"`
 	MaxSDKFamilies               *int   `json:"max_sdk_families,omitempty"`
 	MaxMCPFamilies               *int   `json:"max_mcp_families,omitempty"`
-	MaxExecutionAppFamilies      *int   `json:"max_execution_app_families,omitempty"`
-	MaxExecutionAppConcurrency   *int   `json:"max_execution_app_concurrency,omitempty"`
+	MaxUnifiedAppFamilies        *int   `json:"max_unified_app_families,omitempty"`
+	MaxUnifiedAppConcurrency     *int   `json:"max_unified_app_concurrency,omitempty"`
 	MaxServices                  *int   `json:"max_services,omitempty"`
 	MaxSandboxConcurrency        *int   `json:"max_sandbox_concurrency,omitempty"`
 	DriftMonitoringEnabled       bool   `json:"drift_monitoring_enabled"`
-	ExecutionAppAlwaysOnEnabled  bool   `json:"execution_app_always_on_enabled"`
+	UnifiedAppAlwaysOnEnabled    bool   `json:"unified_app_always_on_enabled"`
 	WebhookIngestionEnabled      bool   `json:"webhook_ingestion_enabled"`
 	SSOEnabled                   bool   `json:"sso_enabled"`
 	ExecutionRetentionDays       *int   `json:"execution_retention_days,omitempty"`
@@ -450,11 +450,10 @@ type ServiceVisibility struct {
 // to add the service to a workspace.
 var ErrServiceNotFound = errors.New("service not found in registry")
 
-// VerifyServiceExists confirms a service ID is real and returns its
-// Registry-authoritative name, without pulling the full catalogue payload
+// VerifyServiceExists confirms a service ID and returns its Registry-authoritative
+// name and current version identity without pulling the full catalogue payload
 // FetchServiceMetadata does (auth configs, rate limits, every resource's
-// endpoints). Used by the Engine's "Add to Workspace" flow, which only needs
-// to know the service exists and what it's called -- not its whole definition.
+// endpoints). The Engine reuses that version identity during workspace activation.
 //
 // The API-key argument is retained at this service boundary because callers
 // also use it for local authorization. HTTPRegistryClient.do always replaces
@@ -2291,12 +2290,12 @@ func RuntimeEntitlementFromHandshake(raw *rawRuntimeEntitlement) models.RuntimeE
 	entitlement.MaxAPIFamilies = raw.MaxAPIFamilies
 	entitlement.MaxSDKFamilies = raw.MaxSDKFamilies
 	entitlement.MaxMCPFamilies = raw.MaxMCPFamilies
-	entitlement.MaxExecutionAppFamilies = raw.MaxExecutionAppFamilies
-	entitlement.MaxExecutionAppConcurrency = raw.MaxExecutionAppConcurrency
+	entitlement.MaxUnifiedAppFamilies = raw.MaxUnifiedAppFamilies
+	entitlement.MaxUnifiedAppConcurrency = raw.MaxUnifiedAppConcurrency
 	entitlement.MaxServices = raw.MaxServices
 	entitlement.MaxSandboxConcurrency = raw.MaxSandboxConcurrency
 	entitlement.DriftMonitoringEnabled = raw.DriftMonitoringEnabled
-	entitlement.ExecutionAppAlwaysOnEnabled = raw.ExecutionAppAlwaysOnEnabled
+	entitlement.UnifiedAppAlwaysOnEnabled = raw.UnifiedAppAlwaysOnEnabled
 	entitlement.WebhookIngestionEnabled = raw.WebhookIngestionEnabled
 	entitlement.SSOEnabled = raw.SSOEnabled
 	entitlement.ExecutionRetentionDays = raw.ExecutionRetentionDays

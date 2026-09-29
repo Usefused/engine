@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
+	"github.com/dop251/goja/parser"
 )
 
 // InspectInProcess evaluates declarations only inside the already-confined worker.
@@ -18,10 +19,12 @@ func InspectInProcess(ctx context.Context, bundle []byte) (json.RawMessage, erro
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	vm := goja.New()
+	// Inline-only maps apply to dynamically evaluated source as well as the immutable bundle.
+	vm.SetParserOptions(parser.WithSourceMapLoader(rejectExternalSourceMap))
 	vm.SetMaxCallStackSize(512)
 	stopInterrupt := context.AfterFunc(ctx, func() { vm.Interrupt("capability declaration timed out") })
 	defer stopInterrupt()
-	program, err := goja.Compile("fused-capability-declarations.js", string(bundle), true)
+	program, err := compileDiagnosticBundle("fused-capability-declarations.js", string(bundle))
 	// Compile errors cannot be replaced by a caller-provided manifest.
 	if err != nil {
 		return nil, errors.New("capability bundle is invalid")
@@ -30,27 +33,27 @@ func InspectInProcess(ctx context.Context, bundle []byte) (json.RawMessage, erro
 	if _, err := vm.RunProgram(program); err != nil {
 		return nil, errors.New("capability declaration evaluation failed")
 	}
-	if err := validateExecutionAppDeclaration(vm); err != nil {
+	if err := validateUnifiedAppDeclaration(vm); err != nil {
 		return nil, err
 	}
-	return readExecutionAppManifest(vm)
+	return readUnifiedAppManifest(vm)
 }
 
-// validateExecutionAppDeclaration requires the manifest to accompany one runnable typed execute export.
-func validateExecutionAppDeclaration(vm *goja.Runtime) error {
-	value, err := vm.RunString(`Boolean(globalThis.FusedExecutionApp &&
-      typeof globalThis.FusedExecutionApp.input?.parse === "function" &&
-      typeof globalThis.FusedExecutionApp.output?.parse === "function" &&
-      typeof globalThis.FusedExecutionApp.execute === "function")`)
+// validateUnifiedAppDeclaration requires the manifest to accompany one runnable typed execute export.
+func validateUnifiedAppDeclaration(vm *goja.Runtime) error {
+	value, err := vm.RunString(`Boolean(globalThis.FusedUnifiedApp &&
+      typeof globalThis.FusedUnifiedApp.input?.parse === "function" &&
+      typeof globalThis.FusedUnifiedApp.output?.parse === "function" &&
+      typeof globalThis.FusedUnifiedApp.execute === "function")`)
 	// A manifest without matching executable code cannot be attached to an app version.
 	if err != nil || !value.ToBoolean() {
-		return errors.New("execution app declaration is invalid")
+		return errors.New("unified app declaration is invalid")
 	}
 	return nil
 }
 
-// readExecutionAppManifest accepts only bounded JSON published by the evaluated bundle.
-func readExecutionAppManifest(vm *goja.Runtime) (json.RawMessage, error) {
+// readUnifiedAppManifest accepts only bounded JSON published by the evaluated bundle.
+func readUnifiedAppManifest(vm *goja.Runtime) (json.RawMessage, error) {
 	value, err := vm.RunString("JSON.stringify(globalThis.FusedExecutionManifest)")
 	// Every bundle must publish one JSON manifest derived from its actual exports.
 	if err != nil || goja.IsUndefined(value) || goja.IsNull(value) {

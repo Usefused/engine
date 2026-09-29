@@ -110,7 +110,6 @@ var appServiceSummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 
 const (
 	appOperationKindPhysical = "physical"
-	appOperationKindUnified  = "unified"
 )
 
 // mcpAppOperation is one exact callable name in an immutable MCP version.
@@ -270,7 +269,7 @@ func mcpAppOperationsGraphQLField(s store.Store) *graphql.Field {
 			return nil, errors.New("MCP server was not found")
 		}
 		catalogue, err := loadMCPAppOperationCatalogue(p.Context, s, *item)
-		// A partial physical or Unified catalogue must never be presented as the complete allowlist.
+		// A partial physical catalogue must never be presented as the complete allowlist.
 		if err != nil {
 			return nil, err
 		}
@@ -278,17 +277,12 @@ func mcpAppOperationsGraphQLField(s store.Store) *graphql.Field {
 	}}
 }
 
-// loadMCPAppOperationCatalogue composes physical selections and Unified descriptors through bounded set-based reads.
+// loadMCPAppOperationCatalogue resolves physical selections through one bounded set-based read.
 func loadMCPAppOperationCatalogue(ctx context.Context, source any, item store.AppCatalogItem) (mcpAppOperationCatalogue, error) {
 	endpointStore, ok := source.(store.ServiceContractEndpointSelectionBatchStore)
 	// Registry fallback or per-selection reads would make exact-version discovery mutable and N+1.
 	if !ok {
 		return mcpAppOperationCatalogue{}, errors.New("MCP operation catalogue is unavailable")
-	}
-	descriptorStore, ok := source.(store.MCPUnifiedDescriptorStore)
-	// Unified names must come from the integrity-checked applied plan, never reconstructed private definitions.
-	if !ok {
-		return mcpAppOperationCatalogue{}, errors.New("MCP Unified operation catalogue is unavailable")
 	}
 	selections, err := mcpEndpointSelections(item.Selections)
 	// Incomplete persisted identities cannot safely select an immutable service contract snapshot.
@@ -300,12 +294,7 @@ func loadMCPAppOperationCatalogue(ctx context.Context, source any, item store.Ap
 	if err != nil {
 		return mcpAppOperationCatalogue{}, fmt.Errorf("list MCP physical operations: %w", err)
 	}
-	descriptors, err := descriptorStore.GetMCPUnifiedOperationDescriptors(ctx, item.AppID, true, nil)
-	// Descriptor hash or applied-plan failures must not silently erase Unified operations.
-	if err != nil {
-		return mcpAppOperationCatalogue{}, fmt.Errorf("list MCP Unified operations: %w", err)
-	}
-	operations, err := mergeMCPAppOperations(item.Selections, matches, descriptors)
+	operations, err := mergeMCPAppOperations(item.Selections, matches)
 	// Duplicate operation IDs make execute routing ambiguous and therefore cannot be advertised as allowed.
 	if err != nil {
 		return mcpAppOperationCatalogue{}, err
@@ -330,8 +319,8 @@ func mcpEndpointSelections(selections []models.SDKSelection) ([]store.ServiceCon
 	return requests, nil
 }
 
-// mergeMCPAppOperations creates one deterministic collision-free physical and Unified catalogue.
-func mergeMCPAppOperations(selections []models.SDKSelection, matches []store.ServiceContractEndpointMatch, descriptors *models.SDKUnifiedOperationDescriptors) ([]mcpAppOperation, error) {
+// mergeMCPAppOperations creates a deterministic collision-free physical catalogue.
+func mergeMCPAppOperations(selections []models.SDKSelection, matches []store.ServiceContractEndpointMatch) ([]mcpAppOperation, error) {
 	operations := make([]mcpAppOperation, 0, len(matches))
 	seen := make(map[string]struct{}, len(matches))
 	// Physical rows inherit exact service provenance from their originating immutable selection.
@@ -344,15 +333,6 @@ func mergeMCPAppOperations(selections []models.SDKSelection, matches []store.Ser
 		operation := mcpAppOperation{OperationID: match.Endpoint.Name, Kind: appOperationKindPhysical, ServiceID: selection.ServiceID, ServiceVersionID: selection.ServiceVersionID}
 		if err := appendUniqueMCPAppOperation(&operations, seen, operation); err != nil {
 			return nil, err
-		}
-	}
-	// A nil descriptor represents an exact applied MCP version with no Unified Operations.
-	if descriptors != nil {
-		// Unified descriptors contribute only their public invocation identity, never private mappings.
-		for _, descriptor := range descriptors.Operations {
-			if err := appendUniqueMCPAppOperation(&operations, seen, mcpAppOperation{OperationID: descriptor.Name, Kind: appOperationKindUnified}); err != nil {
-				return nil, err
-			}
 		}
 	}
 	sort.Slice(operations, func(left, right int) bool {

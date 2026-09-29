@@ -41,7 +41,7 @@ jobs:
           npm test
           npm run build
 
-      - name: Build Execution App compiler
+      - name: Build Unified App compiler
         run: |
           cd runtime/execution
           npm ci

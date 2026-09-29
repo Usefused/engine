@@ -61,4 +61,4 @@ function inspectFile(file) {
 const failed = FILES.map((file) => inspectFile(path.normalize(file))).some(Boolean);
 // A failing gate prevents a complex execution path from shipping unnoticed.
 if (failed) process.exitCode = 1;
-else process.stdout.write(`Complexity <= ${MAX_COMPLEXITY} for Execution App TypeScript.\n`);
+else process.stdout.write(`Complexity <= ${MAX_COMPLEXITY} for Unified App TypeScript.\n`);

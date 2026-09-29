@@ -40,7 +40,6 @@ const STABLE_LOWERCASE_ENGINE_CODES = new Set<string>([
   "mcp_pagination_continuation_invalid",
   "mcp_pagination_request_target_invalid",
   "mcp_pagination_untrusted_next_url",
-  "mcp_physical_pagination_not_allowed_for_unified",
 ]);
 
 const RECOVERY_ACTIONS = new Set<RecoveryAction>(["complete_authentication", "continue_stored_result", "correct_execute_arguments", "adjust_result_projection", "reinitialize_connection", "do_not_replay"]);

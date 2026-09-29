@@ -25,6 +25,72 @@ type generationPlanningTestStore struct {
 	validationCalls int
 }
 
+// AttachGenerationContractPin models the store's exact identity fence for an SDK archive acquired after activation.
+func (s *generationPlanningTestStore) AttachGenerationContractPin(_ context.Context, binding models.SDKContractBinding, hash string) error {
+	// A concurrent runtime refresh must prevent a new archive from being attached to stale execution authority.
+	if binding.ServiceVersionID != s.binding.ServiceVersionID || binding.RuntimeContractHash != s.binding.RuntimeContractHash ||
+		binding.Revision != s.binding.Revision || binding.SourceHash != s.binding.SourceHash || !store.ValidGenerationContractHash(hash) {
+		return store.ErrGenerationContractPinUnavailable
+	}
+	s.binding.GenerationContractHash = hash
+	return nil
+}
+
+type generationArchiveFixture struct {
+	*generationPlanningRegistryTrap
+	snapshot store.ServiceContractSnapshot
+	calls    int
+}
+
+// FetchRuntimeContracts supplies the Registry archive only when generated SDK planning requests it.
+func (r *generationArchiveFixture) FetchRuntimeContracts(_ context.Context, _ []store.WorkspaceServiceVersion, _ string) ([]store.ServiceContractSnapshot, error) {
+	r.calls++
+	return []store.ServiceContractSnapshot{r.snapshot}, nil
+}
+
+// TestGeneratedSDKPlanAcquiresMissingArchiveOnDemand keeps a plain workspace add independent of SDK storage work.
+func TestGeneratedSDKPlanAcquiresMissingArchiveOnDemand(t *testing.T) {
+	s := newGenerationPlanningTestStore()
+	s.binding.GenerationContractHash = ""
+	s.binding.RuntimeContractHash = "runtime-contract"
+	hash := "sha256:" + strings.Repeat("b", 64)
+	registry := &generationArchiveFixture{
+		generationPlanningRegistryTrap: &generationPlanningRegistryTrap{RegistryClient: &mockRegistryClient{}, t: t},
+		snapshot: store.ServiceContractSnapshot{ServiceID: s.binding.ServiceID, ServiceVersionID: s.binding.ServiceVersionID,
+			Version: s.binding.Version, Revision: s.binding.Revision, SourceHash: s.binding.SourceHash,
+			ContractHash: s.binding.RuntimeContractHash, GenerationContractHash: hash},
+	}
+	client, err := localSnapshotPlanningClient(s, registry, true)
+	// The fixture must use the same local planning adapter as production SDK plans.
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection := models.SDKSelection{ServiceID: s.binding.ServiceID, ServiceVersionID: s.binding.ServiceVersionID}
+	validator := client.(sdkSelectionValidator)
+	// First use acquires the Registry archive against the saved runtime identity.
+	if err := validator.ValidateSDKSelections(t.Context(), []models.SDKSelection{selection}); err != nil {
+		t.Fatal(err)
+	}
+	// A second planning read must reuse the acquired local pin without another Registry operation.
+	if err := validator.ValidateSDKSelections(t.Context(), []models.SDKSelection{selection}); err != nil {
+		t.Fatal(err)
+	}
+	// Repeated planning must observe one durable pin and avoid another acquisition.
+	if registry.calls != 1 || s.binding.GenerationContractHash != hash || s.validationCalls != 2 {
+		t.Fatalf("archive calls=%d binding=%+v validations=%d", registry.calls, s.binding, s.validationCalls)
+	}
+	// A changed Registry runtime contract must never be attached to the earlier workspace snapshot.
+	s.binding.GenerationContractHash = ""
+	registry.snapshot.ContractHash = "different-runtime-contract"
+	if err := validator.ValidateSDKSelections(t.Context(), []models.SDKSelection{selection}); !errors.Is(err, store.ErrGenerationContractPinUnavailable) {
+		t.Fatalf("runtime drift error = %v", err)
+	}
+	// A rejected archive must leave the saved snapshot unpinned.
+	if s.binding.GenerationContractHash != "" {
+		t.Fatal("runtime drift attached an SDK archive")
+	}
+}
+
 // generationPlanningRegistryTrap makes any obsolete planning dependency fail at its call boundary.
 type generationPlanningRegistryTrap struct {
 	sandbox.RegistryClient

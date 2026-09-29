@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/Usefused/engine/internal/engine/unified"
 	"github.com/google/uuid"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
@@ -27,25 +26,25 @@ var (
 	ErrInvalidEncryptedAuthMaterial      = errors.New("invalid encrypted auth material")
 
 	// App-family errors
-	ErrAppFamilyNotFound               = errors.New("app family not found")
-	ErrAppFamilyNotEmpty               = errors.New("app family still has active versions")
-	ErrAppNotFound                     = errors.New("app not found")
-	ErrAppVersionImmutable             = errors.New("app version is immutable: same version with changed source or scope")
-	ErrAppVersionExists                = errors.New("app version already exists in family")
-	ErrAppDeactivated                  = errors.New("app is deactivated")
-	ErrAppDeliveryModeMismatch         = errors.New("app delivery mode is immutable")
-	ErrAppTokenNotFound                = errors.New("app token not found")
-	ErrAppTokenNameConflict            = errors.New("a token with this name already exists for this app")
-	ErrAppTokenBindingInvalid          = errors.New("app token binding is invalid or unavailable")
-	ErrAppTombstoneExists              = errors.New("app version was deactivated and cannot be reused")
-	ErrAppKindInvalid                  = errors.New("app kind is invalid")
-	ErrAppFamilyKindMismatch           = errors.New("app kind does not match app family")
-	ErrAPIFamilyLimitExceeded          = errors.New("API family limit exceeded")
-	ErrExecutionAppFamilyLimitExceeded = errors.New("Execution App family limit exceeded")
-	ErrSDKFamilyLimitExceeded          = errors.New("SDK family limit exceeded")
-	ErrMCPFamilyLimitExceeded          = errors.New("MCP family limit exceeded")
-	ErrSDKGenerationTransitionInvalid  = errors.New("SDK generation transition is invalid")
-	ErrAppStatusInvalid                = errors.New("app status is invalid")
+	ErrAppFamilyNotFound              = errors.New("app family not found")
+	ErrAppFamilyNotEmpty              = errors.New("app family still has active versions")
+	ErrAppNotFound                    = errors.New("app not found")
+	ErrAppVersionImmutable            = errors.New("app version is immutable: same version with changed source or scope")
+	ErrAppVersionExists               = errors.New("app version already exists in family")
+	ErrAppDeactivated                 = errors.New("app is deactivated")
+	ErrAppDeliveryModeMismatch        = errors.New("app delivery mode is immutable")
+	ErrAppTokenNotFound               = errors.New("app token not found")
+	ErrAppTokenNameConflict           = errors.New("a token with this name already exists for this app")
+	ErrAppTokenBindingInvalid         = errors.New("app token binding is invalid or unavailable")
+	ErrAppTombstoneExists             = errors.New("app version was deactivated and cannot be reused")
+	ErrAppKindInvalid                 = errors.New("app kind is invalid")
+	ErrAppFamilyKindMismatch          = errors.New("app kind does not match app family")
+	ErrAPIFamilyLimitExceeded         = errors.New("API family limit exceeded")
+	ErrUnifiedAppFamilyLimitExceeded  = errors.New("Unified App family limit exceeded")
+	ErrSDKFamilyLimitExceeded         = errors.New("SDK family limit exceeded")
+	ErrMCPFamilyLimitExceeded         = errors.New("MCP family limit exceeded")
+	ErrSDKGenerationTransitionInvalid = errors.New("SDK generation transition is invalid")
+	ErrAppStatusInvalid               = errors.New("app status is invalid")
 
 	// ErrIdempotentExecutionNotFound means there's no unexpired cached
 	// response for the given (app_id, idempotency key) -- the caller should
@@ -58,13 +57,14 @@ var (
 )
 
 const (
-	// UnifiedDefinitionSchemaVersion aliases the private codec owner so store
-	// defaults cannot drift from runtime admission after future schema changes.
-	UnifiedDefinitionSchemaVersion = unified.DefinitionSchemaVersion
+	// Historical app rows retain the schema marker used by the retired graph format.
+	UnifiedDefinitionSchemaVersion = 3
 	EmptyUnifiedSetHash            = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
 )
 
 type AppRuntime struct {
+	// UnifiedApps contributes hosted delegation to immutable publication capability accounting.
+	UnifiedApps []models.UnifiedAppBinding
 	AccountID   uuid.UUID
 	AppFamilyID uuid.UUID
 	AppID       uuid.UUID
@@ -150,7 +150,7 @@ type App struct {
 	Version     string
 	ConfigKey   string
 	SourceHash  string
-	// BundleDigest is immutable code identity for an authored Execution App version.
+	// BundleDigest is immutable code identity for an authored Unified App version.
 	BundleDigest                   string
 	CapabilityHash                 string
 	CapabilityKeys                 []string
@@ -209,12 +209,6 @@ type SDKGenerationBuildStore interface {
 	ListPendingSDKGenerationBuilds(context.Context, uuid.UUID, int) ([]SDKGenerationBuild, error)
 	CompleteSDKGeneration(context.Context, uuid.UUID, string, string) (bool, error)
 	FailSDKGeneration(context.Context, uuid.UUID, string, string) (bool, error)
-}
-
-// MCPUnifiedDescriptorStore recovers the credential-free public descriptor
-// from the exact applied plan while keeping discovery authorization in SQL.
-type MCPUnifiedDescriptorStore interface {
-	GetMCPUnifiedOperationDescriptors(context.Context, uuid.UUID, bool, []string) (*models.SDKUnifiedOperationDescriptors, error)
 }
 
 // EngineInstallationStore is intentionally narrower than Store because the

@@ -10,11 +10,9 @@ import (
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/store"
-	"github.com/Usefused/engine/internal/engine/unified"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
-	"github.com/Usefused/engine/internal/shared/schemaref"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/google/uuid"
 )
@@ -79,7 +77,7 @@ func newAppOpenAPIFixture(t *testing.T) (*appOpenAPITestStore, fusedobject.Endpo
 		app: &store.App{
 			AppID: appID, AppFamilyID: familyID, AccountID: accountID, Version: "1.2.3",
 			ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections, Status: store.AppStatusActive,
-			UnifiedDefinitionSchemaVersion: unified.DefinitionSchemaVersion, UnifiedDefinitions: []byte("[]"), UnifiedDefinitionHash: store.EmptyUnifiedSetHash,
+			UnifiedDefinitionSchemaVersion: store.UnifiedDefinitionSchemaVersion, UnifiedDefinitions: []byte("[]"), UnifiedDefinitionHash: store.EmptyUnifiedSetHash,
 		},
 		family:  &store.AppFamily{AppFamilyID: familyID, AccountID: accountID, Kind: store.AppKindSDK, DisplayName: "Issue app"},
 		matches: []store.ServiceContractEndpointMatch{{SelectionIndex: 0, Endpoint: endpoint}},
@@ -220,177 +218,6 @@ func TestAppOpenAPIOperationFilterPushesDownBeforeCollision(t *testing.T) {
 	}
 }
 
-// TestAppOpenAPIHandlerRejectsExactPhysicalUnifiedCollision verifies request
-// shape cannot disambiguate an immutable same-name collision.
-func TestAppOpenAPIHandlerRejectsExactPhysicalUnifiedCollision(t *testing.T) {
-	s, endpoint := newAppOpenAPIFixture(t)
-	s.app.UnifiedDefinitions = encodeAppOpenAPITestDefinitions(t, endpoint.Name)
-	s.app.UnifiedDefinitionHash = mustAppOpenAPIHash(t, s.app.UnifiedDefinitions)
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/apps/"+s.app.AppID.String()+"/openapi?operation="+endpoint.Name, nil)
-	mountAppOpenAPITestHandler(s).ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusConflict {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-}
-
-// TestAppOpenAPIHandlerProjectsUnifiedPublicContract verifies service-keyed
-// selectors, explicit targets, private-definition secrecy, and result types.
-func TestAppOpenAPIHandlerProjectsUnifiedPublicContract(t *testing.T) {
-	s, _ := newAppOpenAPIFixture(t)
-	operation := "searchAndEmail"
-	s.app.UnifiedDefinitions = encodeAppOpenAPITestDefinitions(t, operation)
-	s.app.UnifiedDefinitionHash = mustAppOpenAPIHash(t, s.app.UnifiedDefinitions)
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/apps/"+s.app.AppID.String()+"/openapi?operation="+operation, nil)
-	mountAppOpenAPITestHandler(s).ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	if strings.Contains(recorder.Body.String(), "provider-private-operation") {
-		t.Fatalf("private Unified provider identity leaked into public OpenAPI")
-	}
-	var document map[string]any
-	if err := json.Unmarshal(recorder.Body.Bytes(), &document); err != nil {
-		t.Fatalf("decode document: %v", err)
-	}
-	requestSchema := openAPITestOperationRequest(t, document, operation)
-	requestProperties := requestSchema["properties"].(map[string]any)
-	assertUnifiedOpenAPIRouting(t, requestProperties)
-	response := openAPITestOperationResponse(t, document, operation)
-	assertUnifiedOpenAPIResultTypes(t, response)
-}
-
-func TestAppOpenAPIHandlerProjectsExactUnifiedRootOutput(t *testing.T) {
-	s, _ := newAppOpenAPIFixture(t)
-	operation := "searchAndEmail"
-	s.app.UnifiedDefinitions = encodeAppOpenAPITestDefinitionsWithOutput(t, operation)
-	s.app.UnifiedDefinitionHash = mustAppOpenAPIHash(t, s.app.UnifiedDefinitions)
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/apps/"+s.app.AppID.String()+"/openapi?operation="+operation, nil)
-	mountAppOpenAPITestHandler(s).ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	var document map[string]any
-	if err := json.Unmarshal(recorder.Body.Bytes(), &document); err != nil {
-		t.Fatal(err)
-	}
-	response := openAPITestOperationResponse(t, document, operation)
-	properties := response["properties"].(map[string]any)
-	if properties["name"].(map[string]any)["type"] != "string" {
-		t.Fatalf("root output schema = %#v", response)
-	}
-	for _, wrapper := range []string{"results", "rollbacks", "data"} {
-		if _, exists := properties[wrapper]; exists {
-			t.Fatalf("root output schema retained %q wrapper: %#v", wrapper, response)
-		}
-	}
-}
-
-// assertUnifiedOpenAPIRouting checks target and service selector namespaces.
-func assertUnifiedOpenAPIRouting(t *testing.T, properties map[string]any) {
-	t.Helper()
-	targets := properties["targets"].(map[string]any)
-	items := targets["items"].(map[string]any)
-	if !containsAllStrings(stringSlice(items["enum"]), "issue") || targets["minItems"] != float64(1) {
-		t.Fatalf("Unified targets are invalid: %#v", targets)
-	}
-	selectors := properties["selectors"].(map[string]any)["properties"].(map[string]any)
-	if _, ok := selectors["jira"]; !ok {
-		t.Fatalf("Unified service selector is missing: %#v", selectors)
-	}
-	pagination := properties["target_pagination"].(map[string]any)["properties"].(map[string]any)
-	if _, ok := pagination["issue"]; !ok {
-		t.Fatalf("Unified public target pagination is missing: %#v", pagination)
-	}
-	if _, leaked := pagination["jira"]; leaked {
-		t.Fatalf("Unified pagination exposed a private service namespace: %#v", pagination)
-	}
-}
-
-// openAPITestOperationResponse resolves a generated operation response component.
-func openAPITestOperationResponse(t *testing.T, document map[string]any, operation string) map[string]any {
-	t.Helper()
-	components := document["components"].(map[string]any)["schemas"].(map[string]any)
-	response, ok := components[openAPIOperationComponentKey(operation)+"Response"].(map[string]any)
-	if !ok {
-		t.Fatalf("response component for %q is unavailable", operation)
-	}
-	// Exported schemas retain references instead of embedding the same definition.
-	if ref, referenced := response["$ref"].(string); referenced {
-		resolved, found := schemaref.ResolveLocal(document, ref)
-		// A dangling reference must fail the test rather than look like an empty response.
-		if !found {
-			t.Fatal("response component reference is unavailable")
-		}
-		response, _ = resolved.(map[string]any)
-	}
-	return response
-}
-
-// assertUnifiedOpenAPIResultTypes verifies generated schemas match the actual
-// optional string/object fields and repeated rollback trigger wire field.
-func assertUnifiedOpenAPIResultTypes(t *testing.T, response map[string]any) {
-	t.Helper()
-	properties := response["properties"].(map[string]any)
-	result := properties["results"].(map[string]any)["items"].(map[string]any)
-	resultProperties := result["properties"].(map[string]any)
-	if resultProperties["error_code"].(map[string]any)["type"] != "string" || result["additionalProperties"] != false {
-		t.Fatalf("Unified result schema is not exact: %#v", result)
-	}
-	rollback := properties["rollbacks"].(map[string]any)["items"].(map[string]any)
-	triggeredBy := rollback["properties"].(map[string]any)["triggered_by"].(map[string]any)
-	if triggeredBy["type"] != "array" || triggeredBy["items"].(map[string]any)["type"] != "string" {
-		t.Fatalf("rollback triggered_by schema is invalid: %#v", triggeredBy)
-	}
-}
-
-// encodeAppOpenAPITestDefinitions creates one valid private Unified definition.
-func encodeAppOpenAPITestDefinitions(t *testing.T, name string) []byte {
-	t.Helper()
-	encoded, err := unified.EncodeDefinitions([]unified.OperationDefinition{{
-		Name: name, InputSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}}}`),
-		Bindings: []unified.BindingDefinition{{
-			PublicTarget: "issue", ServiceTarget: "jira", OperationID: "provider-private-operation",
-			ServiceID: uuid.New(), ServiceVersionID: uuid.New(), EndpointID: uuid.New(),
-		}},
-	}}, unified.DefaultLimits())
-	if err != nil {
-		t.Fatalf("encode Unified definitions: %v", err)
-	}
-	return encoded
-}
-
-func encodeAppOpenAPITestDefinitionsWithOutput(t *testing.T, name string) []byte {
-	t.Helper()
-	encoded, err := unified.EncodeDefinitions([]unified.OperationDefinition{{
-		Name: name, InputSchema: json.RawMessage(`{"type":"object"}`),
-		Bindings: []unified.BindingDefinition{{
-			PublicTarget: "issue", ServiceTarget: "jira", OperationID: "provider-private-operation",
-			ServiceID: uuid.New(), ServiceVersionID: uuid.New(), EndpointID: uuid.New(),
-		}},
-		Output: &unified.OutputDefinition{
-			Schema:  json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`),
-			Mapping: mustCompileUnifiedProgram(t, map[string]any{"name": "${response.issue.name}"}, []string{"issue"}),
-		},
-	}}, unified.DefaultLimits())
-	if err != nil {
-		t.Fatalf("encode Unified definitions: %v", err)
-	}
-	return encoded
-}
-
-// mustAppOpenAPIHash computes the production canonical definition hash.
-func mustAppOpenAPIHash(t *testing.T, payload []byte) string {
-	t.Helper()
-	hash, err := unifiedCanonicalHash(payload)
-	if err != nil {
-		t.Fatalf("hash Unified definitions: %v", err)
-	}
-	return hash
-}
-
 // TestAppOpenAPIHandlerEnforcesExactSDKScope covers account, family-kind, and
 // runnable-version checks before immutable schemas are returned.
 func TestAppOpenAPIHandlerEnforcesExactSDKScope(t *testing.T) {
@@ -473,19 +300,6 @@ func mustJSON(t *testing.T, value any) []byte {
 		t.Fatalf("marshal fixture: %v", err)
 	}
 	return encoded
-}
-
-// TestAppOpenAPIHandlerRejectsCorruptEmptyUnifiedSet proves an encoded empty
-// definition array still crosses the immutable schema/hash integrity boundary.
-func TestAppOpenAPIHandlerRejectsCorruptEmptyUnifiedSet(t *testing.T) {
-	s, _ := newAppOpenAPIFixture(t)
-	s.app.UnifiedDefinitionHash = "sha256:wrong"
-	recorder := httptest.NewRecorder()
-	mountAppOpenAPITestHandler(s).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/apps/"+s.app.AppID.String()+"/openapi", nil))
-	// Corrupt persisted definitions need a stable non-refresh remediation instead of a generic configuration conflict.
-	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "app_openapi_projection_invalid") || !strings.Contains(recorder.Body.String(), "Fused will not rewrite the source schema") {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
 }
 
 // TestProjectionOpenAPIRequiredStrings verifies the reviewed projection's

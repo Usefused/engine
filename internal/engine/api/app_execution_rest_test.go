@@ -12,7 +12,6 @@ import (
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
-	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/authselector"
@@ -21,6 +20,18 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
+
+// appTestValidator admits the exact version token used by REST and Unified App tests.
+type appTestValidator struct{ identity auth.RuntimeIdentity }
+
+// Validate keeps test authentication scoped to one immutable app version.
+func (validator appTestValidator) Validate(_ context.Context, appID uuid.UUID, token string) (auth.RuntimeIdentity, error) {
+	// A mismatched version or token must fail before any provider dispatch.
+	if appID != validator.identity.AppID || token != "fsk_test" {
+		return auth.RuntimeIdentity{}, auth.ErrUnauthorized
+	}
+	return validator.identity, nil
+}
 
 type restRuntimeTestDouble struct {
 	mu                sync.Mutex
@@ -120,7 +131,6 @@ func TestValidateRESTExecutionRequestBoundsPagination(t *testing.T) {
 	tests := []restExecutionRequest{
 		{Operation: "items.list", Input: json.RawMessage(`{}`), Pagination: &restPaginationIntent{MaxPages: 0}},
 		{Operation: "items.list", Input: json.RawMessage(`{}`), Pagination: &restPaginationIntent{MaxPages: paginationpolicy.CeilingMaxPages + 1}},
-		{Operation: "items.list", Input: json.RawMessage(`{}`), TargetPagination: map[string]*restPaginationIntent{"jira": nil}},
 	}
 	// Each malformed shape must retain the same bounded public error code.
 	for index, request := range tests {
@@ -258,21 +268,6 @@ func TestRESTExecutionRejectsWrongTokenBeforeCacheConnect(t *testing.T) {
 	}
 }
 
-// TestRESTExecutionRejectsRemovedSelectionFieldBeforeCacheConnect proves a
-// persisted legacy row cannot reach runtime dispatch through REST.
-func TestRESTExecutionRejectsRemovedSelectionFieldBeforeCacheConnect(t *testing.T) {
-	runtime := &restRuntimeTestDouble{physicalFound: true}
-	server, appID := newRESTPhysicalServer(runtime)
-	scope := server.store.(*grpcRuntimeStore).scope
-	scope.Selections = []byte(`[{"service_id":"` + uuid.NewString() + `","service_version_id":"` + uuid.NewString() + `","definition_schema_version":3}]`)
-
-	response := performRESTExecution(t, server, appID, "fsk_test", `{"operation":"issues.get","input":{}}`, "")
-	assertRESTErrorCode(t, response, http.StatusForbidden, "app_scope_unavailable")
-	if runtime.connects != 0 || runtime.disconnects != 0 {
-		t.Fatalf("legacy selection reached cache lifecycle: %d/%d", runtime.connects, runtime.disconnects)
-	}
-}
-
 // TestRESTExecutionRejectsSecretShapedSelectorFields proves the strict public DTO cannot become a credential passthrough.
 func TestRESTExecutionRejectsSecretShapedSelectorFields(t *testing.T) {
 	runtime := &restRuntimeTestDouble{physicalFound: true}
@@ -284,24 +279,12 @@ func TestRESTExecutionRejectsSecretShapedSelectorFields(t *testing.T) {
 	}
 }
 
-// TestRESTExecutionRejectsPhysicalUnifiedCollision proves targets never decide kind when immutable definitions collide.
-func TestRESTExecutionRejectsPhysicalUnifiedCollision(t *testing.T) {
-	server, _, appID := newUnifiedRuntimeServer(t, store.AppTokenPolicy{AllowAll: true})
-	runtime := &restRuntimeTestDouble{physicalFound: true}
-	server.restRuntime, server.unifiedRuntime = runtime, runtime
-	response := performRESTExecution(t, server, appID, "fsk_test", `{"operation":"issues.create","input":{"title":"Bug"},"targets":["github"]}`, "logical-1")
-	assertRESTErrorCode(t, response, http.StatusConflict, "operation_ambiguous")
-	if len(runtime.physicalCalls) != 0 || runtime.connects != 1 || runtime.disconnects != 1 {
-		t.Fatalf("collision dispatch/lifecycle = %d/%d/%d", len(runtime.physicalCalls), runtime.connects, runtime.disconnects)
-	}
-}
-
 // TestRESTExecutionRejectsAmbiguousPhysicalName proves two immutable physical
-// matches cannot be disambiguated by request shape or selection order.
+// matches cannot be resolved by selection order.
 func TestRESTExecutionRejectsAmbiguousPhysicalName(t *testing.T) {
 	runtime := &restRuntimeTestDouble{physicalAmbiguous: true}
 	server, appID := newRESTPhysicalServer(runtime)
-	response := performRESTExecution(t, server, appID, "fsk_test", `{"operation":"issues.get","input":{},"targets":["invented"]}`, "")
+	response := performRESTExecution(t, server, appID, "fsk_test", `{"operation":"issues.get","input":{}}`, "")
 	assertRESTErrorCode(t, response, http.StatusConflict, "operation_ambiguous")
 	if len(runtime.physicalCalls) != 0 {
 		t.Fatal("ambiguous physical name reached execution")
@@ -371,120 +354,10 @@ func TestRESTExecutionPhysicalRejectsNullInput(t *testing.T) {
 	}
 }
 
-// TestRESTExecutionUnifiedAcceptsScalarWhenItsSchemaDoes proves kind-specific
-// Unified schema validation, rather than the common envelope, owns input shape.
-func TestRESTExecutionUnifiedAcceptsScalarWhenItsSchemaDoes(t *testing.T) {
-	fixture := newUnifiedCompileFixture()
-	operation := fixture.document.UnifiedOperations["issues.create"]
-	operation.Input = json.RawMessage(`{"type":"integer"}`)
-	operation.Output = nil
-	fixture.document.UnifiedOperations["issues.create"] = operation
-	server, _, appID := newUnifiedRuntimeServerFromFixture(t, fixture, store.AppTokenPolicy{AllowAll: true})
-	runtime := &restRuntimeTestDouble{}
-	server.restRuntime, server.unifiedRuntime = runtime, runtime
-	response := performRESTExecution(t, server, appID, "fsk_test", `{"operation":"issues.create","input":7,"targets":["github","@acme/custom-crm"]}`, "logical-scalar")
-	if response.Code != http.StatusOK {
-		t.Fatalf("scalar Unified status=%d body=%s", response.Code, response.Body.String())
-	}
-	if strings.Contains(response.Body.String(), `"code":"invalid_request"`) {
-		t.Fatalf("scalar Unified input was rejected by shared envelope: %s", response.Body.String())
-	}
-}
-
-// TestRESTExecutionUnifiedMatchesCanonicalResultAndChildTransport proves REST
-// uses the same preflight/scheduler and labels every physical child as REST.
-func TestRESTExecutionUnifiedMatchesCanonicalResultAndChildTransport(t *testing.T) {
-	fixture := newUnifiedCompileFixture()
-	operation := fixture.document.UnifiedOperations["issues.create"]
-	operation.Output = nil
-	fixture.document.UnifiedOperations["issues.create"] = operation
-	server, _, appID := newUnifiedRuntimeServerFromFixture(t, fixture, store.AppTokenPolicy{AllowAll: true})
-	runtime := &restRuntimeTestDouble{}
-	server.restRuntime, server.unifiedRuntime = runtime, runtime
-	response := performRESTExecution(t, server, appID, "fsk_test", `{
-		"operation":"issues.create","input":{"title":"Bug"},
-		"targets":["github","@acme/custom-crm"],
-		"selectors":{"github":{"environment":"sandbox","end_user_ref":"user-1","auth_type":"oauth","auth_name":"githubOAuth"}}
-	}`, "logical-request-1")
-	if response.Code != http.StatusOK {
-		t.Fatalf("Unified status = %d body=%s", response.Code, response.Body.String())
-	}
-	if !strings.Contains(response.Body.String(), `"kind":"unified"`) || !strings.Contains(response.Body.String(), `"rollbacks":[]`) {
-		t.Fatalf("Unified envelope = %s", response.Body.String())
-	}
-	if len(runtime.resolveBindings) != 2 || len(runtime.physicalCalls) != 2 {
-		t.Fatalf("Unified parity calls = bindings:%d physical:%d", len(runtime.resolveBindings), len(runtime.physicalCalls))
-	}
-	for index, call := range runtime.physicalCalls {
-		if call.Transport != models.EngineExecutionTransportREST {
-			t.Fatalf("Unified child %d transport = %q", index, call.Transport)
-		}
-	}
-}
-
-func TestRESTExecutionUnifiedReturnsExactRootOutput(t *testing.T) {
-	server, _, appID := newUnifiedRuntimeServer(t, store.AppTokenPolicy{AllowAll: true})
-	runtime := &restRuntimeTestDouble{}
-	server.restRuntime, server.unifiedRuntime = runtime, runtime
-	response := performRESTExecution(t, server, appID, "fsk_test", `{
-		"operation":"issues.create","input":{"title":"Bug"},
-		"targets":["github","@acme/custom-crm"]
-	}`, "logical-root-output")
-	if response.Code != http.StatusOK {
-		t.Fatalf("Unified status = %d body=%s", response.Code, response.Body.String())
-	}
-	if got := strings.TrimSpace(response.Body.String()); got != `{"id":"gh-1"}` {
-		t.Fatalf("exact Unified output = %s", got)
-	}
-	for _, wrapperField := range []string{`"results"`, `"rollbacks"`, `"data"`, `"kind"`} {
-		if strings.Contains(response.Body.String(), wrapperField) {
-			t.Fatalf("root output retained wrapper field %s: %s", wrapperField, response.Body.String())
-		}
-	}
-}
-
-func TestRESTExecutionUnifiedReturnsBoundedRootOutputError(t *testing.T) {
-	fixture := newUnifiedCompileFixture()
-	operation := fixture.document.UnifiedOperations["issues.create"]
-	operation.Output = json.RawMessage(`{
-		"type":"object",
-		"properties":{"id":"${response.github.missing}"},
-		"required":["id"]
-	}`)
-	fixture.document.UnifiedOperations["issues.create"] = operation
-	server, _, appID := newUnifiedRuntimeServerFromFixture(t, fixture, store.AppTokenPolicy{AllowAll: true})
-	runtime := &restRuntimeTestDouble{}
-	server.restRuntime, server.unifiedRuntime = runtime, runtime
-	response := performRESTExecution(t, server, appID, "fsk_test", `{
-		"operation":"issues.create","input":{"title":"Bug"},
-		"targets":["github","@acme/custom-crm"]
-	}`, "logical-root-error")
-	assertRESTErrorCode(t, response, http.StatusUnprocessableEntity, "output_mapping_failed")
-	if strings.Contains(response.Body.String(), "missing") || strings.Contains(response.Body.String(), "gh-1") {
-		t.Fatalf("root projection error leaked mapping or provider data: %s", response.Body.String())
-	}
-}
-
-// TestRESTExecutionProjectsNullDataAndExplicitEmptyRollbacks locks JSON null
-// semantics instead of dropping a successful provider null value.
-func TestRESTExecutionProjectsNullDataAndExplicitEmptyRollbacks(t *testing.T) {
-	results := projectRESTUnifiedResults([]*enginev1.UnifiedTargetResult{{
-		Target: "provider", Status: "success", DataJson: []byte(`null`),
-	}})
-	recorder := httptest.NewRecorder()
-	writeRESTExecutionJSON(recorder, http.StatusOK, restExecutionSuccess{
-		AppID: uuid.NewString(), Operation: "data.read", Kind: "unified",
-		Results: results, Rollbacks: []restUnifiedRollback{},
-	})
-	if !strings.Contains(recorder.Body.String(), `"data":null`) || !strings.Contains(recorder.Body.String(), `"rollbacks":[]`) {
-		t.Fatalf("null/rollback envelope = %s", recorder.Body.String())
-	}
-}
-
 // TestRESTExecutionGraphQLProjectionKeepsSDKKindSeparateFromTransport protects
 // SDK activity grouping while raw receipt transport remains REST.
 func TestRESTExecutionGraphQLProjectionKeepsSDKKindSeparateFromTransport(t *testing.T) {
-	if got := executionAppKind(models.EngineExecutionTransportREST); got != string(store.AppKindSDK) {
+	if got := unifiedAppKind(models.EngineExecutionTransportREST); got != string(store.AppKindSDK) {
 		t.Fatalf("REST app kind = %q", got)
 	}
 }
@@ -588,8 +461,8 @@ func newRESTPhysicalServer(runtime *restRuntimeTestDouble) (*EngineGRPCServer, u
 		Kind: store.AppKindSDK, Status: store.AppStatusActive, TokenPolicy: store.AppTokenPolicy{AllowAll: true},
 	}
 	runtimeStore := &grpcRuntimeStore{Store: &workspaceTestStore{}, accountID: accountID, appID: appID, scope: scope}
-	server := NewEngineGRPCServer(runtimeStore, nil, nil, nil, nil, unifiedTestValidator{identity: identity}, nil)
-	server.restRuntime, server.unifiedRuntime = runtime, runtime
+	server := NewEngineGRPCServer(runtimeStore, nil, nil, nil, nil, appTestValidator{identity: identity}, nil)
+	server.restRuntime = runtime
 	return server, appID
 }
 

@@ -455,7 +455,7 @@ type engineWorkers struct {
 	appTokenExpiry        *worker.AppTokenExpiryWorker
 	executionEvents       *worker.ExecutionEventWorker
 	retention             *worker.ExecutionRetentionWorker
-	executionAppCleanup   *worker.ExecutionAppCleanupWorker
+	unifiedAppCleanup     *worker.UnifiedAppCleanupWorker
 	publicInsights        *worker.PublicInsightWorker
 	packageLeases         *worker.SDKPackageLeaseWorker
 	sdkGenerations        *worker.SDKGenerationFinalizer
@@ -506,8 +506,8 @@ func (w engineWorkers) stopReportingWorkers(ctx context.Context) {
 		w.retention.Stop(ctx)
 	}
 	// Capability data expires only after its own minimum retention window and active execution work drains.
-	if w.executionAppCleanup != nil {
-		w.executionAppCleanup.Stop(ctx)
+	if w.unifiedAppCleanup != nil {
+		w.unifiedAppCleanup.Stop(ctx)
 	}
 	// Public insight reporting completes its current bounded send attempt.
 	if w.publicInsights != nil {
@@ -597,16 +597,16 @@ func startEngineWorkers(ctx context.Context, engineStore store.Store, natsClient
 		store.ExecutionResultRecoveryStore
 	})
 	// Exact-result cleanup must run only when both result and evidence deletion share the same store.
-	var executionAppCleanup *worker.ExecutionAppCleanupWorker
+	var unifiedAppCleanup *worker.UnifiedAppCleanupWorker
 	if cleanupAvailable {
-		executionAppCleanup = worker.StartExecutionAppCleanupWorker(ctx, cleanupStore)
+		unifiedAppCleanup = worker.StartUnifiedAppCleanupWorker(ctx, cleanupStore)
 	}
 	// A short bounded cleanup keeps credential hashes out of the active table
 	// soon after expiry while the separate history row remains auditable.
 	tokenExpiryWorker := worker.StartAppTokenExpiryWorker(ctx, engineStore, 250)
 	return engineWorkers{
 		appTokenInvalidations: appTokenInvalidations, appTokenExpiry: tokenExpiryWorker,
-		executionEvents: executionEventWorker, retention: retentionWorker, executionAppCleanup: executionAppCleanup, authEventWebhooks: authEventWebhooks,
+		executionEvents: executionEventWorker, retention: retentionWorker, unifiedAppCleanup: unifiedAppCleanup, authEventWebhooks: authEventWebhooks,
 	}
 }
 
@@ -972,7 +972,7 @@ type engineRouterDeps struct {
 // probeExecutionWorkerReadiness checks the real packaged isolation path once for hosted deployments.
 func probeExecutionWorkerReadiness(check func(context.Context) bool) bool {
 	// Legacy or local Engines can serve raw operations without a hosted worker requirement.
-	if os.Getenv("FUSED_EXECUTION_APP_WORKER_REQUIRED") != "true" {
+	if os.Getenv("FUSED_UNIFIED_APP_WORKER_REQUIRED") != "true" {
 		return true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1056,9 +1056,9 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	executionServer := api.NewEngineGRPCServer(
 		deps.engineStore, deps.registryClient, deps.masterKey, deps.configStore, deps.natsClient, deps.tokenValidator, deps.managedAuthConnectClient, deps.connectRedirectURI,
 	)
-	// Production startup keeps promoted Execution Apps resident only while their plan permits it.
+	// Production startup keeps promoted Unified Apps resident only while their plan permits it.
 	if deps.ctx != nil {
-		executionServer.StartExecutionAppWarmReconciler(deps.ctx)
+		executionServer.StartUnifiedAppWarmReconciler(deps.ctx)
 	}
 	// Hosted MCP tools invoke the same durable command on this exact Engine server instance.
 	sandbox.SetMCPCapabilityAdapter(executionServer)
@@ -1066,13 +1066,13 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	sandbox.SetMCPOperationClassifier(deps.registryClient)
 	sandbox.InitSandbox(
 		r, deps.natsClient, deps.cfg, deps.localObjectCache, deps.tokenValidator, deps.engineStore, deps.engineStore, deps.configStore, secretResolver,
-		deps.providerRateLimits, port, executionServer.ExecuteUnified, executionServer.StartConnectSession,
+		deps.providerRateLimits, port, executionServer.StartConnectSession,
 	)
 	// Runtime REST execution reuses the same process-wide sandbox cache and
 	// dispatcher initialized above; it never loops back through network gRPC.
 	api.MountAppExecutionRoute(r, executionServer)
 	// Hosted capabilities share this server's family-token authority and physical dispatcher.
-	api.MountExecutionAppRoutes(r, executionServer)
+	api.MountUnifiedAppRoutes(r, executionServer)
 	// Execution reads use the handle issued by the hosted capability route above.
 	api.MountExecutionResultRoutes(r, executionServer)
 	// SDK and MCP webhook delivery uses EngineGRPCServer.SubscribeWebhooks.

@@ -259,12 +259,13 @@ func (e *workspaceServicePersistenceError) Unwrap() error {
 // the POST body, and nothing upstream of this handler confirms either is
 // real -- without this, an authenticated user could add an arbitrary UUID
 // with a made-up name to their own workspace. VerifyServiceExists is a slim
-// GraphQL query (id + name only), not the full FetchServiceMetadata catalogue
-// payload, since existence + name is all this flow needs.
+// GraphQL query for identity and the current version, not the full
+// FetchServiceMetadata catalogue payload. Its exact version ID also avoids a
+// second Registry request for ordinary service additions.
 func verifyAndActivateService(ctx context.Context, s store.Store, verifier ServiceVerifier, call addServiceCall) error {
 	span := trace.SpanFromContext(ctx)
 
-	verifiedName, verifiedSlug, currentVersionTag, _, err := verifier.VerifyServiceExists(ctx, call.serviceID, call.apiKey)
+	verifiedName, verifiedSlug, currentVersionTag, currentVersionID, err := verifier.VerifyServiceExists(ctx, call.serviceID, call.apiKey)
 	// Registry absence and dependency failure remain distinct bounded outcomes.
 	if err != nil {
 		slog.WarnContext(ctx, "verifyAndActivateService: registry verification failed", slog.Any("error", err), slog.String("service_id", call.serviceID.String()))
@@ -280,7 +281,7 @@ func verifyAndActivateService(ctx context.Context, s store.Store, verifier Servi
 		return fmt.Errorf("%w: %w", errRegistryVerificationFailed, err)
 	}
 
-	version, serviceVersionID, err := resolveWorkspaceServiceVersionID(ctx, verifier, call.serviceID, call.apiKey, call.version, currentVersionTag, call.versionID)
+	version, serviceVersionID, err := resolveWorkspaceServiceVersionID(ctx, verifier, call.serviceID, call.apiKey, call.version, currentVersionTag, currentVersionID, call.versionID)
 	// An exact version pin is required before any workspace membership write.
 	if err != nil {
 		recordWorkspaceServiceMutationFailure(span, "version_unavailable", "service_version_unavailable")
@@ -332,21 +333,29 @@ func recordWorkspaceServiceMutationFailure(span trace.Span, outcome, code string
 	span.SetStatus(codes.Error, code)
 }
 
+// resolveWorkspaceServiceVersionID reuses the exact current-version identity returned by verification and looks up only other requested versions.
 func resolveWorkspaceServiceVersionID(
 	ctx context.Context,
 	verifier ServiceVerifier,
 	serviceID uuid.UUID,
 	apiKey, requestedVersion, currentVersionTag string,
-	requestedVersionID uuid.UUID,
+	currentVersionID, requestedVersionID uuid.UUID,
 ) (string, uuid.UUID, error) {
 	version, err := resolveWorkspaceServiceVersion(requestedVersion, currentVersionTag)
+	// A missing version cannot be repaired by either an ID or a second Registry lookup.
 	if err != nil {
 		return "", uuid.Nil, err
 	}
+	// A caller-pinned identity remains authoritative; contract materialization verifies the exact tuple.
 	if requestedVersionID != uuid.Nil {
 		return version, requestedVersionID, nil
 	}
+	// Verification already resolved the current immutable version, so avoid a redundant Registry round trip for ordinary UI and CLI adds.
+	if currentVersionID != uuid.Nil && version == strings.TrimSpace(currentVersionTag) {
+		return version, currentVersionID, nil
+	}
 	revision, err := fetchServiceVersionRevision(ctx, verifier, serviceID, version, apiKey)
+	// Historical pins still require an exact visible-version lookup before activation.
 	if err != nil {
 		return "", uuid.Nil, err
 	}

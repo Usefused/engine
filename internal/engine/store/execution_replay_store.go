@@ -73,10 +73,10 @@ func (s *postgresStore) SaveReplayEvidence(ctx context.Context, accountID, appID
 		return err
 	}
 	// The SELECT binds evidence to one unexpired terminal result and enforces the same minimum window.
-	tag, err := s.db.Exec(ctx, `INSERT INTO fused_execution_app_replay_evidence
+	tag, err := s.db.Exec(ctx, `INSERT INTO fused_unified_app_replay_evidence
 		(execution_id, account_id, app_id, encrypted_dek, encrypted_history, expires_at)
 		SELECT id, account_id, app_id, $4, $5, GREATEST(expires_at, NOW()+INTERVAL '24 hours')
-		FROM fused_execution_app_results
+		FROM fused_unified_app_results
 		WHERE id=$1 AND account_id=$2 AND app_id=$3 AND status IN ('succeeded','failed','indeterminate')
 			AND expires_at>NOW() AND mode<>'replay'
 		ON CONFLICT (execution_id) DO NOTHING`, executionID, accountID, appID, wrapped, ciphertext)
@@ -94,8 +94,8 @@ func (s *postgresStore) SaveReplayEvidence(ctx context.Context, accountID, appID
 func (s *postgresStore) GetReplayEvidence(ctx context.Context, accountID, appID, executionID uuid.UUID, masterKey []byte) (json.RawMessage, error) {
 	var wrapped, ciphertext string
 	err := s.db.QueryRow(ctx, `SELECT evidence.encrypted_dek, evidence.encrypted_history
-		FROM fused_execution_app_replay_evidence evidence
-		JOIN fused_execution_app_results result ON result.id=evidence.execution_id
+		FROM fused_unified_app_replay_evidence evidence
+		JOIN fused_unified_app_results result ON result.id=evidence.execution_id
 		WHERE evidence.execution_id=$1 AND evidence.account_id=$2 AND evidence.app_id=$3
 			AND result.account_id=$2 AND result.app_id=$3
 			AND evidence.expires_at>NOW() AND result.expires_at>NOW()`, executionID, accountID, appID).
@@ -118,8 +118,8 @@ func (s *postgresStore) DeleteExpiredReplayEvidence(ctx context.Context, before 
 	if limit < 1 || limit > 1000 {
 		return 0, ErrReplayEvidenceInvalid
 	}
-	tag, err := s.db.Exec(ctx, `DELETE FROM fused_execution_app_replay_evidence WHERE execution_id IN (
-		SELECT execution_id FROM fused_execution_app_replay_evidence
+	tag, err := s.db.Exec(ctx, `DELETE FROM fused_unified_app_replay_evidence WHERE execution_id IN (
+		SELECT execution_id FROM fused_unified_app_replay_evidence
 		WHERE expires_at<LEAST($1,NOW()) ORDER BY expires_at, execution_id LIMIT $2
 	)`, before, limit)
 	if err != nil {

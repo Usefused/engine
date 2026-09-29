@@ -854,8 +854,8 @@ func requestMatchesConfigType(path string, configType store.ConfigType) bool {
 	switch {
 	case path == "/sdk-config/apply":
 		return configType == store.ConfigTypeSDK
-	case path == "/execution-config/apply":
-		return configType == store.ConfigTypeExecution
+	case path == "/unified-app-config/apply":
+		return configType == store.ConfigTypeUnifiedApp
 	case path == "/mcp-config/apply":
 		return configType == store.ConfigTypeMCP
 	case path == "/webhook-config/apply":

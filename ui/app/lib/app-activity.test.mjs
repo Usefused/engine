@@ -14,7 +14,7 @@ const appDetailBodyPath = fileURLToPath(import.meta.resolve("../components/apps/
 const appIndexPath = fileURLToPath(import.meta.resolve("../routes/integrations.sdks._index.tsx"));
 const runtimeStatusPath = fileURLToPath(import.meta.resolve("../components/apps/AppRuntimeStatus.tsx"));
 const apiPath = fileURLToPath(import.meta.resolve("./api.ts"));
-const appBuilderPath = fileURLToPath(import.meta.resolve("../routes/integrations.builder.tsx"));
+const appBuilderPath = fileURLToPath(import.meta.resolve("../components/apps/AppServiceBuilder.tsx"));
 const appOverviewPath = fileURLToPath(import.meta.resolve("../components/activity/AppActivityOverview.tsx"));
 const appRequestsPath = fileURLToPath(import.meta.resolve("../components/activity/AppRequestsPanel.tsx"));
 

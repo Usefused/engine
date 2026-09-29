@@ -11,7 +11,7 @@ type RequestStatus = "all" | "success" | "failed";
 interface AppRequestsPanelProps {
   appId: string;
   consumerName: string;
-  transport: "sdk" | "mcp";
+  transport?: "sdk" | "mcp";
 }
 
 const PAGE_SIZE = 10;
@@ -32,7 +32,7 @@ function RequestRow({ event, onSelect }: { event: EngineExecutionEventEntry; onS
         </div>
       </td>
       <td className="px-4 py-3 text-sm text-slate-600">
-        <div>{event.provider_host || "Engine"}</div>
+        <div>{event.provider_host || (event.execution_kind === "unified" ? "App execution" : "Provider not recorded")}</div>
         {event.provider_http_status ? <div className="mt-1 text-xs text-slate-400">HTTP {event.provider_http_status}</div> : null}
       </td>
       <td className="px-4 py-3">
@@ -71,7 +71,7 @@ function RequestCard({ event, onSelect }: { event: EngineExecutionEventEntry; on
         {event.provider_http_status ? <span className="text-slate-400">HTTP {event.provider_http_status}</span> : null}
       </div>
       <div className="mt-3 flex min-w-0 items-end justify-between gap-3 text-xs text-slate-500">
-        <span className="min-w-0 truncate" title={event.provider_host || "Engine"}>{event.provider_host || "Engine"}</span>
+        <span className="min-w-0 truncate" title={event.provider_host || (event.execution_kind === "unified" ? "App execution" : "Provider not recorded")}>{event.provider_host || (event.execution_kind === "unified" ? "App execution" : "Provider not recorded")}</span>
         <span className="shrink-0 text-right">{new Date(event.started_at).toLocaleString()}</span>
       </div>
       {event.failure_reason ? <div className="mt-2 break-words text-xs text-red-600">{event.failure_reason}</div> : null}
@@ -87,7 +87,6 @@ export function AppRequestsPanel({ appId, consumerName, transport }: AppRequests
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
 	const [issue, setIssue] = useState<AppActivityIssue | null>(null);
-	const [includeAllVersions, setIncludeAllVersions] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<EngineExecutionEventEntry | null>(null);
 
   useEffect(() => {
@@ -97,7 +96,8 @@ export function AppRequestsPanel({ appId, consumerName, transport }: AppRequests
 	setSelectedEvent(null);
 	api.workspace.listAppExecutionEvents({
 		appId,
-		includeAllVersions,
+		// Version history selects the exact app; receipts never silently span sibling versions.
+		includeAllVersions: false,
 		// MCP remains a distinct runtime. SDK-family pages intentionally omit the
 		// transport filter so direct REST and generated-client calls appear together.
 		transport: transport === "mcp" ? "mcp" : undefined,
@@ -108,9 +108,9 @@ export function AppRequestsPanel({ appId, consumerName, transport }: AppRequests
       setItems(result.items);
       setTotal(result.total);
     }).catch((cause) => {
-      setIssue(appActivityIssue(cause, transport));
+      setIssue(appActivityIssue(cause, transport ?? "sdk"));
     }).finally(() => setLoading(false));
-	}, [appId, includeAllVersions, page, status, transport]);
+	}, [appId, page, status, transport]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -122,33 +122,27 @@ export function AppRequestsPanel({ appId, consumerName, transport }: AppRequests
 
   return (
     <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-      <div className="flex flex-col gap-3 border-b border-slate-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
+      {/* Keep status filters right-aligned; version navigation belongs to version history. */}
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
+        <div className="min-w-0 basis-72 flex-1">
           <h3 className="text-sm font-semibold text-slate-900">Execution receipts</h3>
           <p className="mt-0.5 text-xs text-slate-500">Individual and Unified calls through this {transport === "mcp" ? "MCP server" : "app"}. Open a Unified call to inspect its executions.</p>
         </div>
-		<div className="grid w-full grid-cols-1 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center">
-			<select
-				aria-label="Activity version"
-				value={includeAllVersions ? "all" : "current"}
-				onChange={(event) => { setIncludeAllVersions(event.target.value === "all"); setPage(1); }}
-				className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 sm:w-auto sm:py-1.5"
-			>
-				<option value="current">This version</option>
-				<option value="all">All versions</option>
-			</select>
-			<div className="grid grid-cols-3 rounded-lg bg-slate-100 p-1">
+		<div className="grid w-full grid-cols-1 gap-2 sm:ml-auto sm:flex sm:w-auto sm:shrink-0 sm:items-center">
+
+			<div className="grid h-9 grid-cols-3 rounded-lg bg-slate-100 p-1">
           {(["all", "success", "failed"] as RequestStatus[]).map((value) => (
             <button
               key={value}
               type="button"
               onClick={() => selectStatus(value)}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium capitalize ${status === value ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+              className={`rounded-md px-3 text-xs font-medium capitalize ${status === value ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
             >
               {value}
             </button>
 			))}
 			</div>
+
 		</div>
       </div>
 

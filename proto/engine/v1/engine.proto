@@ -20,11 +20,6 @@ service EngineService {
   // Paginated operations still return one buffered aggregate response.
   rpc Execute(ExecuteRequest) returns (stream ExecuteResponse);
 
-  // ExecuteUnified invokes one SDK-defined operation for an ordered set of
-  // explicitly selected targets. Authentication remains in x-app-id and
-  // x-api-key call metadata; provider execution stays inside the Engine.
-  rpc ExecuteUnified(ExecuteUnifiedRequest) returns (ExecuteUnifiedResponse);
-
   // StartConnectSession creates an Engine-owned OAuth/OIDC browser session and
   // returns only the provider authorization URL. Client credentials, PKCE
   // verifier, and future token material stay inside the Engine.
@@ -101,68 +96,10 @@ message ExecuteResponse {
   int32 status_code = 3; // Provider HTTP status, sent once after response chunks
 }
 
-// ExecutionSelectors contains only non-secret Engine routing selectors.
-// Provider credentials, headers, and URLs are never accepted here.
-message ExecutionSelectors {
-  string environment = 1;
-  string end_user_ref = 2;
-  string auth_type = 3;
-  string auth_name = 4;
-  string resource_id = 5;
-}
-
 // PaginationIntent bounds one logical response without exposing provider
 // cursors, offsets, URLs, or policy-owned safety controls.
 message PaginationIntent {
   uint32 max_pages = 1;
-}
-
-message ExecuteUnifiedRequest {
-  string operation = 1;
-  repeated string targets = 2; // Ordered target names; duplicates are invalid.
-  bytes input_json = 3; // One bounded JSON document.
-  map<string, ExecutionSelectors> target_selectors = 4;
-  // Generated SDKs supply one non-blank key per logical Unified request.
-  string idempotency_key = 5;
-  // target_pagination keys are selected public target names. Forward targets
-  // may be tightened independently; rollback operations never inherit intent.
-  map<string, PaginationIntent> target_pagination = 6;
-}
-
-message UnifiedTargetResult {
-  string target = 1;
-  string status = 2; // "success", "error", or "skipped".
-  bytes data_json = 3; // Present only for a successful target.
-  string error_code = 4; // Bounded Engine-owned code for an error target.
-  UnifiedAuthAction auth_action = 5; // Present only when user action can unblock auth.
-}
-
-// UnifiedAuthAction contains non-secret routing data needed to repair one
-// connected-auth target without exposing provider credentials.
-message UnifiedAuthAction {
-  string action = 1; // "connect", "reconnect", or "select_resource".
-  string bucket_id = 2;
-  string service_id = 3;
-  string end_user_ref = 4;
-  string connection_id = 5;
-  string reason = 6;
-}
-
-// UnifiedRollbackResult reports one explicitly declared compensation. Raw
-// rollback provider bodies stay Engine-local because they are not call output.
-message UnifiedRollbackResult {
-  string target = 1;
-  string status = 2; // "success" or "error".
-  string error_code = 3;
-  repeated string triggered_by = 4;
-  UnifiedAuthAction auth_action = 5;
-}
-
-message ExecuteUnifiedResponse {
-  repeated UnifiedTargetResult results = 1; // Preserves request target order.
-  repeated UnifiedRollbackResult rollback_results = 2;
-  bytes output_json = 3; // Exact final operation output when configured.
-  string output_error_code = 4;
 }
 
 message StartConnectSessionRequest {

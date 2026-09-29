@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/executionappvm"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -29,14 +30,13 @@ type capabilityExecutionEnvelope struct {
 	SourceExecutionID *uuid.UUID              `json:"sourceExecutionId,omitempty"`
 	ReadHandle        string                  `json:"readHandle,omitempty"`
 	Output            json.RawMessage         `json:"output,omitempty"`
-	Data              json.RawMessage         `json:"data"`
 	Error             *restExecutionErrorBody `json:"error,omitempty"`
 	CreatedAt         time.Time               `json:"createdAt"`
 	CompletedAt       *time.Time              `json:"completedAt,omitempty"`
 }
 
-// MountExecutionAppRoutes adds rerun and replay to the existing SDK execution endpoint.
-func MountExecutionAppRoutes(router chi.Router, server *EngineGRPCServer) {
+// MountUnifiedAppRoutes adds rerun and replay to the existing SDK execution endpoint.
+func MountUnifiedAppRoutes(router chi.Router, server *EngineGRPCServer) {
 	// A missing server cannot accidentally publish a route without authentication.
 	if router == nil || server == nil {
 		return
@@ -45,12 +45,12 @@ func MountExecutionAppRoutes(router chi.Router, server *EngineGRPCServer) {
 	router.Post("/v1/apps/{app_id}/executions/{execution_id}/replay", server.handleCapabilityReplay)
 }
 
-// tryExecutionAppRun uses the existing SDK POST when the exact app version has an authored execute bundle.
-func (s *EngineGRPCServer) tryExecutionAppRun(writer http.ResponseWriter, request *http.Request, scope *store.AppRuntime, identity auth.RuntimeIdentity, decoded restExecutionRequest) bool {
-	ctx, span := otel.Tracer("engine").Start(request.Context(), "engine.execution_app.execute")
+// tryUnifiedAppRun uses the existing SDK POST when the exact app version has an authored execute bundle.
+func (s *EngineGRPCServer) tryUnifiedAppRun(writer http.ResponseWriter, request *http.Request, scope *store.AppRuntime, identity auth.RuntimeIdentity, decoded restExecutionRequest) bool {
+	ctx, span := otel.Tracer("engine").Start(request.Context(), "engine.unified_app.execute")
 	defer span.End()
 	span.SetAttributes(attribute.String("execution.trigger", "caller"), attribute.String("execution.mode", "live"))
-	bundle, manifest, found, requestErr := s.findExecutionAppBundle(ctx, identity.AppID)
+	bundle, manifest, found, requestErr := s.findUnifiedAppBundle(ctx, identity.AppID)
 	// Without a bundle the existing raw operation named execute remains available.
 	if !found && requestErr == nil {
 		return false
@@ -59,7 +59,7 @@ func (s *EngineGRPCServer) tryExecutionAppRun(writer http.ResponseWriter, reques
 		writeCapabilityError(writer, span, requestErr)
 		return true
 	}
-	requestErr = validateExecutionAppRESTControls(decoded)
+	requestErr = validateUnifiedAppRESTControls(decoded)
 	if requestErr != nil {
 		writeCapabilityError(writer, span, requestErr)
 		return true
@@ -84,72 +84,72 @@ func (s *EngineGRPCServer) tryExecutionAppRun(writer http.ResponseWriter, reques
 	return true
 }
 
-// admitExecutionAppTraffic rejects old exact versions after their family promotes a ready replacement.
-func (s *EngineGRPCServer) admitExecutionAppTraffic(ctx context.Context, appID uuid.UUID) *restExecutionError {
-	targets, ok := s.store.(store.ExecutionAppTargetStore)
+// admitUnifiedAppTraffic rejects old exact versions after their family promotes a ready replacement.
+func (s *EngineGRPCServer) admitUnifiedAppTraffic(ctx context.Context, appID uuid.UUID) *restExecutionError {
+	targets, ok := s.store.(store.UnifiedAppTargetStore)
 	// A missing authoritative target store cannot establish the active version.
 	if !ok {
-		return newRESTExecutionError(http.StatusServiceUnavailable, "runtime_unavailable", "execution app target is unavailable")
+		return newRESTExecutionError(http.StatusServiceUnavailable, "runtime_unavailable", "unified app target is unavailable")
 	}
-	active, err := targets.IsExecutionAppTrafficTarget(ctx, appID)
+	active, err := targets.IsUnifiedAppTrafficTarget(ctx, appID)
 	// Persistence errors cannot permit execution through a stale app ID.
 	if err != nil {
-		return newRESTExecutionError(http.StatusServiceUnavailable, "runtime_unavailable", "execution app target is unavailable")
+		return newRESTExecutionError(http.StatusServiceUnavailable, "runtime_unavailable", "unified app target is unavailable")
 	}
 	// A promoted sibling may keep historical records while this version stops receiving traffic.
 	if !active {
-		return newRESTExecutionError(http.StatusConflict, "app_version_not_current", "execution app version is not current")
+		return newRESTExecutionError(http.StatusConflict, "app_version_not_current", "unified app version is not current")
 	}
 	return nil
 }
 
-// validateExecutionAppRESTControls keeps provider routing options out of the one authored input contract.
-func validateExecutionAppRESTControls(request restExecutionRequest) *restExecutionError {
+// validateUnifiedAppRESTControls keeps provider routing options out of the one authored input contract.
+func validateUnifiedAppRESTControls(request restExecutionRequest) *restExecutionError {
 	// The authored script owns its selected workspace calls and selectors.
-	if len(request.Targets) > 0 || request.Selector != nil || len(request.Selectors) > 0 || request.Pagination != nil || len(request.TargetPagination) > 0 {
+	if request.Selector != nil || request.Pagination != nil {
 		return newRESTExecutionError(http.StatusBadRequest, "invalid_request", "execute accepts only operation and input")
 	}
 	return nil
 }
 
-// findExecutionAppBundle pins one optional authored bundle to the exact authenticated app version.
-func (s *EngineGRPCServer) findExecutionAppBundle(ctx context.Context, appID uuid.UUID) (*store.ExecutionAppBundle, *executionAppManifest, bool, *restExecutionError) {
-	bundles, ok := s.store.(store.ExecutionAppBundleStore)
+// findUnifiedAppBundle pins one optional authored bundle to the exact authenticated app version.
+func (s *EngineGRPCServer) findUnifiedAppBundle(ctx context.Context, appID uuid.UUID) (*store.UnifiedAppBundle, *unifiedAppManifest, bool, *restExecutionError) {
+	bundles, ok := s.store.(store.UnifiedAppBundleStore)
 	// Without bundle storage, ordinary SDK versions can still run raw operations.
 	if !ok {
-		return s.missingExecutionAppBundle(ctx, appID)
+		return s.missingUnifiedAppBundle(ctx, appID)
 	}
-	bundle, err := bundles.GetExecutionAppBundle(ctx, appID)
+	bundle, err := bundles.GetUnifiedAppBundle(ctx, appID)
 	// A planned but unattached bundle may never fall through to an unrelated raw execute operation.
-	if errors.Is(err, store.ErrExecutionAppBundleNotFound) {
-		return s.missingExecutionAppBundle(ctx, appID)
+	if errors.Is(err, store.ErrUnifiedAppBundleNotFound) {
+		return s.missingUnifiedAppBundle(ctx, appID)
 	}
 	if err != nil {
-		return nil, nil, true, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_unavailable", "execution app bundle is unavailable")
+		return nil, nil, true, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_unavailable", "unified app bundle is unavailable")
 	}
 	app, err := s.store.GetApp(ctx, appID)
 	// A bundle attached to the wrong source identity cannot gain execution authority.
-	if err != nil || app == nil || app.SourceHash != bundle.SourceHash || app.BundleDigest != store.ExecutionAppBundleDigest([]byte(bundle.BundleJS)) {
-		return nil, nil, true, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_invalid", "execution app bundle is invalid")
+	if err != nil || app == nil || app.SourceHash != bundle.SourceHash || app.BundleDigest != store.UnifiedAppBundleDigest([]byte(bundle.BundleJS)) {
+		return nil, nil, true, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_invalid", "unified app bundle is invalid")
 	}
-	manifest, err := parseExecutionAppManifest(bundle.Manifest)
+	manifest, err := parseUnifiedAppManifest(bundle.Manifest)
 	// Corrupt descriptors fail closed before any execution record or provider call.
 	if err != nil {
-		return nil, nil, true, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_invalid", "execution app bundle is invalid")
+		return nil, nil, true, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_invalid", "unified app bundle is invalid")
 	}
 	return bundle, manifest, true, nil
 }
 
-// missingExecutionAppBundle permits raw execute only when the immutable app version never planned hosted code.
-func (s *EngineGRPCServer) missingExecutionAppBundle(ctx context.Context, appID uuid.UUID) (*store.ExecutionAppBundle, *executionAppManifest, bool, *restExecutionError) {
+// missingUnifiedAppBundle permits raw execute only when the immutable app version never planned hosted code.
+func (s *EngineGRPCServer) missingUnifiedAppBundle(ctx context.Context, appID uuid.UUID) (*store.UnifiedAppBundle, *unifiedAppManifest, bool, *restExecutionError) {
 	app, err := s.store.GetApp(ctx, appID)
 	// A failed identity read cannot prove that raw execute is the intended version contract.
 	if err != nil || app == nil {
-		return nil, nil, true, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_unavailable", "execution app bundle is unavailable")
+		return nil, nil, true, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_unavailable", "unified app bundle is unavailable")
 	}
 	// Hosted code approved at apply must be attached before this app can run execute.
 	if app.BundleDigest != "" {
-		return nil, nil, true, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_unavailable", "execution app bundle is unavailable")
+		return nil, nil, true, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_unavailable", "unified app bundle is unavailable")
 	}
 	return nil, nil, false, nil
 }
@@ -175,6 +175,22 @@ func capabilityCompletion(runErr, ctxErr error, providerStarted bool) (string, s
 	if ctxErr != nil && providerStarted {
 		return "indeterminate", "execution_interrupted"
 	}
+	// Error categories are bounded metadata; exception messages remain private.
+	var diagnostic *executionappvm.DiagnosticError
+	if errors.As(runErr, &diagnostic) {
+		switch diagnostic.Phase {
+		case "timeout":
+			// Timed-out provider work may have committed a side effect and must not imply retry safety.
+			if providerStarted {
+				return "indeterminate", "execution_interrupted"
+			}
+			return "failed", "execution_timeout"
+		case "input_validation":
+			return "failed", "input_validation_failed"
+		case "output_validation":
+			return "failed", "output_validation_failed"
+		}
+	}
 	return "failed", "execution_failed"
 }
 
@@ -184,16 +200,16 @@ func capabilityPublicError(code string) string {
 	if code == "" {
 		return ""
 	}
-	return "execution app did not complete successfully"
+	return "unified app did not complete successfully"
 }
 
-// projectCapabilityExecution adds the one-time read handle without exposing input or token identity.
+// projectCapabilityExecution returns the authored output and one-time read handle while keeping stored search data private.
 func projectCapabilityExecution(record *store.ExecutionResult, readHandle string) capabilityExecutionEnvelope {
 	projected := capabilityExecutionEnvelope{
 		ExecutionID: record.ID, AppID: record.AppID, Version: record.AppVersion,
 		Status: record.Status, Mode: record.Mode,
 		SourceExecutionID: record.SourceExecutionID, ReadHandle: readHandle,
-		Output: record.Output, Data: record.Data,
+		Output:    record.Output,
 		CreatedAt: record.CreatedAt, CompletedAt: record.CompletedAt,
 	}
 	// Errors have a bounded public projection distinct from private provider diagnostics.

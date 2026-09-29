@@ -22,11 +22,11 @@ func (s *postgresStore) RecoverStaleExecutionResults(ctx context.Context, before
 		return 0, ErrExecutionResultInvalid
 	}
 	tag, err := s.db.Exec(ctx, `WITH abandoned AS (
-		SELECT id FROM fused_execution_app_results
+		SELECT id FROM fused_unified_app_results
 		WHERE status IN ('queued','running') AND updated_at<$1
 		ORDER BY updated_at, id LIMIT $2 FOR UPDATE SKIP LOCKED
 	)
-	UPDATE fused_execution_app_results result SET
+	UPDATE fused_unified_app_results result SET
 		status=CASE WHEN result.status='running' THEN 'indeterminate' ELSE 'failed' END,
 		error_code=CASE WHEN result.status='running' THEN 'execution_interrupted' ELSE 'runtime_unavailable' END,
 		error_message='capability execution did not complete successfully',

@@ -16,11 +16,16 @@ import (
 // stable digest. Every app publication path must use this function so
 // semantically identical selection documents cannot acquire different hashes
 // because of JSON formatting or input ordering.
-func KeysAndHash(raw []byte) ([]string, string, error) {
+func KeysAndHash(raw []byte, attachments ...models.UnifiedAppBinding) ([]string, string, error) {
 	keys, err := Keys(raw)
 	if err != nil {
 		return nil, "", err
 	}
+	// Attachment identity is an execution capability even when it selects no physical service directly.
+	for _, binding := range attachments {
+		keys = append(keys, "unified:"+binding.AppID.String()+":operation:unified_app:"+binding.Alias)
+	}
+	sort.Strings(keys)
 	return keys, hashKeys(keys), nil
 }
 

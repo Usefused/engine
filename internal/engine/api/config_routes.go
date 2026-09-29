@@ -30,22 +30,27 @@ func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store
 		// Polling is a local projection; the background finalizer exclusively owns Registry replay and lifecycle transitions.
 		r.Get("/generation/{app_id}", SDKConfigGenerationHandler(s))
 	})
-	// Hosted Execution Apps share plan and token lifecycle with SDKs without generating a Registry package.
-	r.Route("/execution-config", func(r chi.Router) {
-		r.Post("/plan", ExecutionConfigPlanHandler(configStore, s, registryClient))
-		r.Post("/apply", authorizationRevisionSyncHandler(revisionLoader, revisionSink, ExecutionConfigApplyHandler(configStore, s, registryClient)))
+	// Hosted Unified Apps share plan and token lifecycle with SDKs without generating a Registry package.
+	r.Route("/unified-app-config", func(r chi.Router) {
+		r.Post("/plan", UnifiedAppConfigPlanHandler(configStore, s, registryClient))
+		r.Post("/apply", authorizationRevisionSyncHandler(revisionLoader, revisionSink, UnifiedAppConfigApplyHandler(configStore, s, registryClient)))
 	})
 	r.Get("/sdks/{app_id}/download", SDKPackageDownloadHandler(s, proxy, packageClient))
 	contractStore, _ := s.(appOpenAPIContractStore)
 	r.Get("/apps/{app_id}/openapi", AppOpenAPIHandler(s, contractStore))
+	// Privileged diagnostic reads stay on the management plane, separate from runtime tokens.
+	r.Get("/apps/{app_id}/executions/{execution_id}/diagnostics", ExecutionDiagnosticsHandler(s, masterKey))
 	// Workflow extension reads private source locally and retains the existing plan/apply mutation path.
 	r.Get("/apps/{app_id}/config", AppConfigSourceHandler(s, configStore))
 
 	// SDK and MCP versions share lifecycle semantics. There is deliberately no
 	// activate/reactivate endpoint: deactivation is an irreversible hard delete.
 	r.Route("/apps/{app_id}", func(r chi.Router) {
+		// Traffic switching selects a retained ready version; it never resurrects a deleted version.
+		r.Get("/traffic", UnifiedAppTrafficHandler(s))
+		r.Post("/promote", UnifiedAppTrafficHandler(s))
 		// Transitional bundle attachment keeps authored code on the exact existing app version.
-		r.Post("/bundle", ExecutionAppBundleHandler(s))
+		r.Post("/bundle", UnifiedAppBundleHandler(s))
 		r.Post("/deprecate", DeprecateAppHandler(s))
 		r.Post("/undeprecate", UndeprecateAppHandler(s))
 		r.Delete("/", DeactivateAppHandler(s, proxy))

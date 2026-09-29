@@ -559,6 +559,7 @@ func assertEngineCapabilities(t *testing.T, capabilities []interface{}, decoded 
 	}
 }
 
+// TestFetchRuntimeContractsUsesSingleSetBasedGraphQLRequest keeps batched SDK archive acquisition on one Registry request.
 func TestFetchRuntimeContractsUsesSingleSetBasedGraphQLRequest(t *testing.T) {
 	firstServiceID := uuid.New()
 	firstVersionID := uuid.New()
@@ -598,12 +599,39 @@ func TestFetchRuntimeContractsUsesSingleSetBasedGraphQLRequest(t *testing.T) {
 	if len(snapshots) != 2 || snapshots[0].ServiceID != firstServiceID || snapshots[1].ServiceID != secondServiceID {
 		t.Fatalf("unexpected snapshots: %#v", snapshots)
 	}
-	if !strings.Contains(requestBody.Query, "serviceRuntimeContracts(refs: $refs, engine_contract_version: $engine_contract_version, engine_capabilities: $engine_capabilities)") || strings.Contains(requestBody.Query, "service0: service") {
+	// The SDK path must explicitly retain generation input while preserving the set-based contract query.
+	if !strings.Contains(requestBody.Query, "retain_generation_contract: $retain_generation_contract") || requestBody.Variables["retain_generation_contract"] != true || strings.Contains(requestBody.Query, "service0: service") {
 		t.Fatalf("expected set-based runtime contract query, got %s", requestBody.Query)
 	}
 	variablesJSON, _ := json.Marshal(requestBody.Variables)
 	if !bytes.Contains(variablesJSON, []byte(firstServiceID.String())) || !bytes.Contains(variablesJSON, []byte(secondVersionID.String())) {
 		t.Fatalf("unexpected variables: %#v", requestBody.Variables)
+	}
+}
+
+// TestFetchRuntimeContractForActivationSkipsSDKArchive proves a workspace add requests only executable service data.
+func TestFetchRuntimeContractForActivationSkipsSDKArchive(t *testing.T) {
+	serviceID, versionID := uuid.New(), uuid.New()
+	var requestBody graphqlQuery
+	client := &HTTPRegistryClient{
+		endpoint: "https://registry.example/graphql", licenseKey: "engine-license-key",
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			// The fake transport records the exact GraphQL argument sent by the activation client.
+			if err := json.NewDecoder(request.Body).Decode(&requestBody); err != nil {
+				t.Fatalf("decode activation request: %v", err)
+			}
+			body := `{"data":{"serviceRuntimeContracts":[{"contract_version":2,"required_capabilities":[],"service_id":"` + serviceID.String() + `","service_version_id":"` + versionID.String() + `","version":"v1","service":` + runtimeContractServiceJSON(serviceID, versionID, "Workspace") + `,"operations":[],"webhooks":[]}]}}`
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		})},
+	}
+	snapshot, err := client.FetchRuntimeContractForActivation(t.Context(), serviceID, versionID, "v1", "user-api-key")
+	// Runtime validation and identity checks remain in force even without an SDK archive.
+	if err != nil || snapshot.ServiceID != serviceID || snapshot.ServiceVersionID != versionID {
+		t.Fatalf("runtime-only snapshot=%+v error=%v", snapshot, err)
+	}
+	// The activation request must opt out of generation retention all the way to the Registry boundary.
+	if requestBody.Variables["retain_generation_contract"] != false || snapshot.GenerationContractHash != "" {
+		t.Fatalf("activation retained generation input: variables=%#v snapshot=%+v", requestBody.Variables, snapshot)
 	}
 }
 

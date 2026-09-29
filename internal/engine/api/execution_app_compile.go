@@ -20,20 +20,20 @@ import (
 	"go.opentelemetry.io/otel/codes"
 )
 
-const maxExecutionAppSourceBytes = 256 << 10
+const maxUnifiedAppSourceBytes = 256 << 10
 
 // validateExecutionSourceMode separates Engine compilation from the retained precompiled attachment workflow.
 func validateExecutionSourceMode(doc sdkConfigDocument) error {
 	// Inline source must be finite and may not smuggle a caller-chosen compiled digest.
 	if strings.TrimSpace(doc.Source) != "" {
-		if doc.BundleDigest != "" || len(doc.Source) > maxExecutionAppSourceBytes {
+		if doc.BundleDigest != "" || len(doc.Source) > maxUnifiedAppSourceBytes {
 			return errors.New("execution source must be at most 256 KiB and omit bundle_digest")
 		}
 		return nil
 	}
 	// Older authored deployments still require the exact bundle identity they attach separately.
-	if !store.IsCanonicalExecutionAppBundleDigest(doc.BundleDigest) {
-		return errors.New("execution config requires source or a canonical bundle_digest")
+	if !store.IsCanonicalUnifiedAppBundleDigest(doc.BundleDigest) {
+		return errors.New("Unified App config requires source or a canonical bundle_digest")
 	}
 	return nil
 }
@@ -68,19 +68,19 @@ func compileExecutionPlanAndPinDigest(ctx context.Context, s store.Store, doc sd
 // compileExecutionPlanSource freezes authored code and exact local operation IDs before an apply can publish it.
 func compileExecutionPlanSource(ctx context.Context, s store.Store, doc sdkConfigDocument, selections []models.SDKSelection, services []sdkResolvedService) (*executionPlanArtifact, error) {
 	// Explicit precompiled configurations retain their existing attachment workflow.
-	if doc.Kind != store.AppKindExecution.String() || strings.TrimSpace(doc.Source) == "" {
+	if doc.Kind != store.AppKindUnifiedApp.String() || strings.TrimSpace(doc.Source) == "" {
 		return nil, nil
 	}
 	repository, ok := s.(store.ServiceContractEndpointSelectionBatchStore)
 	// Compilation cannot infer endpoint IDs from names or a remote catalogue.
 	if !ok {
-		return nil, workspaceConfigHTTPError{status: 503, message: "execution app contract lookup is unavailable"}
+		return nil, workspaceConfigHTTPError{status: 503, message: "unified app contract lookup is unavailable"}
 	}
 	pins, err := executionCompilerSelections(ctx, repository, selections, services)
 	if err != nil {
 		return nil, err
 	}
-	ctx, span := otel.Tracer("engine").Start(ctx, "engine.execution_app.compile")
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.unified_app.compile")
 	defer span.End()
 	span.SetAttributes(attribute.Int("execution.operation_count", len(pins)))
 	artifact, err := runExecutionCompiler(ctx, doc.Source, pins)
@@ -99,10 +99,10 @@ func compileExecutionPlanSource(ctx context.Context, s store.Store, doc sdkConfi
 
 // validateCompiledExecutionPins requires the compiler declaration to preserve every Engine-selected physical identity.
 func validateCompiledExecutionPins(raw json.RawMessage, pins []executionCompilerSelection) error {
-	manifest, err := parseExecutionAppManifest(raw)
+	manifest, err := parseUnifiedAppManifest(raw)
 	// A malformed descriptor cannot be admitted even when the emitted JavaScript has a valid hash.
 	if err != nil || len(manifest.SelectedOperations) != len(pins) {
-		return workspaceConfigHTTPError{status: 503, message: "execution app compiler changed selected operations"}
+		return workspaceConfigHTTPError{status: 503, message: "unified app compiler changed selected operations"}
 	}
 	expected := make(map[string]executionCompilerSelection, len(pins))
 	for _, pin := range pins {
@@ -113,29 +113,29 @@ func validateCompiledExecutionPins(raw json.RawMessage, pins []executionCompiler
 		pin, found := expected[key]
 		// A compiler mismatch must fail before the plan can grant provider calls.
 		if !found || pin.ServiceID != actual.ServiceID.String() || pin.ServiceVersionID != actual.ServiceVersionID.String() || pin.EndpointID != actual.EndpointID.String() {
-			return workspaceConfigHTTPError{status: 503, message: "execution app compiler changed selected operations"}
+			return workspaceConfigHTTPError{status: 503, message: "unified app compiler changed selected operations"}
 		}
 		delete(expected, key)
 	}
 	// Equal counts alone cannot prove coverage when the compiler repeats one selected operation.
 	if len(expected) != 0 {
-		return workspaceConfigHTTPError{status: 503, message: "execution app compiler changed selected operations"}
+		return workspaceConfigHTTPError{status: 503, message: "unified app compiler changed selected operations"}
 	}
 	return nil
 }
 
 // executionPlanBundleForApply promotes only the compiler output pinned inside the reviewed immutable plan.
-func executionPlanBundleForApply(doc sdkConfigDocument, artifact *executionPlanArtifact, sourceHash string, appID uuid.UUID) (*store.ExecutionAppBundle, error) {
+func executionPlanBundleForApply(doc sdkConfigDocument, artifact *executionPlanArtifact, sourceHash string, appID uuid.UUID) (*store.UnifiedAppBundle, error) {
 	// Legacy precompiled versions use the explicit attachment API; inline source always needs a plan artifact.
 	if strings.TrimSpace(doc.Source) == "" {
 		return nil, nil
 	}
-	if artifact == nil || artifact.Digest != doc.BundleDigest || store.ExecutionAppBundleDigest([]byte(artifact.BundleJS)) != doc.BundleDigest {
-		return nil, workspaceConfigHTTPError{status: 409, message: "execution app compiled plan artifact is missing or changed"}
+	if artifact == nil || artifact.Digest != doc.BundleDigest || store.UnifiedAppBundleDigest([]byte(artifact.BundleJS)) != doc.BundleDigest {
+		return nil, workspaceConfigHTTPError{status: 409, message: "unified app compiled plan artifact is missing or changed"}
 	}
 	// The Engine compiler inspected declarations in its bounded child before the plan was persisted;
 	// re-evaluating top-level author code during apply would add a second execution boundary.
-	return &store.ExecutionAppBundle{AppID: appID, SourceHash: sourceHash, BundleJS: artifact.BundleJS, Manifest: artifact.Manifest}, nil
+	return &store.UnifiedAppBundle{AppID: appID, SourceHash: sourceHash, BundleJS: artifact.BundleJS, Manifest: artifact.Manifest}, nil
 }
 
 // executionCompilerSelections uses one set-based contract read and requires an exact result for every reviewed operation.
@@ -149,7 +149,7 @@ func executionCompilerSelections(ctx context.Context, repository store.ServiceCo
 	for index, selection := range selections {
 		// Select-all and empty operation sets cannot be represented by a stable source-level method binding.
 		if selection.SelectAll || len(selection.OperationNames) == 0 {
-			return nil, workspaceConfigHTTPError{status: 400, message: "execution app source requires explicit operations"}
+			return nil, workspaceConfigHTTPError{status: 400, message: "unified app source requires explicit operations"}
 		}
 		want[index] = make(map[string]bool, len(selection.OperationNames))
 		for _, name := range selection.OperationNames {
@@ -160,7 +160,7 @@ func executionCompilerSelections(ctx context.Context, repository store.ServiceCo
 	matches, err := repository.ListServiceContractEndpointsForSelections(ctx, requests, nil)
 	// A failed local snapshot read cannot be replaced by broader workspace discovery.
 	if err != nil {
-		return nil, workspaceConfigHTTPError{status: 503, message: "execution app operation contracts are unavailable"}
+		return nil, workspaceConfigHTTPError{status: 503, message: "unified app operation contracts are unavailable"}
 	}
 	return bindExecutionCompilerMatches(selections, keys, want, matches)
 }
@@ -169,13 +169,13 @@ func executionCompilerSelections(ctx context.Context, repository store.ServiceCo
 func executionCompilerServiceKeys(selections []models.SDKSelection, services []sdkResolvedService) ([]string, error) {
 	// Resolver output preserves authored selection order, including two aliases of one service ID.
 	if len(services) != len(selections) {
-		return nil, workspaceConfigHTTPError{status: 409, message: "execution app service scope changed during planning"}
+		return nil, workspaceConfigHTTPError{status: 409, message: "unified app service scope changed during planning"}
 	}
 	keys := make([]string, len(services))
 	for index, service := range services {
 		// Index binding prevents one alias from replacing a sibling with the same provider identity.
 		if service.ServiceID != selections[index].ServiceID || service.ServiceVersionID != selections[index].ServiceVersionID || service.PublicTarget == "" {
-			return nil, workspaceConfigHTTPError{status: 409, message: "execution app service scope changed during planning"}
+			return nil, workspaceConfigHTTPError{status: 409, message: "unified app service scope changed during planning"}
 		}
 		keys[index] = service.PublicTarget
 	}
@@ -189,21 +189,21 @@ func bindExecutionCompilerMatches(selections []models.SDKSelection, keys []strin
 		index := match.SelectionIndex
 		// A row outside the requested batch, missing ID, or duplicate name cannot gain capability authority.
 		if index < 0 || index >= len(selections) || match.Endpoint.ID == [16]byte{} || !want[index][match.Endpoint.Name] {
-			return nil, workspaceConfigHTTPError{status: 409, message: "execution app operation scope changed during planning"}
+			return nil, workspaceConfigHTTPError{status: 409, message: "unified app operation scope changed during planning"}
 		}
 		delete(want[index], match.Endpoint.Name)
 		selection := selections[index]
 		key := keys[index]
 		// A missing authored alias would make fused.fetch route to a different method name.
 		if key == "" {
-			return nil, workspaceConfigHTTPError{status: 409, message: "execution app service scope changed during planning"}
+			return nil, workspaceConfigHTTPError{status: 409, message: "unified app service scope changed during planning"}
 		}
 		pins = append(pins, executionCompilerSelection{Service: key, Operation: match.Endpoint.Name, ServiceID: selection.ServiceID.String(), ServiceVersionID: selection.ServiceVersionID.String(), EndpointID: match.Endpoint.ID.String()})
 	}
 	for _, remaining := range want {
 		// Partial snapshot results must fail instead of silently dropping an authored method.
 		if len(remaining) != 0 {
-			return nil, workspaceConfigHTTPError{status: 409, message: "execution app operation scope changed during planning"}
+			return nil, workspaceConfigHTTPError{status: 409, message: "unified app operation scope changed during planning"}
 		}
 	}
 	sort.Slice(pins, func(left, right int) bool {
@@ -227,17 +227,17 @@ func runExecutionCompiler(ctx context.Context, source string, pins []executionCo
 	}
 	dir, err := os.MkdirTemp("", "fused-execution-compile-")
 	if err != nil {
-		return nil, workspaceConfigHTTPError{status: 503, message: "execution app compiler storage is unavailable"}
+		return nil, workspaceConfigHTTPError{status: 503, message: "unified app compiler storage is unavailable"}
 	}
 	defer os.RemoveAll(dir)
 	paths := []string{filepath.Join(dir, "app.ts"), filepath.Join(dir, "spec.json"), filepath.Join(dir, "bundle.js"), filepath.Join(dir, "manifest.json"), filepath.Join(dir, "digest.json")}
 	spec, _ := json.Marshal(map[string]any{"entryFile": paths[0], "selectedOperations": pins})
 	// Source and spec remain private to this one bounded compiler invocation.
 	if err := os.WriteFile(paths[0], []byte(source), 0600); err != nil {
-		return nil, workspaceConfigHTTPError{status: 503, message: "execution app compiler storage is unavailable"}
+		return nil, workspaceConfigHTTPError{status: 503, message: "unified app compiler storage is unavailable"}
 	}
 	if err := os.WriteFile(paths[1], spec, 0600); err != nil {
-		return nil, workspaceConfigHTTPError{status: 503, message: "execution app compiler storage is unavailable"}
+		return nil, workspaceConfigHTTPError{status: 503, message: "unified app compiler storage is unavailable"}
 	}
 	// The outer deadline leaves startup margin around the compiler's own isolated manifest worker limit.
 	compileCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
@@ -256,15 +256,15 @@ func runExecutionCompiler(ctx context.Context, source string, pins []executionCo
 func executionCompilerFailure(ctx context.Context, err error, output []byte) error {
 	// A bounded compiler deadline should tell the caller the Engine build stalled, not blame TypeScript syntax.
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || strings.Contains(string(output), "ETIMEDOUT") {
-		return workspaceConfigHTTPError{status: 504, message: "execution app compiler timed out"}
+		return workspaceConfigHTTPError{status: 504, message: "unified app compiler timed out"}
 	}
 	var executableError *exec.Error
 	// A missing Node runtime or compiler executable is a deployment fault.
 	if errors.As(err, &executableError) {
-		return workspaceConfigHTTPError{status: 503, message: "execution app compiler is unavailable"}
+		return workspaceConfigHTTPError{status: 503, message: "unified app compiler is unavailable"}
 	}
 	// Build errors can include source locations, but never full source or unbounded child output.
-	return workspaceConfigHTTPError{status: 400, message: fmt.Sprintf("execution app compile failed: %.1024s", strings.TrimSpace(string(output)))}
+	return workspaceConfigHTTPError{status: 400, message: fmt.Sprintf("unified app compile failed: %.1024s", strings.TrimSpace(string(output)))}
 }
 
 // readExecutionCompilerArtifacts validates byte identity before a plan can retain executable source.
@@ -277,11 +277,11 @@ func readExecutionCompilerArtifacts(bundlePath, manifestPath, digestPath string)
 		BundleDigest string `json:"bundle_digest"`
 	}
 	// The digest sidecar must identify exactly the bytes retained in the plan.
-	if json.Unmarshal(digest, &identity) != nil || identity.BundleDigest != store.ExecutionAppBundleDigest(bundle) || !json.Valid(manifest) {
-		return nil, workspaceConfigHTTPError{status: 503, message: "execution app compiler artifact digest mismatch"}
+	if json.Unmarshal(digest, &identity) != nil || identity.BundleDigest != store.UnifiedAppBundleDigest(bundle) || !json.Valid(manifest) {
+		return nil, workspaceConfigHTTPError{status: 503, message: "unified app compiler artifact digest mismatch"}
 	}
-	if _, err := parseExecutionAppManifest(manifest); err != nil {
-		return nil, workspaceConfigHTTPError{status: 400, message: "execution app manifest is invalid"}
+	if _, err := parseUnifiedAppManifest(manifest); err != nil {
+		return nil, workspaceConfigHTTPError{status: 400, message: "unified app manifest is invalid"}
 	}
 	return &executionPlanArtifact{Digest: identity.BundleDigest, BundleJS: string(bundle), Manifest: manifest}, nil
 }
@@ -293,11 +293,11 @@ func readBoundedCompilerOutputs(bundlePath, manifestPath, digestPath string) ([]
 	digest, digestErr := os.ReadFile(digestPath)
 	// Missing outputs indicate a compiler packaging fault rather than an authoring error.
 	if bundleErr != nil || manifestErr != nil || digestErr != nil {
-		return nil, nil, nil, workspaceConfigHTTPError{status: 503, message: "execution app compiler produced invalid artifacts"}
+		return nil, nil, nil, workspaceConfigHTTPError{status: 503, message: "unified app compiler produced invalid artifacts"}
 	}
 	// Size checks also cap the in-transaction immutable artifact write.
 	if len(bundle) == 0 || len(bundle) > 2<<20 || len(manifest) > 1<<20 || len(digest) > 1<<10 {
-		return nil, nil, nil, workspaceConfigHTTPError{status: 503, message: "execution app compiler produced invalid artifacts"}
+		return nil, nil, nil, workspaceConfigHTTPError{status: 503, message: "unified app compiler produced invalid artifacts"}
 	}
 	return bundle, manifest, digest, nil
 }

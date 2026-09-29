@@ -12,19 +12,19 @@ import (
 
 type appOpenAPIBundleFixture struct {
 	*appOpenAPITestStore
-	bundle *store.ExecutionAppBundle
+	bundle *store.UnifiedAppBundle
 }
 
-// CreateExecutionAppBundle is unavailable because schema export reads only immutable bundle state.
-func (fixture *appOpenAPIBundleFixture) CreateExecutionAppBundle(context.Context, store.ExecutionAppBundle) error {
+// CreateUnifiedAppBundle is unavailable because schema export reads only immutable bundle state.
+func (fixture *appOpenAPIBundleFixture) CreateUnifiedAppBundle(context.Context, store.UnifiedAppBundle) error {
 	return errors.New("bundle fixture is read only")
 }
 
-// GetExecutionAppBundle returns only the exact fixture version's persisted artifact.
-func (fixture *appOpenAPIBundleFixture) GetExecutionAppBundle(_ context.Context, appID uuid.UUID) (*store.ExecutionAppBundle, error) {
+// GetUnifiedAppBundle returns only the exact fixture version's persisted artifact.
+func (fixture *appOpenAPIBundleFixture) GetUnifiedAppBundle(_ context.Context, appID uuid.UUID) (*store.UnifiedAppBundle, error) {
 	// Another version must never receive the fixture's authored schema.
 	if fixture.bundle == nil || fixture.bundle.AppID != appID {
-		return nil, store.ErrExecutionAppBundleNotFound
+		return nil, store.ErrUnifiedAppBundleNotFound
 	}
 	copy := *fixture.bundle
 	return &copy, nil
@@ -34,13 +34,13 @@ func (fixture *appOpenAPIBundleFixture) GetExecutionAppBundle(_ context.Context,
 func newAppOpenAPIBundleFixture(t *testing.T) *appOpenAPIBundleFixture {
 	t.Helper()
 	base, _ := newAppOpenAPIFixture(t)
-	bundle := &store.ExecutionAppBundle{
+	bundle := &store.UnifiedAppBundle{
 		AppID: base.app.AppID, SourceHash: "sha256:authored-source", BundleJS: "compiled script",
 		Manifest: json.RawMessage(`{"schemaVersion":1,"inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]},"outputSchema":{"type":"object","properties":{"greeting":{"type":"string"}},"required":["greeting"]},"searchable":[],"selectedOperations":[{"service":"issues","operation":"createIssue","serviceId":"11111111-1111-4111-8111-111111111111","serviceVersionId":"22222222-2222-4222-8222-222222222222","endpointId":"33333333-3333-4333-8333-333333333333"}]}`),
 	}
 	base.app.SourceHash = bundle.SourceHash
-	base.app.BundleDigest = store.ExecutionAppBundleDigest([]byte(bundle.BundleJS))
-	base.family.Kind = store.AppKindExecution
+	base.app.BundleDigest = store.UnifiedAppBundleDigest([]byte(bundle.BundleJS))
+	base.family.Kind = store.AppKindUnifiedApp
 	return &appOpenAPIBundleFixture{appOpenAPITestStore: base, bundle: bundle}
 }
 
@@ -64,13 +64,17 @@ func TestAppOpenAPIExportsAuthoredExecuteAlongsideRawOperation(t *testing.T) {
 	components := decoded["components"].(map[string]any)["schemas"].(map[string]any)
 	security := decoded["components"].(map[string]any)["securitySchemes"].(map[string]any)
 	// The distinct app kind must not claim to issue SDK tokens.
-	if _, ok := security["ExecutionAppToken"]; !ok {
-		t.Fatal("Execution App bearer scheme is unavailable")
+	if _, ok := security["UnifiedAppToken"]; !ok {
+		t.Fatal("Unified App bearer scheme is unavailable")
 	}
 	response := components[openAPIOperationComponentKey("execute")+"Response"].(map[string]any)
 	output := response["properties"].(map[string]any)["output"].(map[string]any)
 	if _, ok := output["properties"].(map[string]any)["greeting"]; !ok {
 		t.Fatal("authored output schema is missing greeting")
+	}
+	// Generated contracts must not promise the private search document as response data.
+	if _, ok := response["properties"].(map[string]any)["data"]; ok {
+		t.Fatal("authored response schema exposes stored search data")
 	}
 	openAPITestOperationRequest(t, decoded, "createIssue")
 }

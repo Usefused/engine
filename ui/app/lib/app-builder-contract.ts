@@ -12,6 +12,7 @@ export interface AppBuildSelector {
   resource_type: AppSelectorResourceType;
   resource_id: string;
   display_name: string;
+  is_default?: boolean;
 }
 
 export interface AppOwningTeamPage {
@@ -66,7 +67,7 @@ export const APP_BUILDER_OPERATIONS = {
       appBuildSelectors(owner_team_id: $ownerTeamId, resource_type: $resourceType, search: $search, limit: $limit, offset: $offset) {
         total
         items {
-          resource_type resource_id display_name
+          resource_type resource_id display_name is_default
         }
       }
     }
@@ -136,4 +137,15 @@ export function unactivatedBuilderServices(existing: boolean, authenticated: boo
   // Existing app scope is preserved; new workflow dependencies activate only through the shared create action.
   if (existing || !authenticated || !canRead || !loaded) return [];
   return selected.filter((id) => !enabled.has(id));
+}
+
+/** Preserves a usable choice, otherwise prefers the authorized default or a sole alternative. */
+export function preferredAppBucket(buckets: AppBuildSelector[], selected = ""): string {
+  // A late selector refresh must not overwrite an explicit choice that is still accessible.
+  if (buckets.some((bucket) => bucket.resource_id === selected)) return selected;
+  const defaultBucket = buckets.find((bucket) => bucket.is_default);
+  // Default metadata comes from the permission-filtered Engine selector, never a guessed name or ID.
+  if (defaultBucket) return defaultBucket.resource_id;
+  // Multiple alternatives need a deliberate choice when the default cannot be used.
+  return buckets.length === 1 ? buckets[0].resource_id : "";
 }

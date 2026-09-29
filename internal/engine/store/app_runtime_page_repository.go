@@ -25,8 +25,8 @@ func normalizeAppKind(kind string) (string, bool) {
 		return AppKindSDK.String(), true
 	case string(AppKindMCP):
 		return AppKindMCP.String(), true
-	case string(AppKindExecution):
-		return AppKindExecution.String(), true
+	case string(AppKindUnifiedApp):
+		return AppKindUnifiedApp.String(), true
 	default:
 		return "", false
 	}

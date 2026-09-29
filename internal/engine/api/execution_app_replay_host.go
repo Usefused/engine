@@ -8,6 +8,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/Usefused/engine/internal/engine/executionappvm"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/canonicaljson"
@@ -34,14 +35,16 @@ type capabilityReplayHistory struct {
 }
 
 type recordingCapabilityHost struct {
-	base        sandbox.CapabilityScriptHost
-	mu          sync.Mutex
-	dbMu        sync.Mutex
-	calls       []capabilityReplayCall
-	completed   int
-	data        json.RawMessage
-	invalid     bool
-	determinism sandbox.CapabilityDeterminism
+	phases           []executionappvm.PhaseTiming
+	base             sandbox.CapabilityScriptHost
+	mu               sync.Mutex
+	dbMu             sync.Mutex
+	diagnosticErrors map[int]*executionappvm.DiagnosticError
+	calls            []capabilityReplayCall
+	completed        int
+	data             json.RawMessage
+	invalid          bool
+	determinism      sandbox.CapabilityDeterminism
 }
 
 type replayCapabilityHost struct {
@@ -117,8 +120,15 @@ func (host *recordingCapabilityHost) Fetch(ctx context.Context, raw json.RawMess
 	host.calls = append(host.calls, capabilityReplayCall{Ordinal: ordinal, Request: request})
 	host.mu.Unlock()
 	response, fetchErr := host.base.Fetch(ctx, request)
-	// Live and replay both expose one generic error, so provider messages are never recorded.
+	// Replay and authored code stay stable; raw provider errors are retained only in encrypted diagnostics.
 	if fetchErr != nil {
+		host.mu.Lock()
+		// Allocate private evidence only for failed calls, outside the replay transcript.
+		if host.diagnosticErrors == nil {
+			host.diagnosticErrors = make(map[int]*executionappvm.DiagnosticError)
+		}
+		host.diagnosticErrors[index] = executionappvm.PrivateDiagnostic(fetchErr)
+		host.mu.Unlock()
 		host.finishFetch(index, nil, capabilityRecordedFetchError.Error())
 		return nil, capabilityRecordedFetchError
 	}

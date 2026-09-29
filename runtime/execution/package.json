@@ -1,8 +1,8 @@
 {
-  "name": "@fused/execution",
+  "name": "@fused/unified-app",
   "version": "0.1.0",
   "private": true,
-  "bin": { "fused-execution-build": "dist/src/cli.js" },
+  "bin": { "fused-unified-app-build": "dist/src/cli.js" },
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
   "exports": {

@@ -14,6 +14,7 @@ interface AppActivityOverviewProps {
   downloads: string | null;
   pendingDriftCount: number;
   services: AppActivityService[];
+  hostedSource?: boolean;
 }
 
 interface ServiceUsageRow extends EngineExecutionBreakdown {
@@ -143,19 +144,18 @@ function ServiceUsageTable({ rows }: { rows: ServiceUsageRow[] }) {
 
 // AppActivityOverview loads one app-scoped aggregate and renders its responsive
 // metrics and service usage views.
-export function AppActivityOverview({ appId, downloads, pendingDriftCount, services }: AppActivityOverviewProps) {
+export function AppActivityOverview({ appId, downloads, pendingDriftCount, services, hostedSource = false }: AppActivityOverviewProps) {
 	const [analytics, setAnalytics] = useState<AppExecutionAnalytics | null>(null);
 	const [issue, setIssue] = useState<AppActivityIssue | null>(null);
-	const [includeAllVersions, setIncludeAllVersions] = useState(false);
 
   useEffect(() => {
     setIssue(null);
 	// SDK activity includes generated-client and direct REST ingress because
 	// both receipts carry the same immutable app-family identity.
-	api.workspace.getAppExecutionAnalytics({ appId, includeAllVersions })
+	api.workspace.getAppExecutionAnalytics({ appId, includeAllVersions: false })
       .then(setAnalytics)
       .catch((cause) => setIssue(appActivityIssue(cause, "sdk")));
-	}, [appId, includeAllVersions]);
+	}, [appId]);
 
   const rows = useMemo(() => usageRows(services, analytics), [analytics, services]);
   const requestValue = analytics ? analytics.total_calls.toLocaleString() : "—";
@@ -164,26 +164,16 @@ export function AppActivityOverview({ appId, downloads, pendingDriftCount, servi
 
 	return (
 		<div className="space-y-6">
-			<div className="flex justify-end">
-				<label className="flex items-center gap-2 text-sm text-slate-600">
-					<span>Version</span>
-					<select
-						value={includeAllVersions ? "all" : "current"}
-						onChange={(event) => setIncludeAllVersions(event.target.value === "all")}
-						className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm"
-					>
-						<option value="current">This version</option>
-						<option value="all">All versions</option>
-					</select>
-				</label>
-			</div>
+      {/* Metrics follow the exact version selected from version history. */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Metric label="Requests" value={requestValue} detail="Executed with this app" icon={Activity} />
         <Metric label="Failed requests" value={failedValue} detail={`${failureRate(analytics)} failure rate`} icon={ServerCrash} />
         <Metric label="Average latency" value={latencyValue} icon={Clock3} />
-        <Metric label="Total downloads" value={formatAppDownloadCount(downloads)} icon={Download} />
+        {/* Hosted source has latency analytics rather than a downloadable package. */}
+        {hostedSource ? <Metric label="P95 latency" value={hostedLatency(analytics)} icon={Clock3} /> : <Metric label="Total downloads" value={formatAppDownloadCount(downloads)} icon={Download} />}
         <Metric label="Connected services" value={services.length.toLocaleString()} icon={FileCode} />
-        <Metric label="Pending drift" value={pendingDriftCount.toLocaleString()} icon={AlertTriangle} />
+        {/* Source apps report executed outcomes instead of SDK package drift. */}
+        {hostedSource ? <Metric label="Successful requests" value={hostedSuccesses(analytics)} icon={Activity} /> : <Metric label="Pending drift" value={pendingDriftCount.toLocaleString()} icon={AlertTriangle} />}
       </div>
       {issue ? (
         <div className={`rounded-lg border px-4 py-3 text-sm ${issue.tone === "neutral" ? "border-slate-200 bg-slate-50 text-slate-600" : "border-red-200 bg-red-50 text-red-700"}`}>
@@ -194,3 +184,9 @@ export function AppActivityOverview({ appId, downloads, pendingDriftCount, servi
     </div>
   );
 }
+
+/** Missing aggregate data remains visibly unavailable rather than a fabricated zero. */
+function hostedLatency(analytics: AppExecutionAnalytics | null): string { return analytics ? formatLatency(analytics.p95_latency_ms) : "—"; }
+
+/** Hosted apps expose successful executions instead of package-specific drift counts. */
+function hostedSuccesses(analytics: AppExecutionAnalytics | null): string { return analytics ? analytics.successful_calls.toLocaleString() : "—"; }

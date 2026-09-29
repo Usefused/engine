@@ -26,7 +26,7 @@ type executionHTTPTestStore struct{ *workspaceTestStore }
 
 // TestValidateExecutionSourceModePreservesPrecompiled admits existing digest-pinned app authoring without Engine source.
 func TestValidateExecutionSourceModePreservesPrecompiled(t *testing.T) {
-	doc := sdkConfigDocument{BundleDigest: store.ExecutionAppBundleDigest([]byte("precompiled app"))}
+	doc := sdkConfigDocument{BundleDigest: store.UnifiedAppBundleDigest([]byte("precompiled app"))}
 	// The manual attach workflow remains valid while describe sends inline source by default.
 	if err := validateExecutionSourceMode(doc); err != nil {
 		t.Fatalf("precompiled digest rejected: %v", err)
@@ -122,8 +122,8 @@ func TestRunExecutionCompilerProducesPlanArtifact(t *testing.T) {
 	t.Setenv("FUSED_EXECUTION_COMPILER", "../../../runtime/execution/dist/src/cli.js")
 	pins := []executionCompilerSelection{{Service: "greeting", Operation: "greet", ServiceID: uuid.New().String(), ServiceVersionID: uuid.New().String(), EndpointID: uuid.New().String()}}
 	source := `import * as z from "zod/mini";
-import { buildExecutionApp } from "@fused/execution";
-export default buildExecutionApp({
+import { buildUnifiedApp } from "@fused/unified-app";
+export default buildUnifiedApp({
   input: z.object({ name: z.string() }),
   output: z.object({ greeting: z.string() }),
   fetch: { searchable: ["name"] },
@@ -131,10 +131,10 @@ export default buildExecutionApp({
 });`
 	artifact, err := runExecutionCompiler(context.Background(), source, pins)
 	// The compiler must produce a digest-pinned script and its public contract from source alone.
-	if err != nil || artifact == nil || artifact.Digest != store.ExecutionAppBundleDigest([]byte(artifact.BundleJS)) {
+	if err != nil || artifact == nil || artifact.Digest != store.UnifiedAppBundleDigest([]byte(artifact.BundleJS)) {
 		t.Fatalf("artifact/error = %#v/%v", artifact, err)
 	}
-	var manifest executionAppManifest
+	var manifest unifiedAppManifest
 	// The selected method retains the exact ID supplied by the Engine snapshot.
 	if err := json.Unmarshal(artifact.Manifest, &manifest); err != nil || len(manifest.SelectedOperations) != 1 || manifest.SelectedOperations[0].EndpointID.String() != pins[0].EndpointID {
 		t.Fatalf("manifest/error = %#v/%v", manifest, err)
@@ -145,21 +145,21 @@ export default buildExecutionApp({
 	}
 }
 
-// TestExecutionConfigHTTPPlanCompilesInlineSource checks the public cart path and retained apply artifact.
-func TestExecutionConfigHTTPPlanCompilesInlineSource(t *testing.T) {
+// TestUnifiedAppConfigHTTPPlanCompilesInlineSource checks the public cart path and retained apply artifact.
+func TestUnifiedAppConfigHTTPPlanCompilesInlineSource(t *testing.T) {
 	t.Setenv("FUSED_EXECUTION_COMPILER", "../../../runtime/execution/dist/src/cli.js")
 	serviceID, versionID := uuid.New(), uuid.New()
 	workspace := &executionHTTPTestStore{&workspaceTestStore{accountID: uuid.New(), workspaceID: uuid.New(), workspaceServices: []store.WorkspaceService{{ServiceID: serviceID, ServiceName: "greeting", Version: "1.0"}}, workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{serviceID: {{ServiceID: serviceID, ServiceVersionID: versionID, Version: "1.0"}}}}}
 	registry := &mockRegistryClient{contractRevisions: map[string]sandbox.ServiceVersionRevision{serviceID.String() + "|1.0": {ServiceID: serviceID, ServiceVersionID: versionID, Version: "1.0", Revision: 1, SourceHash: "contract-hash"}}}
 	configStore := &mockConfigStore{}
 	router := newControlTestRouter(workspace.accountID)
-	router.Post("/execution-config/plan", ExecutionConfigPlanHandler(configStore, workspace, registry))
-	router.Post("/execution-config/apply", ExecutionConfigApplyHandler(configStore, workspace, registry))
+	router.Post("/unified-app-config/plan", UnifiedAppConfigPlanHandler(configStore, workspace, registry))
+	router.Post("/unified-app-config/apply", UnifiedAppConfigApplyHandler(configStore, workspace, registry))
 	source := `import * as z from "zod/mini";
-import { buildExecutionApp } from "@fused/execution";
-export default buildExecutionApp({input:z.object({name:z.string()}),output:z.object({greeting:z.string()}),fetch:{searchable:["name"]},async execute({input}){return {greeting:input.name}}});`
-	requestBody, _ := json.Marshal(map[string]any{"source_hash": "sha256:cart", "config_key": "execution:greeting-app:1.0.0", "owner_team": "platform", "config": map[string]any{"apiVersion": "fused/v1", "kind": "execution", "name": "greeting-app", "version": "1.0.0", "language": "typescript", "generate": false, "bucket": "default", "source": source, "services": map[string]any{"greeting": map[string]any{"version": "1.0", "operations": []string{"greet"}}}}})
-	request := httptest.NewRequest(http.MethodPost, "/execution-config/plan", bytes.NewReader(requestBody))
+import { buildUnifiedApp } from "@fused/unified-app";
+export default buildUnifiedApp({input:z.object({name:z.string()}),output:z.object({greeting:z.string()}),fetch:{searchable:["name"]},async execute({input}){return {greeting:input.name}}});`
+	requestBody, _ := json.Marshal(map[string]any{"source_hash": "sha256:cart", "config_key": "unified_app:greeting-app:1.0.0", "owner_team": "platform", "config": map[string]any{"apiVersion": "fused/v1", "kind": "unified_app", "name": "greeting-app", "version": "1.0.0", "bucket": "default", "source": source, "services": map[string]any{"greeting": map[string]any{"version": "1.0", "operations": []string{"greet"}}}}})
+	request := httptest.NewRequest(http.MethodPost, "/unified-app-config/plan", bytes.NewReader(requestBody))
 	request.Header.Set("X-API-Key", "fsk_test")
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
@@ -176,7 +176,7 @@ export default buildExecutionApp({input:z.object({name:z.string()}),output:z.obj
 		t.Fatalf("desired digest and retained artifact = %q/%#v", desired.BundleDigest, resolved.ExecutionBundle)
 	}
 	applyBody, _ := json.Marshal(map[string]any{"plan_id": configStore.plan.ID.String(), "source_hash": "sha256:cart", "skip_token": true})
-	applyRequest := httptest.NewRequest(http.MethodPost, "/execution-config/apply", bytes.NewReader(applyBody))
+	applyRequest := httptest.NewRequest(http.MethodPost, "/unified-app-config/apply", bytes.NewReader(applyBody))
 	applyRequest.Header.Set("X-API-Key", "fsk_test")
 	applyResponse := httptest.NewRecorder()
 	router.ServeHTTP(applyResponse, applyRequest)

@@ -27,7 +27,6 @@ type cachedStore struct {
 }
 
 var _ AuthConnectionRefreshStore = (*cachedStore)(nil)
-var _ MCPUnifiedDescriptorStore = (*cachedStore)(nil)
 var _ SDKGenerationBuildStore = (*cachedStore)(nil)
 
 // AppRuntimeInvalidator terminates volatile consumers holding one exact immutable app authorization.
@@ -143,18 +142,6 @@ func (s *cachedStore) FailSDKGeneration(ctx context.Context, appID uuid.UUID, jo
 		return false, err
 	}
 	return repository.FailSDKGeneration(ctx, appID, jobID, idempotencyKey)
-}
-
-// GetMCPUnifiedOperationDescriptors forwards exact applied-plan recovery
-// without retaining public descriptors in a second runtime cache.
-func (s *cachedStore) GetMCPUnifiedOperationDescriptors(ctx context.Context, appID uuid.UUID, unrestricted bool, allowedOperations []string) (*models.SDKUnifiedOperationDescriptors, error) {
-	repository, ok := s.Store.(MCPUnifiedDescriptorStore)
-	// Discovery cannot fall back to private definitions when the persistence
-	// delegate lacks the exact applied-plan projection.
-	if !ok {
-		return nil, errors.New("store does not support MCP Unified descriptor recovery")
-	}
-	return repository.GetMCPUnifiedOperationDescriptors(ctx, appID, unrestricted, allowedOperations)
 }
 
 func (s *cachedStore) ListEngineExecutionEventsByApp(ctx context.Context, filter EngineExecutionFilter) ([]models.EngineExecutionEvent, int64, error) {

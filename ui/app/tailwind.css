@@ -87,3 +87,63 @@
     cursor: pointer;
   }
 }
+
+/* Component defaults live below utilities so pages can configure layout and presentation. */
+@layer components {
+  .fused-select {
+    min-width: 0;
+    border: 1px solid #cbd5e1;
+    border-radius: 0.5rem;
+    background-color: white;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    color: #334155;
+    cursor: pointer;
+  }
+
+  .fused-select[data-density="compact"] {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    line-height: 1rem;
+  }
+
+  .fused-select[data-tone="subtle"] { background-color: #f8fafc; }
+
+  /* Focus and disabled feedback remain available without page-specific styling. */
+  .fused-select:focus-visible {
+    outline: 2px solid var(--brand-violet);
+    outline-offset: 2px;
+  }
+  .fused-select:disabled { cursor: not-allowed; opacity: 0.6; }
+}
+
+/* Caret spacing is invariant across page utilities; native listboxes need no dropdown indicator. */
+.fused-select:not([multiple]):not([size]),
+.fused-select[size="0"]:not([multiple]),
+.fused-select[size="1"]:not([multiple]) {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 2.5rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%2364758b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E");
+  background-position: right 0.75rem center;
+  background-size: 1rem 1rem;
+  background-repeat: no-repeat;
+}
+
+/* Native indicators remain visible when the operating system replaces author colors and background images. */
+@media (forced-colors: active) {
+  .fused-select:not([multiple]):not([size]),
+  .fused-select[size="0"]:not([multiple]),
+  .fused-select[size="1"]:not([multiple]) {
+    appearance: auto;
+    -webkit-appearance: auto;
+    background-image: none;
+  }
+}
+
+/* Preserve readable native editing when the OS overrides syntax colors for contrast. */
+@media (forced-colors: active) {
+  .fused-typescript-editor .fused-code-highlight { visibility: hidden; }
+  .fused-typescript-editor textarea { color: CanvasText; caret-color: CanvasText; }
+}

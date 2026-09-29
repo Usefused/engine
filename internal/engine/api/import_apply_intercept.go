@@ -589,7 +589,7 @@ func activateImportedService(ctx context.Context, s store.Store, contractFetcher
 		audit.outcome = "activation_check_failed"
 		return audit
 	}
-	// Both membership paths require the same validated snapshot before exposing the version.
+	// Auto-registration admits execution immediately; SDK archiving belongs to a later generated SDK plan.
 	if err := materializeRuntimeContractSnapshot(ctx, s, contractFetcher, accountID, audit.serviceID, audit.serviceVersionID, resp.Version, apiKey); err != nil {
 		audit.outcome = "contract_snapshot_failed"
 		return audit

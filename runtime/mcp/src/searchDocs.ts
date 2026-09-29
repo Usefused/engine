@@ -6,8 +6,6 @@ import {
   FixtureResponseContract,
   FixtureSchemaContract,
   FixtureSchemaProjection,
-  FixtureUnifiedOperation,
-  FixtureUnifiedTarget,
 } from "./fixture.js";
 import { weightedIntentScore } from "./fuzzyMatch.js";
 import { DOCUMENTATION_OUTPUT_POLICY } from "./outputLimits.js";
@@ -18,16 +16,16 @@ export const SEARCH_DOCS_DEFAULT_LIMIT = 3;
 export const SEARCH_DOCS_MAX_LIMIT = 5;
 export const SEARCH_DOCS_LIST_LIMIT = 20;
 
-export type DocumentationSection = "params_schema" | "parameters" | "request" | `response:${string}` | "input" | "targets" | "output" | "definitions";
+export type DocumentationSection = "params_schema" | "parameters" | "request" | `response:${string}` | "definitions";
 
-/** Admits only bounded public section names, including exact physical response statuses. */
+/** Admits only bounded public section names, including exact response statuses. */
 export function isDocumentationSection(value: unknown): value is DocumentationSection {
   // Tool input must be a string before any bounded name checks are attempted.
   if (typeof value !== "string") {
     return false;
   }
-  // Fixed sections cover request and Unified contracts without accepting private namespaces.
-  if (["params_schema", "parameters", "request", "input", "targets", "output", "definitions"].includes(value)) {
+  // Fixed sections cover public request contracts without accepting private namespaces.
+  if (["params_schema", "parameters", "request", "definitions"].includes(value)) {
     return true;
   }
   // A bounded status suffix permits exact response retrieval without accepting arbitrary private namespaces.
@@ -36,7 +34,6 @@ export function isDocumentationSection(value: unknown): value is DocumentationSe
 
 /** Bare callable identity used by bounded schema-free list mode. */
 export interface OperationSummary {
-  kind?: "unified";
   operation_id: string;
   method?: string;
   path?: string;
@@ -99,18 +96,6 @@ type QueryPaginationGuidance =
 /** Explains whether exact discovery is required before changing a physical call shape. */
 export type PaginationGuidance = ExactPaginationGuidance | QueryPaginationGuidance;
 
-/** Unified detail exposes only the public compiler descriptor. */
-export interface UnifiedOperationDetail extends OperationSummary, ExecutionReadiness {
-  kind: "unified";
-  input_schema?: unknown;
-  output_schema?: unknown;
-  targets?: UnifiedTargetDetail[];
-  schema_status: SchemaStatus;
-}
-
-/** Unified targets deliberately exclude Engine identities and private mappings. */
-export type UnifiedTargetDetail = Pick<FixtureUnifiedTarget, "public_target" | "service_target" | "operation_id" | "depends_on" | "rollback" | "output_schema">;
-
 export interface SearchDocsArgs {
   query?: string;
   operationId?: string;
@@ -121,8 +106,8 @@ export interface SearchDocsArgs {
 
 export type SearchDocsResult =
   | { mode: "list"; operations: OperationSummary[]; total: number; truncated: boolean }
-  | { mode: "query"; operations: Array<OperationDetail | UnifiedOperationDetail>; total: number; truncated: boolean }
-  | { mode: "operationId"; operation: OperationDetail | UnifiedOperationDetail }
+  | { mode: "query"; operations: OperationDetail[]; total: number; truncated: boolean }
+  | { mode: "operationId"; operation: OperationDetail }
   | { mode: "operationId" | "section"; error: string }
   | {
       mode: "section";
@@ -191,7 +176,7 @@ function normalizeListLimit(limit: number | undefined): number {
 
 /** Returns a bounded schema-free catalogue window with exact truncation metadata. */
 function listOperations(fixture: Fixture, limit: number): SearchDocsResult {
-  const summaries = [...fixture.operations.map(physicalSummary), ...fixture.unifiedOperations.map(unifiedSummary)];
+  const summaries = fixture.operations.map(physicalSummary);
   const operations: OperationSummary[] = [];
   for (const summary of summaries.slice(0, limit)) {
     const trial = { mode: "list" as const, operations: [...operations, summary], total: summaries.length, truncated: true };
@@ -209,7 +194,7 @@ function listOperations(fixture: Fixture, limit: number): SearchDocsResult {
   };
 }
 
-/** Ranks physical and Unified callables together, then packs complete sections by priority. */
+/** Ranks physical callables together, then packs complete sections by priority. */
 function queryOperations(fixture: Fixture, query: string, limit: number, classifiedNames?: string[]): SearchDocsResult {
   // Trusted classifier order replaces lexical scoring while preserving query schema packing and pagination guidance.
   const matched = classifiedNames !== undefined
@@ -251,11 +236,11 @@ function resolveOperationDetail(fixture: Fixture, operationId: string): SearchDo
 
 /** Packs request-side sections globally before response-side documentation. */
 function packSections(
-  operations: Array<OperationDetail | UnifiedOperationDetail>,
+  operations: OperationDetail[],
   candidates: SearchCandidate[],
   mode: "query" | "operationId",
   total: number,
-): Array<OperationDetail | UnifiedOperationDetail> {
+): OperationDetail[] {
   let packed = operations;
   const attempts = sectionPackingOrder(candidates, mode);
   for (const { index, section } of attempts) {
@@ -275,7 +260,7 @@ function packSections(
 /** Packs only call construction for ranked search while exact detail retains every public section. */
 function sectionPackingOrder(candidates: SearchCandidate[], mode: "query" | "operationId"): Array<{ index: number; section: DocumentationSectionValue }> {
   const attempts: Array<{ index: number; section: DocumentationSectionValue }> = [];
-  const rankedCallSections = new Set<DocumentationSection>(["params_schema", "input", "targets"]);
+  const rankedCallSections = new Set<DocumentationSection>(["params_schema"]);
   for (const priority of [0, 1, 2]) {
     for (let index = 0; index < candidates.length; index++) {
       for (const section of candidates[index].sections) {
@@ -295,19 +280,19 @@ function sectionPackingOrder(candidates: SearchCandidate[], mode: "query" | "ope
 
 /** Replaces one detail immutably so failed budget trials cannot mutate admitted output. */
 function replaceAt(
-  operations: Array<OperationDetail | UnifiedOperationDetail>,
+  operations: OperationDetail[],
   index: number,
-  operation: OperationDetail | UnifiedOperationDetail,
-): Array<OperationDetail | UnifiedOperationDetail> {
+  operation: OperationDetail,
+): OperationDetail[] {
   // Only the selected ranked slot changes; every other reserved summary stays intact.
   return operations.map((current, currentIndex) => currentIndex === index ? operation : current);
 }
 
 /** Adds one entire public section and records its exact inclusion. */
 function includeSection(
-  operation: OperationDetail | UnifiedOperationDetail,
+  operation: OperationDetail,
   section: DocumentationSectionValue,
-): OperationDetail | UnifiedOperationDetail {
+): OperationDetail {
   const mergedFragment = mergeSectionFragment(operation, section.fragment);
   const included = {
     ...operation,
@@ -316,14 +301,14 @@ function includeSection(
       ...operation.schema_status,
       included_sections: [...operation.schema_status.included_sections, section.name],
     },
-  } as OperationDetail | UnifiedOperationDetail;
+  } as OperationDetail;
   // Budget trials must measure the readiness state the agent will actually receive after this section is included.
   return withExecutionReadiness(included);
 }
 
 /** Merges independently retrievable response statuses without overwriting earlier statuses. */
 function mergeSectionFragment(
-  operation: OperationDetail | UnifiedOperationDetail,
+  operation: OperationDetail,
   fragment: Record<string, unknown>,
 ): Record<string, unknown> {
   // Response-status fragments share one public responses object in callable detail.
@@ -335,7 +320,7 @@ function mergeSectionFragment(
 }
 
 /** Marks a detail complete only when every advertised section is present whole. */
-function finalizeStatus(operation: OperationDetail | UnifiedOperationDetail): OperationDetail | UnifiedOperationDetail {
+function finalizeStatus(operation: OperationDetail): OperationDetail {
   const finalized = {
     ...operation,
     schema_status: {
@@ -347,11 +332,9 @@ function finalizeStatus(operation: OperationDetail | UnifiedOperationDetail): Op
 }
 
 /** Derives call readiness from request-side sections while leaving response detail optional. */
-function withExecutionReadiness(operation: OperationDetail | UnifiedOperationDetail): OperationDetail | UnifiedOperationDetail {
-  // Unified calls need both their public input and target graph, while physical calls need only the flattened call schema.
-  const requiredSections: DocumentationSection[] = operation.kind === "unified"
-    ? ["input", "targets"]
-    : ["params_schema"];
+function withExecutionReadiness(operation: OperationDetail): OperationDetail {
+  // Physical calls need the flattened call schema before invocation.
+  const requiredSections: DocumentationSection[] = ["params_schema"];
   const missingSection = requiredSections.find((section) => !operation.schema_status.included_sections.includes(section));
   const { next_action: _priorAction, ...withoutPriorAction } = operation;
   // A missing call-construction section must produce one exact discovery action instead of inviting inference.
@@ -363,9 +346,9 @@ function withExecutionReadiness(operation: OperationDetail | UnifiedOperationDet
         tool: "search_docs",
         arguments: { operationId: operation.operation_id, section: missingSection },
       },
-    } as OperationDetail | UnifiedOperationDetail;
+    } as OperationDetail;
   }
-  return { ...withoutPriorAction, execution_ready: true } as OperationDetail | UnifiedOperationDetail;
+  return { ...withoutPriorAction, execution_ready: true } as OperationDetail;
 }
 
 /** Retrieves one safe public section or JSON Pointer subtree without returning partial values. */
@@ -443,22 +426,17 @@ function childPointers(value: unknown, base: string): string[] {
 
 /** Builds all local candidates without database, network, or private mapping access. */
 function allCandidates(fixture: Fixture): SearchCandidate[] {
-  return [
-    ...fixture.operations.map((operation) => toPhysicalCandidate(operation, fixture)),
-    ...fixture.unifiedOperations.map(toUnifiedCandidate),
-  ];
+  return fixture.operations.map((operation) => toPhysicalCandidate(operation, fixture));
 }
 
 /** Resolves one exact public candidate across collision-free fixture indexes. */
 function exactCandidate(fixture: Fixture, operationId: string): SearchCandidate | undefined {
   const physical = fixture.resolve(operationId);
-  // Physical lookup remains first because fixture admission prevents cross-kind collisions.
+  // Exact physical lookup preserves the public catalogue boundary.
   if (physical) {
     return toPhysicalCandidate(physical, fixture);
   }
-  const unified = fixture.resolveUnified(operationId);
-  // A missing logical name remains absent rather than becoming a fuzzy fallback.
-  return unified ? toUnifiedCandidate(unified) : undefined;
+  return undefined;
 }
 
 /** Projects one physical operation into independently packable request and response sections. */
@@ -775,36 +753,13 @@ function definitionSections(operation: FixtureOperation, fixture: Fixture): Docu
   return [{ name: "definitions", priority: 3, fragment: {}, value: definitions }];
 }
 
-/** Projects one Unified descriptor without compiler mappings or Engine identities. */
-function toUnifiedCandidate(operation: FixtureUnifiedOperation): SearchCandidate {
-  const targets = operation.targets.map(toUnifiedTargetDetail);
-  const sections: DocumentationSectionValue[] = [
-    { name: "input", priority: 0, fragment: { input_schema: operation.input_schema }, value: operation.input_schema },
-    { name: "targets", priority: 1, fragment: { targets }, value: targets },
-  ];
-  // Absent output schemas are not advertised as retrievable documentation.
-  if (operation.output_schema !== undefined) {
-    sections.push({ name: "output", priority: 2, fragment: { output_schema: operation.output_schema }, value: operation.output_schema });
-  }
-  return {
-    summary: unifiedSummary(operation),
-    search_aliases: operation.targets.flatMap((target) => [target.public_target, target.service_target, target.operation_id].filter((value): value is string => value !== undefined)),
-    score: 0,
-    sections,
-  };
-}
-
 /** Converts a candidate to a schema-free callable shell with mode-appropriate execution metadata. */
-function toDetailShell(candidate: SearchCandidate, mode: "query" | "operationId"): OperationDetail | UnifiedOperationDetail {
+function toDetailShell(candidate: SearchCandidate, mode: "query" | "operationId"): OperationDetail {
   const schemaStatus: SchemaStatus = {
     complete: candidate.sections.length === 0,
     included_sections: [],
     available_sections: candidate.sections.map(({ name }) => name),
   };
-  // Unified candidates have no physical path or pagination contract to project.
-  if (candidate.summary.kind === "unified") {
-    return withExecutionReadiness({ ...candidate.summary, kind: "unified", schema_status: schemaStatus, execution_ready: false });
-  }
   // Candidate construction guarantees physical metadata before detail can be returned.
   if (!candidate.detail_metadata) {
     throw new Error("physical search candidate missing execution metadata");
@@ -814,7 +769,7 @@ function toDetailShell(candidate: SearchCandidate, mode: "query" | "operationId"
   return withExecutionReadiness({ ...candidate.summary, path, pagination: mode === "query" ? queryPagination : pagination, schema_status: schemaStatus, execution_ready: false });
 }
 
-/** Scores public physical and Unified metadata with identity weighted most strongly. */
+/** Scores public physical metadata with identity weighted most strongly. */
 function scoreCandidate(query: string, candidate: SearchCandidate): number {
   return weightedIntentScore(query, [
     { value: candidate.summary.operation_id, weight: 8 },
@@ -831,7 +786,7 @@ function compareCandidates(left: SearchCandidate, right: SearchCandidate): numbe
   if (left.score !== right.score) {
     return right.score - left.score;
   }
-  // Exact public IDs provide a locale-independent tie breaker across both operation kinds.
+  // Exact public IDs provide a locale-independent tie breaker.
   return left.summary.operation_id < right.summary.operation_id ? -1 : left.summary.operation_id > right.summary.operation_id ? 1 : 0;
 }
 
@@ -842,11 +797,6 @@ function physicalSummary(operation: FixtureOperation): OperationSummary {
     method: operation.method,
     ...boundedDescription(operation.description ?? operation.name),
   };
-}
-
-/** Builds a bounded Unified summary under its exact authored operation name. */
-function unifiedSummary(operation: FixtureUnifiedOperation): OperationSummary {
-  return { kind: "unified", operation_id: operation.name, ...boundedDescription(operation.description ?? operation.name) };
 }
 
 /** Bounds prose by UTF-8 bytes and marks the only intentionally shortened field. */
@@ -864,19 +814,6 @@ function boundedDescription(description: string): Pick<OperationSummary, "descri
     result += character;
   }
   return { description: `${result}…`, description_truncated: true };
-}
-
-/** Projects only caller-relevant target names, dependencies, rollback, and schemas. */
-function toUnifiedTargetDetail(target: FixtureUnifiedTarget): UnifiedTargetDetail {
-  // Rollback metadata is projected explicitly so private identities cannot ride along with its public ID.
-  return {
-    public_target: target.public_target,
-    service_target: target.service_target,
-    operation_id: target.operation_id,
-    depends_on: target.depends_on,
-    rollback: target.rollback ? { operation_id: target.rollback.operation_id } : undefined,
-    output_schema: target.output_schema,
-  };
 }
 
 /** Measures the exact serialized UTF-8 result rather than JavaScript code units. */

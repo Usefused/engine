@@ -5,23 +5,28 @@ import { fileURLToPath } from "node:url";
 
 const menuPath = fileURLToPath(import.meta.resolve("../components/apps/CreateAppMenu.tsx"));
 const cataloguePath = fileURLToPath(import.meta.resolve("../routes/integrations.sdks._index.tsx"));
-const builderPath = fileURLToPath(import.meta.resolve("../routes/integrations.builder.tsx"));
+const builderPath = fileURLToPath(import.meta.resolve("../components/apps/AppServiceBuilder.tsx"));
 const generationPanelPath = fileURLToPath(import.meta.resolve("../components/consumer/ConsumerGenerationPanel.tsx"));
 
-// The menu contract keeps every delivery adapter reachable from the unified Apps catalogue.
+// The menu contract keeps only the four requested app types in their catalogue order.
 test("offers every supported app delivery adapter from one accessible create menu", async () => {
   const menu = await readFile(menuPath, "utf8");
 
   assert.match(menu, /aria-haspopup="menu"/);
   assert.match(menu, /role="menu"/);
-  assert.match(menu, /primaryOption\?\.mode === "app" \? "\/integrations\/builder"/);
-  assert.match(menu, /\/integrations\/builder\?tab=app/);
+  assert.match(menu, />\s*Create App\s*<ChevronDown/);
+  assert.doesNotMatch(menu, />\s*Create app\s*</);
+  assert.doesNotMatch(menu, /mode: "app", label: "App"/);
+  assert.match(menu, /\/integrations\/unified-apps\/new/);
   assert.match(menu, /\/integrations\/builder\?tab=sdk/);
   assert.match(menu, /\/integrations\/builder\?tab=api/);
   assert.match(menu, /\/integrations\/builder\?tab=mcp/);
+  assert.ok(menu.indexOf('mode: "mcp"') < menu.indexOf('mode: "unified_app"'));
+  assert.ok(menu.indexOf('mode: "unified_app"') < menu.indexOf('mode: "sdk"'));
+  assert.ok(menu.indexOf('mode: "sdk"') < menu.indexOf('mode: "api"'));
   assert.match(menu, /Generate a typed package/);
   assert.match(menu, /Call operations through the Engine/);
-  assert.match(menu, /Connect agents over MCP/);
+  assert.match(menu, /Connect agents to selected operations/);
 });
 
 // Empty and populated catalogues must expose the same creation choices.
@@ -31,6 +36,10 @@ test("reuses the create menu in populated and empty app catalogue states", async
 
   assert.equal(occurrences.length, 2);
   assert.doesNotMatch(catalogue, /<Link\s+to="\/integrations\/builder"/);
+  // The Engine filters before pagination, so each tab's total matches its visible type.
+  assert.match(catalogue, /appFamilies\(kind: \$kind, search: \$search/);
+  assert.match(catalogue, /<AppCatalogueTypeTabs selected=\{type\} onSelect=\{selectType\}/);
+  assert.match(catalogue, /type: "mcp"[\s\S]*type: "unified_app"[\s\S]*type: "sdk"[\s\S]*type: "api"/);
 });
 
 // An untyped builder route starts the combined flow without an extra delivery-choice step.

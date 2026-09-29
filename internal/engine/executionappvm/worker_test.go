@@ -9,7 +9,7 @@ import (
 
 const workerTestBundle = `
 globalThis.FusedExecutionManifest = {schemaVersion:1,inputSchema:{},outputSchema:{},searchable:[],selectedOperations:[]};
-globalThis.FusedExecutionApp = {
+globalThis.FusedUnifiedApp = {
   input: {parse(value) {return value}},
   output: {parse(value) {return value}},
   execute: async ({input}) => JSON.parse(await __fusedHost.fetch(JSON.stringify(input)))
@@ -106,6 +106,10 @@ func collectWorkerTestOutputs(t *testing.T, scanner *bufio.Scanner) map[uint64]s
 		// Every result must retain its invocation ID and the matching provider value.
 		if frame.Kind != "done" || frame.Error != "" {
 			t.Fatalf("expected successful result, got %#v", frame)
+		}
+		// Each concurrent interpreter must return its own complete bounded phase evidence over IPC.
+		if len(frame.Phases) != 5 || !ValidExecutionPhases(frame.Phases) {
+			t.Fatalf("missing phase metadata: %#v", frame.Phases)
 		}
 		outputs[frame.RequestID] = string(frame.Value)
 	}

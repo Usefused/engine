@@ -925,9 +925,21 @@ func (s *postgresStore) GetEngineExecutionAnalyticsByService(ctx context.Context
 	return s.getEngineExecutionAnalytics(ctx, filter)
 }
 
+// GetEngineExecutionAnalyticsByApp counts hosted runs while preserving physical provider breakdowns.
 func (s *postgresStore) GetEngineExecutionAnalyticsByApp(ctx context.Context, filter EngineExecutionFilter) (models.AppExecutionAnalytics, error) {
 	filter.ServiceID = uuid.Nil
-	summary, err := s.getEngineExecutionAnalytics(ctx, filter)
+	// Unified App summaries count logical runs, including pre-provider failures; provider breakdowns remain physical.
+	var hosted bool
+	// Unknown or legacy families retain the existing physical analytics behavior.
+	if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM fused_app_families f WHERE f.account_id=$2 AND f.kind='unified_app' AND (f.app_family_id=$1 OR EXISTS(SELECT 1 FROM fused_apps a WHERE a.app_family_id=f.app_family_id AND a.app_id=$3)))`, filter.AppFamilyID, filter.AccountID, filter.AppID).Scan(&hosted); err != nil {
+		return models.AppExecutionAnalytics{}, err
+	}
+	summaryFilter := filter
+	// Root receipts count one authored invocation even when it performs several provider calls.
+	if hosted {
+		summaryFilter.ReceiptRoots = true
+	}
+	summary, err := s.getEngineExecutionAnalytics(ctx, summaryFilter)
 	if err != nil {
 		return models.AppExecutionAnalytics{}, err
 	}

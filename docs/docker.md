@@ -29,7 +29,7 @@ binary embeds that dependency-complete bundle, so MCP sessions still execute
 through a small Node process without installing `node_modules` at container
 startup or writing shared dependencies into `/app/data`.
 
-Both images also contain the pinned Execution App TypeScript compiler at
+Both images also contain the pinned Unified App TypeScript compiler at
 `/app/runtime/execution/dist/src/cli.js`. Engine invokes it while planning a
 reviewed app cart, before the app receives traffic. The compiler's `src`,
 `dist`, and production npm dependencies are built into the image; tenant

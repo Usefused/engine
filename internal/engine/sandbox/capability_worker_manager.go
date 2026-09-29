@@ -22,10 +22,10 @@ const capabilityWorkerCapacity = 4
 const capabilityWorkerQueueLimit = 32
 
 // ErrCapabilityWorkerOverloaded lets callers distinguish a full per-family queue from app failure.
-var ErrCapabilityWorkerOverloaded = errors.New("execution app worker queue is full")
+var ErrCapabilityWorkerOverloaded = errors.New("unified app worker queue is full")
 
-// ErrCapabilityWorkerConcurrencyDisabled marks a plan that admits no Execution App invocations.
-var ErrCapabilityWorkerConcurrencyDisabled = errors.New("execution app concurrency is disabled by plan")
+// ErrCapabilityWorkerConcurrencyDisabled marks a plan that admits no Unified App invocations.
+var ErrCapabilityWorkerConcurrencyDisabled = errors.New("unified app concurrency is disabled by plan")
 
 // CapabilityWarmTarget identifies the exact immutable version that should remain resident.
 type CapabilityWarmTarget struct {
@@ -78,7 +78,7 @@ func (manager *CapabilityWorkerManager) Run(ctx context.Context, familyID, appID
 		return nil, err
 	}
 	defer manager.release(familyID, entry)
-	ctx, span := otel.Tracer("engine").Start(ctx, "engine.execution_app.worker.run", trace.WithAttributes(
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.unified_app.worker.run", trace.WithAttributes(
 		attribute.String("app.family_id", familyID), attribute.String("app.id", appID),
 		attribute.Int("worker.pid", entry.worker.command.Process.Pid), attribute.Int("worker.concurrency_limit", limit),
 	))
@@ -209,7 +209,7 @@ func (manager *CapabilityWorkerManager) acquire(ctx context.Context, familyID, a
 		}
 		// A version identifier may never point to different executable bytes.
 		if immutableCapabilityBundleChanged(entry, appID, digest) {
-			return nil, errors.New("execution app bundle changed for an immutable version")
+			return nil, errors.New("unified app bundle changed for an immutable version")
 		}
 		if entry.draining {
 			manager.cond.Wait()
@@ -254,7 +254,7 @@ func (manager *CapabilityWorkerManager) reuseEntryLocked(entry *capabilityWorker
 // loadEntryLocked starts one exact version and records bounded startup telemetry.
 func (manager *CapabilityWorkerManager) loadEntryLocked(ctx context.Context, familyID, appID string, bundle []byte, digest [32]byte, keepWarm bool) (*capabilityWorkerEntry, error) {
 	start := time.Now()
-	startCtx, span := otel.Tracer("engine").Start(ctx, "engine.execution_app.worker.start", trace.WithAttributes(
+	startCtx, span := otel.Tracer("engine").Start(ctx, "engine.unified_app.worker.start", trace.WithAttributes(
 		attribute.String("app.family_id", familyID), attribute.String("app.id", appID),
 	))
 	worker, err := startPersistentCapabilityWorker(startCtx, manager.ctx, bundle)
@@ -268,7 +268,7 @@ func (manager *CapabilityWorkerManager) loadEntryLocked(ctx context.Context, fam
 	if err != nil {
 		return nil, err
 	}
-	slog.InfoContext(ctx, "Execution App worker loaded", "app_family_id", familyID, "app_id", appID,
+	slog.InfoContext(ctx, "Unified App worker loaded", "app_family_id", familyID, "app_id", appID,
 		"worker_pid", worker.command.Process.Pid, "startup_ms", elapsed.Milliseconds())
 	entry := &capabilityWorkerEntry{appID: appID, digest: digest, worker: worker, refs: 1, keepWarm: keepWarm}
 	manager.entries[familyID] = entry

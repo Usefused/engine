@@ -3,43 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"regexp"
 	"sort"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/store"
-	"github.com/Usefused/engine/internal/engine/unified"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 )
-
-type workflowSource struct {
-	ID      string `json:"id"`
-	Version string `json:"version"`
-	Hash    string `json:"hash"`
-}
-
-var workflowHashPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-
-// validateWorkflowSources bounds provenance without mistaking it for trusted execution authority.
-func validateWorkflowSources(sources []workflowSource) error {
-	// The library selector's bound applies equally to hand-authored app configs.
-	if len(sources) > 32 {
-		return fmt.Errorf("at most 32 workflow sources are supported")
-	}
-	seen := map[string]bool{}
-	for _, source := range sources {
-		id, err := uuid.Parse(source.ID)
-		// One source must identify one immutable release with a full digest.
-		if err != nil || id == uuid.Nil || seen[source.ID] || source.Version == "" || len(source.Version) > 128 || !workflowHashPattern.MatchString(source.Hash) {
-			return fmt.Errorf("invalid or duplicate workflow source")
-		}
-		seen[source.ID] = true
-	}
-	return nil
-}
 
 // AppConfigSourceHandler returns Engine-owned source to authorized editors without contacting Registry.
 func AppConfigSourceHandler(s store.Store, configs store.ConfigRepository) http.HandlerFunc {
@@ -85,7 +56,7 @@ type workflowServicePin struct {
 	ServiceVersionID uuid.UUID `json:"service_version_id"`
 }
 
-// workflowSourcePins associates saved display-name keys and authored graph aliases with exact app selections, without rebuilding private config.
+// workflowSourcePins associates saved service keys with exact app selections for editor reuse.
 func workflowSourcePins(ctx context.Context, s store.Store, app *store.App, source json.RawMessage) ([]workflowServicePin, error) {
 	var doc sdkConfigDocument
 	// Corrupt private source must not become a partial editable configuration.
@@ -108,50 +79,18 @@ func workflowSourcePins(ctx context.Context, s store.Store, app *store.App, sour
 		return nil, err
 	}
 	pins, err := matchWorkflowSourcePins(keys, resolved, selections)
-	// Exact membership must be established before comparing private graph identities.
+	// Exact membership must be established before the editor reuses a service key.
 	if err != nil {
 		return nil, err
 	}
-	return pins, validateWorkflowSourceGraphPins(app, doc, pins)
+	return pins, nil
 }
 
-// validateWorkflowSourceGraphPins catches alias swaps even when both providers already belong to the app's immutable scope.
-func validateWorkflowSourceGraphPins(app *store.App, doc sdkConfigDocument, pins []workflowServicePin) error {
-	// Physical-only apps have no private graph selectors to preserve.
-	if len(doc.UnifiedOperations) == 0 {
-		return nil
-	}
-	definitions, err := unified.DecodeDefinitions(app.UnifiedDefinitions, unified.DefaultLimits())
-	// Missing executable evidence must not be replaced by public descriptors or live catalogue data.
-	if err != nil || len(definitions) != len(doc.UnifiedOperations) {
-		return workflowSourceIdentityError()
-	}
-	byKey := make(map[string]workflowServicePin, len(pins))
-	for _, pin := range pins {
-		byKey[pin.Key] = pin
-	}
-	for _, definition := range definitions {
-		for _, binding := range definition.Bindings {
-			pin := byKey[binding.ServiceTarget]
-			// An existing binding must retain both the provider and immutable contract version.
-			if pin.ServiceID != binding.ServiceID || pin.ServiceVersionID != binding.ServiceVersionID {
-				return workflowSourceIdentityError()
-			}
-		}
-	}
-	return nil
-}
-
-// workflowSourceKeys includes graph aliases because older desired state saved display names while leaving authored bindings intact.
+// workflowSourceKeys lists only services authored in the saved app declaration.
 func workflowSourceKeys(doc sdkConfigDocument) []string {
 	keys := make(map[string]bool, len(doc.Services))
 	for key := range doc.Services {
 		keys[key] = true
-	}
-	for _, operation := range doc.UnifiedOperations {
-		for target, binding := range operation.Bindings {
-			keys[unifiedBindingServiceTarget(target, binding.Service)] = true
-		}
 	}
 	result := make([]string, 0, len(keys))
 	for key := range keys {

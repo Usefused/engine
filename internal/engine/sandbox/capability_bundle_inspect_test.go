@@ -8,7 +8,7 @@ import (
 
 // TestInspectCapabilityBundleReadsActualDeclarations checks child-side evaluation independent of host OS isolation availability.
 func TestInspectCapabilityBundleReadsActualDeclarations(t *testing.T) {
-	const source = `globalThis.FusedExecutionManifest={schemaVersion:1,inputSchema:{type:"object"},outputSchema:{type:"object"},searchable:[],selectedOperations:[]};globalThis.FusedExecutionApp={input:{parse(v){return v}},output:{parse(v){return v}},execute:async()=>({})};`
+	const source = `globalThis.FusedExecutionManifest={schemaVersion:1,inputSchema:{type:"object"},outputSchema:{type:"object"},searchable:[],selectedOperations:[]};globalThis.FusedUnifiedApp={input:{parse(v){return v}},output:{parse(v){return v}},execute:async()=>({})};`
 	manifest, err := inspectCapabilityBundleInProcess(context.Background(), []byte(source))
 	// The inspected value must come from executing the immutable script itself.
 	if err != nil || string(manifest) != `{"schemaVersion":1,"inputSchema":{"type":"object"},"outputSchema":{"type":"object"},"searchable":[],"selectedOperations":[]}` {

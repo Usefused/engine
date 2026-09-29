@@ -55,7 +55,7 @@ type WorkspaceSDKSelectionMatch struct {
 func WorkspaceSDKSelectionsByServiceVersion(ctx context.Context, configStore ConfigRepository, s Store) (map[uuid.UUID]map[uuid.UUID][]WorkspaceSDKSelectionMatch, error) {
 	states := make([]ConfigState, 0)
 	// Three bounded kind reads preserve removal impact for every App that holds provider authority.
-	for _, kind := range []ConfigType{ConfigTypeSDK, ConfigTypeMCP, ConfigTypeExecution} {
+	for _, kind := range []ConfigType{ConfigTypeSDK, ConfigTypeMCP, ConfigTypeUnifiedApp} {
 		part, err := configStore.ListConfigStates(ctx, kind)
 		if err != nil {
 			return nil, err

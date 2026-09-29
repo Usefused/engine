@@ -61,7 +61,7 @@ test("credential and lifecycle surfaces gate protected queries and actions", () 
   const profile = source("../components/integration-details/WorkspaceConnectionProfileSection.tsx");
   const notifications = source("../components/notifications/NotificationList.tsx");
   const notificationActions = source("../components/notifications/notificationActions.ts");
-  const builder = source("../routes/integrations.builder.tsx");
+  const builder = source("../components/apps/AppServiceBuilder.tsx");
 
   assert.match(buckets, /values: hasWorkspacePermission\(access, "bucket\.values\.read"\)/);
   assert.match(buckets, /credentials\.metadata\.read/);

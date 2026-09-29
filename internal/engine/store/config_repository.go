@@ -26,11 +26,11 @@ import (
 type ConfigType string
 
 const (
-	ConfigTypeWorkspace ConfigType = "workspace"
-	ConfigTypeSDK       ConfigType = "sdk"
-	ConfigTypeMCP       ConfigType = "mcp"
-	ConfigTypeExecution ConfigType = "execution"
-	ConfigTypeWebhook   ConfigType = "webhook"
+	ConfigTypeWorkspace  ConfigType = "workspace"
+	ConfigTypeSDK        ConfigType = "sdk"
+	ConfigTypeMCP        ConfigType = "mcp"
+	ConfigTypeUnifiedApp ConfigType = "unified_app"
+	ConfigTypeWebhook    ConfigType = "webhook"
 )
 
 type ConfigPlanStatus string
@@ -280,7 +280,7 @@ type ApplyAppConfigPlanParams struct {
 	SDKGenerationJobID  string
 	SDKGenerationStatus string
 	// ExecutionBundle is published with app identity so a failed activation rolls back the version and plan together.
-	ExecutionBundle *ExecutionAppBundle
+	ExecutionBundle *UnifiedAppBundle
 }
 
 type ApplyAppConfigPlanResult struct {
@@ -661,7 +661,7 @@ func (r *postgresConfigRepository) ApplyAppConfigPlan(ctx context.Context, param
 	if params.Plan.ExpectedRevision <= 0 {
 		return nil, ErrConfigPlanRevisionMismatch
 	}
-	if (params.Plan.State.ConfigType == ConfigTypeSDK || params.Plan.State.ConfigType == ConfigTypeExecution) && params.Plan.ApplyLeaseID == uuid.Nil {
+	if (params.Plan.State.ConfigType == ConfigTypeSDK || params.Plan.State.ConfigType == ConfigTypeUnifiedApp) && params.Plan.ApplyLeaseID == uuid.Nil {
 		return nil, ErrConfigPlanApplyInProgress
 	}
 	if err := validateAppApplyParams(params); err != nil {
@@ -716,12 +716,12 @@ func applyAppConfigPlanTx(ctx context.Context, tx pgx.Tx, params *ApplyAppConfig
 	if err != nil {
 		return nil, err
 	}
-	// A source-authored Execution App becomes a traffic target only with its exact compiled artifact.
+	// A source-authored Unified App becomes a traffic target only with its exact compiled artifact.
 	if params.ExecutionBundle != nil {
-		if err := createExecutionAppBundleTx(ctx, tx, *params.ExecutionBundle); err != nil {
+		if err := createUnifiedAppBundleTx(ctx, tx, *params.ExecutionBundle); err != nil {
 			return nil, err
 		}
-		if err := promoteExecutionAppVersionTx(ctx, tx, familyID, appID); err != nil {
+		if err := promoteUnifiedAppVersionTx(ctx, tx, familyID, appID); err != nil {
 			return nil, err
 		}
 	}
@@ -846,7 +846,7 @@ func admitConfiguredPrimaryCapacity(ctx context.Context, tx pgx.Tx, familyID uui
 		return admitSDKFamilyActivation(ctx, tx, params.Scope.AccountID, familyID, params.SDKGenerationStatus == models.SDKGenerationStatusSkipped)
 	}
 	// Hosted execute uses the API entitlement under a distinct family count.
-	if params.Scope.Kind == AppKindExecution {
+	if params.Scope.Kind == AppKindUnifiedApp {
 		return admitExecutionFamilyActivation(ctx, tx, params.Scope.AccountID, familyID)
 	}
 	return nil
@@ -976,7 +976,7 @@ func bindAppFamilyServiceBucketsTx(ctx context.Context, tx pgx.Tx, familyID uuid
 
 // publishConfigAppTx persists immutable app publication identity atomically while preserving immutability checks.
 func publishConfigAppTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, params ApplyAppConfigPlanParams) (uuid.UUID, bool, error) {
-	capabilityKeys, capabilityHash, err := capability.KeysAndHash(params.Scope.Selections)
+	capabilityKeys, capabilityHash, err := capability.KeysAndHash(params.Scope.Selections, params.Scope.UnifiedApps...)
 	if err != nil {
 		return uuid.Nil, false, err
 	}
@@ -1183,10 +1183,10 @@ func validatePlannedExecutionBundle(params ApplyAppConfigPlanParams) error {
 	}
 	bundle := *params.ExecutionBundle
 	// A source, identity, or digest mismatch must fail before opening the publication transaction.
-	if params.Scope.Kind != AppKindExecution || bundle.AppID != params.Scope.AppID || bundle.SourceHash != params.Plan.State.SourceHash || ExecutionAppBundleDigest([]byte(bundle.BundleJS)) != params.Scope.BundleDigest {
-		return ErrExecutionAppBundleDigestMismatch
+	if params.Scope.Kind != AppKindUnifiedApp || bundle.AppID != params.Scope.AppID || bundle.SourceHash != params.Plan.State.SourceHash || UnifiedAppBundleDigest([]byte(bundle.BundleJS)) != params.Scope.BundleDigest {
+		return ErrUnifiedAppBundleDigestMismatch
 	}
-	return validateExecutionAppBundle(bundle)
+	return validateUnifiedAppBundle(bundle)
 }
 
 // validateAppApplySelections requires a reviewed provider selection for every app kind.
@@ -1215,7 +1215,7 @@ func validateAppGenerationState(params ApplyAppConfigPlanParams) error {
 		return ErrAppStatusInvalid
 	}
 	// Hosted runtime kinds never acquire a Registry SDK package or building state.
-	if params.Plan.State.ConfigType == ConfigTypeMCP || params.Plan.State.ConfigType == ConfigTypeExecution {
+	if params.Plan.State.ConfigType == ConfigTypeMCP || params.Plan.State.ConfigType == ConfigTypeUnifiedApp {
 		return validateMCPGenerationState(status, params.SDKGenerationJobID, params.SDKGenerationStatus)
 	}
 	return validateSDKGenerationState(status, params.SDKGenerationJobID, params.SDKGenerationStatus)
@@ -1266,13 +1266,13 @@ func validateSDKGenerationState(status AppStatus, jobID, generationStatus string
 func appKindMatchesConfigType(kind AppKind, configType ConfigType) bool {
 	return (kind == AppKindSDK && configType == ConfigTypeSDK) ||
 		(kind == AppKindMCP && configType == ConfigTypeMCP) ||
-		(kind == AppKindExecution && configType == ConfigTypeExecution)
+		(kind == AppKindUnifiedApp && configType == ConfigTypeUnifiedApp)
 }
 
 // validateAppApplyMetadata enforces adapter metadata while respecting explicit deferred token issuance.
 func validateAppApplyMetadata(params ApplyAppConfigPlanParams) error {
 	// Generated SDK identity requires a language even when token issuance is deferred.
-	if (params.Plan.State.ConfigType == ConfigTypeSDK || params.Plan.State.ConfigType == ConfigTypeExecution) && strings.TrimSpace(params.TargetLanguage) == "" {
+	if (params.Plan.State.ConfigType == ConfigTypeSDK || params.Plan.State.ConfigType == ConfigTypeUnifiedApp) && strings.TrimSpace(params.TargetLanguage) == "" {
 		return errors.New("sdk target language is required")
 	}
 	// Hosted MCP runtimes must not inherit SDK package settings.
@@ -1298,7 +1298,7 @@ func validateAppGeneratorVersion(configType ConfigType, generatorVersion string)
 			return nil
 		}
 		return errors.New("mcp must not set a generator version")
-	case ConfigTypeExecution:
+	case ConfigTypeUnifiedApp:
 		// Compiler bundle provenance is pinned separately from Registry SDK generator metadata.
 		if generatorVersion == "" {
 			return nil
@@ -1424,7 +1424,7 @@ func markConfigPlanApplied(ctx context.Context, tx pgx.Tx, params ApplyConfigPla
 		WHERE id = $1 AND config_key = $2
 		  AND config_type = $3 AND source_hash = $4 AND base_generation = $5
 		  AND revision = $6
-		  AND (config_type NOT IN ('workspace', 'sdk', 'execution') OR apply_lease_id = $7)
+		  AND (config_type NOT IN ('workspace', 'sdk', 'unified_app') OR apply_lease_id = $7)
 		  AND status = 'pending'
 	`, params.PlanID, params.State.ConfigKey, params.State.ConfigType,
 		params.State.SourceHash, params.BaseGeneration, params.ExpectedRevision, nullableApplyLease(params.ApplyLeaseID))
@@ -2008,7 +2008,7 @@ func validateConfigIdentity(configKey string, configType ConfigType, sourceHash 
 // validConfigType centralizes the persisted enum so reads and writes cannot
 // accidentally accept different config kinds as the product grows.
 func validConfigType(configType ConfigType) bool {
-	return configType == ConfigTypeWorkspace || configType == ConfigTypeSDK || configType == ConfigTypeMCP || configType == ConfigTypeExecution || configType == ConfigTypeWebhook
+	return configType == ConfigTypeWorkspace || configType == ConfigTypeSDK || configType == ConfigTypeMCP || configType == ConfigTypeUnifiedApp || configType == ConfigTypeWebhook
 }
 
 func normalizeJSONObject(raw json.RawMessage) (json.RawMessage, error) {

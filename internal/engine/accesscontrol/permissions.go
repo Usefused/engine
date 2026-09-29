@@ -31,40 +31,41 @@ const (
 	PermissionAppManage       Permission = "app.manage"
 	PermissionAppTokensManage Permission = "app.tokens.manage"
 
-	PermissionAppSDKRead               Permission = "app.sdk.read"
-	PermissionAppSDKUse                Permission = "app.sdk.use"
-	PermissionAppSDKCreate             Permission = "app.sdk.create"
-	PermissionAppSDKManage             Permission = "app.sdk.manage"
-	PermissionAppSDKTokensManage       Permission = "app.sdk.tokens.manage"
-	PermissionAppExecutionRead         Permission = "app.execution.read"
-	PermissionAppExecutionUse          Permission = "app.execution.use"
-	PermissionAppExecutionCreate       Permission = "app.execution.create"
-	PermissionAppExecutionManage       Permission = "app.execution.manage"
-	PermissionAppExecutionTokensManage Permission = "app.execution.tokens.manage"
-	PermissionAppMCPRead               Permission = "app.mcp.read"
-	PermissionAppMCPUse                Permission = "app.mcp.use"
-	PermissionAppMCPCreate             Permission = "app.mcp.create"
-	PermissionAppMCPManage             Permission = "app.mcp.manage"
-	PermissionAppMCPTokensManage       Permission = "app.mcp.tokens.manage"
-	PermissionAppAPIRead               Permission = "app.api.read"
-	PermissionAppAPIUse                Permission = "app.api.use"
-	PermissionAppAPICreate             Permission = "app.api.create"
-	PermissionAppAPIManage             Permission = "app.api.manage"
-	PermissionAppAPITokensManage       Permission = "app.api.tokens.manage"
-	PermissionAppWebhookRead           Permission = "app.webhook.read"
-	PermissionAppWebhookCreate         Permission = "app.webhook.create"
-	PermissionAppWebhookManage         Permission = "app.webhook.manage"
-	PermissionCatalogueRead            Permission = "catalogue.read"
-	PermissionCatalogueImport          Permission = "catalogue.import"
-	PermissionCatalogueManage          Permission = "catalogue.manage"
-	PermissionAccountRead              Permission = "account.read"
-	PermissionAccountManage            Permission = "account.manage"
-	PermissionBillingRead              Permission = "billing.read"
-	PermissionBillingManage            Permission = "billing.manage"
-	PermissionNotificationUpdate       Permission = "notification.update"
-	PermissionAuditRead                Permission = "audit.read"
-	PermissionAccessRead               Permission = "access.read"
-	PermissionAccessManage             Permission = "access.manage"
+	PermissionAppSDKRead                Permission = "app.sdk.read"
+	PermissionAppSDKUse                 Permission = "app.sdk.use"
+	PermissionAppSDKCreate              Permission = "app.sdk.create"
+	PermissionAppSDKManage              Permission = "app.sdk.manage"
+	PermissionAppSDKTokensManage        Permission = "app.sdk.tokens.manage"
+	PermissionAppUnifiedAppRead         Permission = "app.unified_app.read"
+	PermissionAppUnifiedAppUse          Permission = "app.unified_app.use"
+	PermissionAppUnifiedAppCreate       Permission = "app.unified_app.create"
+	PermissionAppUnifiedAppManage       Permission = "app.unified_app.manage"
+	PermissionAppUnifiedAppTokensManage Permission = "app.unified_app.tokens.manage"
+	PermissionAppMCPRead                Permission = "app.mcp.read"
+	PermissionAppMCPUse                 Permission = "app.mcp.use"
+	PermissionAppMCPCreate              Permission = "app.mcp.create"
+	PermissionAppMCPManage              Permission = "app.mcp.manage"
+	PermissionAppMCPTokensManage        Permission = "app.mcp.tokens.manage"
+	PermissionAppAPIRead                Permission = "app.api.read"
+	PermissionAppAPIUse                 Permission = "app.api.use"
+	PermissionAppAPICreate              Permission = "app.api.create"
+	PermissionAppAPIManage              Permission = "app.api.manage"
+	PermissionAppAPITokensManage        Permission = "app.api.tokens.manage"
+	PermissionAppWebhookRead            Permission = "app.webhook.read"
+	PermissionAppWebhookCreate          Permission = "app.webhook.create"
+	PermissionAppWebhookManage          Permission = "app.webhook.manage"
+	PermissionCatalogueRead             Permission = "catalogue.read"
+	PermissionCatalogueImport           Permission = "catalogue.import"
+	PermissionCatalogueManage           Permission = "catalogue.manage"
+	PermissionAccountRead               Permission = "account.read"
+	PermissionAccountManage             Permission = "account.manage"
+	PermissionBillingRead               Permission = "billing.read"
+	PermissionBillingManage             Permission = "billing.manage"
+	PermissionNotificationUpdate        Permission = "notification.update"
+	PermissionUnifiedAppDiagnosticsRead Permission = "app.unified_app.diagnostics.read"
+	PermissionAuditRead                 Permission = "audit.read"
+	PermissionAccessRead                Permission = "access.read"
+	PermissionAccessManage              Permission = "access.manage"
 )
 
 var (
@@ -89,11 +90,11 @@ var (
 		PermissionAppSDKCreate,
 		PermissionAppSDKManage,
 		PermissionAppSDKTokensManage,
-		PermissionAppExecutionRead,
-		PermissionAppExecutionUse,
-		PermissionAppExecutionCreate,
-		PermissionAppExecutionManage,
-		PermissionAppExecutionTokensManage,
+		PermissionAppUnifiedAppRead,
+		PermissionAppUnifiedAppUse,
+		PermissionAppUnifiedAppCreate,
+		PermissionAppUnifiedAppManage,
+		PermissionAppUnifiedAppTokensManage,
 		PermissionAppMCPRead,
 		PermissionAppMCPUse,
 		PermissionAppMCPCreate,
@@ -116,6 +117,7 @@ var (
 		PermissionBillingManage,
 		PermissionNotificationUpdate,
 		PermissionAuditRead,
+		PermissionUnifiedAppDiagnosticsRead,
 		PermissionAccessRead,
 		PermissionAccessManage,
 	}

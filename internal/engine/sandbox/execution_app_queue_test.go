@@ -37,14 +37,14 @@ func waitForExecutionWaiters(t *testing.T, accountID uuid.UUID, wanted int) {
 	t.Fatalf("account queue did not reach %d waiters", wanted)
 }
 
-// TestExecutionAppPhysicalQueueTransfersSlot proves two active calls can hand
+// TestUnifiedAppPhysicalQueueTransfersSlot proves two active calls can hand
 // capacity to a third app call without oversubscribing the entitlement.
-func TestExecutionAppPhysicalQueueTransfersSlot(t *testing.T) {
+func TestUnifiedAppPhysicalQueueTransfersSlot(t *testing.T) {
 	withEntitlement(t, models.RuntimeEntitlement{MaxSandboxConcurrency: models.IntPtr(2)})
 	accountID := uuid.New()
 	identity := auth.RuntimeIdentity{AccountID: accountID, AppFamilyID: uuid.New(), AppID: uuid.New()}
 	otherApp := auth.RuntimeIdentity{AccountID: accountID, AppFamilyID: uuid.New(), AppID: uuid.New()}
-	ctx := WithExecutionAppPhysicalQueue(context.Background())
+	ctx := WithUnifiedAppPhysicalQueue(context.Background())
 	span := trace.SpanFromContext(ctx)
 	first, err := trackAuthenticatedExecution(ctx, identity, span)
 	if err != nil {
@@ -88,9 +88,9 @@ func TestExecutionAppPhysicalQueueTransfersSlot(t *testing.T) {
 	second()
 }
 
-// TestExecutionAppPhysicalQueueCancellation removes an abandoned waiter so
+// TestUnifiedAppPhysicalQueueCancellation removes an abandoned waiter so
 // later calls can receive the released permit.
-func TestExecutionAppPhysicalQueueCancellation(t *testing.T) {
+func TestUnifiedAppPhysicalQueueCancellation(t *testing.T) {
 	withEntitlement(t, models.RuntimeEntitlement{MaxSandboxConcurrency: models.IntPtr(1)})
 	accountID := uuid.New()
 	identity := auth.RuntimeIdentity{AccountID: accountID}
@@ -99,7 +99,7 @@ func TestExecutionAppPhysicalQueueCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(WithExecutionAppPhysicalQueue(context.Background()))
+	ctx, cancel := context.WithCancel(WithUnifiedAppPhysicalQueue(context.Background()))
 	result := make(chan error, 1)
 	go func() {
 		_, waitErr := trackAuthenticatedExecution(ctx, identity, span)
@@ -119,16 +119,16 @@ func TestExecutionAppPhysicalQueueCancellation(t *testing.T) {
 	waitForExecutionWaiters(t, accountID, 0)
 	hold()
 	// A canceled waiter must not consume the next available slot.
-	release, err := trackAuthenticatedExecution(WithExecutionAppPhysicalQueue(context.Background()), identity, span)
+	release, err := trackAuthenticatedExecution(WithUnifiedAppPhysicalQueue(context.Background()), identity, span)
 	if err != nil {
 		t.Fatalf("next app call could not acquire slot: %v", err)
 	}
 	release()
 }
 
-// TestExecutionAppPhysicalQueueIsBounded ensures a stalled provider cannot
+// TestUnifiedAppPhysicalQueueIsBounded ensures a stalled provider cannot
 // accumulate an unbounded number of waiting application requests.
-func TestExecutionAppPhysicalQueueIsBounded(t *testing.T) {
+func TestUnifiedAppPhysicalQueueIsBounded(t *testing.T) {
 	withEntitlement(t, models.RuntimeEntitlement{MaxSandboxConcurrency: models.IntPtr(1)})
 	accountID := uuid.New()
 	identity := auth.RuntimeIdentity{AccountID: accountID}
@@ -137,7 +137,7 @@ func TestExecutionAppPhysicalQueueIsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(WithExecutionAppPhysicalQueue(context.Background()))
+	ctx, cancel := context.WithCancel(WithUnifiedAppPhysicalQueue(context.Background()))
 	var waiting sync.WaitGroup
 	waiting.Add(maxPhysicalOperationWaiters)
 	for range maxPhysicalOperationWaiters {
@@ -149,7 +149,7 @@ func TestExecutionAppPhysicalQueueIsBounded(t *testing.T) {
 	waitForExecutionWaiters(t, accountID, maxPhysicalOperationWaiters)
 	// The next call must be rejected before allocating another waiter.
 	_, err = trackAuthenticatedExecution(ctx, identity, span)
-	if !errors.Is(err, ErrExecutionAppPhysicalQueueFull) {
+	if !errors.Is(err, ErrUnifiedAppPhysicalQueueFull) {
 		t.Fatalf("expected bounded queue error, got %v", err)
 	}
 	cancel()
@@ -157,9 +157,9 @@ func TestExecutionAppPhysicalQueueIsBounded(t *testing.T) {
 	hold()
 }
 
-// TestExecutionAppPhysicalQueueDoesNotChangeDirectGate proves an unmarked
+// TestUnifiedAppPhysicalQueueDoesNotChangeDirectGate proves an unmarked
 // direct call cannot create a phantom permit while an app waits for capacity.
-func TestExecutionAppPhysicalQueueDoesNotChangeDirectGate(t *testing.T) {
+func TestUnifiedAppPhysicalQueueDoesNotChangeDirectGate(t *testing.T) {
 	withEntitlement(t, models.RuntimeEntitlement{MaxSandboxConcurrency: models.IntPtr(1)})
 	accountID := uuid.New()
 	identity := auth.RuntimeIdentity{AccountID: accountID}
@@ -171,7 +171,7 @@ func TestExecutionAppPhysicalQueueDoesNotChangeDirectGate(t *testing.T) {
 	result := make(chan error, 1)
 	releases := make(chan func(), 1)
 	go func() {
-		release, waitErr := trackAuthenticatedExecution(WithExecutionAppPhysicalQueue(context.Background()), identity, span)
+		release, waitErr := trackAuthenticatedExecution(WithUnifiedAppPhysicalQueue(context.Background()), identity, span)
 		// A granted app call retains the sole permit until the assertion completes.
 		if waitErr == nil {
 			releases <- release

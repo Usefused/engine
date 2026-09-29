@@ -7,7 +7,7 @@
     "ignoreDeprecations": "6.0",
     "types": ["node"],
     "baseUrl": ".",
-    "paths": { "@fused/execution": ["src/index.ts"] },
+    "paths": { "@fused/unified-app": ["src/index.ts"] },
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

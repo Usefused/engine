@@ -24,8 +24,8 @@ var controlPlanePrefixes = []string{
 	"/workspace",
 	"/config",
 	"/sdk-config",
-	// Execution App plan/apply uses the same control credential boundary as SDK plans.
-	"/execution-config",
+	// Unified App plan/apply uses the same control credential boundary as SDK plans.
+	"/unified-app-config",
 	"/mcp-config",
 	"/webhook-config",
 	"/engine/graphql",

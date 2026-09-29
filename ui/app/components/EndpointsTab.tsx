@@ -1,3 +1,4 @@
+import { Select } from "./forms/Select.ts";
 import { ChevronDown, ChevronRight, Loader2, Search } from "lucide-react";
 import { useEffect, useRef } from "react";
 import type { IntegrationObject, ServiceGenerationResult } from "~/lib/api";
@@ -45,6 +46,7 @@ interface EndpointsTabProps {
   setSelectedEndpoint: (ep: IntegrationObject | null) => void;
 }
 
+/** Uses the shared select while keeping selection state and actions owned by this page. */
 export default function EndpointsTab({
   res,
   searchQuery,
@@ -120,6 +122,7 @@ export default function EndpointsTab({
           </div>
       </div>
       <div className="divide-y divide-slate-100">
+        {/* Resource and search views share controls while retaining their distinct loading states. */}
         {(() => {
           if (searchResults !== null) {
             if (searchResults.length === 0) {
@@ -132,6 +135,7 @@ export default function EndpointsTab({
               return acc;
             }, {} as Record<string, IntegrationObject[]>);
 
+            // Each resource keeps its version selection while sharing the dropdown presentation.
             const elements = Object.entries(grouped).map(([resource, eps]) => {
               const availableVersions = Array.from(new Set(eps.map(ep => ep.version || "v1"))).sort().reverse();
               const currentVersion = resourceVersions[resource] || availableVersions[0];
@@ -145,7 +149,7 @@ export default function EndpointsTab({
                       <h3 className="min-w-0 break-words text-xs font-semibold text-slate-600 uppercase tracking-wider">{resource}</h3>
                     </div>
                     {availableVersions.length > 1 && (
-                      <select
+                      <Select
                         value={currentVersion}
                         onChange={(e) => setResourceVersions(prev => ({ ...prev, [resource]: e.target.value }))}
                         className="text-xs border-slate-200 rounded-md py-1 pl-2 pr-6 text-slate-600 focus:ring-blue-500 focus:border-blue-500 bg-white shadow-sm cursor-default"
@@ -153,7 +157,7 @@ export default function EndpointsTab({
                         {availableVersions.map(v => (
                           <option key={v} value={v}>{v}</option>
                         ))}
-                      </select>
+                      </Select>
                     )}
                   </div>
                   <div className="divide-y divide-slate-50">
@@ -183,6 +187,7 @@ export default function EndpointsTab({
             if (resources.length === 0) {
               return <div className="p-8 text-center text-slate-500 text-sm">No resources found.</div>;
             }
+            // Version changes stay local to each resource so other groups remain undisturbed.
             return resources.map(resource => {
               const isCollapsed = !expandedResources[resource.name];
               const eps = integrationsByResource[resource.id] || [];
@@ -209,7 +214,7 @@ export default function EndpointsTab({
                       )}
                       
                       {!isCollapsed && availableVersions.length > 1 && (
-                        <select
+                        <Select
                           value={currentVersion}
                           onClick={(e) => e.stopPropagation()}
                           onChange={(e) => setResourceVersions(prev => ({ ...prev, [resource.name]: e.target.value }))}
@@ -218,7 +223,7 @@ export default function EndpointsTab({
                           {availableVersions.map(v => (
                             <option key={v} value={v}>{v}</option>
                           ))}
-                        </select>
+                        </Select>
                       )}
                     </div>
                     

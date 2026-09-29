@@ -154,8 +154,8 @@ func TestHTTPRegistryClient_HandshakeDefaultsEntitlementsForOlderRegistry(t *tes
 		*got.MaxAPIFamilies != *want.MaxAPIFamilies ||
 		*got.MaxSDKFamilies != *want.MaxSDKFamilies ||
 		*got.MaxMCPFamilies != *want.MaxMCPFamilies ||
-		*got.MaxExecutionAppFamilies != *want.MaxExecutionAppFamilies ||
-		*got.MaxExecutionAppConcurrency != *want.MaxExecutionAppConcurrency ||
+		*got.MaxUnifiedAppFamilies != *want.MaxUnifiedAppFamilies ||
+		*got.MaxUnifiedAppConcurrency != *want.MaxUnifiedAppConcurrency ||
 		*got.MaxServices != *want.MaxServices ||
 		*got.MaxSandboxConcurrency != *want.MaxSandboxConcurrency ||
 		*got.ExecutionRetentionDays != *want.ExecutionRetentionDays ||
@@ -165,7 +165,7 @@ func TestHTTPRegistryClient_HandshakeDefaultsEntitlementsForOlderRegistry(t *tes
 		got.HeartbeatIntervalSeconds != want.HeartbeatIntervalSeconds ||
 		got.HeartbeatStaleAfterSeconds != want.HeartbeatStaleAfterSeconds ||
 		got.DriftMonitoringEnabled != want.DriftMonitoringEnabled ||
-		got.ExecutionAppAlwaysOnEnabled != want.ExecutionAppAlwaysOnEnabled ||
+		got.UnifiedAppAlwaysOnEnabled != want.UnifiedAppAlwaysOnEnabled ||
 		got.WebhookIngestionEnabled != want.WebhookIngestionEnabled ||
 		got.SSOEnabled != want.SSOEnabled {
 		t.Fatalf("expected default entitlement, got %#v", result.Entitlements)

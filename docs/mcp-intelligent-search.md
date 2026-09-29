@@ -30,7 +30,7 @@ and exact-version detail page disclose this processing.
 
 Only non-empty `search_docs.query` calls use the classifier. An exact
 `operationId`, section lookup, or empty-query browse remains local. Jev chooses
-one best matching physical or Unified operation, or no match. The result retains
+one best matching physical operation, or no match. The result retains
 query-mode schema packing and pagination guidance; it never authorizes execution
 or upgrades to exact-lookup pagination controls. The Engine checks the returned
 name against the token-authorized catalogue before returning any documentation.
@@ -70,7 +70,7 @@ A successful response contains `provider: "fused-intelligent-classifier"` and
 `operationName`, which is empty for no match. Request bodies are capped at 2 MiB,
 and the Registry permits at most 32 concurrent classifier requests per process.
 Provider credentials, provider error bodies, operation schemas, runtime tokens,
-and private Unified mappings never appear in the response. Search telemetry
+or private runtime mappings never appear in the response. Search telemetry
 retains the existing content-free search observation contract.
 
 ## Describe operation discovery

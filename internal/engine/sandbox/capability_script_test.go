@@ -52,7 +52,7 @@ func (host *capabilityScriptTestHost) DBSet(_ context.Context, value json.RawMes
 
 // TestRunCapabilityScriptExecutesAndStoresData covers the child interpreter independently of host OS isolation availability.
 func TestRunCapabilityScriptExecutesAndStoresData(t *testing.T) {
-	const bundle = `globalThis.FusedExecutionApp = {
+	const bundle = `globalThis.FusedUnifiedApp = {
 			input: { parse(value) { if (typeof value.name !== "string") throw Error("invalid"); return value; } },
 			output: { parse(value) { if (typeof value.id !== "string") throw Error("invalid"); return value; } },
 			async execute({input}) {
@@ -81,7 +81,7 @@ func TestRunCapabilityScriptExecutesAndStoresData(t *testing.T) {
 
 // TestRunCapabilityScriptRejectsInvalidOutput keeps a child-side Zod rejection out of public output.
 func TestRunCapabilityScriptRejectsInvalidOutput(t *testing.T) {
-	const bundle = `globalThis.FusedExecutionApp={input:{parse(v){return v}},output:{parse(){throw Error("secret value")}},async execute(){return {secret:"hidden"}}};`
+	const bundle = `globalThis.FusedUnifiedApp={input:{parse(v){return v}},output:{parse(){throw Error("secret value")}},async execute(){return {secret:"hidden"}}};`
 	_, err := runCapabilityScriptInProcess(context.Background(), []byte(bundle), json.RawMessage(`{}`), &capabilityScriptTestHost{})
 	// Validation detail may contain private authored values and must stay bounded.
 	if err == nil || err.Error() != "capability execution failed" {
@@ -91,7 +91,7 @@ func TestRunCapabilityScriptRejectsInvalidOutput(t *testing.T) {
 
 // TestRunCapabilityScriptBoundsData verifies the child interpreter rejects an oversized write before storage.
 func TestRunCapabilityScriptBoundsData(t *testing.T) {
-	const bundle = `globalThis.FusedExecutionApp={input:{parse(v){return v}},output:{parse(v){return v}},async execute(){await __fusedHost.dbSet(JSON.stringify({value:"x".repeat(524288)}));return {ok:true}}};`
+	const bundle = `globalThis.FusedUnifiedApp={input:{parse(v){return v}},output:{parse(v){return v}},async execute(){await __fusedHost.dbSet(JSON.stringify({value:"x".repeat(524288)}));return {ok:true}}};`
 	host := &capabilityScriptTestHost{}
 	_, err := runCapabilityScriptInProcess(context.Background(), []byte(bundle), json.RawMessage(`{}`), host)
 	// Runtime rejects the payload before delegating to the durable store.
@@ -108,7 +108,7 @@ func TestRunCapabilityScriptBoundsData(t *testing.T) {
 
 // TestCapabilityDeterminismPinsTimeAndRandom proves replay controls produce identical JavaScript output.
 func TestCapabilityDeterminismPinsTimeAndRandom(t *testing.T) {
-	const bundle = `globalThis.FusedExecutionApp={input:{parse(v){return v}},output:{parse(v){return v}},async execute(){return {now:Date.now(),constructed:new Date().getTime(),random:[Math.random(),Math.random()]}}};`
+	const bundle = `globalThis.FusedUnifiedApp={input:{parse(v){return v}},output:{parse(v){return v}},async execute(){return {now:Date.now(),constructed:new Date().getTime(),random:[Math.random(),Math.random()]}}};`
 	control := CapabilityDeterminism{StartedAtUnixMs: 1700000000123, RandomSeed: 42}
 	host := &capabilityScriptTestHost{}
 	first, err := runCapabilityScriptInProcessWithDeterminism(context.Background(), []byte(bundle), json.RawMessage(`{}`), host, control)

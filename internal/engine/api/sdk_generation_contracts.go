@@ -19,6 +19,7 @@ import (
 type generationPlanningClient struct {
 	sandbox.RegistryClient
 	contracts            store.GenerationContractStore
+	pinWriter            store.GenerationPinWriter
 	observed             map[uuid.UUID]string
 	requireGenerationPin bool
 	generationTargets    map[string]bool
@@ -65,10 +66,70 @@ func localSnapshotPlanningClient(s store.Store, registry sandbox.RegistryClient,
 		}
 		return registry, nil
 	}
+	pinWriter, _ := s.(store.GenerationPinWriter)
 	return &generationPlanningClient{
 		RegistryClient: registry, contracts: contracts, observed: make(map[uuid.UUID]string),
-		requireGenerationPin: requireGenerationPin, generationTargets: make(map[string]bool),
+		pinWriter: pinWriter, requireGenerationPin: requireGenerationPin, generationTargets: make(map[string]bool),
 	}, nil
+}
+
+// ensureGenerationPins acquires SDK archives only for generated targets missing from active runtime snapshots.
+func (c *generationPlanningClient) ensureGenerationPins(ctx context.Context, refs []sandbox.ServiceVersionRef, apiKey string) error {
+	// MCP and metadata-only planning keep using the admitted local execution snapshot without Registry storage work.
+	if !c.requireGenerationPin || len(refs) == 0 {
+		return nil
+	}
+	bindings, err := c.contracts.ListGenerationContractBindings(ctx, refs, false)
+	// Missing local authority cannot be reconstructed from an unscoped Registry lookup.
+	if err != nil {
+		return err
+	}
+	missing := make([]store.WorkspaceServiceVersion, 0, len(bindings))
+	byVersion := make(map[uuid.UUID]models.SDKContractBinding, len(bindings))
+	for _, binding := range bindings {
+		// Existing pins remain immutable; credential-source versions do not consume generated package bytes.
+		if !c.requiresGenerationPin(binding.ServiceID, binding.Version) || store.ValidGenerationContractHash(binding.GenerationContractHash) {
+			continue
+		}
+		// Several auth selections may reference one service version; acquire its immutable archive once.
+		if _, alreadyQueued := byVersion[binding.ServiceVersionID]; alreadyQueued {
+			continue
+		}
+		missing = append(missing, store.WorkspaceServiceVersion{ServiceID: binding.ServiceID, ServiceVersionID: binding.ServiceVersionID, Version: binding.Version})
+		byVersion[binding.ServiceVersionID] = binding
+	}
+	// A fully pinned selection requires no Registry contact during plan or apply.
+	if len(missing) == 0 {
+		return nil
+	}
+	fetcher, canFetch := c.RegistryClient.(BatchRuntimeContractFetcher)
+	// The production client must be able to acquire a durable archive before local planning can use its hash.
+	if !canFetch || c.pinWriter == nil {
+		return store.ErrGenerationContractPinUnavailable
+	}
+	snapshots, err := fetcher.FetchRuntimeContracts(ctx, missing, apiKey)
+	// Partial archive acquisition cannot authorize any local pin attachment.
+	if err != nil {
+		return err
+	}
+	// Every requested version must return an admitted snapshot before any local archive reference is attached.
+	if len(snapshots) != len(missing) {
+		return store.ErrGenerationContractPinUnavailable
+	}
+	for _, snapshot := range snapshots {
+		binding, found := byVersion[snapshot.ServiceVersionID]
+		// Registry bytes may be attached only to the unchanged local execution snapshot and exact source revision.
+		if !found || snapshot.ServiceID != binding.ServiceID || snapshot.Version != binding.Version ||
+			snapshot.Revision != binding.Revision || snapshot.SourceHash != binding.SourceHash ||
+			snapshot.ContractHash != binding.RuntimeContractHash || !store.ValidGenerationContractHash(snapshot.GenerationContractHash) {
+			return store.ErrGenerationContractPinUnavailable
+		}
+		// The store rechecks the same identity atomically against concurrent refresh or removal.
+		if err := c.pinWriter.AttachGenerationContractPin(ctx, binding, snapshot.GenerationContractHash); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // setGenerationTargets records exact generated service versions so metadata-only auth sources need no archive pin.
@@ -115,7 +176,11 @@ func localPlanningUnavailableError() error {
 }
 
 // FetchServiceVersionRevisions keeps the existing before/after-generation checks tied to the local pin instead of current Registry visibility.
-func (c *generationPlanningClient) FetchServiceVersionRevisions(ctx context.Context, refs []sandbox.ServiceVersionRef, _ string) ([]sandbox.ServiceVersionRevision, error) {
+func (c *generationPlanningClient) FetchServiceVersionRevisions(ctx context.Context, refs []sandbox.ServiceVersionRef, apiKey string) ([]sandbox.ServiceVersionRevision, error) {
+	// SDK planning acquires a missing archive before its existing local-only revision fence reads the pin.
+	if err := c.ensureGenerationPins(ctx, refs, apiKey); err != nil {
+		return nil, err
+	}
 	bindings, err := c.contracts.ListGenerationContractBindings(ctx, refs, false)
 	// A missing pin is actionable; network fallback would silently select a different contract.
 	if err != nil {
@@ -147,7 +212,15 @@ func (c *generationPlanningClient) FetchServiceVersionRevisions(ctx context.Cont
 }
 
 // FetchServiceVersionExecutionAuthContracts adapts minimal local security metadata into the existing shared auth resolver.
-func (c *generationPlanningClient) FetchServiceVersionExecutionAuthContracts(ctx context.Context, selections []sandbox.ServiceVersionExecutionAuthSelection, _ string) ([]sandbox.ServiceVersionExecutionAuthContract, error) {
+func (c *generationPlanningClient) FetchServiceVersionExecutionAuthContracts(ctx context.Context, selections []sandbox.ServiceVersionExecutionAuthSelection, apiKey string) ([]sandbox.ServiceVersionExecutionAuthContract, error) {
+	refs := make([]sandbox.ServiceVersionRef, 0, len(selections))
+	for _, selection := range selections {
+		refs = append(refs, sandbox.ServiceVersionRef{ServiceID: selection.ServiceID, Version: selection.Version})
+	}
+	// Auth planning must use the same archived identity as operation selection and the final SDK package.
+	if err := c.ensureGenerationPins(ctx, refs, apiKey); err != nil {
+		return nil, err
+	}
 	inputs := make([]store.GenerationAuthSelection, len(selections))
 	for i, selection := range selections {
 		inputs[i] = store.GenerationAuthSelection{ServiceID: selection.ServiceID, Version: selection.Version, OperationNames: selection.OperationNames, SelectAll: selection.SelectAll}
@@ -193,6 +266,14 @@ func generationAuthProjection(contract store.GenerationAuthContract) sandbox.Ser
 
 // ValidateSDKSelections leaves all operation/webhook membership predicates in the local set-based store.
 func (c *generationPlanningClient) ValidateSDKSelections(ctx context.Context, selections []models.SDKSelection) error {
+	refs := make([]sandbox.ServiceVersionRef, 0, len(selections))
+	for _, selection := range selections {
+		refs = append(refs, sandbox.ServiceVersionRef{ServiceID: selection.ServiceID, Version: selection.ServiceVersionID.String()})
+	}
+	// A plain workspace activation stays fast; the first SDK selection is the point that acquires its generator archive.
+	if err := c.ensureGenerationPins(ctx, refs, ""); err != nil {
+		return err
+	}
 	return c.contracts.ValidateGenerationSelections(ctx, selections, c.requireGenerationPin)
 }
 

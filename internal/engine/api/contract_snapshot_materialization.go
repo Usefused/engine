@@ -23,8 +23,7 @@ type runtimeContractSnapshotWriter interface {
 	UpsertServiceContractSnapshot(ctx context.Context, snapshot store.ServiceContractSnapshot) (*store.ServiceContractSnapshot, error)
 }
 
-// materializeRuntimeContractSnapshot stores the exact Registry contract needed
-// by local activation while keeping its audit dimensions identity-only.
+// materializeRuntimeContractSnapshot stores activation's exact execution contract without requesting SDK archive work.
 func materializeRuntimeContractSnapshot(ctx context.Context, s store.Store, fetcher RuntimeContractFetcher, accountID, serviceID, serviceVersionID uuid.UUID, version, apiKey string) error {
 	snapshotStore, ok := s.(runtimeContractSnapshotWriter)
 	if !ok || fetcher == nil {
@@ -44,7 +43,17 @@ func materializeRuntimeContractSnapshot(ctx context.Context, s store.Store, fetc
 		attribute.String("service_version_id", serviceVersionID.String()),
 	)
 
-	snapshot, err := fetcher.FetchRuntimeContract(ctx, serviceID, serviceVersionID, version, apiKey)
+	var snapshot *store.ServiceContractSnapshot
+	var err error
+	// Workspace additions need execution authority immediately; SDK generation archives are acquired by SDK work.
+	if activationFetcher, ok := fetcher.(interface {
+		FetchRuntimeContractForActivation(context.Context, uuid.UUID, uuid.UUID, string, string) (*store.ServiceContractSnapshot, error)
+	}); ok {
+		snapshot, err = activationFetcher.FetchRuntimeContractForActivation(ctx, serviceID, serviceVersionID, version, apiKey)
+	} else {
+		// Focused test doubles and other callers retain the original complete fetch contract.
+		snapshot, err = fetcher.FetchRuntimeContract(ctx, serviceID, serviceVersionID, version, apiKey)
+	}
 	// Fetch failure stops before local persistence or activation can observe an incomplete snapshot.
 	if err != nil {
 		span.SetAttributes(attribute.String("outcome", "fetch_failed"))

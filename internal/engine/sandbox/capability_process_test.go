@@ -53,7 +53,7 @@ func TestCapabilityWorkerRoundTripsDeterminism(t *testing.T) {
 	if !IsCapabilityWorkerAvailable(context.Background()) {
 		t.Skip("capability worker isolation is unavailable")
 	}
-	const bundle = `globalThis.FusedExecutionApp={input:{parse(v){return v}},output:{parse(v){return v}},async execute(){return {time:Date.now(),random:Math.random()}}};`
+	const bundle = `globalThis.FusedUnifiedApp={input:{parse(v){return v}},output:{parse(v){return v}},async execute(){return {time:Date.now(),random:Math.random()}}};`
 	control := CapabilityDeterminism{StartedAtUnixMs: 1700000000123, RandomSeed: 42}
 	host := &capabilityScriptTestHost{}
 	first, err := RunCapabilityScriptWithDeterminism(context.Background(), []byte(bundle), json.RawMessage(`{}`), host, control)

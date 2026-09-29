@@ -10,7 +10,6 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/store"
-	"github.com/Usefused/engine/internal/shared/canonicaljson"
 	"github.com/Usefused/engine/internal/shared/db"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -29,7 +28,6 @@ type mcpOperationPostgresFixture struct {
 	familyID         uuid.UUID
 	appID            uuid.UUID
 	teamID           uuid.UUID
-	planID           uuid.UUID
 	serviceID        uuid.UUID
 	serviceVersionID uuid.UUID
 	listEndpointID   uuid.UUID
@@ -76,7 +74,7 @@ func openMCPAppOperationPostgresFixture(t *testing.T) mcpOperationPostgresFixtur
 	}
 	fixture := mcpOperationPostgresFixture{
 		ctx: ctx, pool: pool, repository: repository, snapshotStore: snapshotStore, catalogueStore: catalogueStore,
-		accountID: uuid.New(), familyID: uuid.New(), appID: uuid.New(), teamID: uuid.New(), planID: uuid.New(),
+		accountID: uuid.New(), familyID: uuid.New(), appID: uuid.New(), teamID: uuid.New(),
 		serviceID: uuid.New(), serviceVersionID: uuid.New(), listEndpointID: uuid.New(), createEndpointID: uuid.New(),
 	}
 	// Exact-row cleanup is the last registration and therefore runs before the pool closes.
@@ -91,7 +89,6 @@ func (fixture mcpOperationPostgresFixture) cleanup(t *testing.T) {
 		query string
 		id    uuid.UUID
 	}{
-		{`DELETE FROM fused_config_plans WHERE id=$1`, fixture.planID},
 		{`DELETE FROM fused_apps WHERE app_id=$1`, fixture.appID},
 		{`DELETE FROM fused_app_families WHERE app_family_id=$1`, fixture.familyID},
 		{`DELETE FROM fused_service_contract_snapshots WHERE service_version_id=$1`, fixture.serviceVersionID},
@@ -131,7 +128,7 @@ func (fixture mcpOperationPostgresFixture) seedTeamAndSnapshot(t *testing.T) {
 	}
 }
 
-// seedMCPVersion publishes immutable selection state and its integrity-pinned applied Unified descriptor.
+// seedMCPVersion publishes immutable physical selection state.
 func (fixture mcpOperationPostgresFixture) seedMCPVersion(t *testing.T) {
 	t.Helper()
 	family, _, err := fixture.repository.CreateOrGetAppFamily(fixture.ctx, store.AppFamily{
@@ -141,21 +138,6 @@ func (fixture mcpOperationPostgresFixture) seedMCPVersion(t *testing.T) {
 	// The version must belong to an MCP family so SDK identities cannot enter this catalogue.
 	if err != nil {
 		t.Fatalf("seed MCP family: %v", err)
-	}
-	descriptors := &models.SDKUnifiedOperationDescriptors{SchemaVersion: models.SDKUnifiedDescriptorSchemaVersion, Operations: []models.SDKUnifiedOperationDescriptor{{
-		Name: "support.resolve", InputSchema: json.RawMessage(`{"type":"object"}`), Targets: []models.SDKUnifiedTargetDescriptor{{
-			PublicTarget: "tickets", OperationID: "tickets.list", ServiceID: fixture.serviceID, ServiceVersionID: fixture.serviceVersionID, EndpointID: fixture.listEndpointID,
-		}},
-	}}}
-	descriptorJSON, err := json.Marshal(descriptors)
-	// The stored plan and immutable app hash must be derived from the exact same descriptor bytes.
-	if err != nil {
-		t.Fatalf("encode Unified descriptor: %v", err)
-	}
-	descriptorDigest, err := canonicaljson.HexSHA256(descriptorJSON)
-	// Canonical hashing is the integrity boundary used by the production descriptor read.
-	if err != nil {
-		t.Fatalf("hash Unified descriptor: %v", err)
 	}
 	selectionsJSON, err := json.Marshal([]models.SDKSelection{{
 		SchemaVersion: models.AppSelectionSchemaVersion, ServiceID: fixture.serviceID, ServiceVersionID: fixture.serviceVersionID, SelectAll: true,
@@ -172,29 +154,14 @@ func (fixture mcpOperationPostgresFixture) seedMCPVersion(t *testing.T) {
 		ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selectionsJSON,
 		UnifiedDefinitionSchemaVersion: store.UnifiedDefinitionSchemaVersion,
 		UnifiedDefinitions:             []byte("[]"), UnifiedDefinitionHash: store.EmptyUnifiedSetHash,
-		UnifiedCodegenDescriptorHash: "sha256:" + descriptorDigest,
+		UnifiedCodegenDescriptorHash: store.EmptyUnifiedSetHash,
 		Status:                       store.AppStatusActive, ExpectedFamilyKind: store.AppKindMCP,
 	})
-	// Publication freezes the exact service selection and expected public Unified descriptor hash.
+	// Publication freezes the exact service selection for the physical catalogue.
 	if err != nil {
 		t.Fatalf("publish MCP version: %v", err)
 	}
-	resolvedPayload, err := json.Marshal(map[string]any{"unified_operations": descriptors})
-	// The applied plan remains the sole recoverable public descriptor source for this exact version.
-	if err != nil {
-		t.Fatalf("encode applied MCP plan: %v", err)
-	}
-	_, err = fixture.pool.Exec(fixture.ctx, `
-		INSERT INTO fused_config_plans
-			(id, config_key, config_type, owner_team_id, source_hash, status,
-			 actions, desired_state, resolved_payload, blockers, warnings,
-			 required_permissions, applied_at)
-		VALUES ($1,$2,'mcp',$3,$4,'applied','[]','{}',$5,'[]','[]','[]',NOW())
-	`, fixture.planID, configKey, fixture.teamID, sourceHash, resolvedPayload)
-	// Descriptor recovery requires the exact applied config-key and source-hash pair pinned by the app row.
-	if err != nil {
-		t.Fatalf("seed applied MCP plan: %v", err)
-	}
+
 }
 
 // assertCatalogue reads through production PostgreSQL projections and verifies the deterministic complete allowlist.
@@ -205,7 +172,7 @@ func (fixture mcpOperationPostgresFixture) assertCatalogue(t *testing.T) {
 	assertMCPAppOperationCatalogueEntries(t, catalogue)
 }
 
-// loadCatalogue composes the exact authorized app with its physical and Unified PostgreSQL projections.
+// loadCatalogue composes the exact authorized app with its physical PostgreSQL projection.
 func (fixture mcpOperationPostgresFixture) loadCatalogue(t *testing.T) mcpAppOperationCatalogue {
 	t.Helper()
 	item, err := fixture.catalogueStore.GetAuthorizedApp(fixture.ctx, fixture.accountID, fixture.appID, accesscontrol.AuthorizedScope{All: true})
@@ -214,35 +181,35 @@ func (fixture mcpOperationPostgresFixture) loadCatalogue(t *testing.T) mcpAppOpe
 		t.Fatalf("read authorized MCP version: %v", err)
 	}
 	catalogue, err := loadMCPAppOperationCatalogue(fixture.ctx, fixture.repository, *item)
-	// A successful read proves both PostgreSQL projections can compose without Registry fallback or per-row queries.
+	// A successful read proves the physical snapshot can load without Registry fallback or per-row queries.
 	if err != nil {
 		t.Fatalf("load MCP operation catalogue: %v", err)
 	}
 	return catalogue
 }
 
-// assertMCPAppOperationCatalogueIdentity verifies the merged result remains bound to the seeded immutable MCP version.
+// assertMCPAppOperationCatalogueIdentity verifies the result remains bound to the seeded immutable MCP version.
 func assertMCPAppOperationCatalogueIdentity(t *testing.T, fixture mcpOperationPostgresFixture, catalogue mcpAppOperationCatalogue) {
 	t.Helper()
-	// Version IDs and complete row count must survive both independent PostgreSQL projections.
-	if catalogue.AppID != fixture.appID || catalogue.AppFamilyID != fixture.familyID || len(catalogue.Operations) != 3 {
+	// Version IDs and physical row count must survive the exact snapshot projection.
+	if catalogue.AppID != fixture.appID || catalogue.AppFamilyID != fixture.familyID || len(catalogue.Operations) != 2 {
 		t.Fatalf("unexpected MCP operation catalogue: %#v", catalogue)
 	}
 }
 
-// assertMCPAppOperationCatalogueEntries verifies select-all expansion and Unified names merge in deterministic public order.
+// assertMCPAppOperationCatalogueEntries verifies physical select-all expansion in deterministic order.
 func assertMCPAppOperationCatalogueEntries(t *testing.T, catalogue mcpAppOperationCatalogue) {
 	t.Helper()
 	// Sorting and kind labels make the command output deterministic while preserving complete select-all expansion.
-	wantIDs := []string{"support.resolve", "tickets.create", "tickets.list"}
+	wantIDs := []string{"tickets.create", "tickets.list"}
 	for index, wantID := range wantIDs {
 		// Every expected invocation name must occupy its stable lexicographic position.
 		if catalogue.Operations[index].OperationID != wantID {
 			t.Fatalf("operation[%d] = %#v, want %q", index, catalogue.Operations[index], wantID)
 		}
 	}
-	// Unified identity and physical provenance remain distinguishable after merging.
-	if catalogue.Operations[0].Kind != appOperationKindUnified || catalogue.Operations[1].Kind != appOperationKindPhysical || catalogue.Operations[2].Kind != appOperationKindPhysical {
+	// Retired graph definitions must not reappear as callable catalogue entries.
+	if catalogue.Operations[0].Kind != appOperationKindPhysical || catalogue.Operations[1].Kind != appOperationKindPhysical {
 		t.Fatalf("unexpected MCP operation kinds: %#v", catalogue.Operations)
 	}
 }

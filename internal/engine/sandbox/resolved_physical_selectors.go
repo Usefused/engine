@@ -60,7 +60,7 @@ func (operation ResolvedPhysicalOperation) ValidateSelectors(selectors PhysicalE
 		return err
 	}
 	credentials := physicalSelectorCredentials(selectors)
-	// physical execution applies the SDK selection only when the caller did
+	// physical unified applies the SDK selection only when the caller did
 	// not choose auth explicitly. Preflight must inspect that same effective
 	// route or a planned static branch could be mistaken for connected auth.
 	credentials = credentialsWithSelectionAuth(credentials, match.selection, match.endpoint.SecurityRequirements)

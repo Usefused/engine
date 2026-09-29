@@ -22,7 +22,7 @@ function sharedFixture(): Fixture {
       raw: { $ref: "#/$defs/Payload" }, projection: {},
     }}]},
   };
-  return new Fixture([operation], [], { "version-a": { Payload: definition } }, testServer);
+  return new Fixture([operation], { "version-a": { Payload: definition } }, testServer);
 }
 
 describe("shared schema documentation", () => {

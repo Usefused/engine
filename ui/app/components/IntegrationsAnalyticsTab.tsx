@@ -1,3 +1,4 @@
+import { Select } from "./forms/Select.ts";
 import { Link } from "@remix-run/react";
 import { Activity, ArrowDownToLine, Clock3, Code2, Database, Server, ServerCrash } from "lucide-react";
 import type { ComponentType, ReactNode } from "react";
@@ -38,12 +39,12 @@ function ActivityRangeSelector({ value, onChange }: { value: WorkspaceActivityRa
   return <div className="flex w-full sm:justify-end">
     <label className="grid w-full gap-1.5 text-sm text-slate-600 sm:flex sm:w-auto sm:items-center sm:gap-2">
       <span>Date range</span>
-      <select value={value} onChange={(event) => onChange(event.target.value as WorkspaceActivityRange)} aria-label="Workspace activity date range" className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 sm:w-auto">
+      <Select value={value} onChange={(event) => onChange(event.target.value as WorkspaceActivityRange)} aria-label="Workspace activity date range" className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 sm:w-auto">
         <option value="24h">Last 24 hours</option>
         <option value="7d">Last 7 days</option>
         <option value="30d">Last 30 days</option>
         <option value="90d">Last 90 days</option>
-      </select>
+      </Select>
     </label>
   </div>;
 }

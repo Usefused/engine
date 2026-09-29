@@ -33,21 +33,7 @@ func buildSessionFixture(ctx context.Context, cache ObjectCache, appID string, s
 	if err != nil {
 		return nil, err
 	}
-	loader, ok := cache.(mcpUnifiedDescriptorLoader)
-	// A cache without the Engine-local applied-plan resolver cannot claim to
-	// provide a complete catalogue or reconstruct one from private definitions.
-	if !ok {
-		return nil, fmt.Errorf("MCP Unified descriptor lookup unavailable")
-	}
-	descriptors, err := loader.GetMCPUnifiedOperationDescriptors(ctx, appID, policy)
-	// Missing or inconsistent applied-plan state makes the complete catalogue
-	// unavailable rather than silently degrading to physical-only discovery.
-	if err != nil {
-		return nil, err
-	}
-	if err := fixture.attachUnifiedOperations(descriptors); err != nil {
-		return nil, err
-	}
+	// Retired graph descriptors stay out of discovery, including for older immutable versions.
 	metadataLoader, ok := cache.(mcpServerMetadataLoader)
 	// Server identity must describe the same immutable app version as the catalogue, never a process-wide runtime.
 	if !ok {
@@ -64,10 +50,6 @@ func buildSessionFixture(ctx context.Context, cache ObjectCache, appID string, s
 		return nil, err
 	}
 	return fixture, nil
-}
-
-type mcpUnifiedDescriptorLoader interface {
-	GetMCPUnifiedOperationDescriptors(context.Context, string, store.AppTokenPolicy) (*models.SDKUnifiedOperationDescriptors, error)
 }
 
 type mcpServerMetadataLoader interface {
@@ -106,24 +88,6 @@ func validateMCPServerMetadata(metadata FixtureServerMetadata) (FixtureServerMet
 		return FixtureServerMetadata{}, fmt.Errorf("MCP server description exceeds %d bytes", models.MCPServerDescriptionMaxBytes)
 	}
 	return metadata, nil
-}
-
-// GetMCPUnifiedOperationDescriptors delegates one session-scoped read to the
-// persistence owner without retaining descriptor state in another cache.
-func (c *LocalObjectCache) GetMCPUnifiedOperationDescriptors(ctx context.Context, appID string, policy store.AppTokenPolicy) (*models.SDKUnifiedOperationDescriptors, error) {
-	parsedAppID, err := uuid.Parse(appID)
-	// Exact UUID parsing prevents a malformed transport identifier from reaching
-	// the applied-plan query under a different interpretation.
-	if err != nil {
-		return nil, fmt.Errorf("invalid MCP app id: %w", err)
-	}
-	repository, ok := c.db.(store.MCPUnifiedDescriptorStore)
-	// Registry or private-definition fallbacks would create competing sources
-	// of public catalogue truth, so absence fails closed.
-	if !ok {
-		return nil, fmt.Errorf("MCP Unified descriptor store unavailable")
-	}
-	return repository.GetMCPUnifiedOperationDescriptors(ctx, parsedAppID, policy.IsUnrestricted(), policy.AllowedOperations)
 }
 
 type endpointBatchLister interface {

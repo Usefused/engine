@@ -30,10 +30,10 @@ var registryGraphQLQueryPolicies = registryGraphQLPolicies(
 		"serviceVersionImportIdentities", "service", "resourceIntegrations", "getServiceComponent",
 		"integration", "endpointByName", "endpointsByNames", "serviceOperations", "validateSDKSelections",
 		// Batched service candidates are catalogue discovery before a service has workspace execution authority.
-		"searchEndpoints", "searchServices", "serviceCandidatesByRefs", "parseSDKIntent", "draftPromptUnifiedOperation", "driftSnapshots", "driftSnapshotsForServices",
+		"searchEndpoints", "searchServices", "serviceCandidatesByRefs", "parseSDKIntent", "draftPromptUnifiedApp", "driftSnapshots", "driftSnapshotsForServices",
 		"serviceChangelogSince",
 		// Published workflow definitions are catalogue discovery, not workspace execution authority.
-		"workflows",
+		"unifiedAppTemplates",
 	},
 	[]accesscontrol.Permission{accesscontrol.PermissionCatalogueRead},
 	map[string][]accesscontrol.Permission{
@@ -46,12 +46,12 @@ var registryGraphQLQueryPolicies = registryGraphQLPolicies(
 
 var registryGraphQLMutationPolicies = map[string][]accesscontrol.Permission{
 	// Publishing authoring content uses the existing catalogue management and audit boundary.
-	"publishWorkflow":            {accesscontrol.PermissionCatalogueManage},
-	"setWorkflowVisibility":      {accesscontrol.PermissionCatalogueManage},
-	"updateServicePublic":        {accesscontrol.PermissionCatalogueManage},
-	"updateServiceVersionPublic": {accesscontrol.PermissionCatalogueManage},
-	"setConnectionProfile":       {accesscontrol.PermissionServiceManage, accesscontrol.PermissionCredentialsManage},
-	"__typename":                 {},
+	"publishUnifiedAppTemplate":       {accesscontrol.PermissionCatalogueManage},
+	"setUnifiedAppTemplateVisibility": {accesscontrol.PermissionCatalogueManage},
+	"updateServicePublic":             {accesscontrol.PermissionCatalogueManage},
+	"updateServiceVersionPublic":      {accesscontrol.PermissionCatalogueManage},
+	"setConnectionProfile":            {accesscontrol.PermissionServiceManage, accesscontrol.PermissionCredentialsManage},
+	"__typename":                      {},
 }
 
 func authorizeRegistryGraphQLOperation(ctx context.Context, body []byte) (string, error) {

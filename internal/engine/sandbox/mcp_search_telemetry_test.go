@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Usefused/engine/internal/shared/models"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
@@ -15,8 +14,7 @@ import (
 func TestMCPSearchTelemetryAllowlistAndDenylist(t *testing.T) {
 	exporter := installStreamableTestTracer(t)
 	fixture := &Fixture{
-		Operations:        []FixtureOperation{{OperationID: "secret.operation", Description: "secret description"}},
-		UnifiedOperations: &models.SDKUnifiedOperationDescriptors{Operations: []models.SDKUnifiedOperationDescriptor{{Name: "secret.unified", InputSchema: json.RawMessage(`{"secret_schema":true}`)}}},
+		Operations: []FixtureOperation{{OperationID: "secret.operation", Description: "secret description"}},
 	}
 	sess := &mcpSession{transport: mcpStreamableTransport, fixture: fixture, pendingRequests: make(map[string]struct{}), sessionID: "secret-session", token: "secret-token"}
 	request := mcpJSONRPCRequest{Method: "tools/call", ID: json.RawMessage(`7`), Params: json.RawMessage(`{"name":"search_docs","arguments":{"query":"secret query intent"}}`)}
@@ -29,7 +27,7 @@ func TestMCPSearchTelemetryAllowlistAndDenylist(t *testing.T) {
 	assertMCPSearchTelemetryAttributes(t, attributes, len(response))
 	joined := strings.Join(mcpSearchTestValues(attributes), " ")
 	// Request, catalogue, schema, response, and routing sentinels must never survive projection.
-	for _, denied := range []string{"secret query intent", "secret.operation", "secret.unified", "secret description", "secret_schema", "/properties/password", "secret result", "secret-session", "secret-token", "secret-credential", "provider-body"} {
+	for _, denied := range []string{"secret query intent", "secret.operation", "secret description", "/properties/password", "secret result", "secret-session", "secret-token", "secret-credential", "provider-body"} {
 		// A sentinel match proves caller or provider material escaped the projection.
 		if strings.Contains(joined, denied) {
 			t.Fatalf("search telemetry exposed %q in %q", denied, joined)
@@ -42,7 +40,7 @@ func assertMCPSearchTelemetryAttributes(t *testing.T, attributes map[string]stri
 	t.Helper()
 	allowed := map[string]struct{}{
 		"actor.type": {}, "mcp.transport": {}, "mcp.search.mode": {},
-		"mcp.search.physical_count": {}, "mcp.search.unified_count": {},
+		"mcp.search.physical_count": {},
 		"mcp.search.include_detail": {}, "mcp.search.response_bytes": {},
 		"mcp.search.duration_ms": {}, "outcome": {},
 	}
@@ -59,7 +57,7 @@ func assertMCPSearchTelemetryAttributes(t *testing.T, attributes map[string]stri
 	}
 	expected := map[string]string{
 		"actor.type": "agent", "mcp.search.mode": "query", "mcp.search.include_detail": "true",
-		"outcome": "succeeded", "mcp.search.physical_count": "1", "mcp.search.unified_count": "1",
+		"outcome": "succeeded", "mcp.search.physical_count": "1",
 		"mcp.search.response_bytes": strconv.Itoa(responseBytes),
 	}
 	for key, value := range expected {
@@ -82,7 +80,7 @@ func TestMCPSearchTelemetryFailureUsesStableCode(t *testing.T) {
 	attributes := mcpSearchTestAttributes(span)
 	allowed := map[string]struct{}{
 		"actor.type": {}, "mcp.transport": {}, "mcp.search.mode": {},
-		"mcp.search.physical_count": {}, "mcp.search.unified_count": {},
+		"mcp.search.physical_count": {},
 		"mcp.search.include_detail": {}, "mcp.search.response_bytes": {},
 		"mcp.search.duration_ms": {}, "outcome": {}, "error.code": {},
 	}

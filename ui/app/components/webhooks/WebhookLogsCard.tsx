@@ -1,3 +1,4 @@
+import { Select } from "../forms/Select.ts";
 import { useState } from "react";
 import { RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
 import { activateReceiptRow } from "~/components/activity/receiptRow";
@@ -148,7 +149,7 @@ export function WebhookLogsCard({
           Incoming webhook receipts
         </h2>
         <div className="flex flex-wrap items-center gap-3">
-          <select
+          <Select
             value={webhookFilterEvent}
             onChange={(e) => setWebhookFilterEvent(e.target.value)}
             className="text-sm border border-slate-200 rounded px-2 py-1 bg-white text-slate-700 outline-none flex-1 sm:flex-initial"
@@ -158,7 +159,7 @@ export function WebhookLogsCard({
               <option key={name} value={name}>{name}</option>
             ))}
             <option value="UNKNOWN">UNKNOWN</option>
-          </select>
+          </Select>
           <div className="flex items-center gap-2 flex-wrap flex-1 sm:flex-initial">
             <input
               type="date"
@@ -265,7 +266,7 @@ export function WebhookLogsCard({
               <ChevronLeft className="w-4 h-4" />
             </button>
             <span className="text-xs text-slate-500 pl-2">Page</span>
-            <select
+            <Select
               className="bg-white border border-slate-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 mx-1 cursor-pointer"
               value={webhookPage}
               onChange={(e) => setWebhookPage(parseInt(e.target.value, 10))}
@@ -273,7 +274,7 @@ export function WebhookLogsCard({
               {Array.from({ length: Math.ceil(webhookTotal / webhookLimit) }, (_, i) => i + 1).map(p => (
                 <option key={p} value={p}>{p}</option>
               ))}
-            </select>
+            </Select>
             <span className="text-xs font-medium text-slate-500 pr-2">
               of {Math.max(1, Math.ceil(webhookTotal / webhookLimit))}
             </span>

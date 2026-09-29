@@ -1,8 +1,8 @@
 import * as z from "zod/mini";
-import { buildExecutionApp, fused } from "@fused/execution";
+import { buildUnifiedApp, fused } from "@fused/unified-app";
 import { services } from "@fused/operations";
 
-export default buildExecutionApp({
+export default buildUnifiedApp({
   input: z.object({ name: z.string() }),
   output: z.object({ greeting: z.string() }),
   fetch: { searchable: ["name"] },

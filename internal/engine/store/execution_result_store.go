@@ -32,7 +32,7 @@ var (
 	executionPathSegment                  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
 
-// ExecutionResult is the durable record for one exact execution app version.
+// ExecutionResult is the durable record for one exact unified app version.
 // Input and read-handle hashes are deliberately omitted from JSON projections.
 type ExecutionResult struct {
 	ID                 uuid.UUID       `json:"executionId"`
@@ -182,7 +182,7 @@ func (s *postgresStore) CreateExecutionResult(ctx context.Context, record Execut
 		return err
 	}
 	// A new execution owns an empty document; rerun and replay never inherit durable data.
-	_, err = s.db.Exec(ctx, `INSERT INTO fused_execution_app_results
+	_, err = s.db.Exec(ctx, `INSERT INTO fused_unified_app_results
 		(id, account_id, app_family_id, app_id, app_version, app_token_id, read_handle_hash, idempotency_key_hash, status, input, data, source_execution_id, mode)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),'queued',$9,'null'::jsonb,$10,$11)`,
 		record.ID, record.AccountID, record.AppFamilyID, record.AppID, record.AppVersion,
@@ -204,7 +204,7 @@ func (s *postgresStore) CreateOrGetRerunExecutionResult(ctx context.Context, rec
 	}
 	var pgError *pgconn.PgError
 	// Only the dedicated rerun uniqueness conflict is an idempotent retry.
-	if !errors.As(err, &pgError) || pgError.ConstraintName != "uq_fused_execution_app_results_rerun" {
+	if !errors.As(err, &pgError) || pgError.ConstraintName != "uq_fused_unified_app_results_rerun" {
 		return uuid.Nil, false, err
 	}
 	existingID, err := s.matchExistingRerun(ctx, record)
@@ -219,7 +219,7 @@ func (s *postgresStore) matchExistingRerun(ctx context.Context, record Execution
 	var existingID uuid.UUID
 	var existingVersion string
 	var existingInput []byte
-	err := s.db.QueryRow(ctx, `SELECT id, app_version, input FROM fused_execution_app_results
+	err := s.db.QueryRow(ctx, `SELECT id, app_version, input FROM fused_unified_app_results
 		WHERE account_id=$1 AND app_id=$2 AND app_token_id=$3 AND mode='rerun'
 			AND source_execution_id=$4 AND idempotency_key_hash=$5`,
 		record.AccountID, record.AppID, record.AppTokenID, record.SourceExecutionID, record.IdempotencyKeyHash).
@@ -246,7 +246,7 @@ func (s *postgresStore) matchExistingRerun(ctx context.Context, record Execution
 func (s *postgresStore) StartExecutionResult(ctx context.Context, accountID, appID, executionID uuid.UUID) error {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.execution_result.start")
 	defer span.End()
-	tag, err := s.db.Exec(ctx, `UPDATE fused_execution_app_results SET status='running', updated_at=NOW()
+	tag, err := s.db.Exec(ctx, `UPDATE fused_unified_app_results SET status='running', updated_at=NOW()
 		WHERE id=$1 AND account_id=$2 AND app_id=$3 AND status='queued'`, executionID, accountID, appID)
 	if err != nil {
 		return err
@@ -278,7 +278,7 @@ func (s *postgresStore) CompleteExecutionResult(ctx context.Context, accountID, 
 	if len(errorCode) > 128 || len(errorMessage) > 1024 {
 		return ErrExecutionResultInvalid
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE fused_execution_app_results
+	tag, err := s.db.Exec(ctx, `UPDATE fused_unified_app_results
 		SET status=$4, output=$5::jsonb, data=$6::jsonb, error_code=$7, error_message=$8, updated_at=NOW(),
 			completed_at=NOW(), expires_at=NOW()+INTERVAL '24 hours'
 		WHERE id=$1 AND account_id=$2 AND app_id=$3 AND status IN ('queued','running')`,
@@ -331,7 +331,7 @@ func scanExecutionSearchResult(row pgx.Row) (*ExecutionResult, error) {
 
 // GetExecutionResult resolves only an unexpired row within the exact account and app version.
 func (s *postgresStore) GetExecutionResult(ctx context.Context, accountID, appID, executionID uuid.UUID) (*ExecutionResult, error) {
-	row := s.db.QueryRow(ctx, `SELECT `+executionResultColumns+` FROM fused_execution_app_results
+	row := s.db.QueryRow(ctx, `SELECT `+executionResultColumns+` FROM fused_unified_app_results
 		WHERE id=$1 AND account_id=$2 AND app_id=$3 AND (expires_at IS NULL OR expires_at>NOW())`, executionID, accountID, appID)
 	record, err := scanExecutionResult(row)
 	// Missing, expired, and cross-tenant IDs share the same public not-found result.
@@ -469,7 +469,7 @@ func (s *postgresStore) SearchExecutionResults(ctx context.Context, filter Execu
 		clauses = append(clauses, clause)
 	}
 	args = append(args, filter.Limit)
-	query := `SELECT ` + executionSearchColumns + ` FROM fused_execution_app_results WHERE ` + strings.Join(clauses, " AND ") + fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
+	query := `SELECT ` + executionSearchColumns + ` FROM fused_unified_app_results WHERE ` + strings.Join(clauses, " AND ") + fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
 	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -494,8 +494,8 @@ func (s *postgresStore) DeleteExpiredExecutionResults(ctx context.Context, befor
 	if limit < 1 || limit > 1000 {
 		return 0, ErrExecutionResultInvalid
 	}
-	tag, err := s.db.Exec(ctx, `DELETE FROM fused_execution_app_results WHERE id IN (
-		SELECT id FROM fused_execution_app_results
+	tag, err := s.db.Exec(ctx, `DELETE FROM fused_unified_app_results WHERE id IN (
+		SELECT id FROM fused_unified_app_results
 		WHERE expires_at IS NOT NULL AND expires_at<LEAST($1,NOW())
 		ORDER BY expires_at, id LIMIT $2
 	)`, before, limit)

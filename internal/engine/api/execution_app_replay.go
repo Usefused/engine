@@ -15,10 +15,10 @@ import (
 
 // handleCapabilityReplay runs the retained bundle and input against recorded calls without provider access.
 func (s *EngineGRPCServer) handleCapabilityReplay(writer http.ResponseWriter, request *http.Request) {
-	ctx, span := otel.Tracer("engine").Start(request.Context(), "engine.execution_app.replay")
+	ctx, span := otel.Tracer("engine").Start(request.Context(), "engine.unified_app.replay")
 	defer span.End()
 	span.SetAttributes(attribute.String("execution.trigger", "caller"), attribute.String("execution.mode", "replay"))
-	source, requestErr := s.loadExecutionAppSource(ctx, request)
+	source, requestErr := s.loadUnifiedAppSource(ctx, request)
 	if requestErr != nil {
 		writeCapabilityError(writer, span, requestErr)
 		return
@@ -28,10 +28,10 @@ func (s *EngineGRPCServer) handleCapabilityReplay(writer http.ResponseWriter, re
 		writeCapabilityError(writer, span, newRESTExecutionError(http.StatusConflict, "replay_unavailable", "execution cannot be replayed"))
 		return
 	}
-	bundle, manifest, found, requestErr := s.findExecutionAppBundle(ctx, source.appID)
+	bundle, manifest, found, requestErr := s.findUnifiedAppBundle(ctx, source.appID)
 	// Replay cannot fall back to raw SDK operations when its authored bundle is absent.
 	if !found && requestErr == nil {
-		requestErr = newRESTExecutionError(http.StatusNotFound, "bundle_not_found", "execution app bundle is unavailable")
+		requestErr = newRESTExecutionError(http.StatusNotFound, "bundle_not_found", "unified app bundle is unavailable")
 	}
 	if requestErr != nil {
 		writeCapabilityError(writer, span, requestErr)
@@ -47,7 +47,7 @@ func (s *EngineGRPCServer) handleCapabilityReplay(writer http.ResponseWriter, re
 }
 
 // executeCapabilityReplay records a new result while the replay host serves all effects from memory.
-func (s *EngineGRPCServer) executeCapabilityReplay(ctx context.Context, identity auth.RuntimeIdentity, version string, bundle *store.ExecutionAppBundle, manifest *executionAppManifest, source *store.ExecutionResult) (capabilityExecutionEnvelope, *restExecutionError) {
+func (s *EngineGRPCServer) executeCapabilityReplay(ctx context.Context, identity auth.RuntimeIdentity, version string, bundle *store.UnifiedAppBundle, manifest *unifiedAppManifest, source *store.ExecutionResult) (capabilityExecutionEnvelope, *restExecutionError) {
 	evidence, ok := s.store.(store.ExecutionReplayEvidenceStore)
 	// An installation without encrypted evidence cannot silently execute the provider again.
 	if !ok {
@@ -70,7 +70,7 @@ func (s *EngineGRPCServer) executeCapabilityReplay(ctx context.Context, identity
 	if err := admitted.results.StartExecutionResult(ctx, identity.AccountID, identity.AppID, admitted.id); err != nil {
 		return capabilityExecutionEnvelope{}, newRESTExecutionError(http.StatusServiceUnavailable, "result_unavailable", "execution result is unavailable")
 	}
-	output, runErr := s.runExecutionAppWorker(ctx, identity, []byte(bundle.BundleJS), source.Input, host, host.Determinism())
+	output, runErr := s.runUnifiedAppWorker(ctx, identity, []byte(bundle.BundleJS), source.Input, host, host.Determinism())
 	status, code := replayCompletion(source, output, host, runErr)
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()

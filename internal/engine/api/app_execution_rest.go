@@ -11,11 +11,9 @@ import (
 	"mime"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
-	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/authselector"
@@ -23,8 +21,6 @@ import (
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -32,23 +28,22 @@ import (
 const (
 	restExecutionContentType = "application/json"
 	maxRESTOperationBytes    = 512
+	maxRESTSelectorBytes     = 256
 )
 
 type restExecutionRuntime interface {
-	unifiedPhysicalRuntime
 	ConnectAppRuntime(context.Context, uuid.UUID) error
 	DisconnectAppRuntime(uuid.UUID)
 	ResolvePhysicalOperationByName(context.Context, uuid.UUID, string) (sandbox.ResolvedPhysicalOperation, bool, error)
+	ValidateResolvedPhysicalSelectors(sandbox.ResolvedPhysicalOperation, sandbox.PhysicalExecutionSelectors) error
+	ExecuteResolvedPhysicalJSON(context.Context, auth.RuntimeIdentity, sandbox.ResolvedPhysicalOperation, sandbox.PhysicalExecutionRequest) (sandbox.PhysicalExecutionResult, error)
 }
 
 type restExecutionRequest struct {
-	Operation        string                            `json:"operation"`
-	Input            json.RawMessage                   `json:"input"`
-	Targets          []string                          `json:"targets,omitempty"`
-	Selector         *restExecutionSelector            `json:"selector,omitempty"`
-	Selectors        map[string]*restExecutionSelector `json:"selectors,omitempty"`
-	Pagination       *restPaginationIntent             `json:"pagination,omitempty"`
-	TargetPagination map[string]*restPaginationIntent  `json:"target_pagination,omitempty"`
+	Operation  string                 `json:"operation"`
+	Input      json.RawMessage        `json:"input"`
+	Selector   *restExecutionSelector `json:"selector,omitempty"`
+	Pagination *restPaginationIntent  `json:"pagination,omitempty"`
 }
 
 // restPaginationIntent mirrors the provider-neutral public control without accepting policy-owned limits.
@@ -76,26 +71,6 @@ type restExecutionSuccess struct {
 	Kind       string `json:"kind"`
 	StatusCode int    `json:"status_code,omitempty"`
 	Results    any    `json:"results"`
-	Rollbacks  any    `json:"rollbacks,omitempty"`
-	// Direct bypasses the standard execution envelope only when a Unified
-	// operation declares an exact final output contract.
-	Direct json.RawMessage `json:"-"`
-}
-
-type restUnifiedResult struct {
-	Target     string                      `json:"target"`
-	Status     string                      `json:"status"`
-	Data       json.RawMessage             `json:"data,omitempty"`
-	ErrorCode  string                      `json:"error_code,omitempty"`
-	AuthAction *enginev1.UnifiedAuthAction `json:"auth_action,omitempty"`
-}
-
-type restUnifiedRollback struct {
-	Target      string                      `json:"target"`
-	Status      string                      `json:"status"`
-	ErrorCode   string                      `json:"error_code,omitempty"`
-	TriggeredBy []string                    `json:"triggered_by,omitempty"`
-	AuthAction  *enginev1.UnifiedAuthAction `json:"auth_action,omitempty"`
 }
 
 type restExecutionErrorEnvelope struct {
@@ -124,7 +99,7 @@ func MountAppExecutionRoute(router chi.Router, server *EngineGRPCServer) {
 	router.Post("/v1/apps/{app_id}/executions", server.handleRESTExecution)
 }
 
-// handleRESTExecution authenticates one exact SDK or Execution App version and dispatches its selected operation.
+// handleRESTExecution authenticates one exact SDK or Unified App version and dispatches its selected operation.
 func (s *EngineGRPCServer) handleRESTExecution(writer http.ResponseWriter, request *http.Request) {
 	appID, requestErr := parseRESTAppID(chi.URLParam(request, "app_id"))
 	if requestErr != nil {
@@ -136,9 +111,9 @@ func (s *EngineGRPCServer) handleRESTExecution(writer http.ResponseWriter, reque
 		writeRESTExecutionError(writer, requestErr)
 		return
 	}
-	// Only the family-selected ready Execution App version accepts new invocations, including raw operations.
-	if scope.Kind == store.AppKindExecution {
-		if requestErr := s.admitExecutionAppTraffic(request.Context(), appID); requestErr != nil {
+	// Only the family-selected ready Unified App version accepts new invocations, including raw operations.
+	if scope.Kind == store.AppKindUnifiedApp {
+		if requestErr := s.admitUnifiedAppTraffic(request.Context(), appID); requestErr != nil {
 			writeRESTExecutionError(writer, requestErr)
 			return
 		}
@@ -148,13 +123,15 @@ func (s *EngineGRPCServer) handleRESTExecution(writer http.ResponseWriter, reque
 		writeRESTExecutionError(writer, requestErr)
 		return
 	}
-	// Only Execution Apps can publish authored execute; every selected raw operation retains the existing path.
-	if scope.Kind == store.AppKindExecution && decoded.Operation == "execute" {
-		if !s.tryExecutionAppRun(writer, request, scope, identity, decoded) {
-			writeRESTExecutionError(writer, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_unavailable", "execution app bundle is unavailable"))
+	// Only Unified Apps can publish authored execute; every selected raw operation retains the existing path.
+	if scope.Kind == store.AppKindUnifiedApp && decoded.Operation == "execute" {
+		if !s.tryUnifiedAppRun(writer, request, scope, identity, decoded) {
+			writeRESTExecutionError(writer, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_unavailable", "unified app bundle is unavailable"))
 		}
 		return
 	}
+	// Attached hosted capabilities use the same consumer authentication and durable executor.
+	if s.tryAttachedUnifiedAppRun(writer, request, identity, decoded) { return }
 	s.handleRawRESTExecution(writer, request, appID, scope, identity, decoded, canonical)
 }
 
@@ -170,7 +147,7 @@ func (s *EngineGRPCServer) handleRawRESTExecution(writer http.ResponseWriter, re
 		writeRESTExecutionError(writer, requestErr)
 		return
 	}
-	idempotencyKey, requestErr := restIdempotencyKey(request, plan.kind)
+	idempotencyKey, requestErr := restIdempotencyKey(request)
 	if requestErr != nil {
 		writeRESTExecutionError(writer, requestErr)
 		return
@@ -179,10 +156,6 @@ func (s *EngineGRPCServer) handleRawRESTExecution(writer http.ResponseWriter, re
 	response, requestErr := s.executeRESTPlan(ctx, scope, identity, decoded, canonical, plan, idempotencyKey)
 	if requestErr != nil {
 		writeRESTExecutionError(writer, requestErr)
-		return
-	}
-	if response.Direct != nil {
-		writeRESTExecutionJSON(writer, http.StatusOK, response.Direct)
 		return
 	}
 	writeRESTExecutionJSON(writer, http.StatusOK, response)
@@ -199,7 +172,7 @@ func parseRESTAppID(raw string) (uuid.UUID, *restExecutionError) {
 }
 
 // authenticateRESTApp accepts only one family execution bearer token and
-// binds it to the exact SDK or Execution App runtime selected by the path.
+// binds it to the exact SDK or Unified App runtime selected by the path.
 func (s *EngineGRPCServer) authenticateRESTApp(request *http.Request, appID uuid.UUID) (*store.AppRuntime, auth.RuntimeIdentity, *restExecutionError) {
 	token, err := restBearerToken(request)
 	if err != nil {
@@ -238,11 +211,11 @@ func restBearerToken(request *http.Request) (string, error) {
 	return token, nil
 }
 
-// validRESTAppScope requires one exact SDK or Execution App runtime with matching token kind.
+// validRESTAppScope requires one exact SDK or Unified App runtime with matching token kind.
 func validRESTAppScope(scope *store.AppRuntime, identity auth.RuntimeIdentity, appID uuid.UUID) bool {
 	return scope != nil && scope.AppID == appID && scope.AppID == identity.AppID &&
 		scope.AccountID == identity.AccountID && scope.BucketID != uuid.Nil && scope.Kind == identity.Kind &&
-		(scope.Kind == store.AppKindSDK || scope.Kind == store.AppKindExecution)
+		(scope.Kind == store.AppKindSDK || scope.Kind == store.AppKindUnifiedApp)
 }
 
 // decodeRESTExecutionRequest enforces one bounded canonical JSON document and
@@ -272,10 +245,10 @@ func decodeRESTExecutionRequest(writer http.ResponseWriter, request *http.Reques
 	return decoded, canonical, nil
 }
 
-// validateRESTExecutionRequest checks shared fields before immutable runtime
-// definitions decide whether physical or Unified semantics apply.
+// validateRESTExecutionRequest checks physical input and routing fields before dispatch.
 func validateRESTExecutionRequest(request restExecutionRequest) *restExecutionError {
-	if _, err := validateUnifiedName(request.Operation, maxRESTOperationBytes); err != nil {
+	// Operation names must stay bounded before exact runtime lookup.
+	if request.Operation == "" || len(request.Operation) > maxRESTOperationBytes || strings.TrimSpace(request.Operation) != request.Operation {
 		return newRESTExecutionError(http.StatusBadRequest, "invalid_request", "operation is required and must be bounded")
 	}
 	if len(request.Input) == 0 {
@@ -284,23 +257,8 @@ func validateRESTExecutionRequest(request restExecutionRequest) *restExecutionEr
 	if err := validateRESTSelector(request.Selector); err != nil {
 		return err
 	}
-	for _, selector := range request.Selectors {
-		if err := validateRESTSelector(selector); err != nil {
-			return err
-		}
-	}
 	if err := validateRESTPaginationIntent(request.Pagination); err != nil {
 		return err
-	}
-	// Every target control is bounded before operation classification can reveal runtime definitions.
-	for _, intent := range request.TargetPagination {
-		// A selected target entry must contain an explicit bound instead of JSON null.
-		if intent == nil {
-			return newRESTExecutionError(http.StatusBadRequest, "pagination_invalid", "target pagination intent is invalid")
-		}
-		if err := validateRESTPaginationIntent(intent); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -325,11 +283,12 @@ func validateRESTSelector(selector *restExecutionSelector) *restExecutionError {
 	}
 	values := []string{selector.Environment, selector.EndUserRef, selector.AuthName, selector.ResourceID}
 	for _, value := range values {
-		if len(value) > maxUnifiedSelector || value != strings.TrimSpace(value) {
+		if len(value) > maxRESTSelectorBytes || value != strings.TrimSpace(value) {
 			return newRESTExecutionError(http.StatusBadRequest, "selector_invalid", "selector values must be bounded")
 		}
 	}
-	if !validUnifiedAuthType(selector.AuthType) {
+	// Only provider auth selectors recognized by physical execution may enter dispatch.
+	if !validRESTAuthType(selector.AuthType) {
 		return newRESTExecutionError(http.StatusBadRequest, "selector_invalid", "auth_type must be one of api_key, oauth, oidc, basic, bearer, or mtls")
 	}
 	if selector.ResourceID != "" {
@@ -340,13 +299,18 @@ func validateRESTSelector(selector *restExecutionSelector) *restExecutionError {
 	return nil
 }
 
-// classifyRESTExecution independently resolves physical and Unified existence
-// from immutable runtime state and rejects every collision before dispatch.
-func (s *EngineGRPCServer) classifyRESTExecution(ctx context.Context, scope *store.AppRuntime, request restExecutionRequest) (restExecutionPlan, *restExecutionError) {
-	_, unifiedFound, err := lookupUnifiedDefinition(scope, request.Operation)
-	if err != nil {
-		return restExecutionPlan{}, restErrorFromExecution(err)
+// validRESTAuthType admits the physical routing vocabulary without accepting arbitrary auth mechanisms.
+func validRESTAuthType(value string) bool {
+	switch value {
+	case "", "api_key", "oauth", "oidc", "basic", "bearer", "mtls":
+		return true
+	default:
+		return false
 	}
+}
+
+// classifyRESTExecution resolves only selected physical operations after graph retirement.
+func (s *EngineGRPCServer) classifyRESTExecution(ctx context.Context, scope *store.AppRuntime, request restExecutionRequest) (restExecutionPlan, *restExecutionError) {
 	physical, physicalFound, err := s.restRuntime.ResolvePhysicalOperationByName(ctx, scope.AppID, request.Operation)
 	if errors.Is(err, sandbox.ErrPhysicalOperationAmbiguous) {
 		return restExecutionPlan{}, newRESTExecutionError(http.StatusConflict, "operation_ambiguous", "operation resolves to multiple physical definitions")
@@ -354,22 +318,15 @@ func (s *EngineGRPCServer) classifyRESTExecution(ctx context.Context, scope *sto
 	if err != nil {
 		return restExecutionPlan{}, newRESTExecutionError(http.StatusServiceUnavailable, "runtime_unavailable", "physical operation definitions are unavailable")
 	}
-	if physicalFound && unifiedFound {
-		return restExecutionPlan{}, newRESTExecutionError(http.StatusConflict, "operation_ambiguous", "operation is both physical and Unified")
-	}
-	if !physicalFound && !unifiedFound {
+	// A removed graph name has no executable REST route even if its old definition remains stored.
+	if !physicalFound {
 		return restExecutionPlan{}, newRESTExecutionError(http.StatusNotFound, "operation_not_found", "operation is not defined for this app")
 	}
-	kind := "physical"
-	if unifiedFound {
-		kind = "unified"
-	}
-	return restExecutionPlan{kind: kind, physical: physical, operation: request.Operation}, nil
+	return restExecutionPlan{kind: "physical", physical: physical, operation: request.Operation}, nil
 }
 
-// restIdempotencyKey validates one header value and enforces the existing
-// Unified requirement without making physical execution less compatible.
-func restIdempotencyKey(request *http.Request, kind string) (string, *restExecutionError) {
+// restIdempotencyKey validates the bounded replay key supplied to physical execution.
+func restIdempotencyKey(request *http.Request) (string, *restExecutionError) {
 	values := request.Header.Values("Idempotency-Key")
 	if len(values) > 1 {
 		return "", newRESTExecutionError(http.StatusBadRequest, "invalid_request", "Idempotency-Key must be supplied once")
@@ -378,30 +335,20 @@ func restIdempotencyKey(request *http.Request, kind string) (string, *restExecut
 	if len(values) == 1 {
 		value = values[0]
 	}
-	if len(value) > maxUnifiedSelector || value != strings.TrimSpace(value) {
+	if len(value) > maxRESTSelectorBytes || value != strings.TrimSpace(value) {
 		return "", newRESTExecutionError(http.StatusBadRequest, "invalid_request", "Idempotency-Key must be bounded")
-	}
-	if kind == "unified" && value == "" {
-		return "", newRESTExecutionError(http.StatusBadRequest, "idempotency_key_required", "Idempotency-Key is required for Unified execution")
 	}
 	return value, nil
 }
 
-// executeRESTPlan applies kind-specific field contracts and then calls the same
-// in-process physical or Unified core used by gRPC.
+// executeRESTPlan uses the selected physical dispatcher for raw operations.
 func (s *EngineGRPCServer) executeRESTPlan(ctx context.Context, scope *store.AppRuntime, identity auth.RuntimeIdentity, request restExecutionRequest, canonical []byte, plan restExecutionPlan, idempotencyKey string) (restExecutionSuccess, *restExecutionError) {
-	if plan.kind == "physical" {
-		return s.executeRESTPhysical(ctx, identity, request, canonical, plan, idempotencyKey)
-	}
-	return s.executeRESTUnified(ctx, scope, identity, request, plan, idempotencyKey)
+	return s.executeRESTPhysical(ctx, identity, request, canonical, plan, idempotencyKey)
 }
 
 // executeRESTPhysical validates its singular selector, binds full public
 // intent to idempotency, and collects one successful bounded JSON response.
 func (s *EngineGRPCServer) executeRESTPhysical(ctx context.Context, identity auth.RuntimeIdentity, request restExecutionRequest, canonical []byte, plan restExecutionPlan, idempotencyKey string) (restExecutionSuccess, *restExecutionError) {
-	if len(request.Targets) != 0 || len(request.Selectors) != 0 || len(request.TargetPagination) != 0 {
-		return restExecutionSuccess{}, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "targets, selectors, and target_pagination apply only to Unified operations")
-	}
 	selectors := physicalRESTSelectors(request.Selector)
 	// Typed auth corrections must reach the shared public projector instead of being collapsed into the legacy selector mask.
 	if err := s.restRuntime.ValidateResolvedPhysicalSelectors(plan.physical, selectors); err != nil {
@@ -452,52 +399,6 @@ func restPhysicalRequestHash(request restExecutionRequest, fallback []byte) stri
 	return hex.EncodeToString(digest[:])
 }
 
-// executeRESTUnified reuses the canonical preflight and scheduler while
-// retaining the same bounded parent/child audit metadata as SDK and MCP calls.
-func (s *EngineGRPCServer) executeRESTUnified(ctx context.Context, scope *store.AppRuntime, identity auth.RuntimeIdentity, request restExecutionRequest, plan restExecutionPlan, idempotencyKey string) (response restExecutionSuccess, requestErr *restExecutionError) {
-	started := time.Now()
-	// Logical callers must place physical controls on their individual targets.
-	if request.Selector != nil || request.Pagination != nil {
-		return restExecutionSuccess{}, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "selector and pagination apply only to physical operations")
-	}
-	protoRequest := &enginev1.ExecuteUnifiedRequest{
-		Operation: plan.operation, Targets: request.Targets, InputJson: request.Input,
-		TargetSelectors: protoRESTSelectors(request.Selectors), TargetPagination: protoRESTTargetPagination(request.TargetPagination), IdempotencyKey: idempotencyKey,
-	}
-	ctx, span := otel.Tracer("engine").Start(ctx, "engine.unified.execute")
-	span.SetAttributes(
-		attribute.String("execution.transport", models.EngineExecutionTransportREST),
-		attribute.Int("unified.target_count", boundedUnifiedTargetCount(protoRequest)),
-	)
-	stage := "validation"
-	var protoResponse *enginev1.ExecuteUnifiedResponse
-	var execErr error
-	defer func() { finishUnifiedSpan(span, stage, protoResponse, execErr) }()
-	call, execErr := s.prepareUnifiedCall(ctx, scope, identity, protoRequest, models.EngineExecutionTransportREST)
-	// Whole-call validation must finish before any audit parent or provider dispatch.
-	if execErr != nil {
-		return restExecutionSuccess{}, restErrorFromExecution(execErr)
-	}
-	stage = "dispatch"
-	protoResponse = s.executePreparedUnified(ctx, call, started)
-	output, outputCode := protoResponse.GetOutputJson(), protoResponse.GetOutputErrorCode()
-	// Output mapping errors remain visible on the already-published logical receipt.
-	if call.output != nil && outputCode != "" {
-		return restExecutionSuccess{}, newRESTExecutionErrorWithDetails(
-			http.StatusUnprocessableEntity, outputCode, "Unified output could not be produced",
-			projectRESTUnifiedDiagnostics(protoResponse.GetResults()),
-		)
-	}
-	// Authored projections retain the existing direct REST response contract.
-	if call.output != nil {
-		return restExecutionSuccess{Direct: json.RawMessage(output)}, nil
-	}
-	return restExecutionSuccess{
-		AppID: identity.AppID.String(), Operation: plan.operation, Kind: plan.kind,
-		Results: projectRESTUnifiedResults(protoResponse.GetResults()), Rollbacks: projectRESTUnifiedRollbacks(protoResponse.GetRollbackResults()),
-	}, nil
-}
-
 // runtimeRESTPaginationIntent copies a validated REST control into the internal physical request.
 func runtimeRESTPaginationIntent(value *restPaginationIntent) *engine.PaginationIntent {
 	// Message absence must remain distinguishable from a present invalid zero value.
@@ -505,18 +406,6 @@ func runtimeRESTPaginationIntent(value *restPaginationIntent) *engine.Pagination
 		return nil
 	}
 	return &engine.PaginationIntent{MaxPages: value.MaxPages}
-}
-
-// protoRESTTargetPagination maps selected target controls onto the canonical Unified protobuf contract.
-func protoRESTTargetPagination(values map[string]*restPaginationIntent) map[string]*enginev1.PaginationIntent {
-	mapped := make(map[string]*enginev1.PaginationIntent, len(values))
-	// Values were bounded during strict REST decoding, so mapping cannot introduce new semantics.
-	for target, value := range values {
-		if value != nil {
-			mapped[target] = &enginev1.PaginationIntent{MaxPages: uint32(value.MaxPages)}
-		}
-	}
-	return mapped
 }
 
 // decodeRESTInput preserves JSON number precision by using json.Number until
@@ -566,67 +455,6 @@ func addRESTCredential(credentials map[string]any, key, value string) {
 	if value != "" {
 		credentials[key] = value
 	}
-}
-
-// protoRESTSelectors projects service-keyed REST selectors to the canonical
-// protobuf DTO without adding any credential-shaped fields.
-func protoRESTSelectors(selectors map[string]*restExecutionSelector) map[string]*enginev1.ExecutionSelectors {
-	if len(selectors) == 0 {
-		return nil
-	}
-	projected := make(map[string]*enginev1.ExecutionSelectors, len(selectors))
-	for target, selector := range selectors {
-		if selector == nil {
-			projected[target] = nil
-			continue
-		}
-		projected[target] = &enginev1.ExecutionSelectors{
-			Environment: selector.Environment, EndUserRef: selector.EndUserRef,
-			AuthType: selector.AuthType, AuthName: selector.AuthName, ResourceId: selector.ResourceID,
-		}
-	}
-	return projected
-}
-
-// projectRESTUnifiedResults exposes canonical JSON values rather than protobuf
-// byte encoding while retaining bounded Engine-owned errors and auth actions.
-func projectRESTUnifiedResults(results []*enginev1.UnifiedTargetResult) []restUnifiedResult {
-	projected := make([]restUnifiedResult, 0, len(results))
-	for _, result := range results {
-		if result == nil {
-			continue
-		}
-		projected = append(projected, restUnifiedResult{
-			Target: result.GetTarget(), Status: result.GetStatus(), Data: json.RawMessage(result.GetDataJson()),
-			ErrorCode: result.GetErrorCode(), AuthAction: result.GetAuthAction(),
-		})
-	}
-	return projected
-}
-
-// projectRESTUnifiedDiagnostics keeps output failures from bypassing the configured response transformation.
-func projectRESTUnifiedDiagnostics(results []*enginev1.UnifiedTargetResult) []restUnifiedResult {
-	projected := projectRESTUnifiedResults(results)
-	for index := range projected {
-		projected[index].Data = nil
-	}
-	return projected
-}
-
-// projectRESTUnifiedRollbacks preserves SDK ordering and never includes raw
-// compensation provider bodies.
-func projectRESTUnifiedRollbacks(results []*enginev1.UnifiedRollbackResult) []restUnifiedRollback {
-	projected := make([]restUnifiedRollback, 0, len(results))
-	for _, result := range results {
-		if result == nil {
-			continue
-		}
-		projected = append(projected, restUnifiedRollback{
-			Target: result.GetTarget(), Status: result.GetStatus(), ErrorCode: result.GetErrorCode(),
-			TriggeredBy: result.GetTriggeredBy(), AuthAction: result.GetAuthAction(),
-		})
-	}
-	return projected
 }
 
 // restErrorFromExecution reduces internal failures to stable messages and

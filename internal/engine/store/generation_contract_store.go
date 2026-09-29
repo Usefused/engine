@@ -46,12 +46,42 @@ type GenerationAuthContract struct {
 	Operations             []GenerationOperationSecurity
 }
 
-// GenerationContractStore keeps generation planning independent of the live Registry catalogue.
+// GenerationContractStore keeps generation decisions on admitted local snapshots; a missing SDK archive is acquired separately.
 type GenerationContractStore interface {
 	ResolveGenerationServiceIDsByKeys(context.Context, []string) (map[string]uuid.UUID, error)
 	ListGenerationContractBindings(context.Context, []models.ServiceVersionRef, bool) ([]models.SDKContractBinding, error)
 	ListGenerationAuthContracts(context.Context, []GenerationAuthSelection, bool) ([]GenerationAuthContract, error)
 	ValidateGenerationSelections(context.Context, []models.SDKSelection, bool) error
+}
+
+// GenerationPinWriter attaches a Registry archive only when the active local execution snapshot still matches it.
+type GenerationPinWriter interface {
+	AttachGenerationContractPin(context.Context, models.SDKContractBinding, string) error
+}
+
+// AttachGenerationContractPin preserves runtime authority while a later SDK plan acquires its archive.
+func (s *postgresStore) AttachGenerationContractPin(ctx context.Context, binding models.SDKContractBinding, hash string) error {
+	// A malformed or cross-version pin must never be written even if SQL would match a row.
+	if !ValidGenerationContractHash(hash) || binding.ServiceID == uuid.Nil || binding.ServiceVersionID == uuid.Nil || binding.RuntimeContractHash == "" {
+		return ErrGenerationContractPinUnavailable
+	}
+	tag, err := s.db.Exec(ctx, `UPDATE fused_service_contract_snapshots AS snapshot
+		SET generation_contract_hash=$1
+		WHERE snapshot.service_id=$2 AND snapshot.service_version_id=$3 AND snapshot.version=$4
+			AND snapshot.revision=$5 AND snapshot.source_hash=$6 AND snapshot.contract_hash=$7
+			AND (snapshot.generation_contract_hash='' OR snapshot.generation_contract_hash=$1)
+			AND EXISTS (SELECT 1 FROM fused_workspace_service_versions AS active
+				WHERE active.service_id=snapshot.service_id AND active.service_version_id=snapshot.service_version_id
+					AND active.status <> 'deprecated')`,
+		hash, binding.ServiceID, binding.ServiceVersionID, binding.Version, binding.Revision, binding.SourceHash, binding.RuntimeContractHash)
+	// A refresh, removal, or competing archive must force the SDK plan to restart with fresh local authority.
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrGenerationContractPinUnavailable
+	}
+	return nil
 }
 
 // GenerationSelectionResolver converts name or select-all requests into the exact IDs persisted by an immutable app version.

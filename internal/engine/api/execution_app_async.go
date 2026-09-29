@@ -68,7 +68,7 @@ func (s *EngineGRPCServer) executeCapabilityRunWithWait(ctx context.Context, spe
 	done := make(chan capabilityAsyncOutcome, 1)
 	go func() {
 		defer cancel()
-		workerCtx, span := otel.Tracer("engine").Start(workerCtx, "engine.execution_app.worker")
+		workerCtx, span := otel.Tracer("engine").Start(workerCtx, "engine.unified_app.worker")
 		defer span.End()
 		span.SetAttributes(attribute.String("execution.id", admitted.id.String()), attribute.String("execution.mode", spec.mode))
 		result, err := s.runAdmittedCapability(workerCtx, spec, admitted)

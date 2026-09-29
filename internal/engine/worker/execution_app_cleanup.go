@@ -12,39 +12,39 @@ import (
 )
 
 const (
-	executionAppCleanupInterval   = 5 * time.Minute
-	executionAppCleanupTimeout    = 5 * time.Second
-	executionAppCleanupBatch      = 500
-	executionAppCleanupMaxBatches = 4
+	unifiedAppCleanupInterval   = 5 * time.Minute
+	unifiedAppCleanupTimeout    = 5 * time.Second
+	unifiedAppCleanupBatch      = 500
+	unifiedAppCleanupMaxBatches = 4
 )
 
-type executionAppCleanupStore interface {
+type unifiedAppCleanupStore interface {
 	RecoverStaleExecutionResults(context.Context, time.Time, int) (int64, error)
 	DeleteExpiredReplayEvidence(context.Context, time.Time, int) (int64, error)
 	DeleteExpiredExecutionResults(context.Context, time.Time, int) (int64, error)
 }
 
-// ExecutionAppCleanupWorker finalizes abandoned work and removes expired result and replay rows.
-type ExecutionAppCleanupWorker struct {
+// UnifiedAppCleanupWorker finalizes abandoned work and removes expired result and replay rows.
+type UnifiedAppCleanupWorker struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 	once   sync.Once
 }
 
-// StartExecutionAppCleanupWorker starts bounded cleanup against Engine-owned result storage.
-func StartExecutionAppCleanupWorker(ctx context.Context, repository executionAppCleanupStore) *ExecutionAppCleanupWorker {
+// StartUnifiedAppCleanupWorker starts bounded cleanup against Engine-owned result storage.
+func StartUnifiedAppCleanupWorker(ctx context.Context, repository unifiedAppCleanupStore) *UnifiedAppCleanupWorker {
 	// A missing optional store disables cleanup without starting an idle goroutine.
 	if repository == nil {
 		return nil
 	}
 	workerCtx, cancel := context.WithCancel(ctx)
-	worker := &ExecutionAppCleanupWorker{cancel: cancel, done: make(chan struct{})}
+	worker := &UnifiedAppCleanupWorker{cancel: cancel, done: make(chan struct{})}
 	go worker.run(workerCtx, repository)
 	return worker
 }
 
 // Stop waits for the bounded active cleanup pass or its caller's shutdown deadline.
-func (worker *ExecutionAppCleanupWorker) Stop(ctx context.Context) {
+func (worker *UnifiedAppCleanupWorker) Stop(ctx context.Context) {
 	if worker == nil {
 		return
 	}
@@ -56,33 +56,33 @@ func (worker *ExecutionAppCleanupWorker) Stop(ctx context.Context) {
 }
 
 // run makes one startup pass, then periodically revisits abandoned and expired rows.
-func (worker *ExecutionAppCleanupWorker) run(ctx context.Context, repository executionAppCleanupStore) {
+func (worker *UnifiedAppCleanupWorker) run(ctx context.Context, repository unifiedAppCleanupStore) {
 	defer close(worker.done)
-	cleanupExecutionAppPass(ctx, repository, time.Now().UTC())
-	ticker := time.NewTicker(executionAppCleanupInterval)
+	cleanupUnifiedAppPass(ctx, repository, time.Now().UTC())
+	ticker := time.NewTicker(unifiedAppCleanupInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			cleanupExecutionAppPass(ctx, repository, now.UTC())
+			cleanupUnifiedAppPass(ctx, repository, now.UTC())
 		}
 	}
 }
 
-// cleanupExecutionAppPass recovers and expires fixed row batches within one short deadline.
-func cleanupExecutionAppPass(parent context.Context, repository executionAppCleanupStore, now time.Time) {
+// cleanupUnifiedAppPass recovers and expires fixed row batches within one short deadline.
+func cleanupUnifiedAppPass(parent context.Context, repository unifiedAppCleanupStore, now time.Time) {
 	// Shutdown does not start a fresh pass or report cancellation as a database failure.
 	if parent.Err() != nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(parent, executionAppCleanupTimeout)
+	ctx, cancel := context.WithTimeout(parent, unifiedAppCleanupTimeout)
 	defer cancel()
-	ctx, span := otel.Tracer("engine").Start(ctx, "engine.execution_app.cleanup")
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.unified_app.cleanup")
 	defer span.End()
 	// The worker budget exceeds the sandbox wall bound, so only abandoned calls are finalized.
-	recovered, err := cleanupExecutionAppBatches(ctx, now.Add(-2*time.Minute), repository.RecoverStaleExecutionResults)
+	recovered, err := cleanupUnifiedAppBatches(ctx, now.Add(-2*time.Minute), repository.RecoverStaleExecutionResults)
 	if err != nil {
 		// Cancellation is normal shutdown; other failures carry only a bounded diagnostic code.
 		if ctx.Err() != nil {
@@ -92,7 +92,7 @@ func cleanupExecutionAppPass(parent context.Context, repository executionAppClea
 		slog.ErrorContext(ctx, "Failed to recover abandoned capability executions", slog.String("error_code", "execution_recovery_failed"))
 		return
 	}
-	evidenceDeleted, err := cleanupExecutionAppBatches(ctx, now, repository.DeleteExpiredReplayEvidence)
+	evidenceDeleted, err := cleanupUnifiedAppBatches(ctx, now, repository.DeleteExpiredReplayEvidence)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -101,7 +101,7 @@ func cleanupExecutionAppPass(parent context.Context, repository executionAppClea
 		slog.ErrorContext(ctx, "Failed to delete expired capability replay evidence", slog.String("error_code", "replay_cleanup_failed"))
 		return
 	}
-	resultsDeleted, err := cleanupExecutionAppBatches(ctx, now, repository.DeleteExpiredExecutionResults)
+	resultsDeleted, err := cleanupUnifiedAppBatches(ctx, now, repository.DeleteExpiredExecutionResults)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -110,23 +110,23 @@ func cleanupExecutionAppPass(parent context.Context, repository executionAppClea
 		slog.ErrorContext(ctx, "Failed to delete expired capability results", slog.String("error_code", "result_cleanup_failed"))
 		return
 	}
-	span.SetAttributes(attribute.Int64("execution_app.results_recovered", recovered), attribute.Int64("execution_app.evidence_deleted", evidenceDeleted), attribute.Int64("execution_app.results_deleted", resultsDeleted))
+	span.SetAttributes(attribute.Int64("unified_app.results_recovered", recovered), attribute.Int64("unified_app.evidence_deleted", evidenceDeleted), attribute.Int64("unified_app.results_deleted", resultsDeleted))
 }
 
-// cleanupExecutionAppBatches caps SQL work per pass even when an Engine has a large backlog.
-func cleanupExecutionAppBatches(ctx context.Context, before time.Time, deleteBatch func(context.Context, time.Time, int) (int64, error)) (int64, error) {
+// cleanupUnifiedAppBatches caps SQL work per pass even when an Engine has a large backlog.
+func cleanupUnifiedAppBatches(ctx context.Context, before time.Time, deleteBatch func(context.Context, time.Time, int) (int64, error)) (int64, error) {
 	var total int64
-	for batch := 0; batch < executionAppCleanupMaxBatches; batch++ {
+	for batch := 0; batch < unifiedAppCleanupMaxBatches; batch++ {
 		// A canceled worker leaves remaining rows for its next replica or pass.
 		if err := ctx.Err(); err != nil {
 			return total, err
 		}
-		deleted, err := deleteBatch(ctx, before, executionAppCleanupBatch)
+		deleted, err := deleteBatch(ctx, before, unifiedAppCleanupBatch)
 		if err != nil {
 			return total, err
 		}
 		total += deleted
-		if deleted < executionAppCleanupBatch {
+		if deleted < unifiedAppCleanupBatch {
 			return total, nil
 		}
 	}

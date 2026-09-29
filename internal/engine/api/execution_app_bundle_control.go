@@ -21,60 +21,60 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const maxExecutionAppBundleRequestBytes = 3 << 20
-const maxExecutionAppSelectedOperations = 64
+const maxUnifiedAppBundleRequestBytes = 3 << 20
+const maxUnifiedAppSelectedOperations = 64
 
-type executionAppBundleAttachRequest struct {
+type unifiedAppBundleAttachRequest struct {
 	SourceHash string          `json:"source_hash"`
 	BundleJS   string          `json:"bundle_js"`
 	Manifest   json.RawMessage `json:"manifest"`
 }
 
-type executionAppBundleAdmissionStore interface {
+type unifiedAppBundleAdmissionStore interface {
 	store.Store
-	store.ExecutionAppBundleStore
+	store.UnifiedAppBundleStore
 	store.ServiceContractEndpointSelectionBatchStore
 }
 
-type executionAppSelectionKey struct {
+type unifiedAppSelectionKey struct {
 	serviceID uuid.UUID
 	versionID uuid.UUID
 }
 
-type executionAppExpectedEndpoint struct {
+type unifiedAppExpectedEndpoint struct {
 	id   uuid.UUID
 	name string
 }
 
-// ExecutionAppBundleHandler is a transitional write-once attach path for an applied Execution App version.
-func ExecutionAppBundleHandler(s store.Store) http.HandlerFunc {
+// UnifiedAppBundleHandler is a transitional write-once attach path for an applied Unified App version.
+func UnifiedAppBundleHandler(s store.Store) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
-		ctx, span := otel.Tracer("engine").Start(request.Context(), "engine.execution_app.bundle_attach")
+		ctx, span := otel.Tracer("engine").Start(request.Context(), "engine.unified_app.bundle_attach")
 		defer span.End()
 		actor, app, err := lifecycleActorAndApp(ctx, s, request)
 		// Actor and exact workspace ownership are prerequisites for reading authored code.
 		if err != nil {
-			writeExecutionAppBundleError(writer, span, err)
+			writeUnifiedAppBundleError(writer, span, err)
 			return
 		}
-		if err := authorizeExecutionAppBundle(ctx, actor, app); err != nil {
-			writeExecutionAppBundleError(writer, span, err)
+		if err := authorizeUnifiedAppBundle(ctx, actor, app); err != nil {
+			writeUnifiedAppBundleError(writer, span, err)
 			return
 		}
-		repository, ok := s.(executionAppBundleAdmissionStore)
+		repository, ok := s.(unifiedAppBundleAdmissionStore)
 		// The route cannot attach code without both immutable storage and a set-based scope lookup.
 		if !ok {
-			writeExecutionAppBundleError(writer, span, workspaceConfigHTTPError{status: http.StatusServiceUnavailable, message: "execution app deployment is unavailable"})
+			writeUnifiedAppBundleError(writer, span, workspaceConfigHTTPError{status: http.StatusServiceUnavailable, message: "unified app deployment is unavailable"})
 			return
 		}
-		bundle, err := prepareExecutionAppBundle(ctx, writer, request, repository, app)
+		bundle, err := prepareUnifiedAppBundle(ctx, writer, request, repository, app)
 		// Validation must finish before the immutable artifact receives a database row.
 		if err != nil {
-			writeExecutionAppBundleError(writer, span, err)
+			writeUnifiedAppBundleError(writer, span, err)
 			return
 		}
-		if err := repository.CreateExecutionAppBundle(ctx, bundle); err != nil {
-			writeExecutionAppBundleError(writer, span, err)
+		if err := repository.CreateUnifiedAppBundle(ctx, bundle); err != nil {
+			writeUnifiedAppBundleError(writer, span, err)
 			return
 		}
 		span.SetAttributes(attribute.String("app.id", app.AppID.String()), attribute.String("app.family_id", app.AppFamilyID.String()), attribute.String("outcome", "attached"))
@@ -84,8 +84,8 @@ func ExecutionAppBundleHandler(s store.Store) http.HandlerFunc {
 	}
 }
 
-// authorizeExecutionAppBundle applies the same family app.manage boundary as other app mutations.
-func authorizeExecutionAppBundle(ctx context.Context, actor accesscontrol.Actor, app *store.App) error {
+// authorizeUnifiedAppBundle applies the same family app.manage boundary as other app mutations.
+func authorizeUnifiedAppBundle(ctx context.Context, actor accesscontrol.Actor, app *store.App) error {
 	// An absent exact app cannot yield a family grant.
 	if app == nil {
 		return workspaceConfigHTTPError{status: http.StatusNotFound, message: "app not found"}
@@ -96,37 +96,37 @@ func authorizeExecutionAppBundle(ctx context.Context, actor accesscontrol.Actor,
 	})
 }
 
-// prepareExecutionAppBundle checks version identity, manifest, and selected operations before storage.
-func prepareExecutionAppBundle(ctx context.Context, writer http.ResponseWriter, request *http.Request, repository executionAppBundleAdmissionStore, app *store.App) (store.ExecutionAppBundle, error) {
+// prepareUnifiedAppBundle checks version identity, manifest, and selected operations before storage.
+func prepareUnifiedAppBundle(ctx context.Context, writer http.ResponseWriter, request *http.Request, repository unifiedAppBundleAdmissionStore, app *store.App) (store.UnifiedAppBundle, error) {
 	family, err := repository.GetAppFamily(ctx, app.AppFamilyID)
-	// Only an active Execution App version can acquire its planned hosted bundle.
-	if err != nil || family == nil || family.Kind != store.AppKindExecution || app.Status != store.AppStatusActive {
-		return store.ExecutionAppBundle{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "active Execution App version required"}
+	// Only an active Unified App version can acquire its planned hosted bundle.
+	if err != nil || family == nil || family.Kind != store.AppKindUnifiedApp || app.Status != store.AppStatusActive {
+		return store.UnifiedAppBundle{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "active Unified App version required"}
 	}
-	decoded, err := decodeExecutionAppBundleAttach(writer, request)
+	decoded, err := decodeUnifiedAppBundleAttach(writer, request)
 	if err != nil {
-		return store.ExecutionAppBundle{}, err
+		return store.UnifiedAppBundle{}, err
 	}
-	if err := validateExecutionAppBundleIdentityAndBytes(app, decoded); err != nil {
-		return store.ExecutionAppBundle{}, err
+	if err := validateUnifiedAppBundleIdentityAndBytes(app, decoded); err != nil {
+		return store.UnifiedAppBundle{}, err
 	}
 	// The submitted descriptor must be exactly what the compiled bundle publishes when evaluated without host effects.
-	if err := verifyExecutionAppBundleManifest(ctx, decoded.BundleJS, decoded.Manifest); err != nil {
-		return store.ExecutionAppBundle{}, err
+	if err := verifyUnifiedAppBundleManifest(ctx, decoded.BundleJS, decoded.Manifest); err != nil {
+		return store.UnifiedAppBundle{}, err
 	}
-	manifest, err := parseExecutionAppManifest(decoded.Manifest)
+	manifest, err := parseUnifiedAppManifest(decoded.Manifest)
 	// The one authored execute contract must be admitted before attaching code.
 	if err != nil {
-		return store.ExecutionAppBundle{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "invalid execution app manifest"}
+		return store.UnifiedAppBundle{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "invalid unified app manifest"}
 	}
-	if err := validateExecutionAppManifestScope(ctx, repository, app, manifest); err != nil {
-		return store.ExecutionAppBundle{}, err
+	if err := validateUnifiedAppManifestScope(ctx, repository, app, manifest); err != nil {
+		return store.UnifiedAppBundle{}, err
 	}
-	return store.ExecutionAppBundle{AppID: app.AppID, SourceHash: decoded.SourceHash, BundleJS: decoded.BundleJS, Manifest: decoded.Manifest}, nil
+	return store.UnifiedAppBundle{AppID: app.AppID, SourceHash: decoded.SourceHash, BundleJS: decoded.BundleJS, Manifest: decoded.Manifest}, nil
 }
 
-// validateExecutionAppBundleIdentityAndBytes pins submitted source and compiled bytes to the applied app version.
-func validateExecutionAppBundleIdentityAndBytes(app *store.App, decoded executionAppBundleAttachRequest) error {
+// validateUnifiedAppBundleIdentityAndBytes pins submitted source and compiled bytes to the applied app version.
+func validateUnifiedAppBundleIdentityAndBytes(app *store.App, decoded unifiedAppBundleAttachRequest) error {
 	// The applied app's source identity is authoritative; the request cannot choose a new version.
 	if app.SourceHash == "" || decoded.SourceHash != app.SourceHash {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "bundle source hash does not match app version"}
@@ -136,18 +136,18 @@ func validateExecutionAppBundleIdentityAndBytes(app *store.App, decoded executio
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "bundle script must be between 1 byte and 2 MiB"}
 	}
 	// An old version without a planned digest, or bytes that differ from its plan, cannot gain hosted behavior.
-	if !store.IsCanonicalExecutionAppBundleDigest(app.BundleDigest) || store.ExecutionAppBundleDigest([]byte(decoded.BundleJS)) != app.BundleDigest {
+	if !store.IsCanonicalUnifiedAppBundleDigest(app.BundleDigest) || store.UnifiedAppBundleDigest([]byte(decoded.BundleJS)) != app.BundleDigest {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "bundle digest does not match planned app version"}
 	}
 	return nil
 }
 
-// verifyExecutionAppBundleManifest binds the admitted declaration to the actual script without provider or DB access.
-func verifyExecutionAppBundleManifest(ctx context.Context, script string, submitted json.RawMessage) error {
+// verifyUnifiedAppBundleManifest binds the admitted declaration to the actual script without provider or DB access.
+func verifyUnifiedAppBundleManifest(ctx context.Context, script string, submitted json.RawMessage) error {
 	inspected, err := sandbox.InspectCapabilityBundle(ctx, []byte(script))
 	// A script that cannot publish its own declaration must not acquire execution authority.
 	if err != nil {
-		return executionAppBundleInspectionError(err)
+		return unifiedAppBundleInspectionError(err)
 	}
 	actual, actualErr := canonicaljson.Canonicalize(inspected)
 	claimed, claimedErr := canonicaljson.Canonicalize(submitted)
@@ -158,50 +158,50 @@ func verifyExecutionAppBundleManifest(ctx context.Context, script string, submit
 	return nil
 }
 
-// executionAppBundleInspectionError separates unavailable worker isolation from invalid authored code.
-func executionAppBundleInspectionError(err error) error {
+// unifiedAppBundleInspectionError separates unavailable worker isolation from invalid authored code.
+func unifiedAppBundleInspectionError(err error) error {
 	// A missing OS isolation boundary is an Engine deployment fault, so retrying other bundle bytes cannot help.
 	if errors.Is(err, sandbox.ErrCapabilityWorkerUnavailable) {
-		return workspaceConfigHTTPError{status: http.StatusServiceUnavailable, message: "execution app worker is unavailable"}
+		return workspaceConfigHTTPError{status: http.StatusServiceUnavailable, message: "unified app worker is unavailable"}
 	}
 	return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "bundle declaration is invalid"}
 }
 
-// decodeExecutionAppBundleAttach admits one bounded JSON document with no unknown deployment controls.
-func decodeExecutionAppBundleAttach(writer http.ResponseWriter, request *http.Request) (executionAppBundleAttachRequest, error) {
+// decodeUnifiedAppBundleAttach admits one bounded JSON document with no unknown deployment controls.
+func decodeUnifiedAppBundleAttach(writer http.ResponseWriter, request *http.Request) (unifiedAppBundleAttachRequest, error) {
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	// A fixed JSON media type prevents alternate parsers from changing bundle bytes.
 	if err != nil || mediaType != "application/json" {
-		return executionAppBundleAttachRequest{}, workspaceConfigHTTPError{status: http.StatusUnsupportedMediaType, message: "Content-Type must be application/json"}
+		return unifiedAppBundleAttachRequest{}, workspaceConfigHTTPError{status: http.StatusUnsupportedMediaType, message: "Content-Type must be application/json"}
 	}
-	raw, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, maxExecutionAppBundleRequestBytes))
+	raw, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, maxUnifiedAppBundleRequestBytes))
 	// A bounded body is required before JSON decoding allocates the compiled script.
 	if err != nil || len(raw) == 0 {
-		return executionAppBundleAttachRequest{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "invalid or oversized bundle request"}
+		return unifiedAppBundleAttachRequest{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "invalid or oversized bundle request"}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	var decoded executionAppBundleAttachRequest
+	var decoded unifiedAppBundleAttachRequest
 	// Unknown controls and malformed JSON cannot become deployment authority.
 	if err := decoder.Decode(&decoded); err != nil {
-		return executionAppBundleAttachRequest{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "invalid bundle request"}
+		return unifiedAppBundleAttachRequest{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "invalid bundle request"}
 	}
 	var trailing any
 	// A second document must not change the authored manifest after admission.
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		return executionAppBundleAttachRequest{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "invalid bundle request"}
+		return unifiedAppBundleAttachRequest{}, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "invalid bundle request"}
 	}
 	return decoded, nil
 }
 
-// validateExecutionAppManifestScope admits every declared physical call in one snapshot query.
-func validateExecutionAppManifestScope(ctx context.Context, repository store.ServiceContractEndpointSelectionBatchStore, app *store.App, manifest *executionAppManifest) error {
+// validateUnifiedAppManifestScope admits every declared physical call in one snapshot query.
+func validateUnifiedAppManifestScope(ctx context.Context, repository store.ServiceContractEndpointSelectionBatchStore, app *store.App, manifest *unifiedAppManifest) error {
 	selections, err := models.DecodeAppSelections(app.ScopeSchemaVersion, app.Selections)
 	// Incomplete immutable app scope cannot authorize newly attached code.
 	if err != nil {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "app operation scope is unavailable"}
 	}
-	requests, expected, err := executionAppEndpointRequests(manifest, selections)
+	requests, expected, err := unifiedAppEndpointRequests(manifest, selections)
 	if err != nil {
 		return err
 	}
@@ -214,16 +214,16 @@ func validateExecutionAppManifestScope(ctx context.Context, repository store.Ser
 	if err != nil {
 		return workspaceConfigHTTPError{status: http.StatusServiceUnavailable, message: "app operation scope is unavailable"}
 	}
-	return verifyExecutionAppEndpointMatches(matches, expected)
+	return verifyUnifiedAppEndpointMatches(matches, expected)
 }
 
-// executionAppEndpointRequests converts manifest pins into one set-based selection query.
-func executionAppEndpointRequests(manifest *executionAppManifest, selections []models.SDKSelection) ([]store.ServiceContractEndpointSelection, map[int]executionAppExpectedEndpoint, error) {
+// unifiedAppEndpointRequests converts manifest pins into one set-based selection query.
+func unifiedAppEndpointRequests(manifest *unifiedAppManifest, selections []models.SDKSelection) ([]store.ServiceContractEndpointSelection, map[int]unifiedAppExpectedEndpoint, error) {
 	requests := make([]store.ServiceContractEndpointSelection, 0)
-	expected := make(map[int]executionAppExpectedEndpoint)
-	selected := make(map[executionAppSelectionKey]models.SDKSelection, len(selections))
+	expected := make(map[int]unifiedAppExpectedEndpoint)
+	selected := make(map[unifiedAppSelectionKey]models.SDKSelection, len(selections))
 	for _, selection := range selections {
-		key := executionAppSelectionKey{serviceID: selection.ServiceID, versionID: selection.ServiceVersionID}
+		key := unifiedAppSelectionKey{serviceID: selection.ServiceID, versionID: selection.ServiceVersionID}
 		// Duplicate exact service versions would make operation authority ambiguous.
 		if _, exists := selected[key]; exists {
 			return nil, nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app operation scope is ambiguous"}
@@ -231,15 +231,15 @@ func executionAppEndpointRequests(manifest *executionAppManifest, selections []m
 		selected[key] = selection
 	}
 	// Search only accepts paths approved when this immutable bundle is attached.
-	if err := validateExecutionAppSearchable(manifest.Searchable); err != nil {
+	if err := validateUnifiedAppSearchable(manifest.Searchable); err != nil {
 		return nil, nil, err
 	}
 	for _, operation := range manifest.SelectedOperations {
 		// A fixed total prevents a manifest from causing unbounded contract work.
-		if len(requests) >= maxExecutionAppSelectedOperations {
+		if len(requests) >= maxUnifiedAppSelectedOperations {
 			return nil, nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "too many selected operations"}
 		}
-		selection, found := selected[executionAppSelectionKey{serviceID: operation.ServiceID, versionID: operation.ServiceVersionID}]
+		selection, found := selected[unifiedAppSelectionKey{serviceID: operation.ServiceID, versionID: operation.ServiceVersionID}]
 		// An unselected service/version cannot become callable through a manifest entry.
 		if !found {
 			return nil, nil, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "manifest operation is outside app scope"}
@@ -250,13 +250,13 @@ func executionAppEndpointRequests(manifest *executionAppManifest, selections []m
 			SelectAll: selection.SelectAll, EndpointIDs: selection.EndpointIDs, OperationNames: selection.OperationNames,
 			EndpointNames: []string{operation.Operation},
 		})
-		expected[index] = executionAppExpectedEndpoint{id: operation.EndpointID, name: operation.Operation}
+		expected[index] = unifiedAppExpectedEndpoint{id: operation.EndpointID, name: operation.Operation}
 	}
 	return requests, expected, nil
 }
 
-// verifyExecutionAppEndpointMatches checks that SQL returned one exact selected endpoint for each pin.
-func verifyExecutionAppEndpointMatches(matches []store.ServiceContractEndpointMatch, expected map[int]executionAppExpectedEndpoint) error {
+// verifyUnifiedAppEndpointMatches checks that SQL returned one exact selected endpoint for each pin.
+func verifyUnifiedAppEndpointMatches(matches []store.ServiceContractEndpointMatch, expected map[int]unifiedAppExpectedEndpoint) error {
 	// Missing rows mean at least one manifest operation was not selected in the app snapshot.
 	if len(matches) != len(expected) {
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "manifest operation is outside app scope"}
@@ -276,8 +276,8 @@ func verifyExecutionAppEndpointMatches(matches []store.ServiceContractEndpointMa
 	return nil
 }
 
-// validateExecutionAppSearchable bounds immutable data filters to scalar object paths.
-func validateExecutionAppSearchable(paths []string) error {
+// validateUnifiedAppSearchable bounds immutable data filters to scalar object paths.
+func validateUnifiedAppSearchable(paths []string) error {
 	// Search index policy allows at most 32 authored data paths per app version.
 	if len(paths) > 32 {
 		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "too many searchable data paths"}
@@ -296,18 +296,18 @@ func validateExecutionAppSearchable(paths []string) error {
 	return nil
 }
 
-// writeExecutionAppBundleError records a bounded control outcome without logging bundle bytes.
-func writeExecutionAppBundleError(writer http.ResponseWriter, span trace.Span, err error) {
+// writeUnifiedAppBundleError records a bounded control outcome without logging bundle bytes.
+func writeUnifiedAppBundleError(writer http.ResponseWriter, span trace.Span, err error) {
 	span.RecordError(err)
 	span.SetStatus(codes.Error, "bundle attachment failed")
 	span.SetAttributes(attribute.String("outcome", "failed"))
 	// Immutable conflicts are distinct from malformed submitted artifacts.
-	if errors.Is(err, store.ErrExecutionAppBundleImmutable) {
+	if errors.Is(err, store.ErrUnifiedAppBundleImmutable) {
 		writeSDKConfigError(writer, workspaceConfigHTTPError{status: http.StatusConflict, message: "app bundle is immutable; create a new version"})
 		return
 	}
 	// A version removed or changed between admission and write cannot acquire a bundle.
-	if errors.Is(err, store.ErrExecutionAppBundleNotFound) {
+	if errors.Is(err, store.ErrUnifiedAppBundleNotFound) {
 		writeSDKConfigError(writer, workspaceConfigHTTPError{status: http.StatusConflict, message: "app version is no longer available for bundle attachment"})
 		return
 	}

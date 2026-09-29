@@ -12,7 +12,6 @@ import (
 	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
-	"github.com/Usefused/engine/internal/engine/unified"
 	"github.com/Usefused/engine/internal/shared/canonical"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -168,9 +167,6 @@ func decodeAppConfigPlanRequest(r *http.Request, kind string) (SDKConfigPlanRequ
 // keeping generation-only fields out of an Engine-projected MCP runtime.
 func validateAppConfigDocument(doc sdkConfigDocument, kind string) error {
 	// SDK and MCP admit the same local-only workflow provenance.
-	if err := validateWorkflowSources(doc.WorkflowSources); err != nil {
-		return err
-	}
 	return validateHostedAppDefinition(doc, kind)
 }
 
@@ -202,12 +198,10 @@ func validateHostedAppDefinition(doc sdkConfigDocument, kind string) error {
 	}
 	// Service selection must be valid before bindings can rely on those exact
 	// configured keys and operation allowlists.
-	if err := validateAppServiceDocs(doc.Services); err != nil {
+	if err := validateAttachedAppServices(doc); err != nil {
 		return err
 	}
-	// MCP shares the SDK graph contract but has no generated language symbols,
-	// so only the code-generation checks are disabled at this boundary.
-	return validateAppUnifiedOperations(doc, false)
+	return nil
 }
 
 // validateMCPServerDescription keeps hosted-server identity policy separate from shared app selection validation.
@@ -276,14 +270,14 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	targetBindings, credentialSourceBindings := splitAppContractBindings(bindings, resolved)
 	selections = finalizeAppSelections(selections, targetBindings)
 
-	selections, unifiedCompilation, err := resolveAndCompileMCPUnifiedOperations(ctx, s, call.document, selections, resolved)
-	// A partially frozen or compiled graph must never enter an immutable plan.
+	selections, err = resolveMCPEndpointIDs(ctx, s, selections)
+	// Physical endpoint IDs must come from the exact local contract snapshot.
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
 	readiness, err := inspectAppBucketReadiness(ctx, s, buckets, selections, appReadinessServiceNames(append(append([]sdkResolvedService{}, resolved...), credentialSources...), nil))
 	// Mutable credential absence becomes review metadata only after the exact
-	// immutable physical and Unified scope has passed admission.
+	// immutable physical scope has passed admission.
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
@@ -297,12 +291,12 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		Description:                strings.TrimSpace(call.document.Description),
 		FusedIntelligentClassifier: call.document.FusedIntelligentClassifier,
 		Selections:                 selections, ContractBindings: targetBindings, CredentialSourceBindings: credentialSourceBindings, BucketID: bucket.ID,
-		ServiceBuckets:                 appResolvedBucketRefs(buckets.Overrides),
-		UnifiedDefinitionSchemaVersion: unified.DefinitionSchemaVersion,
-		UnifiedDefinitions:             unifiedCompilation.DefinitionJSON,
-		UnifiedDefinitionHash:          unifiedCompilation.DefinitionHash,
-		UnifiedCodegenDescriptorHash:   unifiedCompilation.CodegenDescriptorHash,
-		UnifiedOperations:              unifiedCompilation.Descriptors,
+		ServiceBuckets: appResolvedBucketRefs(buckets.Overrides),
+	}
+	// Hosted references share SDK dependency admission and immutable identity.
+	payload.UnifiedApps, err = resolveUnifiedAppAttachments(ctx, s, call.accountID, call.document)
+	if err != nil {
+		return sdkPlanResult{}, err
 	}
 	resolvedPayload, _ := json.Marshal(payload)
 	requiredPermissions, requiredCount, err := configPlanRequiredPermissionsWithBuckets(
@@ -311,6 +305,11 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	// Required permissions remain attached to the plan regardless of contract storage location.
 	if err != nil {
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to compute required permissions"}
+	}
+	// Actor and owning team must both be allowed to use every attached app.
+	requiredPermissions, requiredCount, err = attachmentPermissions(requiredPermissions, payload.UnifiedApps)
+	if err != nil {
+		return sdkPlanResult{}, err
 	}
 	// Plan creation must not expose a family the actor cannot manage.
 	if err := preflightConfigOwnership(ctx, s, call.actor, owner, existingConfigResourceID(current), requiredPermissions); err != nil {
@@ -375,21 +374,6 @@ func loadMCPPlanningState(ctx context.Context, configStore store.ConfigRepositor
 	return current, client, nil
 }
 
-// resolveAndCompileMCPUnifiedOperations freezes physical selections before invoking the unchanged SDK Unified compiler.
-func resolveAndCompileMCPUnifiedOperations(ctx context.Context, s store.Store, doc sdkConfigDocument, selections []models.SDKSelection, services []sdkResolvedService) ([]models.SDKSelection, sdkUnifiedCompilation, error) {
-	resolved, err := resolveMCPEndpointIDs(ctx, s, selections)
-	// Compilation requires endpoint IDs from the exact local contract snapshot.
-	if err != nil {
-		return nil, sdkUnifiedCompilation{}, err
-	}
-	compiled, err := compileSDKUnifiedOperations(ctx, s, doc, resolved, services)
-	// The shared compiler is the sole admission boundary for executable graph bytes.
-	if err != nil {
-		return nil, sdkUnifiedCompilation{}, err
-	}
-	return resolved, compiled, nil
-}
-
 func validateMCPDesiredState(state sdkConfigDocument, current *store.ConfigState) ([]byte, error) {
 	desiredState, err := canonicalAppState(state)
 	if err != nil {
@@ -406,6 +390,11 @@ func validateMCPDesiredState(state sdkConfigDocument, current *store.ConfigState
 	return desiredState, nil
 }
 
+// mcpEndpointContractStore reads the exact immutable endpoint rows selected for hosted MCP calls.
+type mcpEndpointContractStore interface {
+	ListServiceContractEndpointsForSelections(context.Context, []store.ServiceContractEndpointSelection, []string) ([]store.ServiceContractEndpointMatch, error)
+}
+
 // resolveMCPEndpointIDs freezes explicit MCP operation names to immutable endpoint IDs through one Engine snapshot query.
 func resolveMCPEndpointIDs(ctx context.Context, s store.Store, selections []models.SDKSelection) ([]models.SDKSelection, error) {
 	requests := mcpEndpointResolutionRequests(selections)
@@ -414,7 +403,7 @@ func resolveMCPEndpointIDs(ctx context.Context, s store.Store, selections []mode
 	if len(requests) == 0 {
 		return selections, nil
 	}
-	contractStore, ok := s.(sdkUnifiedContractStore)
+	contractStore, ok := s.(mcpEndpointContractStore)
 	// Explicit operation names cannot be frozen safely without the set-based
 	// snapshot resolver; falling back to Registry would reintroduce N+1 reads.
 	if !ok {
@@ -493,11 +482,6 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 	if err != nil {
 		return mcpConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
 	}
-	// Apply rechecks canonical bytes and both hashes so a tampered plan cannot
-	// become executable even though planning already validated the graph.
-	if err := normalizeAndValidateResolvedUnifiedPayload(&payload); err != nil {
-		return mcpConfigApplyResult{}, withWorkspaceConfigErrorMetadata(err, "apply_admission", call.planID.String(), "not_committed")
-	}
 	runtimeID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(plan.ConfigKey))
 	// decodeAppApplyPlan above already re-verified payload.ServiceBuckets
 	// against live bucket identity, so its entries are trusted here rather
@@ -513,6 +497,7 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 		kind: store.AppKindMCP, name: doc.Name, version: doc.Version, configKey: plan.ConfigKey,
 		description:                    payload.Description,
 		fusedIntelligentClassifier:     payload.FusedIntelligentClassifier,
+		unifiedApps:                    payload.UnifiedApps,
 		unifiedDefinitionSchemaVersion: payload.UnifiedDefinitionSchemaVersion,
 		unifiedDefinitions:             payload.UnifiedDefinitions,
 		unifiedDefinitionHash:          payload.UnifiedDefinitionHash,

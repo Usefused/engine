@@ -49,7 +49,6 @@ it("derives correction only for local pre-bridge pagination failures", () => {
   expect(recoveryForError("MCP_CALL_OPTIONS_INVALID: bad options")).toMatchObject(correction);
   expect(recoveryForError("MCP_CALL_PAGINATION_INVALID: bad value")).toMatchObject(correction);
   expect(recoveryForError("mcp_pagination_not_supported: omit it")).toMatchObject({ recovery_action: "do_not_replay", provider_execution: "unknown" });
-  expect(recoveryForError("mcp_physical_pagination_not_allowed_for_unified: omit it")).toMatchObject({ recovery_action: "do_not_replay", provider_execution: "unknown" });
   expect(recoveryForError("mcp_pagination_max_pages: traversal stopped")).toMatchObject({ recovery_action: "do_not_replay", provider_execution: "unknown" });
 });
 
@@ -65,7 +64,6 @@ it("validates bridge recovery fields before use", () => {
 it("preserves stable Engine codes without admitting arbitrary lowercase prefixes", () => {
   expect(modelVisibleExecuteErrorCode("bucket_credentials_missing: run fused-cli secret set")).toBe("bucket_credentials_missing");
   expect(modelVisibleExecuteErrorCode("mcp_pagination_not_supported: omit it")).toBe("mcp_pagination_not_supported");
-  expect(modelVisibleExecuteErrorCode("mcp_physical_pagination_not_allowed_for_unified: omit it")).toBe("mcp_physical_pagination_not_allowed_for_unified");
   expect(modelVisibleExecuteErrorCode("MCP_CALL_OPTIONS_INVALID: bad options")).toBe("MCP_CALL_OPTIONS_INVALID");
   expect(modelVisibleExecuteErrorCode("mcp_pagination_continuation_invalid: contract mismatch")).toBe("mcp_pagination_continuation_invalid");
   expect(recoveryForError("mcp_pagination_continuation_invalid: contract mismatch")).toMatchObject({ recovery_action: "do_not_replay", provider_execution: "unknown" });

@@ -1,3 +1,4 @@
+import { Select } from "./forms/Select.ts";
 import { FormEvent } from "react";
 import { Link } from "@remix-run/react";
 import { ArrowUpRight, Check, Loader2, Search, X, ChevronLeft, ChevronRight } from "lucide-react";
@@ -483,9 +484,9 @@ function IntegrationPagination({ loading, query, totalPages, totalItems, page, o
           <ChevronLeft className="w-4 h-4" />
         </button>
         <span className="text-xs text-slate-500 pl-2">Page</span>
-        <select className="bg-white border border-slate-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 mx-1 cursor-pointer" value={page} onChange={(event) => onPageChange(parseInt(event.target.value, 10))}>
+        <Select density="compact" className="mx-1" value={page} onChange={(event) => onPageChange(parseInt(event.target.value, 10))}>
           {Array.from({ length: totalPages }, (_, index) => index + 1).map((pageNumber) => <option key={pageNumber} value={pageNumber}>{pageNumber}</option>)}
-        </select>
+        </Select>
         <span className="text-xs font-medium text-slate-500 pr-2">of {totalPages}</span>
         <button type="button" data-track="paginate_next" onClick={() => onPageChange(page + 1)} disabled={page >= totalPages} className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-40 disabled:hover:bg-transparent" aria-label="Next page" title="Next">
           <ChevronRight className="w-4 h-4" />

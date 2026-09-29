@@ -31,6 +31,39 @@ func TestGenerationContractHashAdmission(t *testing.T) {
 	}
 }
 
+// TestAttachGenerationContractPinRejectsRuntimeDrift proves deferred SDK acquisition cannot overwrite changed execution authority.
+func TestAttachGenerationContractPinRejectsRuntimeDrift(t *testing.T) {
+	ctx, s, _ := openGenerationContractTestStore(t)
+	snapshot := seedGenerationContractFixture(t, ctx, s, 1)
+	snapshot.GenerationContractHash = ""
+	// A new workspace activation has runtime data but no SDK generation pin.
+	if _, err := s.UpsertServiceContractSnapshot(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	bindings, err := s.ListGenerationContractBindings(ctx, []models.ServiceVersionRef{{ServiceID: snapshot.ServiceID, Version: snapshot.Version}}, false)
+	// Deferred attachment must start from the locally admitted exact revision.
+	if err != nil || len(bindings) != 1 {
+		t.Fatalf("local binding=%+v error=%v", bindings, err)
+	}
+	binding := bindings[0]
+	hash := "sha256:" + strings.Repeat("b", 64)
+	stale := binding
+	stale.RuntimeContractHash = "different-runtime-hash"
+	// A changed runtime hash must fail before a usable generation pin becomes visible.
+	if err := s.AttachGenerationContractPin(ctx, stale, hash); !errors.Is(err, ErrGenerationContractPinUnavailable) {
+		t.Fatalf("stale pin error=%v", err)
+	}
+	// The matching runtime identity may acquire exactly the Registry archive it requested.
+	if err := s.AttachGenerationContractPin(ctx, binding, hash); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListGenerationContractBindings(ctx, []models.ServiceVersionRef{{ServiceID: snapshot.ServiceID, Version: snapshot.Version}}, true)
+	// Attaching the archive must not change the runtime contract hash used by execution.
+	if err != nil || len(got) != 1 || got[0].GenerationContractHash != hash || got[0].RuntimeContractHash != binding.RuntimeContractHash {
+		t.Fatalf("attached binding=%+v error=%v", got, err)
+	}
+}
+
 type generationQueryTracer struct{ count atomic.Int64 }
 
 // TraceQueryStart counts actual database statements rather than treating per-row batches as set-based evidence.

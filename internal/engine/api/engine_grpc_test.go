@@ -292,8 +292,8 @@ type grpcRuntimeStore struct {
 	scope     *store.AppRuntime
 }
 
-// IsExecutionAppTrafficTarget makes this single-version runtime fixture current by default.
-func (s *grpcRuntimeStore) IsExecutionAppTrafficTarget(_ context.Context, appID uuid.UUID) (bool, error) {
+// IsUnifiedAppTrafficTarget makes this single-version runtime fixture current by default.
+func (s *grpcRuntimeStore) IsUnifiedAppTrafficTarget(_ context.Context, appID uuid.UUID) (bool, error) {
 	return s.appID == appID, nil
 }
 

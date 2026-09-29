@@ -70,17 +70,21 @@ func handleMCPModernToolsList(ctx context.Context, span trace.Span, w http.Respo
 		writeMCPModernError(w, request.ID, -32603, "MCP tool catalogue is invalid", http.StatusInternalServerError, nil)
 		return
 	}
-	// Hosted Execution Apps add their typed execute input to this authenticated catalogue.
+	// Hosted Unified Apps add their typed execute input to this authenticated catalogue.
 	if err := appendMCPHostedCapabilityTools(ctx, result, admission); err != nil {
 		writeMCPModernError(w, request.ID, -32603, "MCP execution catalogue is unavailable", http.StatusServiceUnavailable, nil)
 		return
 	}
+	// Consumer attachments extend the same execute tool without a second MCP runtime.
+	if err := appendAttachedMCPTools(ctx, result, admission); err != nil { writeMCPModernError(w, request.ID, -32603, "MCP attachment catalogue unavailable", http.StatusServiceUnavailable, nil); return }
 	writeMCPModernResult(w, request.ID, result, admission.server)
 }
 
 // handleMCPModernToolsCall executes one tool and retains sandbox state only behind an explicit token-bound handle.
 func handleMCPModernToolsCall(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, routeID, token string, request mcpJSONRPCRequest, admission *mcpModernAdmission) {
-	// An authored execute request uses the durable Execution App command before legacy child admission.
+	// Attached aliases must be admitted before the physical script decoder.
+	if handleAttachedMCPCall(ctx, w, r, request, admission) { return }
+	// An authored execute request uses the durable Unified App command before legacy child admission.
 	if handleMCPHostedCapabilityCall(ctx, w, r, request, admission) {
 		return
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -19,10 +20,11 @@ import (
 type capabilityRunSpec struct {
 	identity           auth.RuntimeIdentity
 	version            string
-	bundle             *store.ExecutionAppBundle
-	manifest           *executionAppManifest
+	bundle             *store.UnifiedAppBundle
+	manifest           *unifiedAppManifest
 	input              json.RawMessage
 	mode               string
+	transport          string
 	sourceExecutionID  *uuid.UUID
 	idempotencyKeyHash string
 }
@@ -36,7 +38,11 @@ type admittedCapabilityRun struct {
 }
 
 // executeCapabilityRun records and executes one live or rerun invocation against an exact app bundle.
-func (s *EngineGRPCServer) executeCapabilityRun(ctx context.Context, spec capabilityRunSpec) (capabilityExecutionEnvelope, *restExecutionError) {
+func (s *EngineGRPCServer) executeCapabilityRun(ctx context.Context, spec capabilityRunSpec) (result capabilityExecutionEnvelope, requestErr *restExecutionError) {
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.unified_app.run")
+	span.SetAttributes(attribute.String("app.family_id", spec.identity.AppFamilyID.String()), attribute.String("app.id", spec.identity.AppID.String()))
+	// Finalize the logical span after persistence and publication, without recording private errors.
+	defer func() { finishUnifiedAppSpan(span, result, requestErr); span.End() }()
 	admitted, requestErr := s.admitCapabilityRun(ctx, spec)
 	if requestErr != nil {
 		return capabilityExecutionEnvelope{}, requestErr
@@ -50,16 +56,19 @@ func (s *EngineGRPCServer) executeCapabilityRun(ctx context.Context, spec capabi
 
 // runAdmittedCapability owns provider work only after the result reservation is durable.
 func (s *EngineGRPCServer) runAdmittedCapability(ctx context.Context, spec capabilityRunSpec, admitted admittedCapabilityRun) (capabilityExecutionEnvelope, *restExecutionError) {
+	// Every terminal authored run shares the canonical Requests and Analytics event path.
+	var recorder *recordingCapabilityHost
+	defer func() { s.publishUnifiedAppReceipt(ctx, spec, admitted.id, recorder) }()
 	controls, err := sandbox.NewCapabilityDeterminism()
 	// No provider work may start if replay controls could not be generated for this invocation.
 	if err != nil {
-		return failCapabilityRuntimeStart(ctx, admitted, spec)
+		return s.failCapabilityRuntimeStart(ctx, admitted, spec, err)
 	}
 	// DB-only scripts have no physical bindings and need no provider cache or workspace connection.
 	if len(admitted.bindings) > 0 {
 		// A fresh reservation alone can acquire provider-capable cache scope.
 		if err := s.restRuntime.ConnectAppRuntime(ctx, spec.identity.AppID); err != nil {
-			return failCapabilityRuntimeStart(ctx, admitted, spec)
+			return s.failCapabilityRuntimeStart(ctx, admitted, spec, err)
 		}
 		// The runtime cache remains acquired for every provider call in the script.
 		defer s.restRuntime.DisconnectAppRuntime(spec.identity.AppID)
@@ -74,7 +83,7 @@ func (s *EngineGRPCServer) runAdmittedCapability(ctx context.Context, spec capab
 	// Buffering the JSON document keeps the final state and output in one terminal SQL update.
 	buffer := NewBufferedCapabilityHost(host)
 	// Recording every workspace call gives replay a sealed transcript without exposing provider credentials.
-	recorder := NewRecordingCapabilityHost(buffer)
+	recorder = NewRecordingCapabilityHost(buffer)
 	setErr := recorder.SetDeterminism(controls)
 	var output json.RawMessage
 	var runErr error
@@ -82,7 +91,7 @@ func (s *EngineGRPCServer) runAdmittedCapability(ctx context.Context, spec capab
 	if setErr != nil {
 		runErr = setErr
 	} else {
-		output, runErr = s.runExecutionAppWorker(ctx, spec.identity, []byte(spec.bundle.BundleJS), spec.input, recorder, controls)
+		output, runErr = s.runUnifiedAppWorker(ctx, spec.identity, []byte(spec.bundle.BundleJS), spec.input, recorder, controls)
 	}
 	history, historyErr := recorder.History()
 	// An incomplete recording cannot be presented as a replayable success.
@@ -96,12 +105,13 @@ func (s *EngineGRPCServer) runAdmittedCapability(ctx context.Context, spec capab
 	if err := admitted.results.CompleteExecutionResult(finishCtx, spec.identity.AccountID, spec.identity.AppID, admitted.id, status, output, buffer.Data(), errorCode, capabilityPublicError(errorCode)); err != nil {
 		return capabilityExecutionEnvelope{}, newRESTExecutionError(http.StatusServiceUnavailable, "result_unavailable", "execution result is unavailable")
 	}
-	s.saveExecutionAppReplayEvidence(finishCtx, spec, admitted.id, history, historyErr)
+	s.saveExecutionDiagnostics(finishCtx, spec, admitted.id, recorder, runErr)
+	s.saveUnifiedAppReplayEvidence(finishCtx, spec, admitted.id, history, historyErr)
 	return loadCapabilityRunEnvelope(finishCtx, admitted.results, spec.identity, admitted.id, admitted.readHandle)
 }
 
-// saveExecutionAppReplayEvidence seals complete history only after the matching result commits.
-func (s *EngineGRPCServer) saveExecutionAppReplayEvidence(ctx context.Context, spec capabilityRunSpec, executionID uuid.UUID, history json.RawMessage, historyErr error) {
+// saveUnifiedAppReplayEvidence seals complete history only after the matching result commits.
+func (s *EngineGRPCServer) saveUnifiedAppReplayEvidence(ctx context.Context, spec capabilityRunSpec, executionID uuid.UUID, history json.RawMessage, historyErr error) {
 	// Incomplete history cannot authenticate a future side-effect-free replay.
 	if historyErr != nil {
 		return
@@ -123,15 +133,15 @@ func (s *EngineGRPCServer) admitCapabilityRun(ctx context.Context, spec capabili
 	results, ok := s.store.(store.ExecutionResultStore)
 	// Missing durable storage or an authored contract prevents unrecorded effects.
 	if !ok || spec.bundle == nil || spec.manifest == nil {
-		return admittedCapabilityRun{}, newRESTExecutionError(http.StatusServiceUnavailable, "runtime_unavailable", "execution app runtime is unavailable")
+		return admittedCapabilityRun{}, newRESTExecutionError(http.StatusServiceUnavailable, "runtime_unavailable", "unified app runtime is unavailable")
 	}
-	bindings, err := executionAppBindings(spec.manifest)
+	bindings, err := unifiedAppBindings(spec.manifest)
 	if err != nil {
-		return admittedCapabilityRun{}, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_invalid", "execution app bundle is invalid")
+		return admittedCapabilityRun{}, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_invalid", "unified app bundle is invalid")
 	}
 	// Provider-capable scripts require both the physical dispatcher and its request-scoped cache.
 	if len(bindings) > 0 && (s.runtime == nil || s.restRuntime == nil) {
-		return admittedCapabilityRun{}, newRESTExecutionError(http.StatusServiceUnavailable, "runtime_unavailable", "execution app runtime is unavailable")
+		return admittedCapabilityRun{}, newRESTExecutionError(http.StatusServiceUnavailable, "runtime_unavailable", "unified app runtime is unavailable")
 	}
 	id, handle, created, err := reserveCapabilityRun(ctx, results, spec)
 	// A rejected reservation cannot acquire a cache reference or start provider work.
@@ -146,14 +156,15 @@ func (s *EngineGRPCServer) admitCapabilityRun(ctx context.Context, spec capabili
 }
 
 // failCapabilityRuntimeStart preserves the accepted ID when no worker cache can be acquired.
-func failCapabilityRuntimeStart(ctx context.Context, admitted admittedCapabilityRun, spec capabilityRunSpec) (capabilityExecutionEnvelope, *restExecutionError) {
+func (s *EngineGRPCServer) failCapabilityRuntimeStart(ctx context.Context, admitted admittedCapabilityRun, spec capabilityRunSpec, runErr error) (capabilityExecutionEnvelope, *restExecutionError) {
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	// No provider call began, so this queued execution has a known failure outcome.
 	if err := admitted.results.CompleteExecutionResult(finishCtx, spec.identity.AccountID, spec.identity.AppID, admitted.id,
-		"failed", nil, json.RawMessage("null"), "runtime_unavailable", "execution app runtime is unavailable"); err != nil {
+		"failed", nil, json.RawMessage("null"), "runtime_unavailable", "unified app runtime is unavailable"); err != nil {
 		return capabilityExecutionEnvelope{}, newRESTExecutionError(http.StatusServiceUnavailable, "result_unavailable", "execution result is unavailable")
 	}
+	s.saveExecutionDiagnostics(finishCtx, spec, admitted.id, NewRecordingCapabilityHost(nil), runErr)
 	return loadCapabilityRunEnvelope(finishCtx, admitted.results, spec.identity, admitted.id, admitted.readHandle)
 }
 
@@ -177,7 +188,7 @@ func reserveCapabilityRun(ctx context.Context, results store.ExecutionResultStor
 	}
 	// Only explicit reruns may reuse a previous reservation under one caller key.
 	if spec.mode != "rerun" {
-		return uuid.Nil, "", false, errors.New("unsupported execution app run mode")
+		return uuid.Nil, "", false, errors.New("unsupported unified app run mode")
 	}
 	reservedID, created, err := results.CreateOrGetRerunExecutionResult(ctx, record)
 	// The first response owns the read handle; duplicates never reissue it.

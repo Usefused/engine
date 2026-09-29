@@ -2841,7 +2841,7 @@ func projectGraphQLEngineExecutionEvents(events []models.EngineExecutionEvent) [
 			"unified_steps": projectUnifiedReceiptSteps(event.UnifiedSteps),
 			"id":            event.ID.String(), "trace_id": event.TraceID, "span_id": event.SpanID,
 			"app_family_id": optionalGraphQLUUID(event.AppFamilyID), "app_id": optionalGraphQLUUID(event.AppID),
-			"app_version": event.AppVersion, "app_kind": executionAppKind(event.Transport),
+			"app_version": event.AppVersion, "app_kind": unifiedAppKind(event.Transport),
 			"transport": event.Transport, "provider_protocol": event.ProviderProtocol,
 			"direction": event.Direction, "service_id": event.ServiceID.String(),
 			"service_version_id": event.ServiceVersionID,
@@ -2873,9 +2873,9 @@ func projectGraphQLEngineExecutionEvents(events []models.EngineExecutionEvent) [
 	return items
 }
 
-// executionAppKind keeps ingress transport separate from immutable app kind;
+// unifiedAppKind keeps ingress transport separate from immutable app kind;
 // REST receipts belong to SDK apps even though their transport remains rest.
-func executionAppKind(transport string) string {
+func unifiedAppKind(transport string) string {
 	if transport == models.EngineExecutionTransportREST {
 		return string(store.AppKindSDK)
 	}

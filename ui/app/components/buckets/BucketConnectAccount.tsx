@@ -1,3 +1,4 @@
+import { Select } from "../forms/Select.ts";
 import { useState, type FormEvent } from "react";
 import { ArrowUpRight, Loader2 } from "lucide-react";
 import { api, type ActivatedService, type BucketSummary } from "~/lib/api";
@@ -76,10 +77,10 @@ function ConnectScheme({ options, selected, onChange }: { options: ReturnType<ty
   // The service must be selected before a meaningful scheme can be displayed.
   if (!options.length) return null;
   return <label className="block text-xs font-medium text-slate-600">Authentication
-    <select required value={selected} onChange={(event) => { /* Selection pins both auth type and name in the request. */ onChange(event.target.value); }} className={fieldClass}>
+    <Select required value={selected} onChange={(event) => { /* Selection pins both auth type and name in the request. */ onChange(event.target.value); }} className={fieldClass}>
       <option value="" disabled>Choose authentication</option>
       {options.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.key_prefix}</option>)}
-    </select>
+    </Select>
   </label>;
 }
 

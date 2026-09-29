@@ -30,7 +30,7 @@ export function generateExecutionBindingsSource(operations: readonly SelectedOpe
     const methods = entries.map(([operation, index]) => `${JSON.stringify(operation.operation)}: (input: Operation${index}Input): Promise<Operation${index}Output> => fused.fetch({ service: ${JSON.stringify(service)}, operation: ${JSON.stringify(operation.operation)}, input: input as JsonObject }) as Promise<unknown> as Promise<Operation${index}Output>`);
     return `${JSON.stringify(service)}: { ${methods.join(", ")} }`;
   });
-  return `import { fused, type JsonObject } from "@fused/execution";\n${types}\nexport const services = { ${groups.join(", ")} };`;
+  return `import { fused, type JsonObject } from "@fused/unified-app";\n${types}\nexport const services = { ${groups.join(", ")} };`;
 }
 
 // Emit author-facing declarations from reviewed schema hints without adding those hints to the manifest.

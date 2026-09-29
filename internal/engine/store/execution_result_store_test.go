@@ -90,7 +90,7 @@ func TestExecutionResultPostgresLifecycle(t *testing.T) {
 		AppTokenID: uuid.New(), AppVersion: "1", Status: "queued", Mode: "live",
 		ReadHandleHash: strings.Repeat("a", 64), Input: json.RawMessage(`{"email":"a@example.com"}`),
 	}
-	defer pool.Exec(context.Background(), `DELETE FROM fused_execution_app_results WHERE id=$1`, record.ID)
+	defer pool.Exec(context.Background(), `DELETE FROM fused_unified_app_results WHERE id=$1`, record.ID)
 	createCompletedTestExecution(t, ctx, repository, record)
 	assertStoredExecutionRead(t, ctx, repository, record)
 	assertStoredExecutionSearch(t, ctx, repository, record)
@@ -171,7 +171,7 @@ func TestRerunReservationPostgresDeduplicates(t *testing.T) {
 		ReadHandleHash: strings.Repeat("a", 64), IdempotencyKeyHash: strings.Repeat("b", 64),
 		Input: json.RawMessage(`{"email":"a@example.com"}`), SourceExecutionID: &sourceID,
 	}
-	defer pool.Exec(context.Background(), `DELETE FROM fused_execution_app_results WHERE id=$1`, run.ID)
+	defer pool.Exec(context.Background(), `DELETE FROM fused_unified_app_results WHERE id=$1`, run.ID)
 	first, created, err := repository.CreateOrGetRerunExecutionResult(ctx, run)
 	if err != nil || !created || first != run.ID {
 		t.Fatalf("expected first reservation, got %s created=%v err=%v", first, created, err)

@@ -24,7 +24,7 @@ COPY runtime/mcp/tsconfig.json runtime/mcp/tsconfig.build.json ./
 COPY runtime/mcp/src ./src
 RUN npm run build
 
-# Compile reviewed Execution App source inside Engine. The compiler and its
+# Compile reviewed Unified App source inside Engine. The compiler and its
 # pinned dependencies stay in the image, never in a tenant app sandbox.
 FROM node:24-alpine AS execution-compiler-builder
 

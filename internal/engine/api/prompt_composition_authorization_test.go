@@ -8,9 +8,9 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 )
 
-// TestPromptCompositionRequiresCatalogueRead keeps the new Registry drafting route inside the existing discovery permission boundary.
+// TestPromptCompositionRequiresCatalogueRead keeps app drafting inside the discovery permission boundary.
 func TestPromptCompositionRequiresCatalogueRead(t *testing.T) {
-	body := []byte(`{"query":"query { draftPromptUnifiedOperation(q: \"goal\", selections: \"[]\") }"}`)
+	body := []byte(`{"query":"query { draftPromptUnifiedApp(q: \"goal\", selections: \"[]\") }"}`)
 	ctx := accesscontrol.ContextWithActor(context.Background(), registryPolicyActor(t, accesscontrol.PermissionCatalogueRead))
 	operation, err := authorizeRegistryGraphQLOperation(ctx, body)
 	// Read-authorized callers may draft; app publication still uses its separate lifecycle permissions.

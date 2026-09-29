@@ -49,7 +49,7 @@ func AppPermission(appType string, action Permission) Permission {
 // AppPermissions expands an internal role template into explicit, reviewable grants.
 func AppPermissions(action Permission) []Permission {
 	permissions := make([]Permission, 0, 5)
-	for _, appType := range []string{"sdk", "execution", "mcp", "api", "webhook"} {
+	for _, appType := range []string{"sdk", "unified_app", "mcp", "api", "webhook"} {
 		permission := AppPermission(appType, action)
 		// Webhooks have no execution-token or app-use lifecycle to authorize.
 		if ValidatePermission(permission) == nil {
@@ -84,7 +84,7 @@ func AppTypeFromConfig(configType string, raw []byte) (string, error) {
 	}
 	// Route/plan type is authoritative; config keys and names never select permission type.
 	switch configType {
-	case "execution", "mcp", "webhook":
+	case "unified_app", "mcp", "webhook":
 		return configType, nil
 	case "sdk":
 		// Only an explicit package-free configuration belongs to the API namespace.

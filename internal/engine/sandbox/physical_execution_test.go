@@ -85,9 +85,9 @@ func TestExecuteResolvedPhysicalJSONAccountsCollectorFailureOnce(t *testing.T) {
 	assertPhysicalFailureAudit(t, auditCapture, identity, operation)
 }
 
-// TestSDKUnifiedPhysicalQueueRunsEightAtFourSlots proves the resolved SDK
+// TestSDKPhysicalQueueRunsEightAtFourSlots proves the resolved SDK
 // boundary waits through account saturation without exceeding the plan limit.
-func TestSDKUnifiedPhysicalQueueRunsEightAtFourSlots(t *testing.T) {
+func TestSDKPhysicalQueueRunsEightAtFourSlots(t *testing.T) {
 	withEntitlement(t, models.RuntimeEntitlement{MaxSandboxConcurrency: models.IntPtr(4)})
 	audit := &sdkQueuePublisher{}
 	executionevent.SetPublisher(executionevent.NewPublisher(audit))
@@ -145,9 +145,9 @@ func TestSDKUnifiedPhysicalQueueRunsEightAtFourSlots(t *testing.T) {
 	}
 }
 
-// TestSDKUnifiedPhysicalQueueKeepsMCPImmediate checks that the same SDK-kind
+// TestSDKPhysicalQueueKeepsMCPImmediate checks that the same SDK-kind
 // app does not queue when the Engine's MCP adapter owns the call.
-func TestSDKUnifiedPhysicalQueueKeepsMCPImmediate(t *testing.T) {
+func TestSDKPhysicalQueueKeepsMCPImmediate(t *testing.T) {
 	withEntitlement(t, models.RuntimeEntitlement{MaxSandboxConcurrency: models.IntPtr(1)})
 	identity, operation := physicalExecutionTestOperation("https://provider.invalid")
 	hold, err := trackAuthenticatedExecution(context.Background(), identity, trace.SpanFromContext(context.Background()))

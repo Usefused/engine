@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   APP_BUILDER_OPERATIONS,
+  preferredAppBucket,
   unactivatedBuilderServices,
   appCreationModeFromSearch,
   appApplyInput,
@@ -14,7 +15,7 @@ import {
   effectiveAppBuilderServiceURL,
 } from "./app-builder-contract.ts";
 
-const appBuilderPath = fileURLToPath(import.meta.resolve("../routes/integrations.builder.tsx"));
+const appBuilderPath = fileURLToPath(import.meta.resolve("../components/apps/AppServiceBuilder.tsx"));
 
 function sourceSection(source, start, end) {
   const startIndex = source.indexOf(start);
@@ -94,10 +95,11 @@ test("resolves the executable URL from an imported service contract", () => {
   assert.equal(effectiveAppBuilderServiceURL({ base_url: null, servers: [] }), "");
 });
 
+// Source boundaries use declarations so presentation comments do not affect contract coverage.
 test("hydrates the effective URL for catalog, expansion, and version changes", async () => {
   const source = await readFile(appBuilderPath, "utf8");
   const sections = [
-    sourceSection(source, "async function loadRegistryServicesByIDs", "// AddSelectedServiceToWorkspaceButton"),
+    sourceSection(source, "async function loadRegistryServicesByIDs", "function AddSelectedServiceToWorkspaceButton"),
     sourceSection(source, "async function loadBuilderVersionContract", "// appServicesConfig"),
     sourceSection(source, "const webhookRes = await api.graphql", "const bootstrap = builderBootstrapRows"),
   ];
@@ -116,4 +118,15 @@ test("activation controls require authenticated service access and authoritative
   for (const flags of [[true, true, true, true], [false, false, true, true], [false, true, false, true], [false, true, true, false]]) {
     assert.deepEqual(unactivatedBuilderServices(...flags, ["missing"], enabled), []);
   }
+});
+
+// Credential defaults must come only from usable selectors and preserve deliberate choices.
+test("prefers the authorized default bucket without overriding user choices", () => {
+  const defaultBucket = { resource_type: "BUCKET", resource_id: "default-id", display_name: "Renamed default", is_default: true };
+  const other = { resource_type: "BUCKET", resource_id: "other-id", display_name: "default", is_default: false };
+  assert.equal(preferredAppBucket([other, defaultBucket]), "default-id");
+  assert.equal(preferredAppBucket([other, defaultBucket], "other-id"), "other-id");
+  assert.equal(preferredAppBucket([other], "revoked-id"), "other-id");
+  assert.equal(preferredAppBucket([other, { ...other, resource_id: "third-id" }]), "");
+  assert.equal(preferredAppBucket([]), "");
 });

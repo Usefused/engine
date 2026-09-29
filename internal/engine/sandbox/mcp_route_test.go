@@ -115,15 +115,15 @@ func TestMCPStableRouteSessionSurvivesPromotion(t *testing.T) {
 	}
 }
 
-// TestMCPExecutionAppSessionRejectsPromotion gives Execution Apps stricter traffic ownership than MCP apps.
-func TestMCPExecutionAppSessionRejectsPromotion(t *testing.T) {
+// TestMCPUnifiedAppSessionRejectsPromotion gives Unified Apps stricter traffic ownership than MCP apps.
+func TestMCPUnifiedAppSessionRejectsPromotion(t *testing.T) {
 	previousResolver, previousValidator := globalMCPRouteResolver, globalTokenValidator
 	t.Cleanup(func() { globalMCPRouteResolver, globalTokenValidator = previousResolver, previousValidator })
 	familyID, oldAppID, newAppID, tokenID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	resolver := &mcpRouteResolverStub{target: &store.MCPRouteTarget{AppFamilyID: familyID, AppID: newAppID, Stable: true}}
 	globalMCPRouteResolver = resolver
 	globalTokenValidator = &mcpModernTokenValidator{token: "family-token", identity: auth.RuntimeIdentity{
-		AppID: oldAppID, TokenID: tokenID, Kind: store.AppKindExecution, HostedMCP: true,
+		AppID: oldAppID, TokenID: tokenID, Kind: store.AppKindUnifiedApp, HostedMCP: true,
 	}}
 	sess := &mcpSession{
 		appID: oldAppID.String(), routeID: familyID.String(), sessionID: uuid.NewString(),
@@ -137,6 +137,6 @@ func TestMCPExecutionAppSessionRejectsPromotion(t *testing.T) {
 	_, status, err := authenticateMCPStreamableSession(context.Background(), familyID.String(), sess.token, sess.sessionID, sess.protocolVersion)
 	// The family token remains valid, but the prior exact version no longer receives requests.
 	if err == nil || status != 401 || resolver.calls != 1 {
-		t.Fatalf("old Execution App MCP session status=%d resolver calls=%d error=%v", status, resolver.calls, err)
+		t.Fatalf("old Unified App MCP session status=%d resolver calls=%d error=%v", status, resolver.calls, err)
 	}
 }

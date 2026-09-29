@@ -39,25 +39,25 @@ export interface ExecutionBundle {
 export type ManifestEvaluator = (code: string) => Promise<unknown>;
 
 const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-const AUTHOR_IMPORTS = new Set(["@fused/execution", "@fused/operations", "zod", "zod/mini"]);
+const AUTHOR_IMPORTS = new Set(["@fused/unified-app", "@fused/operations", "zod", "zod/mini"]);
 
 // Validate one exact endpoint and its optional local typing hints before bundling.
 function validateSelection(operation: SelectedOperation): void {
   // Incomplete bindings must fail before a bundle can reach Engine apply.
   if (!operation || ![operation.service, operation.operation, operation.serviceId, operation.serviceVersionId, operation.endpointId].every((field) => typeof field === "string" && field.trim().length > 0)) {
-    throw new Error("Execution App contains an incomplete selected operation");
+    throw new Error("Unified App contains an incomplete selected operation");
   }
   // Engine decodes each target ID as a UUID at its physical dispatch boundary.
   if (![operation.serviceId, operation.serviceVersionId, operation.endpointId].every((identifier) => UUID.test(identifier))) {
-    throw new Error("Execution App contains a non-UUID selected operation ID");
+    throw new Error("Unified App contains a non-UUID selected operation ID");
   }
   // Reviewed input contracts must preserve the provider parameter object required by Engine.
   if (operation.inputSchema !== undefined && (!isRecord(operation.inputSchema) || operation.inputSchema.type !== "object")) {
-    throw new Error("Execution App operation input schema must be a JSON object");
+    throw new Error("Unified App operation input schema must be a JSON object");
   }
   // Output typing may represent any JSON response root, but never executable values.
   if (operation.outputSchema !== undefined && !isRecord(operation.outputSchema)) {
-    throw new Error("Execution App operation output schema must be a JSON Schema object");
+    throw new Error("Unified App operation output schema must be a JSON Schema object");
   }
 }
 
@@ -66,11 +66,11 @@ function validateSelections(operations: readonly SelectedOperation[]): void {
   const seen = new Set<string>();
   // Every hosted version must bind at least one admitted workspace operation.
   if (operations.length === 0) {
-    throw new Error("Execution App requires at least one selected operation");
+    throw new Error("Unified App requires at least one selected operation");
   }
   // Engine admission caps each immutable app version at 64 bound endpoints.
   if (operations.length > 64) {
-    throw new Error("Execution App supports at most 64 selected operations");
+    throw new Error("Unified App supports at most 64 selected operations");
   }
   // Every declared provider target must remain pinned across execution and replay.
   for (const operation of operations) {
@@ -78,7 +78,7 @@ function validateSelections(operations: readonly SelectedOperation[]): void {
     const key = `${operation.service}\u0000${operation.operation}`;
     // Duplicate author keys would make fused.fetch routing ambiguous.
     if (seen.has(key)) {
-      throw new Error(`Execution App selects ${operation.service}.${operation.operation} more than once`);
+      throw new Error(`Unified App selects ${operation.service}.${operation.operation} more than once`);
     }
     seen.add(key);
   }
@@ -104,13 +104,13 @@ import { toPublicSchema } from ${JSON.stringify(runtimeFile)};
 const app = authored;
 // A missing builder contract cannot become the one app-level execute operation.
 if (!app || !app.input || !app.output || !app.fetch || typeof app.execute !== "function") {
-  throw new Error("Missing default Execution App export");
+  throw new Error("Missing default Unified App export");
 }
 const inputSchema = toPublicSchema(app.input);
 const outputSchema = toPublicSchema(app.output);
 const searchable = app.fetch.searchable;
 const selectedOperations = ${selections};
-globalThis.FusedExecutionApp = {
+globalThis.FusedUnifiedApp = {
   input: app.input,
   output: app.output,
   fetch: { searchable },
@@ -130,9 +130,12 @@ globalThis.FusedExecutionManifest = { schemaVersion: 1, inputSchema, outputSchem
     // Remove unused Zod/runtime branches and shorten the isolated payload without changing its contract.
     minify: true,
     treeShaking: true,
+    // Inline maps let the isolated interpreter report authored TypeScript line numbers.
+    sourcemap: "inline",
+    sourcesContent: false,
     // Author imports resolve to the pinned runtime and Zod versions in this package.
     alias: {
-      "@fused/execution": runtimeFile,
+      "@fused/unified-app": runtimeFile,
       "zod/v4/core": path.join(path.dirname(require.resolve("zod/mini")), "../v4/core/index.js"),
       "zod/mini": path.join(path.dirname(require.resolve("zod/mini")), "index.js"),
       "zod": path.join(path.dirname(require.resolve("zod")), "index.js"),
@@ -148,7 +151,7 @@ globalThis.FusedExecutionManifest = { schemaVersion: 1, inputSchema, outputSchem
           }
           // Relative, absolute, Node, and arbitrary package imports could copy Engine files into a bundle.
           if (!AUTHOR_IMPORTS.has(args.path)) {
-            return { errors: [{ text: `Execution App source cannot import ${args.path}` }] };
+            return { errors: [{ text: `Unified App source cannot import ${args.path}` }] };
           }
           // This virtual method surface is generated from the exact Engine-selected operations.
           if (args.path === "@fused/operations") {
@@ -165,9 +168,9 @@ globalThis.FusedExecutionManifest = { schemaVersion: 1, inputSchema, outputSchem
   });
   // An immutable version owns exactly one executable JavaScript bundle.
   if (result.outputFiles.length !== 1) {
-    throw new Error("Execution App bundler did not produce a single script");
+    throw new Error("Unified App bundler did not produce a single script");
   }
-  const code = result.outputFiles[0].text;
+  const code = stableSourceMap(result.outputFiles[0].text, entryFile);
   // Plan and apply pin SHA-256 of the exact emitted UTF-8 bytes.
   const bundleDigest = "sha256:" + createHash("sha256").update(code, "utf8").digest("hex");
   return { code, bundleDigest };
@@ -182,11 +185,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function parseExecutionManifest(raw: unknown): ExecutionBundleManifest {
   // The app descriptor must contain both object contracts and its declared effects.
   if (!isRecord(raw) || raw.schemaVersion !== 1 || !isRecord(raw.inputSchema) || !isRecord(raw.outputSchema) || !Array.isArray(raw.searchable) || !Array.isArray(raw.selectedOperations)) {
-    throw new Error("Invalid Execution App bundle manifest");
+    throw new Error("Invalid Unified App bundle manifest");
   }
   // REST and generated client arguments use named fields, not a scalar root.
   if (raw.inputSchema.type !== "object" || raw.outputSchema.type !== "object") {
-    throw new Error("Execution App manifest schemas must be JSON objects");
+    throw new Error("Unified App manifest schemas must be JSON objects");
   }
   const searchable = validateSearchablePaths(raw.searchable);
   const selectedOperations = raw.selectedOperations as SelectedOperation[];
@@ -197,4 +200,14 @@ export function parseExecutionManifest(raw: unknown): ExecutionBundleManifest {
 // Let the caller's isolated build worker evaluate top-level code without invoking execute.
 export async function inspectExecutionBundle(code: string, evaluator: ManifestEvaluator): Promise<ExecutionBundleManifest> {
   return parseExecutionManifest(await evaluator(code));
+}
+
+// Normalize build-machine paths so equivalent source produces one deterministic immutable bundle.
+function stableSourceMap(code: string, entryFile: string): string {
+  return code.replace(/(sourceMappingURL=data:application\/json;base64,)([^\s]+)/, (_match, prefix: string, encoded: string) => {
+    const map = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+    // Only stable filenames enter private stack traces; source text stays in the app configuration.
+    map.sources = map.sources.map((source: string, index: number) => path.basename(source) === path.basename(entryFile) ? "unified-app.ts" : `fused-runtime/${index}/${path.basename(source)}`);
+    return prefix + Buffer.from(JSON.stringify(map)).toString("base64");
+  });
 }

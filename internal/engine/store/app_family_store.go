@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/Usefused/engine/internal/shared/canonicaljson"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -200,13 +199,13 @@ func (s *postgresStore) GetAppFamilyQuotaUsage(ctx context.Context, accountID uu
 			  AND (
 			    $2 = ''
 		    OR ($2 = 'api' AND family.kind = 'sdk')
-		    OR ($2 IN ('mcp', 'hosted_mcp') AND family.kind IN ('mcp', 'sdk', 'execution'))
+		    OR ($2 IN ('mcp', 'hosted_mcp') AND family.kind IN ('mcp', 'sdk', 'unified_app'))
 		    OR ($2 NOT IN ('api', 'mcp', 'hosted_mcp') AND family.kind = $2)
 			  )
 		)
 		SELECT COUNT(*) FILTER (WHERE invokable),
 		       COALESCE(BOOL_OR(canonical_name = $3 AND invokable AND (
-		         ($2 = 'hosted_mcp' AND kind IN ('sdk', 'execution')) OR
+		         ($2 = 'hosted_mcp' AND kind IN ('sdk', 'unified_app')) OR
 		         ($2 <> 'hosted_mcp' AND ($2 <> 'mcp' OR kind = 'mcp'))
 		       )), FALSE)
 		FROM scoped_families
@@ -298,8 +297,8 @@ func publishNewAppVersionTx(ctx context.Context, tx pgx.Tx, app App) (*App, bool
 
 // promoteStableMCPVersionTx advances the shared family's MCP alias only for a runnable MCP delivery.
 func promoteStableMCPVersionTx(ctx context.Context, tx pgx.Tx, app App) error {
-	// An Execution App's stable MCP alias moves only when its ready bundle takes traffic.
-	if app.ExpectedFamilyKind == AppKindExecution {
+	// A Unified App's stable MCP alias moves only when its ready bundle takes traffic.
+	if app.ExpectedFamilyKind == AppKindUnifiedApp {
 		return nil
 	}
 	// Plain SDK versions cannot acquire an MCP route through an unrelated apply.
@@ -316,7 +315,7 @@ func promoteStableMCPVersionTx(ctx context.Context, tx pgx.Tx, app App) error {
 		    END
 		FROM fused_apps app
 		WHERE family.app_family_id = $1
-		  AND (family.kind = 'mcp' OR (family.kind IN ('sdk', 'execution') AND app.hosted_mcp))
+		  AND (family.kind = 'mcp' OR (family.kind IN ('sdk', 'unified_app') AND app.hosted_mcp))
 		  AND app.app_id = $2
 		  AND app.app_family_id = family.app_family_id
 		  AND app.status IN ('active', 'deprecated')
@@ -438,11 +437,11 @@ func (s *postgresStore) AssessAppCapabilityExpansion(
 		), missing_operations AS (
 			SELECT regexp_replace(
 			         capability_key,
-			         '^service:[^:]+:[^:]+:operation:',
+			         '^(service:[^:]+:[^:]+|unified:[^:]+):operation:',
 			         ''
 			       ) AS operation_name
 			FROM missing
-			WHERE capability_key ~ '^service:[^:]+:[^:]+:operation:'
+			WHERE capability_key ~ '^(service:[^:]+:[^:]+|unified:[^:]+):operation:'
 		), expansion AS (
 			SELECT EXISTS(SELECT 1 FROM runnable_apps)
 			   AND EXISTS(SELECT 1 FROM missing) AS expands
@@ -614,8 +613,8 @@ func (s *postgresStore) ResolveMCPRoute(ctx context.Context, routeID uuid.UUID) 
 			  ON family.app_family_id = app.app_family_id
 			 AND family.account_id = app.account_id
 			WHERE app.app_id = $1
-			  AND (family.kind = 'mcp' OR (family.kind IN ('sdk', 'execution') AND app.hosted_mcp))
-			  AND (family.kind <> 'execution' OR family.execution_active_app_id = app.app_id)
+			  AND (family.kind = 'mcp' OR (family.kind IN ('sdk', 'unified_app') AND app.hosted_mcp))
+			  AND (family.kind <> 'unified_app' OR family.unified_active_app_id = app.app_id)
 			  AND app.status IN ('active', 'deprecated')
 			UNION ALL
 			SELECT family.app_family_id, app.app_id, true AS stable, 1 AS preference
@@ -625,8 +624,8 @@ func (s *postgresStore) ResolveMCPRoute(ctx context.Context, routeID uuid.UUID) 
 			 AND app.app_family_id = family.app_family_id
 			 AND app.account_id = family.account_id
 			WHERE family.app_family_id = $1
-			  AND (family.kind = 'mcp' OR (family.kind IN ('sdk', 'execution') AND app.hosted_mcp))
-			  AND (family.kind <> 'execution' OR family.execution_active_app_id = app.app_id)
+			  AND (family.kind = 'mcp' OR (family.kind IN ('sdk', 'unified_app') AND app.hosted_mcp))
+			  AND (family.kind <> 'unified_app' OR family.unified_active_app_id = app.app_id)
 			  AND app.status IN ('active', 'deprecated')
 		)
 		SELECT app_family_id, app_id, stable
@@ -693,7 +692,7 @@ var ErrSDKPackageNotGenerated = errors.New("app has no generated SDK package")
 func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID, appID uuid.UUID) (*models.SDKGenerationRequest, error) {
 	var request models.SDKGenerationRequest
 	var deliveryMode AppDeliveryMode
-	var selections, bindings, unifiedOperations []byte
+	var selections, bindings, attached []byte
 	var planID uuid.UUID
 	err := s.db.QueryRow(ctx, `
 		SELECT family.display_name, app.version, app.app_family_id, app.app_id,
@@ -704,8 +703,7 @@ func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID
 		       COALESCE((plan.resolved_payload->>'skip_sandbox')::boolean, false),
 		       COALESCE(plan.resolved_payload->>'default_engine_url', ''),
 		       COALESCE(plan.resolved_payload->'contract_bindings', '[]'::jsonb),
-		       COALESCE(plan.resolved_payload->'unified_operations', 'null'::jsonb),
-		       plan.id, COALESCE(family.delivery_mode, '')
+		       plan.id, COALESCE(family.delivery_mode, ''), COALESCE(plan.resolved_payload->'unified_apps', '[]'::jsonb)
 		FROM fused_apps app
 		JOIN fused_app_families family
 		  ON family.app_family_id = app.app_family_id
@@ -727,7 +725,7 @@ func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID
 		&request.Name, &request.Version, &request.AppFamilyID, &request.AppID,
 		&request.SourceHash, &request.GeneratorVersion, &request.TargetLanguage,
 		&selections, &request.Description, &request.IncludeMCP, &request.SkipSandbox,
-		&request.DefaultEngineURL, &bindings, &unifiedOperations, &planID, &deliveryMode,
+		&request.DefaultEngineURL, &bindings, &planID, &deliveryMode, &attached,
 	)
 	// Absence and cross-account identity remain indistinguishable to callers.
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -749,112 +747,13 @@ func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID
 	if err := json.Unmarshal(bindings, &request.ContractBindings); err != nil {
 		return nil, fmt.Errorf("decode SDK package contract bindings: %w", err)
 	}
-	// An absent descriptor is distinct from an invalid descriptor.
-	if string(unifiedOperations) != "null" {
-		// Reject corrupted definitions instead of regenerating a reduced SDK.
-		if err := json.Unmarshal(unifiedOperations, &request.UnifiedOperations); err != nil {
-			return nil, fmt.Errorf("decode SDK package unified operations: %w", err)
-		}
+	// Package recovery must retain the same public hosted contracts as its original build.
+	if err := json.Unmarshal(attached, &request.UnifiedApps); err != nil {
+		return nil, err
 	}
 	request.IdempotencyKey = planID.String()
 	request.TargetType = AppKindSDK.String()
 	return &request, nil
-}
-
-// GetMCPUnifiedOperationDescriptors returns only complete logical operations
-// whose physical graph is discoverable under the session token. The complete
-// descriptor is still read for immutable-hash verification, while PostgreSQL
-// owns policy filtering so runtime code cannot accidentally broaden it.
-func (s *postgresStore) GetMCPUnifiedOperationDescriptors(ctx context.Context, appID uuid.UUID, unrestricted bool, allowedOperations []string) (*models.SDKUnifiedOperationDescriptors, error) {
-	var expectedHash string
-	var complete, visible []byte
-	err := s.db.QueryRow(ctx, `
-		WITH descriptor AS (
-			SELECT app.unified_codegen_descriptor_hash AS expected_hash, COALESCE(plan.resolved_payload->'unified_operations', 'null'::jsonb) AS complete
-			FROM fused_apps app
-			JOIN fused_app_families family ON family.app_family_id = app.app_family_id AND family.account_id = app.account_id
-			JOIN LATERAL (
-				SELECT applied.resolved_payload
-				FROM fused_config_plans applied
-				WHERE applied.config_key = app.config_key AND applied.source_hash = app.source_hash
-				  AND applied.config_type = family.kind AND applied.status = 'applied'
-				  AND NOT COALESCE((applied.resolved_payload->>'noop')::boolean, false)
-				ORDER BY applied.applied_at DESC, applied.created_at DESC
-				LIMIT 1
-			) plan ON true
-			WHERE app.app_id = $1
-			  AND (family.kind = 'mcp' OR (family.kind IN ('sdk', 'execution') AND app.hosted_mcp))
-			  AND app.status IN ('active', 'deprecated')
-		), projected AS (
-			SELECT expected_hash, complete,
-			       CASE WHEN complete = 'null'::jsonb THEN complete
-			       ELSE jsonb_build_object(
-			         'schema_version', complete->'schema_version',
-			         'operations', COALESCE((
-			           SELECT jsonb_agg(candidate.operation ORDER BY candidate.operation->>'name')
-			           FROM jsonb_array_elements(complete->'operations') candidate(operation)
-			           WHERE $2::boolean OR NOT EXISTS (
-			             SELECT 1
-			             FROM jsonb_array_elements(candidate.operation->'targets') target(value)
-			             WHERE NOT (target.value->>'operation_id' = ANY($3::text[]) AND (
-			                 target.value->'rollback' IS NULL
-			                 OR target.value->'rollback' = 'null'::jsonb
-			                 OR target.value->'rollback'->>'operation_id' = ANY($3::text[])
-			               ))
-			           )
-			         ), '[]'::jsonb)
-			       ) END AS visible
-			FROM descriptor
-		)
-		SELECT expected_hash, complete, visible FROM projected
-	`, appID, unrestricted, allowedOperations).Scan(&expectedHash, &complete, &visible)
-	// A missing runnable MCP version or exact applied plan cannot provide an
-	// authoritative catalogue and must not fall back to mutable state.
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrAppNotFound
-	}
-	// Database errors remain distinct from an absent descriptor so callers can
-	// fail the session rather than silently presenting a partial catalogue.
-	if err != nil {
-		return nil, fmt.Errorf("get MCP Unified descriptor: %w", err)
-	}
-	return decodeMCPUnifiedDescriptorProjection(complete, visible, expectedHash)
-}
-
-// decodeMCPUnifiedDescriptorProjection verifies the immutable complete value
-// before admitting the independently SQL-filtered public projection.
-func decodeMCPUnifiedDescriptorProjection(complete, visible []byte, expectedHash string) (*models.SDKUnifiedOperationDescriptors, error) {
-	// The canonical empty graph is represented by no public descriptor, not by
-	// a second synthetic descriptor shape.
-	if string(complete) == "null" {
-		if expectedHash != EmptyUnifiedSetHash {
-			return nil, errors.New("MCP Unified descriptor hash is inconsistent")
-		}
-		return nil, nil
-	}
-	digest, err := canonicaljson.HexSHA256(complete)
-	// App identity pins the complete descriptor, so a mismatch invalidates the
-	// entire discovery surface even if the filtered subset decoded cleanly.
-	if err != nil || "sha256:"+digest != expectedHash {
-		return nil, errors.New("MCP Unified descriptor hash is invalid")
-	}
-	var descriptors models.SDKUnifiedOperationDescriptors
-	// The filtered bytes retain the shared public descriptor contract; they do
-	// not become a separate MCP-specific schema.
-	if err := json.Unmarshal(visible, &descriptors); err != nil {
-		return nil, fmt.Errorf("decode MCP Unified descriptor: %w", err)
-	}
-	// Runtime discovery accepts only the compiler's current public descriptor
-	// schema so future semantics cannot be guessed by an older Engine.
-	if descriptors.SchemaVersion != models.SDKUnifiedDescriptorSchemaVersion {
-		return nil, errors.New("MCP Unified descriptor schema is unsupported")
-	}
-	// No fully authorized logical operation means there is no Unified catalogue
-	// section for this token, while physical discovery remains unaffected.
-	if len(descriptors.Operations) == 0 {
-		return nil, nil
-	}
-	return &descriptors, nil
 }
 
 // scanApp maps the stable query column order into one immutable app publication value.

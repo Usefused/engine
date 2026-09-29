@@ -120,11 +120,6 @@ func mcpClassifierCatalogue(fixture *Fixture) []ClassifierOperation {
 	for _, op := range fixture.Operations {
 		operations = append(operations, ClassifierOperation{op.OperationID, classifierDescription(op.Description)})
 	}
-	if fixture.UnifiedOperations != nil { // Public Unified descriptors participate in the same exact namespace.
-		for _, op := range fixture.UnifiedOperations.Operations {
-			operations = append(operations, ClassifierOperation{op.Name, classifierDescription("Unified operation: " + op.Description)})
-		}
-	}
 	return operations
 }
 

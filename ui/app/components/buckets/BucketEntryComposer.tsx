@@ -1,3 +1,4 @@
+import { Select } from "../forms/Select.ts";
 import { type FormEvent, useEffect, useState } from "react";
 import { Check, X } from "lucide-react";
 import { type ActivatedService } from "~/lib/api";
@@ -490,6 +491,7 @@ function MTLSSecretFields({
   );
 }
 
+/** Uses the shared select while keeping selection state and actions owned by this page. */
 function QualifierSelect({
   kind,
   authOptions,
@@ -512,7 +514,7 @@ function QualifierSelect({
       <span className="mb-1 block text-xs font-medium text-slate-500">
         {kind === "secret" ? "Credential type" : "Location"}
       </span>
-      <select
+      <Select
         value={kind === "secret" ? secret.credentialType : value.location}
         disabled={kind === "secret" && authOptions.length === 0}
         onChange={(event) =>
@@ -540,7 +542,7 @@ function QualifierSelect({
             <option value="env">Env</option>
           </>
         )}
-      </select>
+      </Select>
     </label>
   );
 }

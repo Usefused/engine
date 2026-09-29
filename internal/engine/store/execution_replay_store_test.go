@@ -52,7 +52,7 @@ func TestReplayEvidencePostgresScope(t *testing.T) {
 		AppVersion: "1", Status: "queued", Mode: "live",
 		ReadHandleHash: strings.Repeat("a", 64), Input: json.RawMessage(`{"email":"a@example.com"}`),
 	}
-	defer pool.Exec(context.Background(), `DELETE FROM fused_execution_app_results WHERE id=$1`, record.ID)
+	defer pool.Exec(context.Background(), `DELETE FROM fused_unified_app_results WHERE id=$1`, record.ID)
 	repository := NewPostgresStore(pool)
 	createCompletedTestExecution(t, ctx, repository.(ExecutionResultStore), record)
 	replay := repository.(ExecutionReplayEvidenceStore)
@@ -62,7 +62,7 @@ func TestReplayEvidencePostgresScope(t *testing.T) {
 		t.Fatalf("save replay evidence: %v", err)
 	}
 	assertReplayEvidenceScope(t, ctx, replay, record, key, history)
-	if _, err := pool.Exec(ctx, `UPDATE fused_execution_app_replay_evidence SET expires_at=NOW()-INTERVAL '1 second' WHERE execution_id=$1`, record.ID); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE fused_unified_app_replay_evidence SET expires_at=NOW()-INTERVAL '1 second' WHERE execution_id=$1`, record.ID); err != nil {
 		t.Fatalf("expire replay evidence: %v", err)
 	}
 	if _, err := replay.GetReplayEvidence(ctx, record.AccountID, record.AppID, record.ID, key); !errors.Is(err, ErrReplayEvidenceNotFound) {

@@ -1,3 +1,4 @@
+import { Select } from "../forms/Select.ts";
 import { newWebhookEvent, webhookPayloadField, webhookRecord, type WebhookDraftEvent, type WebhookEditorDraft } from "~/lib/webhook-editor-draft";
 
 export const webhookFieldClass = "mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 disabled:bg-slate-100";
@@ -36,12 +37,12 @@ function DeliveryMethod({ event, onChange }: { event: WebhookDraftEvent; onChang
   return <details className="mt-3 text-sm" open={event.method !== "post"}>
     <summary className="cursor-pointer text-slate-600">Delivery method: {event.method.toUpperCase()} · Advanced</summary>
     <div className="space-y-2 pt-3">
-      <label className="block">HTTP delivery method<select className={webhookFieldClass} value={event.method} onChange={(e) => onChange({ method: e.target.value })}>
+      <label className="block">HTTP delivery method<Select className={webhookFieldClass} value={event.method} onChange={(e) => onChange({ method: e.target.value })}>
         <option value="post">POST (default)</option>
         <option value="get">GET</option>
         {/* A selected disabled option exposes the original value without offering unsupported verbs for new events. */}
         {!supported && <option value={event.method} disabled>{event.method.toUpperCase()} (imported; unsupported)</option>}
-      </select></label>
+      </Select></label>
       {/* Non-default imports must not silently acquire POST semantics or appear executable by this receiver. */}
       {!supported && <p role="note" className="text-sm text-amber-800">{event.method.toUpperCase()} is preserved from the imported spec but unsupported by Engine ingress (POST/GET only).</p>}
       {/* Undo restores only this row's original transport, without offering unsupported verbs for unrelated events. */}

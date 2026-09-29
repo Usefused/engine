@@ -72,9 +72,9 @@ func TestValidateMCPFixtureSchemasAggregateLimit(t *testing.T) {
 	}
 }
 
-// TestValidateMCPFixtureSchemasCoversNestedAndLogicalSchemas guards schema
+// TestValidateMCPFixtureSchemasCoversNestedPhysicalSchemas guards schema
 // surfaces that do not appear as top-level physical request contracts.
-func TestValidateMCPFixtureSchemasCoversNestedAndLogicalSchemas(t *testing.T) {
+func TestValidateMCPFixtureSchemasCoversNestedPhysicalSchemas(t *testing.T) {
 	tooDeep := mcpTestNestedArraySchema(maxMCPSchemaDepth + 1)
 	tests := []struct {
 		name    string
@@ -86,14 +86,9 @@ func TestValidateMCPFixtureSchemasCoversNestedAndLogicalSchemas(t *testing.T) {
 				ItemEncoding: &models.RequestEncoding{Headers: map[string]models.HeaderContract{"X-Cursor": {Schema: &models.SchemaContract{Raw: tooDeep}}}},
 			}}}}}},
 		},
-		{
-			name: "Unified target output",
-			fixture: &Fixture{UnifiedOperations: &models.SDKUnifiedOperationDescriptors{Operations: []models.SDKUnifiedOperationDescriptor{{
-				InputSchema: json.RawMessage(`{"type":"object"}`), Targets: []models.SDKUnifiedTargetDescriptor{{OutputSchema: tooDeep}},
-			}}}},
-		},
+
 	}
-	// Both cases represent schema branches outside the ordinary request body path.
+	// Encoding headers remain schema branches outside the ordinary request body path.
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			// Every documented schema location shares the same depth classification.
@@ -166,10 +161,7 @@ func TestMCPEncodingQueueRejectsPrefixBeforeCopy(t *testing.T) {
 func TestLoadFixtureRejectsOversizedSchemaWithoutEcho(t *testing.T) {
 	marker := "private-schema-marker"
 	description := marker + strings.Repeat("x", maxMCPSchemaEncodedBytes)
-	fixture := Fixture{UnifiedOperations: &models.SDKUnifiedOperationDescriptors{
-		SchemaVersion: models.SDKUnifiedDescriptorSchemaVersion,
-		Operations:    []models.SDKUnifiedOperationDescriptor{{Name: "oversized", InputSchema: mcpTestDescriptionSchema(t, description)}},
-	}}
+	fixture := Fixture{Operations: []FixtureOperation{{OperationID: "oversized", Parameters: []models.Parameter{{Schema: &models.SchemaContract{Raw: mcpTestDescriptionSchema(t, description)}}}}}}
 	encoded, err := json.Marshal(fixture)
 	// The test fixture itself must remain valid so admission owns the failure.
 	if err != nil {

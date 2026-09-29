@@ -1,3 +1,4 @@
+import { Select } from "../forms/Select.ts";
 import { createElement, type ChangeEvent, type FormEvent, type ReactElement } from "react";
 import type {
   Team,
@@ -94,6 +95,7 @@ export function teamResourceLevels(team: Team, resourceType: TeamResourceType, r
   });
 }
 
+/** Uses the shared select while keeping selection state and actions owned by this page. */
 function workspaceRoleControl(props: TeamAccessControlsProps): ReactElement {
   const current = teamWorkspaceRole(props.team);
   // Preserve Owner as the visible current value, but never offer Owner as an
@@ -108,7 +110,7 @@ function workspaceRoleControl(props: TeamAccessControlsProps): ReactElement {
     createElement("span", { className: "block text-sm font-semibold text-slate-800 mb-1" }, "Workspace role"),
     createElement("span", { className: "block text-xs text-slate-500 mb-2" }, "Sets the team's general workspace capabilities."),
     createElement(
-      "select",
+      Select,
       {
         value: current,
         disabled: props.disabled || (current === "OWNER" && !props.canManageOwners),
@@ -142,6 +144,7 @@ function resourceSection(
   );
 }
 
+/** Uses the shared select while keeping selection state and actions owned by this page. */
 function resourceRow(resourceType: TeamResourceType, resource: TeamAccessResource, props: TeamAccessControlsProps): ReactElement {
   const current = teamResourceLevel(props.team, resourceType, resource.id) ?? "NONE";
   return createElement(
@@ -149,7 +152,7 @@ function resourceRow(resourceType: TeamResourceType, resource: TeamAccessResourc
     { key: resource.id, className: "flex items-center justify-between gap-4 py-3" },
     createElement("span", { className: "text-sm text-slate-800 truncate" }, resource.name),
     createElement(
-      "select",
+      Select,
       {
         value: current,
         disabled: props.disabled,
@@ -186,6 +189,7 @@ function appSection(props: TeamAccessControlsProps): ReactElement {
   );
 }
 
+/** Uses the shared select while keeping selection state and actions owned by this page. */
 function appGrantForm(props: TeamAccessControlsProps): ReactElement {
   return createElement(
     "form",
@@ -202,7 +206,7 @@ function appGrantForm(props: TeamAccessControlsProps): ReactElement {
       className: "rounded-lg border border-slate-300 px-3 py-2 text-sm",
     }),
     createElement(
-      "select",
+      Select,
       { name: "level", disabled: props.disabled, "aria-label": "App or server access", className: "rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm" },
       createElement("option", { value: "READER" }, "Read"),
       createElement("option", { value: "MANAGER" }, "Manage")
@@ -221,6 +225,7 @@ function submitAppGrant(event: FormEvent<HTMLFormElement>, props: TeamAccessCont
   event.currentTarget.reset();
 }
 
+/** Uses the shared select while keeping selection state and actions owned by this page. */
 function appRow(binding: Team["bindings"][number], props: TeamAccessControlsProps): ReactElement {
   const levels = teamAppAccessLevels(props.team, binding.resource_id);
   const current = levels.includes("MANAGER") ? "MANAGER" : levels.includes("READER") ? "READER" : "NONE";
@@ -233,7 +238,7 @@ function appRow(binding: Team["bindings"][number], props: TeamAccessControlsProp
       createElement("span", { className: "block text-xs text-slate-400 truncate" }, binding.resource_id)
     ),
     createElement(
-      "select",
+      Select,
       {
         value: current,
         disabled: props.disabled,

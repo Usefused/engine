@@ -11,7 +11,7 @@ type AppDeliveryMode string
 const (
 	AppKindSDK         AppKind         = "sdk"
 	AppKindMCP         AppKind         = "mcp"
-	AppKindExecution   AppKind         = "execution"
+	AppKindUnifiedApp  AppKind         = "unified_app"
 	AppDeliveryModeSDK AppDeliveryMode = "sdk"
 	AppDeliveryModeAPI AppDeliveryMode = "api"
 )
@@ -19,7 +19,7 @@ const (
 // Valid admits only persisted App adapters with a concrete runtime contract.
 func (kind AppKind) Valid() bool {
 	// Hosted execute has its own family identity while sharing version and token lifecycle.
-	return kind == AppKindSDK || kind == AppKindMCP || kind == AppKindExecution
+	return kind == AppKindSDK || kind == AppKindMCP || kind == AppKindUnifiedApp
 }
 
 func (kind AppKind) String() string {

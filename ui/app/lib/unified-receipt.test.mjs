@@ -141,5 +141,5 @@ test("child navigation reuses canonical receipt data and restores parent positio
   assert.match(css, /animation: none/);
   assert.match(api, /parent_execution_id: \$parentExecutionId/);
   assert.match(api, /unified_steps \{ target phase status error_code \}/);
-  assert.doesNotMatch(inspector, /ExecuteUnified|executeResolved|api\.[a-zA-Z.]*execute\(/);
+  assert.doesNotMatch(inspector, /executeResolved|api\.[a-zA-Z.]*execute\(/);
 });

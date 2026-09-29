@@ -1,7 +1,49 @@
 {
-  "call_count": 92,
-  "document_count": 110,
+  "call_count": 104,
+  "document_count": 122,
   "calls": [
+    {
+      "endpoint": "registry",
+      "file": "app/components/apps/AppServiceBuilder.tsx",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/components/apps/AppServiceBuilder.tsx",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/components/apps/AppServiceBuilder.tsx",
+      "call": 3,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/components/apps/AppServiceBuilder.tsx",
+      "call": 4,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/components/apps/AppServiceBuilder.tsx",
+      "call": 5,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/components/apps/AppServiceBuilder.tsx",
+      "call": 6,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/components/apps/UnifiedAppUsage.tsx",
+      "call": 1,
+      "document_count": 1
+    },
     {
       "endpoint": "engine",
       "file": "app/components/buckets/BucketConnectAccount.tsx",
@@ -210,6 +252,48 @@
       "endpoint": "engine",
       "file": "app/lib/app-builder.ts",
       "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/app-describe-api.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/app-describe-api.ts",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/app-describe-api.ts",
+      "call": 3,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/app-describe-api.ts",
+      "call": 4,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/app-describe-api.ts",
+      "call": 5,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/app-describe-api.ts",
+      "call": 6,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/app-describe-selection.ts",
+      "call": 1,
       "document_count": 1
     },
     {
@@ -436,14 +520,20 @@
     },
     {
       "endpoint": "registry",
-      "file": "app/lib/workflow-api.ts",
+      "file": "app/lib/unified-app-api.ts",
       "call": 1,
       "document_count": 1
     },
     {
       "endpoint": "registry",
-      "file": "app/lib/workflow-api.ts",
+      "file": "app/lib/unified-app-api.ts",
       "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/unified-app-api.ts",
+      "call": 3,
       "document_count": 1
     },
     {
@@ -477,39 +567,9 @@
       "document_count": 2
     },
     {
-      "endpoint": "registry",
-      "file": "app/routes/integrations.builder.tsx",
-      "call": 1,
-      "document_count": 1
-    },
-    {
-      "endpoint": "registry",
-      "file": "app/routes/integrations.builder.tsx",
-      "call": 2,
-      "document_count": 1
-    },
-    {
-      "endpoint": "registry",
-      "file": "app/routes/integrations.builder.tsx",
-      "call": 3,
-      "document_count": 1
-    },
-    {
-      "endpoint": "registry",
-      "file": "app/routes/integrations.builder.tsx",
-      "call": 4,
-      "document_count": 1
-    },
-    {
-      "endpoint": "registry",
-      "file": "app/routes/integrations.builder.tsx",
-      "call": 5,
-      "document_count": 1
-    },
-    {
       "endpoint": "engine",
       "file": "app/routes/integrations.builder.tsx",
-      "call": 6,
+      "call": 1,
       "document_count": 1
     },
     {
@@ -553,9 +613,70 @@
       "file": "app/routes/integrations.sdks.$id.tsx",
       "call": 2,
       "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.unified-apps.$id.tsx",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.unified-apps.$id.tsx",
+      "call": 2,
+      "document_count": 1
     }
   ],
   "documents": [
+    {
+      "endpoint": "registry",
+      "file": "app/components/apps/AppServiceBuilder.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "\n    query($id: String!, $version: String!) {\n      service(id: $id, version: $version) {\n        current_service_version\n        base_url\n        servers { url description environment is_default }\n        resources { id name }\n        webhooks { id name description method }\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/components/apps/AppServiceBuilder.tsx",
+      "call": 2,
+      "variant": 1,
+      "document": "\n    query AppBuilderServices($serviceIds: [String!]!) {\n      servicesByIds(serviceIds: $serviceIds) {\n        id name slug canonical_ref provider { name handle } description base_url\n        servers { url description environment is_default }\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/components/apps/AppServiceBuilder.tsx",
+      "call": 3,
+      "variant": 1,
+      "document": "\n  query($resourceId: String!, $serviceId: String!, $serviceVersionId: String!, $limit: Int, $offset: Int) {\n    resourceIntegrations(resourceId: $resourceId, serviceId: $serviceId, service_version_id: $serviceVersionId, limit: $limit, offset: $offset) {\n      id service_id name description version status method path deprecated deprecation_date\n    }\n  }\n"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/components/apps/AppServiceBuilder.tsx",
+      "call": 4,
+      "variant": 1,
+      "document": "\n        query($id: String!) {\n          service(id: $id) {\n            current_service_version\n            base_url\n            servers { url description environment is_default }\n            endpoint_count\n            webhook_count\n            event_extraction_path\n            incoming_webhook_config { auth_type }\n            resources { id name }\n            webhooks { id name description method }\n          }\n          serviceVersions(serviceId: $id) { id name header_value status }\n        }\n      "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/components/apps/AppServiceBuilder.tsx",
+      "call": 5,
+      "variant": 1,
+      "document": "\n  query($resourceId: String!, $serviceId: String!, $serviceVersionId: String!, $limit: Int, $offset: Int) {\n    resourceIntegrations(resourceId: $resourceId, serviceId: $serviceId, service_version_id: $serviceVersionId, limit: $limit, offset: $offset) {\n      id service_id name description version status method path deprecated deprecation_date\n    }\n  }\n"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/components/apps/AppServiceBuilder.tsx",
+      "call": 6,
+      "variant": 1,
+      "document": "query($search: String!, $version: String!) { apps(kind: \"sdk\", search: $search, version: $version, limit: 1, offset: 0) { items { name version } } }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/components/apps/UnifiedAppUsage.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "query UnifiedAppDestinations($kind: String!, $search: String!) {\n        appFamilies(kind: $kind, search: $search, limit: 50, offset: 0) { items { app_family_id name latest_version latest_version_id } }\n      }"
+    },
     {
       "endpoint": "engine",
       "file": "app/components/buckets/BucketConnectAccount.tsx",
@@ -800,6 +921,55 @@
       "call": 2,
       "variant": 1,
       "document": "\n    query AppBuildSelectors($ownerTeamId: ID, $resourceType: AppSelectorResourceType!, $search: String, $limit: Int!, $offset: Int!) {\n      appBuildSelectors(owner_team_id: $ownerTeamId, resource_type: $resourceType, search: $search, limit: $limit, offset: $offset) {\n        total\n        items {\n          resource_type resource_id display_name\n        }\n      }\n    }\n  "
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/app-describe-api.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "query UnifiedAppCandidates($refs: [String!]!, $limitPerRef: Int!) {\n    serviceCandidatesByRefs(refs: $refs, limitPerRef: $limitPerRef) { ref candidates { id name slug provider { handle } } }\n  }"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/app-describe-api.ts",
+      "call": 2,
+      "variant": 1,
+      "document": "query UnifiedAppServiceVersion($id: String!) {\n    service(id: $id) { service_versions(limit: 1) { id name status } }\n  }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/app-describe-api.ts",
+      "call": 3,
+      "variant": 1,
+      "document": "query ClassifyPromptOperation($service_id: String!, $version: String!, $query: String!) {\n      classifyPromptOperation(service_id: $service_id, version: $version, query: $query)\n    }"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/app-describe-api.ts",
+      "call": 4,
+      "variant": 1,
+      "document": "query ParsePromptIntent($q: String!, $appContext: String!) {\n    parseSDKIntent(q: $q, appContext: $appContext) { clarification action name description language sequential webhook_requested services { name endpoint_query endpoint_queries select_all_operations event_queries } }\n  }"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/app-describe-api.ts",
+      "call": 5,
+      "variant": 1,
+      "document": "query DraftPromptUnifiedApp($q: String!, $selections: String!) {\n    draftPromptUnifiedApp(q: $q, selections: $selections)\n  }"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/app-describe-api.ts",
+      "call": 6,
+      "variant": 1,
+      "document": "query DescribeAppEvents($id: String!, $version: String!) {\n    service(id: $id, version: $version) { webhooks { name description } }\n  }"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/app-describe-selection.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "query DescribeSelectionContract($id: String!, $version: String!) {\n      service(id: $id, version: $version) {\n        id name slug canonical_ref provider { name handle } description current_service_version base_url\n        servers { url description environment is_default }\n        endpoint_count webhook_count event_extraction_path incoming_webhook_config { auth_type }\n        resources { id name }\n        webhooks { id name description method }\n      }\n      serviceVersions(serviceId: $id) { id name header_value status }\n      serviceOperations(serviceId: $id, version: $version) { id service_id name description method path resource_name }\n    }"
     },
     {
       "endpoint": "engine",
@@ -1167,17 +1337,24 @@
     },
     {
       "endpoint": "registry",
-      "file": "app/lib/workflow-api.ts",
+      "file": "app/lib/unified-app-api.ts",
       "call": 1,
       "variant": 1,
-      "document": "query WorkflowLibrary($search: String!, $ids: [ID!], $limit: Int!, $offset: Int!) {\n  workflows(search: $search, ids: $ids, limit: $limit, offset: $offset) {\n    total items { id publisher hash public is_owner template }\n  }\n}"
+      "document": "query UnifiedAppTemplates($search: String!, $ids: [ID!], $limit: Int!, $offset: Int!) {\n    unifiedAppTemplates(search: $search, ids: $ids, limit: $limit, offset: $offset) { total items { id publisher hash public is_owner template } }\n  }"
     },
     {
       "endpoint": "registry",
-      "file": "app/lib/workflow-api.ts",
+      "file": "app/lib/unified-app-api.ts",
       "call": 2,
       "variant": 1,
-      "document": "mutation SetWorkflowVisibility($id: ID!, $public: Boolean!) {\n    setWorkflowVisibility(id: $id, public: $public) { id publisher hash public is_owner template }\n  }"
+      "document": "mutation PublishUnifiedAppTemplate($template: String!, $public: Boolean!) {\n    publishUnifiedAppTemplate(template: $template, public: $public) { id publisher hash public is_owner template }\n  }"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/unified-app-api.ts",
+      "call": 3,
+      "variant": 1,
+      "document": "mutation SetUnifiedAppTemplateVisibility($id: ID!, $public: Boolean!) {\n    setUnifiedAppTemplateVisibility(id: $id, public: $public) { id publisher hash public is_owner template }\n  }"
     },
     {
       "endpoint": "registry",
@@ -1229,46 +1406,11 @@
       "document": "\n    query($id: String!, $version: String) {\n      service(id: $id, version: $version) {\n        id name slug description icon_url base_url current_service_version servers { url description environment is_default }\n        is_public watch_for_drift created_at updated_at source_url import_method\n        import_warnings { id endpoint_id method path operation_id reasons recommendation source created_at }\n        auth_configs {\n          name type scheme basic_password_mode location key_name open_id_connect_url oauth2_metadata_url\n          deprecated token_endpoint_auth_method token_request_media_type pkce_required scopes_delimiter\n          extra_auth_params extra_token_params refresh_token_rotates oauth2_flows strategy policy_provenance\n        }\n        event_extraction_path\n        incoming_webhook_config { auth_type auth_location auth_key_name signature_header }\n        rate_limit { \n  version\n  policies {\n    name\n    mode\n    unit\n    identity { inputs { kind binding name } }\n    cost { default rules { operation cost } }\n    algorithm\n    fixed_window { limit duration_ms }\n    rolling_window { limit duration_ms }\n    token_bucket { capacity refill_units refill_interval_ms }\n    concurrency { limit }\n    response_signals {\n      limit { source name path }\n      remaining { source name path }\n      reset { signal { source name path } format }\n      cost { source name path }\n    }\n  }\n  cooldown {\n    statuses { min max }\n    headers { name formats max_delay_ms }\n  }\n }\n        retry_config { \n  version\n  rules {\n    predicates {\n      methods\n      operation_kinds\n      statuses { min max }\n      errors\n      body_replayability\n      idempotency_key { requirement header }\n      required_provider_headers\n    }\n    action {\n      max_attempts\n      max_elapsed_ms\n      backoff { strategy base_delay_ms max_delay_ms jitter_ms }\n      retry_after_headers { name formats max_delay_ms }\n    }\n  }\n }\n        default_headers provider { name handle } canonical_ref is_owner webhook_count endpoint_count\n        webhooks { id name description method request_body }\n        resources { id name endpointCount }\n      }\n      serviceVersions(serviceId: $id) { id name is_public status created_at updated_at }\n    }\n  "
     },
     {
-      "endpoint": "registry",
+      "endpoint": "engine",
       "file": "app/routes/integrations.builder.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n    query($id: String!, $version: String!) {\n      service(id: $id, version: $version) {\n        current_service_version\n        base_url\n        servers { url description environment is_default }\n        resources { id name }\n        webhooks { id name description method }\n      }\n    }\n  "
-    },
-    {
-      "endpoint": "registry",
-      "file": "app/routes/integrations.builder.tsx",
-      "call": 2,
-      "variant": 1,
-      "document": "\n    query AppBuilderServices($serviceIds: [String!]!) {\n      servicesByIds(serviceIds: $serviceIds) {\n        id name slug canonical_ref provider { name handle } description base_url\n        servers { url description environment is_default }\n      }\n    }\n  "
-    },
-    {
-      "endpoint": "registry",
-      "file": "app/routes/integrations.builder.tsx",
-      "call": 3,
-      "variant": 1,
-      "document": "\n  query($resourceId: String!, $serviceId: String!, $serviceVersionId: String!, $limit: Int, $offset: Int) {\n    resourceIntegrations(resourceId: $resourceId, serviceId: $serviceId, service_version_id: $serviceVersionId, limit: $limit, offset: $offset) {\n      id service_id name description version status method path deprecated deprecation_date\n    }\n  }\n"
-    },
-    {
-      "endpoint": "registry",
-      "file": "app/routes/integrations.builder.tsx",
-      "call": 4,
-      "variant": 1,
-      "document": "\n        query($id: String!) {\n          service(id: $id) {\n            current_service_version\n            base_url\n            servers { url description environment is_default }\n            endpoint_count\n            webhook_count\n            event_extraction_path\n            incoming_webhook_config { auth_type }\n            resources { id name }\n            webhooks { id name description method }\n          }\n          serviceVersions(serviceId: $id) { id name header_value status }\n        }\n      "
-    },
-    {
-      "endpoint": "registry",
-      "file": "app/routes/integrations.builder.tsx",
-      "call": 5,
-      "variant": 1,
-      "document": "\n  query($resourceId: String!, $serviceId: String!, $serviceVersionId: String!, $limit: Int, $offset: Int) {\n    resourceIntegrations(resourceId: $resourceId, serviceId: $serviceId, service_version_id: $serviceVersionId, limit: $limit, offset: $offset) {\n      id service_id name description version status method path deprecated deprecation_date\n    }\n  }\n"
-    },
-    {
-      "endpoint": "engine",
-      "file": "app/routes/integrations.builder.tsx",
-      "call": 6,
-      "variant": 1,
-      "document": "query($search: String!, $version: String!) { apps(kind: \"sdk\", search: $search, version: $version, limit: 1, offset: 0) { items { name version } } }"
+      "document": "query UnifiedAppConsumerSource($id: String!) { app(app_id: $id) { app_id kind name version } }"
     },
     {
       "endpoint": "engine",
@@ -1296,7 +1438,7 @@
       "file": "app/routes/integrations.sdks._index.tsx",
       "call": 1,
       "variant": 1,
-      "document": "\n    query Applications($search: String!, $archived: Boolean!, $limit: Int!, $offset: Int!) {\n      appFamilies(search: $search, archived: $archived, limit: $limit, offset: $offset) {\n        items {\n          app_family_id\n          app_id: latest_version_id\n          name\n          version: latest_version\n          version_count\n          kind\n          delivery_mode\n          hosted_mcp\n          target_language\n          created_at: latest_created_at\n          status: latest_status\n          archived_at\n          downloads\n        }\n        total\n      }\n    }\n  "
+      "document": "\n    query Applications($kind: String!, $search: String!, $archived: Boolean!, $limit: Int!, $offset: Int!) {\n      appFamilies(kind: $kind, search: $search, archived: $archived, limit: $limit, offset: $offset) {\n        items {\n          app_family_id\n          app_id: latest_version_id\n          name\n          version: latest_version\n          version_count\n          kind\n          delivery_mode\n          hosted_mcp\n          target_language\n          created_at: latest_created_at\n          status: latest_status\n          archived_at\n          downloads\n        }\n        total\n      }\n    }\n  "
     },
     {
       "endpoint": "engine",
@@ -1325,6 +1467,20 @@
       "call": 2,
       "variant": 1,
       "document": "\n      query($appFamilyId: String!) {\n        appVersions(app_family_id: $appFamilyId) {\n            app_id\n            version\n            created_at\n        }\n      }\n    "
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.unified-apps.$id.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "query UnifiedAppDetails($id: String!) {\n          app(app_id: $id) { app_id app_family_id name description version status kind created_at }\n          appServices(app_id: $id) { service_id service_name service_slug version endpoint_count }\n        }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/routes/integrations.unified-apps.$id.tsx",
+      "call": 2,
+      "variant": 1,
+      "document": "query UnifiedAppVersions($family: String!) {\n          appVersions(app_family_id: $family) { id: app_id version created_at }\n        }"
     }
   ]
 }

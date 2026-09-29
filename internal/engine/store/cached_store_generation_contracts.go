@@ -37,6 +37,16 @@ func (s *cachedStore) ListGenerationContractBindings(ctx context.Context, refs [
 	return delegate.ListGenerationContractBindings(ctx, refs, requireGenerationPin)
 }
 
+// AttachGenerationContractPin forwards the exact compare-and-set write without caching a mutable planning result.
+func (s *cachedStore) AttachGenerationContractPin(ctx context.Context, binding models.SDKContractBinding, hash string) error {
+	writer, ok := s.Store.(GenerationPinWriter)
+	// A cache wrapper must never replace missing durable authority with its own process state.
+	if !ok {
+		return ErrGenerationContractPinUnavailable
+	}
+	return writer.AttachGenerationContractPin(ctx, binding, hash)
+}
+
 // ListGenerationAuthContracts forwards the bounded minimal-security projection without caching snapshots.
 func (s *cachedStore) ListGenerationAuthContracts(ctx context.Context, selections []GenerationAuthSelection, requireGenerationPin bool) ([]GenerationAuthContract, error) {
 	delegate, err := s.generationContracts()

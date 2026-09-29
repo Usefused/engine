@@ -22,7 +22,6 @@ const (
 	EngineService_Connect_FullMethodName                 = "/engine.v1.EngineService/Connect"
 	EngineService_Disconnect_FullMethodName              = "/engine.v1.EngineService/Disconnect"
 	EngineService_Execute_FullMethodName                 = "/engine.v1.EngineService/Execute"
-	EngineService_ExecuteUnified_FullMethodName          = "/engine.v1.EngineService/ExecuteUnified"
 	EngineService_StartConnectSession_FullMethodName     = "/engine.v1.EngineService/StartConnectSession"
 	EngineService_GetConnection_FullMethodName           = "/engine.v1.EngineService/GetConnection"
 	EngineService_ListConnectionResources_FullMethodName = "/engine.v1.EngineService/ListConnectionResources"
@@ -45,10 +44,6 @@ type EngineServiceClient interface {
 	// The response stream carries server-sent events and transport response chunks.
 	// Paginated operations still return one buffered aggregate response.
 	Execute(ctx context.Context, in *ExecuteRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExecuteResponse], error)
-	// ExecuteUnified invokes one SDK-defined operation for an ordered set of
-	// explicitly selected targets. Authentication remains in x-app-id and
-	// x-api-key call metadata; provider execution stays inside the Engine.
-	ExecuteUnified(ctx context.Context, in *ExecuteUnifiedRequest, opts ...grpc.CallOption) (*ExecuteUnifiedResponse, error)
 	// StartConnectSession creates an Engine-owned OAuth/OIDC browser session and
 	// returns only the provider authorization URL. Client credentials, PKCE
 	// verifier, and future token material stay inside the Engine.
@@ -120,16 +115,6 @@ func (c *engineServiceClient) Execute(ctx context.Context, in *ExecuteRequest, o
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type EngineService_ExecuteClient = grpc.ServerStreamingClient[ExecuteResponse]
 
-func (c *engineServiceClient) ExecuteUnified(ctx context.Context, in *ExecuteUnifiedRequest, opts ...grpc.CallOption) (*ExecuteUnifiedResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ExecuteUnifiedResponse)
-	err := c.cc.Invoke(ctx, EngineService_ExecuteUnified_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (c *engineServiceClient) StartConnectSession(ctx context.Context, in *StartConnectSessionRequest, opts ...grpc.CallOption) (*StartConnectSessionResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(StartConnectSessionResponse)
@@ -189,10 +174,6 @@ type EngineServiceServer interface {
 	// The response stream carries server-sent events and transport response chunks.
 	// Paginated operations still return one buffered aggregate response.
 	Execute(*ExecuteRequest, grpc.ServerStreamingServer[ExecuteResponse]) error
-	// ExecuteUnified invokes one SDK-defined operation for an ordered set of
-	// explicitly selected targets. Authentication remains in x-app-id and
-	// x-api-key call metadata; provider execution stays inside the Engine.
-	ExecuteUnified(context.Context, *ExecuteUnifiedRequest) (*ExecuteUnifiedResponse, error)
 	// StartConnectSession creates an Engine-owned OAuth/OIDC browser session and
 	// returns only the provider authorization URL. Client credentials, PKCE
 	// verifier, and future token material stay inside the Engine.
@@ -233,9 +214,6 @@ func (UnimplementedEngineServiceServer) Disconnect(context.Context, *DisconnectR
 }
 func (UnimplementedEngineServiceServer) Execute(*ExecuteRequest, grpc.ServerStreamingServer[ExecuteResponse]) error {
 	return status.Error(codes.Unimplemented, "method Execute not implemented")
-}
-func (UnimplementedEngineServiceServer) ExecuteUnified(context.Context, *ExecuteUnifiedRequest) (*ExecuteUnifiedResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ExecuteUnified not implemented")
 }
 func (UnimplementedEngineServiceServer) StartConnectSession(context.Context, *StartConnectSessionRequest) (*StartConnectSessionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method StartConnectSession not implemented")
@@ -317,24 +295,6 @@ func _EngineService_Execute_Handler(srv interface{}, stream grpc.ServerStream) e
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type EngineService_ExecuteServer = grpc.ServerStreamingServer[ExecuteResponse]
 
-func _EngineService_ExecuteUnified_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ExecuteUnifiedRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(EngineServiceServer).ExecuteUnified(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: EngineService_ExecuteUnified_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(EngineServiceServer).ExecuteUnified(ctx, req.(*ExecuteUnifiedRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _EngineService_StartConnectSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(StartConnectSessionRequest)
 	if err := dec(in); err != nil {
@@ -410,10 +370,6 @@ var EngineService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Disconnect",
 			Handler:    _EngineService_Disconnect_Handler,
-		},
-		{
-			MethodName: "ExecuteUnified",
-			Handler:    _EngineService_ExecuteUnified_Handler,
 		},
 		{
 			MethodName: "StartConnectSession",

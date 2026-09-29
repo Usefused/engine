@@ -456,8 +456,10 @@ type mockVerifier struct {
 	resolvedSlugs     []string
 	slugIDs           map[string]uuid.UUID
 	contractRevisions map[string]sandbox.ServiceVersionRevision
-	latestVersions    map[uuid.UUID]sandbox.ServiceVersionResolvedRef
-	latestBatches     [][]uuid.UUID
+	// revisionCalls tracks the extra Registry lookup so activation tests can guard the fast path.
+	revisionCalls  atomic.Int32
+	latestVersions map[uuid.UUID]sandbox.ServiceVersionResolvedRef
+	latestBatches  [][]uuid.UUID
 	// serviceMetadata lets tests supply an IncomingWebhookConfig/
 	// EventExtractionPath for the webhook-registration apply path
 	// (upsertWorkspaceServiceWebhooks). Defaults to an empty-but-non-nil
@@ -512,6 +514,38 @@ type runtimeContractVerifier struct {
 	runtimeContractArgs         []runtimeContractFetchArgs
 	batchRuntimeArgs            [][]store.WorkspaceServiceVersion
 	batchGenerationContractHash string
+}
+
+type activationSnapshotFetcher struct {
+	standardCalls   int
+	activationCalls int
+}
+
+// FetchRuntimeContract represents the archive-producing read reserved for SDK or import work.
+func (f *activationSnapshotFetcher) FetchRuntimeContract(_ context.Context, serviceID, versionID uuid.UUID, version, _ string) (*store.ServiceContractSnapshot, error) {
+	f.standardCalls++
+	return &store.ServiceContractSnapshot{ServiceID: serviceID, ServiceVersionID: versionID, Version: version}, nil
+}
+
+// FetchRuntimeContractForActivation represents the runtime-only workspace button path.
+func (f *activationSnapshotFetcher) FetchRuntimeContractForActivation(_ context.Context, serviceID, versionID uuid.UUID, version, _ string) (*store.ServiceContractSnapshot, error) {
+	f.activationCalls++
+	return &store.ServiceContractSnapshot{ServiceID: serviceID, ServiceVersionID: versionID, Version: version}, nil
+}
+
+// TestWorkspaceAddMaterializesRuntimeWithoutGenerationArchive keeps the button's fetch independent of SDK planning.
+func TestWorkspaceAddMaterializesRuntimeWithoutGenerationArchive(t *testing.T) {
+	s := &workspaceTestStore{}
+	fetcher := &activationSnapshotFetcher{}
+	serviceID, versionID := uuid.New(), uuid.New()
+	// The local snapshot write must complete through the runtime-only fetch capability.
+	if err := materializeRuntimeContractSnapshot(t.Context(), s, fetcher, uuid.New(), serviceID, versionID, "v1", ""); err != nil {
+		t.Fatal(err)
+	}
+	// The alternate path must be selected before snapshot persistence, not merely after the archive call completed.
+	if fetcher.activationCalls != 1 || fetcher.standardCalls != 0 || len(s.snapshotWrites) != 1 {
+		t.Fatalf("activation=%d standard=%d snapshots=%d", fetcher.activationCalls, fetcher.standardCalls, len(s.snapshotWrites))
+	}
 }
 
 type runtimeContractFetchArgs struct {
@@ -587,7 +621,9 @@ func (m *mockVerifier) VerifyServiceExists(ctx context.Context, serviceID uuid.U
 	return name, "test/test-service", currentVersionTag, serviceVersionID, nil
 }
 
+// FetchServiceVersionRevisions records when activation needs a historical version lookup.
 func (m *mockVerifier) FetchServiceVersionRevisions(ctx context.Context, refs []sandbox.ServiceVersionRef, apiKey string) ([]sandbox.ServiceVersionRevision, error) {
+	m.revisionCalls.Add(1)
 	out := make([]sandbox.ServiceVersionRevision, 0, len(refs))
 	for _, ref := range refs {
 		if revision, ok := m.contractRevisions[ref.ServiceID.String()+"|"+ref.Version]; ok {
@@ -1914,16 +1950,25 @@ func TestAddService_RejectsLegacyVersionField(t *testing.T) {
 	}
 }
 
+// TestAddService_PinsToRegistryCurrentVersionWhenRequestOmitsVersion proves ordinary activation reuses verification's version ID.
 func TestAddService_PinsToRegistryCurrentVersionWhenRequestOmitsVersion(t *testing.T) {
 	s := &workspaceTestStore{
 		accountID:   uuid.New(),
 		workspaceID: uuid.New(),
 	}
-	verifier := &mockVerifier{name: "Stripe", currentVersionTag: "2026-07-09"}
+	serviceID, currentVersionID := uuid.New(), uuid.New()
+	verifier := &mockVerifier{
+		name: "Stripe", currentVersionTag: "2026-07-09", serviceVersionID: currentVersionID,
+		contractRevisions: map[string]sandbox.ServiceVersionRevision{
+			serviceID.String() + "|2026-07-09": {
+				ServiceID: serviceID, Version: "2026-07-09", ServiceVersionID: uuid.New(), Revision: 1,
+			},
+		},
+	}
 	router := buildWorkspaceRouter(s, verifier)
 
 	body := jsonBody(map[string]string{
-		"service_id":   uuid.New().String(),
+		"service_id":   serviceID.String(),
 		"service_name": "Stripe",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/workspace/services", body)
@@ -1938,6 +1983,14 @@ func TestAddService_PinsToRegistryCurrentVersionWhenRequestOmitsVersion(t *testi
 	}
 	if s.gotVersion != "2026-07-09" {
 		t.Errorf("expected activation to pin Registry current version, got %q", s.gotVersion)
+	}
+	// A second revision lookup would return a different ID and expose the redundant slow path.
+	if s.gotServiceVersionID != currentVersionID {
+		t.Errorf("expected current version ID %s from verification, got %s", currentVersionID, s.gotServiceVersionID)
+	}
+	// The current version is already pinned by verification, so an extra Registry read is a latency regression.
+	if calls := verifier.revisionCalls.Load(); calls != 0 {
+		t.Errorf("current-version activation made %d revision lookups, want none", calls)
 	}
 }
 

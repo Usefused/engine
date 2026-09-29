@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { buildExecutionApp, fused } from "@fused/execution";
+import { buildUnifiedApp, fused } from "@fused/unified-app";
 
-export default buildExecutionApp({
+export default buildUnifiedApp({
   input: z.object({ name: z.string() }),
   output: z.object({ customerId: z.string() }),
   fetch: { searchable: ["customerId"] },

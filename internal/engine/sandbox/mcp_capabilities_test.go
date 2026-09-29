@@ -11,34 +11,34 @@ import (
 	"github.com/google/uuid"
 )
 
-type mcpExecutionAppFixture struct {
+type mcpUnifiedAppFixture struct {
 	listed   int
 	executed int
 	input    json.RawMessage
 }
 
-// ExecutionAppInputSchema returns one exact version's authored input schema.
-func (fixture *mcpExecutionAppFixture) ExecutionAppInputSchema(context.Context, auth.RuntimeIdentity) (json.RawMessage, bool, error) {
+// UnifiedAppInputSchema returns one exact version's authored input schema.
+func (fixture *mcpUnifiedAppFixture) UnifiedAppInputSchema(context.Context, auth.RuntimeIdentity) (json.RawMessage, bool, error) {
 	fixture.listed++
 	return json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"}}}`), true, nil
 }
 
-// ExecuteExecutionApp records the selected input and returns one shared execution envelope.
-func (fixture *mcpExecutionAppFixture) ExecuteExecutionApp(_ context.Context, _ auth.RuntimeIdentity, input json.RawMessage) (json.RawMessage, error) {
+// ExecuteUnifiedApp records the selected input and returns one shared execution envelope.
+func (fixture *mcpUnifiedAppFixture) ExecuteUnifiedApp(_ context.Context, _ auth.RuntimeIdentity, input json.RawMessage) (json.RawMessage, error) {
 	fixture.executed++
 	fixture.input = append(json.RawMessage(nil), input...)
 	return json.RawMessage(`{"executionId":"11111111-1111-4111-8111-111111111111","status":"succeeded","output":{"customerId":"cus_123"}}`), nil
 }
 
-// TestMCPExecuteToolSharesExecutionAppCommand checks the existing execute tool's authored variant.
-func TestMCPExecuteToolSharesExecutionAppCommand(t *testing.T) {
-	fixture := &mcpExecutionAppFixture{}
+// TestMCPExecuteToolSharesUnifiedAppCommand checks the existing execute tool's authored variant.
+func TestMCPExecuteToolSharesUnifiedAppCommand(t *testing.T) {
+	fixture := &mcpUnifiedAppFixture{}
 	SetMCPCapabilityAdapter(fixture)
 	defer SetMCPCapabilityAdapter(nil)
 	appID := uuid.New()
 	admission := &mcpModernAdmission{
 		target:   &store.MCPRouteTarget{AppID: appID},
-		identity: auth.RuntimeIdentity{AppID: appID, Kind: store.AppKindExecution, HostedMCP: true},
+		identity: auth.RuntimeIdentity{AppID: appID, Kind: store.AppKindUnifiedApp, HostedMCP: true},
 		server:   FixtureServerMetadata{Name: "support", Title: "support", Version: "1.0.0", Description: "Support app"},
 	}
 	base := map[string]any{"name": "execute", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"script": map[string]any{"type": "string"}}, "required": []string{"script"}}}
@@ -56,11 +56,11 @@ func TestMCPExecuteToolSharesExecutionAppCommand(t *testing.T) {
 	if !handleMCPHostedCapabilityCall(context.Background(), response, call, request, admission) {
 		t.Fatal("authored execute was not handled")
 	}
-	assertMCPExecutionAppResult(t, response.Body.Bytes(), fixture)
+	assertMCPUnifiedAppResult(t, response.Body.Bytes(), fixture)
 }
 
-// assertMCPExecutionAppResult checks that MCP projected the durable envelope and exact input.
-func assertMCPExecutionAppResult(t *testing.T, response []byte, fixture *mcpExecutionAppFixture) {
+// assertMCPUnifiedAppResult checks that MCP projected the durable envelope and exact input.
+func assertMCPUnifiedAppResult(t *testing.T, response []byte, fixture *mcpUnifiedAppFixture) {
 	t.Helper()
 	var envelope struct {
 		Result struct {
@@ -84,7 +84,7 @@ func assertMCPExecutionAppResult(t *testing.T, response []byte, fixture *mcpExec
 
 // TestMCPExecuteToolRejectsUnoptedSDK keeps ordinary SDK versions on the raw tool path.
 func TestMCPExecuteToolRejectsUnoptedSDK(t *testing.T) {
-	fixture := &mcpExecutionAppFixture{}
+	fixture := &mcpUnifiedAppFixture{}
 	SetMCPCapabilityAdapter(fixture)
 	defer SetMCPCapabilityAdapter(nil)
 	appID := uuid.New()

@@ -1,4 +1,4 @@
-# Execution App local smoke evidence
+# Unified App local smoke evidence
 
 ## Pagination and fixed service ref, 2026-09-29
 
@@ -12,7 +12,7 @@ A patched Linux arm64 Engine ran in the disposable local container on port 18081
 | Service ref helper, `maxPages: 10` | HTTP 200 execution record with `failed` status; the requested cap did not tighten the policy limit | None |
 | Two services with refs `alice-live` and `bob-live` | HTTP 200, `succeeded`; each service returned its own two-page greeting | `1, 2` for each service |
 
-The provider hit log was `1, 1, 2, 1, 2, 1, 2, 1, 2`: the first `1` was a direct provider probe, followed by two calls for each successful one-service execution and four for the two-service execution. The failed executions made no provider call. The second service used the operation name `greetB` because an Execution App rejects ambiguous operation names across selected services. Both services use anonymous authentication, so the hosted helper invocation verifies the multi-service app and bridge dispatch, while the package tests verify the distinct selector refs. OAuth connection selection remains untested. Family tokens and read handles are omitted.
+The provider hit log was `1, 1, 2, 1, 2, 1, 2, 1, 2`: the first `1` was a direct provider probe, followed by two calls for each successful one-service execution and four for the two-service execution. The failed executions made no provider call. The second service used the operation name `greetB` because a Unified App rejects ambiguous operation names across selected services. Both services use anonymous authentication, so the hosted helper invocation verifies the multi-service app and bridge dispatch, while the package tests verify the distinct selector refs. OAuth connection selection remains untested. Family tokens and read handles are omitted.
 
 The resident-worker validation later in this record covers the current worker design. Earlier per-invocation timing and two-call limit observations describe the implementation before the resident worker and bounded queue changes.
 
@@ -24,10 +24,10 @@ The hosted source used the selected-operation methods generated from the build s
 
 ```ts
 import * as z from "zod/mini";
-import { buildExecutionApp, fused } from "@fused/execution";
+import { buildUnifiedApp, fused } from "@fused/unified-app";
 import { services } from "@fused/operations";
 
-export default buildExecutionApp({
+export default buildUnifiedApp({
   input: z.object({ name: z.string() }),
   output: z.object({ greeting: z.string() }),
   fetch: { searchable: ["name"] },
@@ -57,23 +57,23 @@ node dist/src/cli.js \
 
 ## Disposable deployment
 
-The app config used `kind: execution`, version `1.0.2`, `bundle_digest` above, bucket `default`, and selected `fused-greeting-smoke` version `1.0.0` operation `greet`. The test license and runtime token were supplied from local protected files and are omitted here.
+The app config used `kind: unified_app`, version `1.0.2`, `bundle_digest` above, bucket `default`, and selected `fused-greeting-smoke` version `1.0.0` operation `greet`. The test license and runtime token were supplied from local protected files and are omitted here.
 
 ```sh
 fused-cli --engine-url http://127.0.0.1:18081 --key "$FUSED_TEST_LICENSE" \
-  -f /private/tmp/fused-live-service-app-v102.yaml execution plan \
+  -f /private/tmp/fused-live-service-app-v102.yaml unified-app plan \
   --receipt-out /private/tmp/fused-live-service-app-v102.receipt.json --json
 fused-cli --engine-url http://127.0.0.1:18081 --key "$FUSED_TEST_LICENSE" \
-  -f /private/tmp/fused-live-service-app-v102.yaml execution apply \
+  -f /private/tmp/fused-live-service-app-v102.yaml unified-app apply \
   --receipt /private/tmp/fused-live-service-app-v102.receipt.json --json
 fused-cli --engine-url http://127.0.0.1:18081 --key "$FUSED_TEST_LICENSE" \
-  execution bundle attach 067b4528-8da9-55b0-88b5-133310ce0eca \
+  unified-app bundle attach 067b4528-8da9-55b0-88b5-133310ce0eca \
   --source-hash sha256:1e4c62b2a0568e0bd04d06bd6da115f0925131a8e18dcb25bcbd703a0abaa021 \
   --bundle /private/tmp/fused-live-service-small.bundle.js \
   --manifest /private/tmp/fused-live-service-small.manifest.json --json
 ```
 
-Plan `b6aeaf15-06ce-4588-be41-a0e162d02c6e` succeeded; apply created app version `067b4528-8da9-55b0-88b5-133310ce0eca`; attach returned `{"status":"attached"}`. The plan required `app.execution.create`, `bucket.use`, and `service.consume`.
+Plan `b6aeaf15-06ce-4588-be41-a0e162d02c6e` succeeded; apply created app version `067b4528-8da9-55b0-88b5-133310ce0eca`; attach returned `{"status":"attached"}`. The plan required `app.unified_app.create`, `bucket.use`, and `service.consume`.
 
 ## Hosted calls
 
@@ -108,9 +108,9 @@ curl -X POST -H "Authorization: Bearer $FUSED_APP_TOKEN" \
 
 ## Multiple requests
 
-The restored, unmodified Engine build handled two simultaneous POST requests to the same Execution App. `FinalConcurrent1` produced execution `7df5a935-ad9a-4f9b-af90-25eeae061dd0` and `{"greeting":"Hello FinalConcurrent1"}`; `FinalConcurrent2` produced execution `e010a973-58f2-4638-b912-7d973dd09d85` and `{"greeting":"Hello FinalConcurrent2"}`. Both returned HTTP 200 with `status=succeeded`. Separate GET requests using each caller's read handle returned the matching saved output, and the mock provider counter increased by two.
+The restored, unmodified Engine build handled two simultaneous POST requests to the same Unified App. `FinalConcurrent1` produced execution `7df5a935-ad9a-4f9b-af90-25eeae061dd0` and `{"greeting":"Hello FinalConcurrent1"}`; `FinalConcurrent2` produced execution `e010a973-58f2-4638-b912-7d973dd09d85` and `{"greeting":"Hello FinalConcurrent2"}`. Both returned HTTP 200 with `status=succeeded`. Separate GET requests using each caller's read handle returned the matching saved output, and the mock provider counter increased by two.
 
-Five simultaneous requests were also tried. The disposable Engine's stored entitlement was `plan=dev`, `max_sandbox_concurrency=2`, so two succeeded and three recorded `status=failed`. The diagnostic dispatcher error for those three was `sandbox_concurrency limit reached (2/2)`. The limit applies to concurrent physical provider calls across the account, not to the number of deployed Execution Apps.
+Five simultaneous requests were also tried. The disposable Engine's stored entitlement was `plan=dev`, `max_sandbox_concurrency=2`, so two succeeded and three recorded `status=failed`. The diagnostic dispatcher error for those three was `sandbox_concurrency limit reached (2/2)`. The limit applies to concurrent physical provider calls across the account, not to the number of deployed Unified Apps.
 
 ## Per-invocation startup timing
 
@@ -120,7 +120,7 @@ The final disposable Engine used a separate stripped Linux arm64 `fused-executio
 
 ## Final arm64 seccomp profile
 
-The final test replaced the earlier permissive Docker setting with [the arm64 worker seccomp profile](../../fused-provisioner/deploy/seccomp/fused-execution-worker-arm64.json). The disposable Engine ran as UID/GID `100:101`, with all Linux capabilities dropped, no new privileges, and `FUSED_EXECUTION_APP_WORKER_REQUIRED=true`. `FUSED_SECCOMP_PROFILE` denotes that profile's absolute checkout path. This is the relevant Docker invocation; the protected env file supplied the disposable license, encryption key, and database URL:
+The final test replaced the earlier permissive Docker setting with [the arm64 worker seccomp profile](../../fused-provisioner/deploy/seccomp/fused-execution-worker-arm64.json). The disposable Engine ran as UID/GID `100:101`, with all Linux capabilities dropped, no new privileges, and `FUSED_UNIFIED_APP_WORKER_REQUIRED=true`. `FUSED_SECCOMP_PROFILE` denotes that profile's absolute checkout path. This is the relevant Docker invocation; the protected env file supplied the disposable license, encryption key, and database URL:
 
 ```sh
 docker run -d --name fused-execution-test-engine --network fused-execution-test-net \
@@ -128,7 +128,7 @@ docker run -d --name fused-execution-test-engine --network fused-execution-test-
   --security-opt seccomp="$FUSED_SECCOMP_PROFILE" \
   -p 127.0.0.1:18081:8081 --env-file /private/tmp/fused-execution-engine.env \
   -e SSL_CERT_FILE=/etc/ssl/certs/fused-greeting-ca.crt \
-  -e FUSED_EXECUTION_APP_WORKER_REQUIRED=true \
+  -e FUSED_UNIFIED_APP_WORKER_REQUIRED=true \
   -v /private/tmp/fused-engine-live-v9:/app/fused-engine:ro \
   -v /private/tmp/fused-execution-worker-v9:/app/fused-execution-worker:ro \
   -v /private/tmp/fused-greeting-ca.crt:/etc/ssl/certs/fused-greeting-ca.crt:ro \
@@ -140,7 +140,7 @@ docker run -d --name fused-execution-test-engine --network fused-execution-test-
 
 ## Resident worker live validation
 
-On 2026-09-28, the same Zod-authored TypeScript app and 27,810-byte bundle above ran against the patched Engine. The selected operation was `fused-greeting-smoke.greet` (`POST /greet` on the disposable HTTPS provider). Every `execute` called that operation once, returned its greeting, and stored `{"name":input.name}` through `fused.db`. The hosted immutable Execution App version was `067b4528-8da9-55b0-88b5-133310ce0eca`.
+On 2026-09-28, the same Zod-authored TypeScript app and 27,810-byte bundle above ran against the patched Engine. The selected operation was `fused-greeting-smoke.greet` (`POST /greet` on the disposable HTTPS provider). Every `execute` called that operation once, returned its greeting, and stored `{"name":input.name}` through `fused.db`. The hosted immutable Unified App version was `067b4528-8da9-55b0-88b5-133310ce0eca`.
 
 The TypeScript compilation command was:
 
@@ -168,7 +168,7 @@ docker run -d --name fused-execution-test-engine --network fused-execution-test-
   --security-opt seccomp="$FUSED_SECCOMP_PROFILE" \
   -p 127.0.0.1:18081:8081 --env-file /private/tmp/fused-execution-engine.env \
   -e SSL_CERT_FILE=/etc/ssl/certs/fused-greeting-ca.crt \
-  -e FUSED_EXECUTION_APP_WORKER_REQUIRED=true \
+  -e FUSED_UNIFIED_APP_WORKER_REQUIRED=true \
   -v /private/tmp/fused-engine-resident-final:/app/fused-engine:ro \
   -v /private/tmp/fused-execution-worker-resident-live:/app/fused-execution-worker:ro \
   -v /private/tmp/fused-greeting-ca.crt:/etc/ssl/certs/fused-greeting-ca.crt:ro \
@@ -202,7 +202,7 @@ The first resident-worker request failed because the disposable mock provider ha
 
 ## Plan-configured Dev app concurrency
 
-The same compiled TypeScript bundle and hosted app above were tested on 2026-09-28 after adding `max_execution_app_concurrency` to the plan and Engine entitlement. The local Registry used a disposable Dev plan with `max_execution_app_concurrency: 2` and `max_sandbox_concurrency: 4`; the second value was raised from the normal Dev value of 2 only to isolate the app limit from the account-wide provider-call limit. The Engine database confirmed `dev|2|4`. The Engine was rebuilt for Linux arm64 and started with the same confined worker and Docker settings documented above:
+The same compiled TypeScript bundle and hosted app above were tested on 2026-09-28 after adding `max_unified_app_concurrency` to the plan and Engine entitlement. The local Registry used a disposable Dev plan with `max_unified_app_concurrency: 2` and `max_sandbox_concurrency: 4`; the second value was raised from the normal Dev value of 2 only to isolate the app limit from the account-wide provider-call limit. The Engine database confirmed `dev|2|4`. The Engine was rebuilt for Linux arm64 and started with the same confined worker and Docker settings documented above:
 
 ```sh
 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags headless -ldflags '-s -w' \
@@ -212,7 +212,7 @@ docker run -d --name fused-execution-test-engine --network fused-execution-test-
   --security-opt seccomp="$FUSED_SECCOMP_PROFILE" \
   -p 127.0.0.1:18081:8081 --env-file /private/tmp/fused-execution-engine.env \
   -e SSL_CERT_FILE=/etc/ssl/certs/fused-greeting-ca.crt \
-  -e FUSED_EXECUTION_APP_WORKER_REQUIRED=true \
+  -e FUSED_UNIFIED_APP_WORKER_REQUIRED=true \
   -v /private/tmp/fused-engine-plan-concurrency:/app/fused-engine:ro \
   -v /private/tmp/fused-execution-worker-resident-live:/app/fused-execution-worker:ro \
   -v /private/tmp/fused-greeting-ca.crt:/etc/ssl/certs/fused-greeting-ca.crt:ro \

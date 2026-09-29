@@ -86,11 +86,6 @@ func (*streamableSessionCache) MCPPaginationForSelections(context.Context, []mod
 	return map[int]*fusedobject.PaginationConfig{}, nil
 }
 
-// GetMCPUnifiedOperationDescriptors returns the canonical absent logical catalogue for this transport-only test.
-func (*streamableSessionCache) GetMCPUnifiedOperationDescriptors(context.Context, string, store.AppTokenPolicy) (*models.SDKUnifiedOperationDescriptors, error) {
-	return nil, nil
-}
-
 // GetMCPServerMetadata supplies stable identity for transport tests that do not load an applied app plan.
 func (*streamableSessionCache) GetMCPServerMetadata(context.Context, string) (FixtureServerMetadata, error) {
 	return FixtureServerMetadata{Name: "transport-test", Title: "Transport test", Version: "1.0.0", Description: "Exercise the MCP transport contract."}, nil

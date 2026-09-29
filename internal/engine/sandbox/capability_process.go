@@ -20,7 +20,7 @@ import (
 const capabilityFrameBytes = 5 << 20
 
 // ErrCapabilityWorkerUnavailable distinguishes an isolation or IPC failure from invalid authored declarations.
-var ErrCapabilityWorkerUnavailable = errors.New("execution app worker is unavailable")
+var ErrCapabilityWorkerUnavailable = errors.New("unified app worker is unavailable")
 
 var capabilityTestWorker struct {
 	once sync.Once
@@ -39,7 +39,7 @@ type capabilityCallOrdinalKey struct{}
 
 // IsCapabilityWorkerAvailable probes the real isolated process with a fixed, side-effect-free declaration.
 func IsCapabilityWorkerAvailable(ctx context.Context) bool {
-	const probe = `globalThis.FusedExecutionManifest={schemaVersion:1,inputSchema:{},outputSchema:{},searchable:[],selectedOperations:[]};globalThis.FusedExecutionApp={input:{parse(v){return v}},output:{parse(v){return v}},execute:async()=>({})};`
+	const probe = `globalThis.FusedExecutionManifest={schemaVersion:1,inputSchema:{},outputSchema:{},searchable:[],selectedOperations:[]};globalThis.FusedUnifiedApp={input:{parse(v){return v}},output:{parse(v){return v}},execute:async()=>({})};`
 	manifest, err := InspectCapabilityBundle(ctx, []byte(probe))
 	// Tests may skip only when the same production worker path cannot execute safely on this host.
 	return err == nil && string(manifest) == `{"schemaVersion":1,"inputSchema":{},"outputSchema":{},"searchable":[],"selectedOperations":[]}`
@@ -149,6 +149,12 @@ func readCapabilityProcess(ctx context.Context, scanner *bufio.Scanner, writer *
 func handleCapabilityProcessFrame(ctx context.Context, writer *capabilityFrameWriter, requestKind string, host CapabilityScriptHost, frame capabilityProcessFrame, ids map[uint64]struct{}, ordinals map[int]struct{}, semaphore chan struct{}) (json.RawMessage, bool, error) {
 	// Bundle inspection cannot request any Engine effect.
 	if frame.Kind == "done" {
+		// Completed worker timings share the original invocation context and cannot carry authored labels.
+		if executionappvm.ValidExecutionPhases(frame.Phases) {
+			if observer, ok := host.(executionappvm.PhaseObserver); ok {
+				observer.RecordExecutionPhases(ctx, frame.Phases)
+			}
+		}
 		output, err := capabilityProcessOutput(frame)
 		return output, true, err
 	}
@@ -194,6 +200,10 @@ func decodeCapabilityFrame(raw []byte) (capabilityProcessFrame, error) {
 func capabilityProcessOutput(frame capabilityProcessFrame) (json.RawMessage, error) {
 	// Worker errors have no authored source or provider payload attached to public failures.
 	if frame.Error != "" {
+		// The typed error keeps private detail out of ordinary Error() projections.
+		if frame.Diagnostic != nil {
+			return nil, frame.Diagnostic
+		}
 		return nil, errors.New(frame.Error)
 	}
 	if len(frame.Value) == 0 || len(frame.Value) > maxCapabilityOutputBytes || !json.Valid(frame.Value) {

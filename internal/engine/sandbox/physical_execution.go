@@ -100,7 +100,7 @@ func executeResolvedPhysicalBoundary(
 		return err
 	}
 	ctx = preparePhysicalExecutionContext(ctx, request)
-	ctx = withSDKUnifiedPhysicalQueue(ctx, identity)
+	ctx = withSDKPhysicalQueue(ctx, identity)
 	executionStarted := time.Now()
 	ctx, span := startPhysicalExecutionSpan(ctx, identity, match.endpoint.Name)
 	defer span.End()
@@ -126,10 +126,9 @@ func executeResolvedPhysicalBoundary(
 	return err
 }
 
-// withSDKUnifiedPhysicalQueue admits SDK Unified children to the same bounded
-// provider queue as Execution Apps while preserving MCP's immediate gate.
-func withSDKUnifiedPhysicalQueue(ctx context.Context, identity auth.RuntimeIdentity) context.Context {
-	// SDK-kind REST and gRPC Unified calls share a plan limit even when they use different adapters.
+// withSDKPhysicalQueue shares bounded provider capacity across SDK transports.
+func withSDKPhysicalQueue(ctx context.Context, identity auth.RuntimeIdentity) context.Context {
+	// SDK REST and gRPC calls use the same plan limit while MCP has its own gate.
 	if identity.Kind == store.AppKindSDK && ExecutionTransportFromContext(ctx) != models.EngineExecutionTransportMCP {
 		return withPhysicalOperationQueue(ctx)
 	}

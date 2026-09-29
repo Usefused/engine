@@ -26,7 +26,6 @@ import (
 type EngineGRPCServer struct {
 	enginev1.UnimplementedEngineServiceServer
 	runtime        *sandbox.EngineGRPCServer
-	unifiedRuntime unifiedPhysicalRuntime
 	restRuntime    restExecutionRuntime
 	store          store.Store
 	verifier       ServiceVerifier
@@ -60,7 +59,6 @@ func NewEngineGRPCServerWithWebhookStreams(s store.Store, verifier ServiceVerifi
 	}
 	return &EngineGRPCServer{
 		runtime:        runtime,
-		unifiedRuntime: runtime,
 		restRuntime:    runtime,
 		store:          s,
 		verifier:       verifier,
@@ -260,9 +258,9 @@ func (s *EngineGRPCServer) authenticatedAppRuntimeFromGRPC(ctx context.Context) 
 	if err != nil || !grpcRuntimeMatchesIdentity(scope, identity, appID) {
 		return nil, auth.RuntimeIdentity{}, status.Error(codes.PermissionDenied, "app scope is unavailable")
 	}
-	// Execution App gRPC calls share the same promoted-version boundary as REST and MCP.
-	if scope.Kind == store.AppKindExecution && s.admitExecutionAppTraffic(ctx, appID) != nil {
-		return nil, auth.RuntimeIdentity{}, status.Error(codes.PermissionDenied, "execution app version is not current")
+	// Unified App gRPC calls share the same promoted-version boundary as REST and MCP.
+	if scope.Kind == store.AppKindUnifiedApp && s.admitUnifiedAppTraffic(ctx, appID) != nil {
+		return nil, auth.RuntimeIdentity{}, status.Error(codes.PermissionDenied, "unified app version is not current")
 	}
 	// Invalid persisted selections cannot broaden provider authority at invocation time.
 	if _, err := models.DecodeAppSelections(scope.ScopeSchemaVersion, scope.Selections); err != nil {

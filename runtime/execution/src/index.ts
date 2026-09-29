@@ -32,14 +32,14 @@ export interface ExecutionContext<Input> {
   input: Input;
 }
 
-export interface ExecutionApp<Input extends $ZodType, Output extends $ZodType> {
+export interface UnifiedApp<Input extends $ZodType, Output extends $ZodType> {
   readonly input: Input;
   readonly output: Output;
   readonly fetch: Readonly<{ searchable: readonly string[] }>;
   readonly execute: (context: ExecutionContext<output<Input>>) => Promise<input<Output>> | input<Output>;
 }
 
-export interface ExecutionAppConfig<Input extends $ZodType, Output extends $ZodType> {
+export interface UnifiedAppConfig<Input extends $ZodType, Output extends $ZodType> {
   input: Input;
   output: Output;
   fetch?: { searchable?: readonly string[] };
@@ -86,10 +86,10 @@ export function validateSearchablePaths(paths: readonly string[]): readonly stri
 }
 
 // Preserve the authored contract while validating its public search declaration.
-export function buildExecutionApp<Input extends $ZodType, Output extends $ZodType>(config: ExecutionAppConfig<Input, Output>): ExecutionApp<Input, Output> {
+export function buildUnifiedApp<Input extends $ZodType, Output extends $ZodType>(config: UnifiedAppConfig<Input, Output>): UnifiedApp<Input, Output> {
   // The builder must have runtime schemas and executable code before it can be bundled.
   if (!(config.input instanceof $ZodType) || !(config.output instanceof $ZodType) || typeof config.execute !== "function") {
-    throw new Error("Execution App requires Zod input/output schemas and execute()");
+    throw new Error("Unified App requires Zod input/output schemas and execute()");
   }
   // An omitted fetch policy exposes only Engine-owned metadata search fields.
   const searchable = validateSearchablePaths(config.fetch?.searchable ?? []);
@@ -263,7 +263,7 @@ function rejectUnrepresentedChecks(value: unknown, seen: Set<object>): void {
     const definition = value._zod.def as $ZodTypeDef & { checks?: Array<{ _zod: { def: { check: string } } }> };
     // Refined fields must not have weaker REST or MCP validation than the worker.
     if (definition.checks?.some((check) => check._zod.def.check === "custom")) {
-      throw new Error("Execution App schemas cannot use custom Zod refinements");
+      throw new Error("Unified App schemas cannot use custom Zod refinements");
     }
     rejectUnrepresentedChecks(definition, seen);
     return;
@@ -280,16 +280,16 @@ export function toPublicSchema(schema: $ZodType): Record<string, unknown> {
   const converted = toJSONSchema(schema, { unrepresentable: "throw" });
   // Public app inputs and outputs are objects with named fields.
   if (!converted || converted.type !== "object") {
-    throw new Error("Execution App input and output must be JSON objects");
+    throw new Error("Unified App input and output must be JSON objects");
   }
   return converted as Record<string, unknown>;
 }
 
 // Parse both boundaries so generated client, REST, and MCP see the same authored output.
-export async function runExecutionApp<Input extends $ZodType, Output extends $ZodType>(app: ExecutionApp<Input, Output>, rawInput: unknown): Promise<output<Output>> {
+export async function runUnifiedApp<Input extends $ZodType, Output extends $ZodType>(app: UnifiedApp<Input, Output>, rawInput: unknown): Promise<output<Output>> {
   const input = await parseAsync(app.input, rawInput);
   const output = await app.execute({ input });
   const parsed = await parseAsync(app.output, output);
-  encodeJson(parsed, "Execution App output");
+  encodeJson(parsed, "Unified App output");
   return parsed;
 }

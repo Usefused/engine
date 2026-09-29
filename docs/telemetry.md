@@ -76,13 +76,8 @@ unless a future feature explicitly adds redaction and opt-in controls.
 
 ## Execution receipts and sessions
 
-SDK and MCP Activity show one parent receipt for each admitted Unified call,
-with the existing service receipts beneath it. The parent records total elapsed
-time and bounded forward/rollback outcomes; it does not retain inputs or
-responses, and it does not add another provider usage count. Selecting a child
-opens its normal receipt in the same sidebar. Back restores the Unified view.
-Rejected calls that fail whole-call preflight do not create a parent receipt.
-Provider timing capture and parent/child linkage work without an OTLP exporter.
+SDK and MCP Activity show physical execution receipts with provider timing.
+Timing capture works without an OTLP exporter.
 
 Sessions use server-side cursor pagination. New sessions retain bounded
 client-reported `initialize.clientInfo.name` and `version`, plus the initial

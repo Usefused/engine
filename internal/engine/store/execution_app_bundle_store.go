@@ -14,28 +14,28 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const maxExecutionAppBundleBytes = 2 << 20
+const maxUnifiedAppBundleBytes = 2 << 20
 
 var (
-	ErrExecutionAppBundleNotFound       = errors.New("execution app bundle not found")
-	ErrExecutionAppBundleImmutable      = errors.New("execution app bundle is immutable")
-	ErrExecutionAppBundleDigestMismatch = errors.New("execution app bundle digest does not match planned version")
+	ErrUnifiedAppBundleNotFound       = errors.New("unified app bundle not found")
+	ErrUnifiedAppBundleImmutable      = errors.New("unified app bundle is immutable")
+	ErrUnifiedAppBundleDigestMismatch = errors.New("unified app bundle digest does not match planned version")
 )
 
-var canonicalExecutionAppBundleDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+var canonicalUnifiedAppBundleDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
-// IsCanonicalExecutionAppBundleDigest admits only the exact hash syntax shared by compiler and Engine.
-func IsCanonicalExecutionAppBundleDigest(digest string) bool {
-	return canonicalExecutionAppBundleDigest.MatchString(digest)
+// IsCanonicalUnifiedAppBundleDigest admits only the exact hash syntax shared by compiler and Engine.
+func IsCanonicalUnifiedAppBundleDigest(digest string) bool {
+	return canonicalUnifiedAppBundleDigest.MatchString(digest)
 }
 
-// ExecutionAppBundleDigest identifies exact compiled bytes, independent of caller source labels or manifest claims.
-func ExecutionAppBundleDigest(script []byte) string {
+// UnifiedAppBundleDigest identifies exact compiled bytes, independent of caller source labels or manifest claims.
+func UnifiedAppBundleDigest(script []byte) string {
 	return fmt.Sprintf("sha256:%x", sha256.Sum256(script))
 }
 
-// ExecutionAppBundle belongs to one exact immutable app version, identified by AppID.
-type ExecutionAppBundle struct {
+// UnifiedAppBundle belongs to one exact immutable app version, identified by AppID.
+type UnifiedAppBundle struct {
 	AppID      uuid.UUID
 	SourceHash string
 	BundleJS   string
@@ -43,22 +43,22 @@ type ExecutionAppBundle struct {
 	CreatedAt  time.Time
 }
 
-// ExecutionAppBundleStore is the narrow persistence contract for hosted capability bundles.
-type ExecutionAppBundleStore interface {
-	CreateExecutionAppBundle(context.Context, ExecutionAppBundle) error
-	GetExecutionAppBundle(context.Context, uuid.UUID) (*ExecutionAppBundle, error)
+// UnifiedAppBundleStore is the narrow persistence contract for hosted capability bundles.
+type UnifiedAppBundleStore interface {
+	CreateUnifiedAppBundle(context.Context, UnifiedAppBundle) error
+	GetUnifiedAppBundle(context.Context, uuid.UUID) (*UnifiedAppBundle, error)
 }
 
-// CreateExecutionAppBundle writes one exact app bundle and treats identical retries as idempotent.
-func (s *postgresStore) CreateExecutionAppBundle(ctx context.Context, bundle ExecutionAppBundle) error {
+// CreateUnifiedAppBundle writes one exact app bundle and treats identical retries as idempotent.
+func (s *postgresStore) CreateUnifiedAppBundle(ctx context.Context, bundle UnifiedAppBundle) error {
 	// Invalid or oversized bundles must fail before the database allocates immutable storage.
-	if err := validateExecutionAppBundle(bundle); err != nil {
+	if err := validateUnifiedAppBundle(bundle); err != nil {
 		return err
 	}
 	tx, err := s.db.Begin(ctx)
 	// Bundle storage and traffic promotion must commit together.
 	if err != nil {
-		return fmt.Errorf("create execution app bundle: begin: %w", err)
+		return fmt.Errorf("create unified app bundle: begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
 	var familyID uuid.UUID
@@ -66,32 +66,32 @@ func (s *postgresStore) CreateExecutionAppBundle(ctx context.Context, bundle Exe
 		SELECT family.app_family_id
 		FROM fused_apps app
 		JOIN fused_app_families family ON family.app_family_id = app.app_family_id
-		WHERE app.app_id = $1 AND family.kind = 'execution' AND family.archived_at IS NULL
+		WHERE app.app_id = $1 AND family.kind = 'unified_app' AND family.archived_at IS NULL
 		FOR UPDATE OF family
 	`, bundle.AppID).Scan(&familyID)
-	// Only an existing Execution App family can receive an authored bundle.
+	// Only an existing Unified App family can receive an authored bundle.
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrExecutionAppBundleNotFound
+		return ErrUnifiedAppBundleNotFound
 	}
 	// Other lookup failures cannot be treated as a missing family.
 	if err != nil {
-		return fmt.Errorf("create execution app bundle: lock family: %w", err)
+		return fmt.Errorf("create unified app bundle: lock family: %w", err)
 	}
-	if err := createExecutionAppBundleTx(ctx, tx, bundle); err != nil {
+	if err := createUnifiedAppBundleTx(ctx, tx, bundle); err != nil {
 		return err
 	}
-	if err := promoteExecutionAppVersionTx(ctx, tx, familyID, bundle.AppID); err != nil {
+	if err := promoteUnifiedAppVersionTx(ctx, tx, familyID, bundle.AppID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
-// createExecutionAppBundleTx preserves immutable bytes while the caller owns promotion's family lock.
-func createExecutionAppBundleTx(ctx context.Context, tx pgx.Tx, bundle ExecutionAppBundle) error {
-	digest := ExecutionAppBundleDigest([]byte(bundle.BundleJS))
+// createUnifiedAppBundleTx preserves immutable bytes while the caller owns promotion's family lock.
+func createUnifiedAppBundleTx(ctx context.Context, tx pgx.Tx, bundle UnifiedAppBundle) error {
+	digest := UnifiedAppBundleDigest([]byte(bundle.BundleJS))
 	var inserted uuid.UUID
 	err := tx.QueryRow(ctx, `
-		INSERT INTO fused_execution_app_bundles (app_id, source_hash, bundle_js, manifest)
+		INSERT INTO fused_unified_app_bundles (app_id, source_hash, bundle_js, manifest)
 		SELECT app_id, $2, $3, $4::jsonb
 		FROM fused_apps
 		WHERE app_id = $1 AND source_hash = $2 AND bundle_digest = $5 AND status = 'active'
@@ -104,52 +104,52 @@ func createExecutionAppBundleTx(ctx context.Context, tx pgx.Tx, bundle Execution
 	}
 	// Only a unique-key conflict permits an idempotency comparison; SQL failures remain failures.
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("create execution app bundle: %w", err)
+		return fmt.Errorf("create unified app bundle: %w", err)
 	}
 	var identical bool
 	err = tx.QueryRow(ctx, `
 		SELECT artifact.source_hash = $2 AND artifact.bundle_js = $3 AND artifact.manifest = $4::jsonb AND app.bundle_digest = $5
-		FROM fused_execution_app_bundles artifact
+		FROM fused_unified_app_bundles artifact
 		JOIN fused_apps app ON app.app_id = artifact.app_id
 		WHERE artifact.app_id = $1 AND app.status = 'active'
 	`, bundle.AppID, bundle.SourceHash, bundle.BundleJS, bundle.Manifest, digest).Scan(&identical)
 	// A concurrently removed exact version cannot be treated as a successful retry.
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrExecutionAppBundleNotFound
+		return ErrUnifiedAppBundleNotFound
 	}
 	// Database comparison errors must not be misreported as immutable conflicts.
 	if err != nil {
-		return fmt.Errorf("compare execution app bundle: %w", err)
+		return fmt.Errorf("compare unified app bundle: %w", err)
 	}
 	// A source, compiled bundle, or manifest change requires a new app version.
 	if !identical {
-		return ErrExecutionAppBundleImmutable
+		return ErrUnifiedAppBundleImmutable
 	}
 	return nil
 }
 
-// promoteExecutionAppVersionTx selects one ready immutable version for all new calls in its family.
-func promoteExecutionAppVersionTx(ctx context.Context, tx pgx.Tx, familyID, appID uuid.UUID) error {
+// promoteUnifiedAppVersionTx selects one ready immutable version for all new calls in its family.
+func promoteUnifiedAppVersionTx(ctx context.Context, tx pgx.Tx, familyID, appID uuid.UUID) error {
 	result, err := tx.Exec(ctx, `
 		UPDATE fused_app_families family
-		SET execution_active_app_id = app.app_id,
-		    execution_target_initialized = true,
+		SET unified_active_app_id = app.app_id,
+		    unified_target_initialized = true,
 		    mcp_stable_app_id = CASE WHEN app.hosted_mcp THEN app.app_id ELSE NULL END,
 		    mcp_stable_route_initialized = true,
-		    updated_at = CASE WHEN family.execution_active_app_id IS DISTINCT FROM app.app_id THEN NOW() ELSE family.updated_at END
+		    updated_at = CASE WHEN family.unified_active_app_id IS DISTINCT FROM app.app_id THEN NOW() ELSE family.updated_at END
 		FROM fused_apps app
-		JOIN fused_execution_app_bundles bundle ON bundle.app_id = app.app_id
-		WHERE family.app_family_id = $1 AND family.kind = 'execution'
+		JOIN fused_unified_app_bundles bundle ON bundle.app_id = app.app_id
+		WHERE family.app_family_id = $1 AND family.kind = 'unified_app'
 		  AND family.archived_at IS NULL AND app.app_id = $2
 		  AND app.app_family_id = family.app_family_id
 		  AND app.status IN ('active', 'deprecated')
 	`, familyID, appID)
 	// Failed readiness checks must roll back attachment instead of disabling the previous target.
 	if err != nil {
-		return fmt.Errorf("promote execution app version: %w", err)
+		return fmt.Errorf("promote unified app version: %w", err)
 	}
 	if result.RowsAffected() != 1 {
-		return ErrExecutionAppBundleNotFound
+		return ErrUnifiedAppBundleNotFound
 	}
 	// Sessions pinned to a prior version cannot continue using its raw MCP tools.
 	if _, err := tx.Exec(ctx, `
@@ -159,77 +159,77 @@ func promoteExecutionAppVersionTx(ctx context.Context, tx pgx.Tx, familyID, appI
 		WHERE app.app_id = session.app_id AND app.app_family_id = $1
 		  AND app.app_id <> $2 AND session.ended_at IS NULL
 	`, familyID, appID); err != nil {
-		return fmt.Errorf("retire previous execution app sessions: %w", err)
+		return fmt.Errorf("retire previous unified app sessions: %w", err)
 	}
 	return nil
 }
 
-// GetExecutionAppBundle loads the authored bundle for exactly one app version ID.
-func (s *postgresStore) GetExecutionAppBundle(ctx context.Context, appID uuid.UUID) (*ExecutionAppBundle, error) {
+// GetUnifiedAppBundle loads the authored bundle for exactly one app version ID.
+func (s *postgresStore) GetUnifiedAppBundle(ctx context.Context, appID uuid.UUID) (*UnifiedAppBundle, error) {
 	// Empty identities cannot select a retained app version.
 	if appID == uuid.Nil {
-		return nil, ErrExecutionAppBundleNotFound
+		return nil, ErrUnifiedAppBundleNotFound
 	}
-	var bundle ExecutionAppBundle
+	var bundle UnifiedAppBundle
 	var pinnedDigest string
 	err := s.db.QueryRow(ctx, `
 		SELECT artifact.app_id, artifact.source_hash, artifact.bundle_js, artifact.manifest, artifact.created_at, app.bundle_digest
-		FROM fused_execution_app_bundles artifact
+		FROM fused_unified_app_bundles artifact
 		JOIN fused_apps app ON app.app_id = artifact.app_id
 		WHERE artifact.app_id = $1 AND app.bundle_digest IS NOT NULL
 	`, appID).Scan(&bundle.AppID, &bundle.SourceHash, &bundle.BundleJS, &bundle.Manifest, &bundle.CreatedAt, &pinnedDigest)
 	// Absence is part of the bundle lookup contract, including removed app versions.
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrExecutionAppBundleNotFound
+		return nil, ErrUnifiedAppBundleNotFound
 	}
 	// Persistence failures must remain distinguishable from an absent version.
 	if err != nil {
-		return nil, fmt.Errorf("get execution app bundle: %w", err)
+		return nil, fmt.Errorf("get unified app bundle: %w", err)
 	}
 	// Corrupted stored bytes must not execute even if the version and source label still match.
-	if ExecutionAppBundleDigest([]byte(bundle.BundleJS)) != pinnedDigest {
-		return nil, ErrExecutionAppBundleDigestMismatch
+	if UnifiedAppBundleDigest([]byte(bundle.BundleJS)) != pinnedDigest {
+		return nil, ErrUnifiedAppBundleDigestMismatch
 	}
 	return &bundle, nil
 }
 
-// validateExecutionAppBundle rejects malformed immutable material before persistence.
-func validateExecutionAppBundle(bundle ExecutionAppBundle) error {
+// validateUnifiedAppBundle rejects malformed immutable material before persistence.
+func validateUnifiedAppBundle(bundle UnifiedAppBundle) error {
 	// Every bundle must be attached to one exact app version and source identity.
 	if bundle.AppID == uuid.Nil || strings.TrimSpace(bundle.SourceHash) == "" {
-		return errors.New("execution app bundle identity is incomplete")
+		return errors.New("unified app bundle identity is incomplete")
 	}
 	// The compiled script has the same fixed size limit as its database column.
-	if len(bundle.BundleJS) == 0 || len(bundle.BundleJS) > maxExecutionAppBundleBytes {
-		return errors.New("execution app bundle exceeds the allowed size or is empty")
+	if len(bundle.BundleJS) == 0 || len(bundle.BundleJS) > maxUnifiedAppBundleBytes {
+		return errors.New("unified app bundle exceeds the allowed size or is empty")
 	}
 	var manifest map[string]json.RawMessage
 	// A manifest is an object so runtime admission can inspect its capability declarations.
 	if err := json.Unmarshal(bundle.Manifest, &manifest); err != nil || manifest == nil {
-		return errors.New("execution app bundle manifest must be a JSON object")
+		return errors.New("unified app bundle manifest must be a JSON object")
 	}
 	return nil
 }
 
-// CreateExecutionAppBundle preserves narrow bundle access through the cached store wrapper.
-func (s *cachedStore) CreateExecutionAppBundle(ctx context.Context, bundle ExecutionAppBundle) error {
-	repository, ok := s.Store.(ExecutionAppBundleStore)
+// CreateUnifiedAppBundle preserves narrow bundle access through the cached store wrapper.
+func (s *cachedStore) CreateUnifiedAppBundle(ctx context.Context, bundle UnifiedAppBundle) error {
+	repository, ok := s.Store.(UnifiedAppBundleStore)
 	// A wrapper without bundle persistence cannot silently discard an immutable app artifact.
 	if !ok {
-		return errors.New("execution app bundle store unavailable")
+		return errors.New("unified app bundle store unavailable")
 	}
-	return repository.CreateExecutionAppBundle(ctx, bundle)
+	return repository.CreateUnifiedAppBundle(ctx, bundle)
 }
 
-// GetExecutionAppBundle delegates exact version lookup without caching mutable script bytes.
-func (s *cachedStore) GetExecutionAppBundle(ctx context.Context, appID uuid.UUID) (*ExecutionAppBundle, error) {
-	repository, ok := s.Store.(ExecutionAppBundleStore)
+// GetUnifiedAppBundle delegates exact version lookup without caching mutable script bytes.
+func (s *cachedStore) GetUnifiedAppBundle(ctx context.Context, appID uuid.UUID) (*UnifiedAppBundle, error) {
+	repository, ok := s.Store.(UnifiedAppBundleStore)
 	// A missing delegate must not be mistaken for an absent app version.
 	if !ok {
-		return nil, errors.New("execution app bundle store unavailable")
+		return nil, errors.New("unified app bundle store unavailable")
 	}
-	return repository.GetExecutionAppBundle(ctx, appID)
+	return repository.GetUnifiedAppBundle(ctx, appID)
 }
 
-var _ ExecutionAppBundleStore = (*postgresStore)(nil)
-var _ ExecutionAppBundleStore = (*cachedStore)(nil)
+var _ UnifiedAppBundleStore = (*postgresStore)(nil)
+var _ UnifiedAppBundleStore = (*cachedStore)(nil)

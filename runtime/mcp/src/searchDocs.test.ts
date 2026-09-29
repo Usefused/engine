@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Fixture as RuntimeFixture, FixtureOperation, FixtureSchemaContract, FixtureUnifiedOperation } from "./fixture.js";
+import { Fixture as RuntimeFixture, FixtureOperation, FixtureSchemaContract } from "./fixture.js";
 import { SEARCH_DOCS_MAX_BYTES, SEARCH_DOCS_MAX_LIMIT, searchDocs } from "./searchDocs.js";
 
 const testServer = {
@@ -11,10 +11,9 @@ class Fixture extends RuntimeFixture {
   /** Supplies complete server identity while individual tests focus on catalogue behavior. */
   constructor(
     operations: FixtureOperation[],
-    unifiedOperations: FixtureUnifiedOperation[] = [],
     schemaDefinitions: Record<string, Record<string, FixtureSchemaContract>> = {},
   ) {
-    super(operations, unifiedOperations, schemaDefinitions, testServer);
+    super(operations, schemaDefinitions, testServer);
   }
 }
 
@@ -110,20 +109,6 @@ const insertCalendarEvent: FixtureOperation = {
   },
   responses: { "200": { description: "Created event", representations: [] } },
 };
-
-const syncRepos = {
-  name: "repos.sync",
-  description: "Synchronize reviewed repositories.",
-  input_schema: { type: "object", properties: { owner: { type: "string" } } },
-  output_schema: { type: "object" },
-  targets: [{
-    public_target: "source", service_target: "github", operation_id: "github.listRepos",
-    depends_on: [], output_schema: { type: "array" },
-    service_id: "private-service", service_version_id: "private-version", endpoint_id: "private-endpoint",
-    rollback: { operation_id: "github.restoreRepos", service_id: "private-rollback", endpoint_id: "private-endpoint" },
-  }],
-  private_mapping: { forbidden: true },
-} as unknown as FixtureUnifiedOperation;
 
 /** testFixture returns one deterministic mixed physical catalogue. */
 function testFixture(): Fixture {
@@ -467,41 +452,6 @@ describe("searchDocs", () => {
     expect(invalidPointer).toEqual({ mode: "section", error: "schemaPath must be an RFC 6901 JSON Pointer" });
   });
 
-  // Public Unified structure is sufficient for callers; Engine routing identities remain private.
-  it("projects Unified documentation without Engine identities or mappings", () => {
-    const result = searchDocs(new Fixture([], [syncRepos]), { operationId: "repos.sync" });
-    // Leakage assertions inspect a successful public descriptor, not an unrelated error payload.
-    if (result.mode !== "operationId" || "error" in result) throw new Error("expected Unified detail");
-
-    const encoded = JSON.stringify(result.operation);
-    expect(result.operation.execution_ready).toBe(true);
-    expect(result.operation).not.toHaveProperty("next_action");
-    expect(encoded).toContain("github.restoreRepos");
-    for (const forbidden of ["service_id", "service_version_id", "endpoint_id", "private_mapping", "selectors"]) {
-      // Public documentation must not reveal compiler or Engine routing identities.
-      expect(encoded).not.toContain(forbidden);
-    }
-  });
-
-  // Ranked Unified results include only the two sections needed to construct a call.
-  it("avoids packing Unified output documentation into ranked results", () => {
-    const result = searchDocs(new Fixture([], [syncRepos]), { query: "synchronize repositories" });
-    // The ranked branch must be narrowed before checking its call-construction sections.
-    if (result.mode !== "query") throw new Error("expected query mode");
-
-    expect(result.operations[0]).toMatchObject({
-      execution_ready: true,
-      schema_status: {
-        complete: false,
-        included_sections: ["input", "targets"],
-        available_sections: ["input", "targets", "output"],
-      },
-    });
-    expect(result.operations[0]).toHaveProperty("input_schema");
-    expect(result.operations[0]).toHaveProperty("targets");
-    expect(result.operations[0]).not.toHaveProperty("output_schema");
-  });
-
   // Prose has an explicit loss marker; schemas never use the same shortening path.
   it("truncates only prose and marks that intentional change", () => {
     const operation = { ...listRepos, operation_id: "long.description", description: "é".repeat(600) };
@@ -513,25 +463,23 @@ describe("searchDocs", () => {
     expect(Buffer.byteLength(result.operations[0].description, "utf8")).toBeLessThanOrEqual(512);
   });
 
-  // Equal lexical evidence must not depend on operation kind or fixture insertion order.
-  it("uses query default three, maximum five, and deterministic cross-kind ties", () => {
+  // Equal lexical evidence must not depend on fixture insertion order.
+  it("uses query default three, maximum five, and deterministic ties", () => {
     const physical = Array.from({ length: 6 }, (_, index) => ({
       ...listRepos,
       operation_id: `shared.physical${index}`,
       name: "Repository workflow",
       description: "Shared repository workflow",
     }));
-    const unified = { ...syncRepos, name: "shared.logical", description: "Shared repository workflow" };
-    const fixture = new Fixture(physical, [unified]);
+    const fixture = new Fixture(physical);
     const defaulted = searchDocs(fixture, { query: "shared" });
     const clamped = searchDocs(fixture, { query: "shared", limit: 100 });
-
-    // Both windows must come from the same ranking contract before comparing their sizes.
+    // Both windows use the same ranking and stable operation IDs.
     if (defaulted.mode !== "query" || clamped.mode !== "query") throw new Error("expected query mode");
     expect(defaulted.operations).toHaveLength(3);
     expect(clamped.operations).toHaveLength(5);
     expect(defaulted.operations.map(({ operation_id }) => operation_id)).toEqual([
-      "shared.logical", "shared.physical0", "shared.physical1",
+      "shared.physical0", "shared.physical1", "shared.physical2",
     ]);
     expect(JSON.stringify(defaulted)).not.toContain("score");
   });
@@ -545,54 +493,6 @@ describe("searchDocs", () => {
     expect(result).toMatchObject({ total: 2, truncated: false });
     expect(result.operations[0]).not.toHaveProperty("path");
     expect(result.operations[0]).not.toHaveProperty("schema_status");
-  });
-
-  // Byte-level admission prevents multi-byte text from bypassing the semantic result budget.
-  it("counts multibyte UTF-8 exactly at the 64 KiB section boundary", () => {
-    // The empty result measures fixed wrapper bytes so the payload can exercise the exact boundary.
-    const resultFor = (value: string) => searchDocs(
-      new Fixture([], [{ ...syncRepos, name: "unicode.boundary", input_schema: value }]),
-      { operationId: "unicode.boundary", section: "input" },
-    );
-    const emptyBytes = encodedBytes(resultFor(""));
-    const fittingValue = "é".repeat(Math.floor((SEARCH_DOCS_MAX_BYTES - emptyBytes) / 2));
-    const fitting = resultFor(fittingValue);
-    const overflowing = resultFor(`${fittingValue}é`);
-
-    expect(encodedBytes(fitting)).toBeLessThanOrEqual(SEARCH_DOCS_MAX_BYTES);
-    expect(fitting).toMatchObject({ mode: "section", schema_status: { complete: true } });
-    expect(overflowing).toMatchObject({ mode: "section", schema_status: { complete: false }, available_schema_paths: [] });
-    expect(encodedBytes(overflowing)).toBeLessThanOrEqual(SEARCH_DOCS_MAX_BYTES);
-  });
-
-  // Both large Unified schema kinds must keep their callable summary and safe recovery metadata.
-  it("omits large Unified input and target schemas without leaking private identities", () => {
-    const operation = {
-      ...syncRepos,
-      name: "repos.largeSync",
-      input_schema: { type: "object", properties: largeProperties(900) },
-      targets: [{
-        ...syncRepos.targets[0],
-        output_schema: { type: "object", properties: largeProperties(900) },
-      }],
-    } as unknown as FixtureUnifiedOperation;
-    const result = searchDocs(new Fixture([], [operation]), { query: "large synchronize repositories" });
-
-    // Query mode must retain the large callable rather than silently dropping its summary.
-    if (result.mode !== "query") throw new Error("expected query mode");
-    expect(result.operations[0].schema_status).toMatchObject({
-      complete: false,
-      available_sections: ["input", "targets", "output"],
-    });
-    expect(result.operations[0].execution_ready).toBe(false);
-    expect(result.operations[0].next_action).toEqual({
-      tool: "search_docs",
-      arguments: { operationId: "repos.largeSync", section: "input" },
-    });
-    expect(encodedBytes(result)).toBeLessThanOrEqual(SEARCH_DOCS_MAX_BYTES);
-    for (const forbidden of ["service_id", "service_version_id", "endpoint_id", "private_mapping"]) {
-      expect(JSON.stringify(result)).not.toContain(forbidden);
-    }
   });
 
   // Request contracts take priority because callers need them to construct a valid execution.
@@ -625,18 +525,7 @@ describe("searchDocs", () => {
     }
   });
 
-  // Escaped keys remain exact while inherited properties and array aliases stay inaccessible.
-  it("resolves escaped schema keys without prototype traversal or array aliases", () => {
-    const operation = { ...syncRepos, input_schema: { "a/b": { "~key": ["exact"] } } };
-    const fixture = new Fixture([], [operation]);
-    const exact = searchDocs(fixture, { operationId: operation.name, section: "input", schemaPath: "/a~1b/~0key/0" });
-    const inherited = searchDocs(fixture, { operationId: operation.name, section: "input", schemaPath: "/constructor" });
-    const alias = searchDocs(fixture, { operationId: operation.name, section: "input", schemaPath: "/a~1b/~0key/00" });
 
-    expect(exact).toMatchObject({ mode: "section", value: "exact", schema_status: { complete: true } });
-    expect(inherited).toHaveProperty("error");
-    expect(alias).toHaveProperty("error");
-  });
 });
 
 // Classifier-selected results retain query-mode safety instead of masquerading as exact lookup.

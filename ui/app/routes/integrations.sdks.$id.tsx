@@ -173,7 +173,7 @@ function useSdkVersionDeletion({ sdk, currentId, versions, setVersions, navigate
       if (version.id === currentId) {
         // A surviving sibling keeps the operator in Changes; an empty family returns to its owning catalogue tab.
         if (remaining.length > 0) navigate(`/integrations/sdks/${remaining[0].id}?tab=changes`);
-        else navigate(sdkCataloguePath());
+        else navigate(sdkCataloguePath(sdk));
         return;
       }
       setVersions(remaining);
@@ -187,10 +187,10 @@ function useSdkVersionDeletion({ sdk, currentId, versions, setVersions, navigate
   return { deletingVersionId, deleteVersion };
 }
 
-/** Returns the unified Apps catalogue for every SDK-kind delivery mode. */
-function sdkCataloguePath(): string {
-  // Delivery affects detail actions, but no longer fragments family discovery.
-  return "/integrations/sdks";
+/** Returns the owning Apps tab for a generated SDK or direct REST version. */
+function sdkCataloguePath(sdk?: Sdk | null): string {
+  // A missing version defaults to SDK; a loaded API version returns to the REST tab.
+  return sdk?.delivery_mode === "api" ? "/integrations/sdks?type=api" : "/integrations/sdks?type=sdk";
 }
 
 /** Resolves the exact loaded version while route parameters settle during navigation. */
@@ -538,7 +538,7 @@ function SdkLoadedContent({
 
   return (
     <div className="space-y-6">
-      <AppDetailBackLink to={sdkCataloguePath()} />
+      <AppDetailBackLink to={sdkCataloguePath(sdk)} />
 
       {/* Adapter-owned metadata and actions slot into one shared app identity hierarchy. */}
       <AppDetailHeader

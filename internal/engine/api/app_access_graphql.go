@@ -27,6 +27,7 @@ var appBuildSelectorGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"resource_type": &graphql.Field{Type: graphql.NewNonNull(appSelectorResourceTypeGraphQLEnum)},
 		"resource_id":   &graphql.Field{Type: graphql.NewNonNull(graphql.ID)},
 		"display_name":  &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		"is_default":    &graphql.Field{Type: graphql.NewNonNull(graphql.Boolean)},
 	},
 })
 
@@ -144,11 +145,12 @@ func appAccessRepository(s store.Store) (store.AppAccessRepository, error) {
 	return repository, nil
 }
 
+// projectAppBuildSelectorPage preserves authorized default metadata without extra bucket reads.
 func projectAppBuildSelectorPage(page store.AppSelectorPage) map[string]interface{} {
 	items := make([]map[string]interface{}, 0, len(page.Items))
 	for _, item := range page.Items {
 		items = append(items, map[string]interface{}{
-			"resource_type": item.Resource.Type, "resource_id": item.Resource.ID.String(), "display_name": item.DisplayName,
+			"resource_type": item.Resource.Type, "resource_id": item.Resource.ID.String(), "display_name": item.DisplayName, "is_default": item.IsDefault,
 		})
 	}
 	return map[string]interface{}{"items": items, "total": page.Total}

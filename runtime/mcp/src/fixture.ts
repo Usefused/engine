@@ -188,25 +188,6 @@ export interface FixturePagination {
   engine_max_pages?: number;
 }
 
-/** Mirrors the existing credential-free Unified descriptor stored in the applied plan. */
-export interface FixtureUnifiedOperation {
-  name: string;
-  description?: string;
-  input_schema: unknown;
-  output_schema?: unknown;
-  targets: FixtureUnifiedTarget[];
-}
-
-/** Carries the public graph metadata search_docs may safely project. */
-export interface FixtureUnifiedTarget {
-  public_target: string;
-  service_target?: string;
-  operation_id: string;
-  depends_on?: string[];
-  rollback?: { operation_id: string };
-  output_schema?: unknown;
-}
-
 /** Carries app-version identity that MCP hosts can inspect before listing tools. */
 export interface FixtureServerMetadata {
   "fused-intelligent-classifier"?: boolean;
@@ -220,10 +201,7 @@ interface FixtureFile {
   server?: Partial<FixtureServerMetadata>;
   schema_definitions?: Record<string, Record<string, FixtureSchemaContract>>;
   operations: FixtureOperation[];
-  unified_operations?: {
-    schema_version: number;
-    operations: FixtureUnifiedOperation[];
-  };
+
 }
 
 /**
@@ -236,12 +214,10 @@ interface FixtureFile {
  */
 export class Fixture {
   private readonly byOperationId = new Map<string, FixtureOperation>();
-  private readonly byUnifiedOperationId = new Map<string, FixtureUnifiedOperation>();
 
   /** Admits immutable server identity before indexing any callable catalogue entries. */
   constructor(
     public readonly operations: FixtureOperation[],
-    public readonly unifiedOperations: FixtureUnifiedOperation[] = [],
     public readonly schemaDefinitions: Record<string, Record<string, FixtureSchemaContract>> = {},
     server?: Partial<FixtureServerMetadata>,
   ) {
@@ -258,18 +234,7 @@ export class Fixture {
       }
       this.byOperationId.set(op.operation_id, op);
     }
-    for (const operation of unifiedOperations) {
-      // Empty logical names cannot become exact call identifiers.
-      if (!operation.name) {
-        throw new Error("Unified fixture operation missing name");
-      }
-      // Cross-kind or repeated logical names are ambiguous to call(operationId)
-      // and therefore fail before the MCP server exposes either operation.
-      if (this.byOperationId.has(operation.name) || this.byUnifiedOperationId.has(operation.name)) {
-        throw new Error(`physical and Unified operation name collision "${operation.name}"`);
-      }
-      this.byUnifiedOperationId.set(operation.name, operation);
-    }
+
   }
 
   public readonly server: FixtureServerMetadata;
@@ -285,10 +250,7 @@ export class Fixture {
     return this.byOperationId.get(operationId);
   }
 
-  /** Resolves one exact authored Unified name without inspecting private graph state. */
-  resolveUnified(operationId: string): FixtureUnifiedOperation | undefined {
-    return this.byUnifiedOperationId.get(operationId);
-  }
+
 }
 
 /** Validates complete app-version identity before the runtime advertises an MCP server. */
@@ -344,12 +306,6 @@ export function loadFixture(path: string): Fixture {
   if (!Array.isArray(parsed.operations)) {
     throw new Error("fixture.json missing an \"operations\" array");
   }
-  const unified = parsed.unified_operations;
-  // Descriptor schema admission belongs at fixture load so search_docs never
-  // guesses how to project a future compiler contract.
-  if (unified !== undefined && (unified.schema_version !== 3 || !Array.isArray(unified.operations))) {
-    throw new Error("fixture.json has an unsupported Unified descriptor");
-  }
-  // Standalone fixtures have no dictionary; compact roots retain the exact version-keyed shared source.
-  return new Fixture(parsed.operations, unified?.operations ?? [], parsed.schema_definitions ?? {}, parsed.server);
+  // Only physical operations and their shared definitions participate in local discovery.
+  return new Fixture(parsed.operations, parsed.schema_definitions ?? {}, parsed.server);
 }

@@ -18,9 +18,9 @@ func TestPermissionCatalogueContainsUniqueValidNames(t *testing.T) {
 		}
 		seen[permission] = struct{}{}
 	}
-	// Execution Apps add five isolated scopes without changing existing grants.
-	if len(permissions) != 47 {
-		t.Fatalf("permission catalogue contains %d entries, want 47", len(permissions))
+	// Private diagnostics add a separate grant without broadening ordinary read access.
+	if len(permissions) != 48 {
+		t.Fatalf("permission catalogue contains %d entries, want 48", len(permissions))
 	}
 }
 
@@ -49,6 +49,18 @@ func TestValidateResourceType(t *testing.T) {
 	for _, resourceType := range []ResourceType{"", "team"} {
 		if err := ValidateResourceType(resourceType); err == nil {
 			t.Fatalf("ValidateResourceType(%q) unexpectedly succeeded", resourceType)
+		}
+	}
+}
+
+// TestDiagnosticsPermissionIsExplicit prevents ordinary app read/manage roles from gaining raw-body access.
+func TestDiagnosticsPermissionIsExplicit(t *testing.T) {
+	for _, role := range BuiltInRoles() {
+		for _, permission := range role.Permissions {
+			// Owner retains its intentional all-permissions contract; every other built-in needs a separate grant.
+			if permission == PermissionUnifiedAppDiagnosticsRead && role.Slug != RoleOwner {
+				t.Fatalf("%s implicitly grants diagnostics", role.Slug)
+			}
 		}
 	}
 }

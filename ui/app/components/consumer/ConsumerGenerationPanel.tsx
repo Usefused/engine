@@ -1,5 +1,7 @@
+import { Select } from "../forms/Select.ts";
 import type { FormEvent } from "react";
-import { AlertTriangle, Check, Copy, Download, Globe2, Info, Server } from "lucide-react";
+import { ExecutionTokenField } from "~/components/apps/ExecutionTokenField";
+import { AlertTriangle, Check, Download, Globe2, Info, Server } from "lucide-react";
 import { AppOwnerControls } from "~/components/access/AppOwnerControls";
 import { McpTransportEndpoints, type McpTransportEndpointData } from "~/components/mcp/McpTransportEndpoints";
 import type { AppBuildSelector, AppCreationMode, AppOwningTeam } from "~/lib/app-builder-contract";
@@ -171,7 +173,7 @@ function LanguageSelector({ generationMode, language, setLanguage }: {
   return (
     <div>
       <label htmlFor="app-language" className="mb-1 block text-sm font-medium text-slate-700">Language</label>
-      <select
+      <Select
         id="app-language"
         data-track="select_app_language"
         value={language}
@@ -180,7 +182,7 @@ function LanguageSelector({ generationMode, language, setLanguage }: {
       >
         <option value="typescript">TypeScript</option>
         <option value="python">Python</option>
-      </select>
+      </Select>
     </div>
   );
 }
@@ -242,11 +244,14 @@ interface UnactivatedServicesWarningProps {
   AddSelectedServiceToWorkspaceButton: ConsumerGenerationPanelProps["AddSelectedServiceToWorkspaceButton"];
 }
 
+/** Explains the remaining workspace prerequisite without competing with the primary create action. */
 function UnactivatedServicesWarning({ unactivatedSelectedServiceIds, data, versionSelections, onAdded, AddSelectedServiceToWorkspaceButton }: UnactivatedServicesWarningProps) {
+  // Hide the prerequisite once every selected dependency is available.
   if (unactivatedSelectedServiceIds.length === 0) return null;
   return (
-    <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl animate-in fade-in slide-in-from-top-1">
-      <p className="text-xs text-amber-800 leading-snug mb-2.5">
+    <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+      <p className="mb-3 text-sm leading-relaxed text-slate-600">
+        {/* Match the prerequisite explanation to the number of pending services. */}
         {unactivatedSelectedServiceIds.length === 1
           ? "This service isn't in your workspace yet. Add it to continue:"
           : "These services aren't in your workspace yet. Add them to continue:"}
@@ -422,8 +427,8 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
   const showsLanguage = !props.existingApp && (generationMode === "sdk" || generationMode === "app");
 
   return (
-    /* The stacked layout should not stretch every input across a tablet-width screen. */
-    <div className="mx-auto w-full max-w-lg flex-shrink-0 lg:mx-0 lg:w-80 lg:max-w-none">
+    /* Fill the shared grid column on desktop and the full available width when stacked. */
+    <div className="w-full min-w-0">
       <div className="bg-white rounded-2xl border border-slate-200 shadow-xl shadow-slate-200/50 overflow-hidden sticky top-8">
         <GenerationModeHeader generationMode={generationMode} />
 
@@ -506,27 +511,6 @@ function NewAppLanguage({ props }: { props: ConsumerGenerationPanelProps }) {
 /** One shared gate prevents pending, empty, or conflicting capability selections from being submitted. */
 function generationSubmitDisabled(props: ConsumerGenerationPanelProps) {
   return [props.selectionError, props.selectionPending, props.generating, props.totalSelected === 0, !props.sdkName.trim(), !props.bucketId, props.totalSelectedServices > 10, props.unactivatedSelectedServiceIds.length > 0].some(Boolean);
-}
-
-/** Presents one-time runtime credentials only after the shared app lifecycle completes. */
-function ExecutionTokenField({ token, copied, onCopy }: { token: string; copied: boolean; onCopy: () => void }) {
-  return (
-    <div className="mt-3 flex items-center gap-2">
-      <code className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs">{token}</code>
-      <button
-        type="button"
-        title="Copy execution token"
-        aria-label="Copy execution token"
-        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded border border-slate-200 bg-white hover:bg-slate-50"
-        onClick={async () => {
-          await navigator.clipboard.writeText(token);
-          onCopy();
-        }}
-      >
-        {copied ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
-      </button>
-    </div>
-  );
 }
 
 /** Names the authored description for the delivery the user is creating. */

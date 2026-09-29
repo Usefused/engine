@@ -13,15 +13,15 @@ import (
 func TestExecutionBundleDigestPlanAdmission(t *testing.T) {
 	generate := false
 	base := sdkConfigDocument{
-		APIVersion: "fused/v1", Kind: "execution", Name: "capability-app", Version: "1.0.0",
+		APIVersion: "fused/v1", Kind: "unified_app", Name: "capability-app", Version: "1.0.0",
 		Language: "typescript", Generate: &generate, Bucket: "default", Services: map[string]sdkConfigServiceDoc{
 			"crm": {Version: "v1", Operations: []string{"customers.create"}},
 		},
 	}
-	valid := store.ExecutionAppBundleDigest([]byte("compiled capability"))
+	valid := store.UnifiedAppBundleDigest([]byte("compiled capability"))
 	for _, testCase := range []struct {
 		name, language, digest                  string
-		graph, defaultGenerate, enabledGenerate bool
+		defaultGenerate, enabledGenerate bool
 		wantErr                                 bool
 	}{
 		{name: "authored TypeScript", language: "typescript", digest: valid},
@@ -29,16 +29,15 @@ func TestExecutionBundleDigestPlanAdmission(t *testing.T) {
 		{name: "uppercase digest", language: "typescript", digest: strings.ToUpper(valid), wantErr: true},
 		{name: "bare digest", language: "typescript", digest: strings.TrimPrefix(valid, "sha256:"), wantErr: true},
 		{name: "other language", language: "python", digest: valid, wantErr: true},
-		{name: "implicit package", language: "typescript", digest: valid, defaultGenerate: true, wantErr: true},
+		{name: "omitted package fields", language: "typescript", digest: valid, defaultGenerate: true},
 		{name: "explicit package", language: "typescript", digest: valid, enabledGenerate: true, wantErr: true},
-		{name: "competing graph", language: "typescript", digest: valid, graph: true, wantErr: true},
 	} {
 		// Each independent input proves the plan boundary rejects an unpinnable code identity.
 		t.Run(testCase.name, func(t *testing.T) {
 			doc := base
 			doc.Language = testCase.language
 			doc.BundleDigest = testCase.digest
-			// Authored versions must declare API delivery until package generation supports execute.
+			// Unified Apps infer their TypeScript runtime and never generate an SDK package.
 			if testCase.defaultGenerate {
 				doc.Generate = nil
 			}
@@ -46,11 +45,7 @@ func TestExecutionBundleDigestPlanAdmission(t *testing.T) {
 				enabled := true
 				doc.Generate = &enabled
 			}
-			// A graph declaration makes one version's execution contract ambiguous.
-			if testCase.graph {
-				doc.UnifiedOperations = map[string]sdkUnifiedOperationDoc{"legacy.execute": {}}
-			}
-			err := validateExecutionConfigDocument(doc)
+			err := validateUnifiedAppConfigDocument(doc)
 			// A hosted execute needs its own immutable compiler identity.
 			if (err != nil) != testCase.wantErr {
 				t.Fatalf("validateSDKConfigDocument() error = %v, want error %t", err, testCase.wantErr)
@@ -63,13 +58,13 @@ func TestExecutionBundleDigestPlanAdmission(t *testing.T) {
 func TestExecutionBundleDigestRequiresServiceScope(t *testing.T) {
 	generate := false
 	doc := sdkConfigDocument{
-		APIVersion: "fused/v1", Kind: "execution", Name: "greeting", Version: "1.0.0",
+		APIVersion: "fused/v1", Kind: "unified_app", Name: "greeting", Version: "1.0.0",
 		Language: "typescript", Generate: &generate, Bucket: "default",
-		BundleDigest: store.ExecutionAppBundleDigest([]byte("authored execute")),
+		BundleDigest: store.UnifiedAppBundleDigest([]byte("authored execute")),
 	}
 	// A pinned bundle cannot authorize unselected provider operations.
-	if err := validateExecutionConfigDocument(doc); err == nil {
-		t.Fatal("service-free Execution App accepted")
+	if err := validateUnifiedAppConfigDocument(doc); err == nil {
+		t.Fatal("service-free Unified App accepted")
 	}
 	doc.Kind = "sdk"
 	// SDKs also retain their ordinary service-selection rule.
@@ -78,15 +73,15 @@ func TestExecutionBundleDigestRequiresServiceScope(t *testing.T) {
 	}
 }
 
-// TestExecutionAppRuntimeRejectsEmptyScope prevents a compiler digest from widening provider authority.
-func TestExecutionAppRuntimeRejectsEmptyScope(t *testing.T) {
+// TestUnifiedAppRuntimeRejectsEmptyScope prevents a compiler digest from widening provider authority.
+func TestUnifiedAppRuntimeRejectsEmptyScope(t *testing.T) {
 	scope, err := appRuntimeForApply(persistAppRuntimeParams{
-		bucketID: uuid.New(), bucketName: "default", kind: store.AppKindExecution,
+		bucketID: uuid.New(), bucketName: "default", kind: store.AppKindUnifiedApp,
 		scopeSchemaVersion: models.AppScopeSchemaVersion,
-		bundleDigest:       store.ExecutionAppBundleDigest([]byte("greeting")),
+		bundleDigest:       store.UnifiedAppBundleDigest([]byte("greeting")),
 	})
 	// Runtime publication requires at least one exact selected provider operation.
 	if err == nil {
-		t.Fatalf("empty Execution App scope accepted: %#v", scope)
+		t.Fatalf("empty Unified App scope accepted: %#v", scope)
 	}
 }

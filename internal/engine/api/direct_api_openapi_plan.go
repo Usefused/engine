@@ -6,13 +6,12 @@ import (
 	"net/http"
 
 	"github.com/Usefused/engine/internal/engine/store"
-	"github.com/Usefused/engine/internal/engine/unified"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 )
 
 // validateDirectAPIOpenAPIPlan runs the production export projection against the prospective immutable scope before any API plan is stored.
-func validateDirectAPIOpenAPIPlan(ctx context.Context, s store.Store, doc sdkConfigDocument, existingAppID uuid.UUID, selections []models.SDKSelection, compilation sdkUnifiedCompilation) error {
+func validateDirectAPIOpenAPIPlan(ctx context.Context, s store.Store, doc sdkConfigDocument, existingAppID uuid.UUID, selections []models.SDKSelection) error {
 	// Generated SDKs retain their package contract and do not promise a package-free REST API export during this plan path.
 	if sdkConfigGeneratesPackage(doc) {
 		return nil
@@ -34,8 +33,6 @@ func validateDirectAPIOpenAPIPlan(ctx context.Context, s store.Store, doc sdkCon
 	appID := directAPIOpenAPIPlanID(existingAppID, doc)
 	app := &store.App{
 		AppID: appID, Version: doc.Version, ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: encodedSelections,
-		UnifiedDefinitionSchemaVersion: unified.DefinitionSchemaVersion, UnifiedDefinitions: compilation.DefinitionJSON,
-		UnifiedDefinitionHash: compilation.DefinitionHash, UnifiedCodegenDescriptorHash: compilation.CodegenDescriptorHash,
 		Status: store.AppStatusActive,
 	}
 	family := &store.AppFamily{Kind: store.AppKindSDK, DisplayName: doc.Name}

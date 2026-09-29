@@ -18,8 +18,8 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 			singleton_key, entitlement_revision, plan, heartbeat_required, usage_reporting,
 			public_service_insights_enabled,
 			heartbeat_interval_seconds, heartbeat_stale_after_seconds, refreshed_at, updated_at,
-			max_buckets, max_api_families, max_sdk_families, max_mcp_families, max_execution_app_families, max_execution_app_concurrency, max_services, max_sandbox_concurrency,
-			drift_monitoring_enabled, execution_app_always_on_enabled, webhook_ingestion_enabled, sso_enabled, execution_retention_days
+			max_buckets, max_api_families, max_sdk_families, max_mcp_families, max_unified_app_families, max_unified_app_concurrency, max_services, max_sandbox_concurrency,
+			drift_monitoring_enabled, unified_app_always_on_enabled, webhook_ingestion_enabled, sso_enabled, execution_retention_days
 		)
 		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 		ON CONFLICT (singleton_key) DO UPDATE SET
@@ -36,12 +36,12 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 			max_api_families = EXCLUDED.max_api_families,
 			max_sdk_families = EXCLUDED.max_sdk_families,
 			max_mcp_families = EXCLUDED.max_mcp_families,
-			max_execution_app_families = EXCLUDED.max_execution_app_families,
-			max_execution_app_concurrency = EXCLUDED.max_execution_app_concurrency,
+			max_unified_app_families = EXCLUDED.max_unified_app_families,
+			max_unified_app_concurrency = EXCLUDED.max_unified_app_concurrency,
 			max_services = EXCLUDED.max_services,
 			max_sandbox_concurrency = EXCLUDED.max_sandbox_concurrency,
 			drift_monitoring_enabled = EXCLUDED.drift_monitoring_enabled,
-			execution_app_always_on_enabled = EXCLUDED.execution_app_always_on_enabled,
+			unified_app_always_on_enabled = EXCLUDED.unified_app_always_on_enabled,
 			webhook_ingestion_enabled = EXCLUDED.webhook_ingestion_enabled,
 			sso_enabled = EXCLUDED.sso_enabled,
 			execution_retention_days = EXCLUDED.execution_retention_days
@@ -59,12 +59,12 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 		entitlement.MaxAPIFamilies,
 		entitlement.MaxSDKFamilies,
 		entitlement.MaxMCPFamilies,
-		entitlement.MaxExecutionAppFamilies,
-		entitlement.MaxExecutionAppConcurrency,
+		entitlement.MaxUnifiedAppFamilies,
+		entitlement.MaxUnifiedAppConcurrency,
 		entitlement.MaxServices,
 		entitlement.MaxSandboxConcurrency,
 		entitlement.DriftMonitoringEnabled,
-		entitlement.ExecutionAppAlwaysOnEnabled,
+		entitlement.UnifiedAppAlwaysOnEnabled,
 		entitlement.WebhookIngestionEnabled,
 		entitlement.SSOEnabled,
 		entitlement.ExecutionRetentionDays,
@@ -78,8 +78,8 @@ func (s *postgresStore) GetRuntimeEntitlement(ctx context.Context) (models.Runti
 		SELECT entitlement_revision, plan, heartbeat_required, usage_reporting,
 			public_service_insights_enabled,
 			heartbeat_interval_seconds, heartbeat_stale_after_seconds, refreshed_at,
-			max_buckets, max_api_families, max_sdk_families, max_mcp_families, max_execution_app_families, max_execution_app_concurrency, max_services, max_sandbox_concurrency,
-			drift_monitoring_enabled, execution_app_always_on_enabled, webhook_ingestion_enabled, sso_enabled, execution_retention_days
+			max_buckets, max_api_families, max_sdk_families, max_mcp_families, max_unified_app_families, max_unified_app_concurrency, max_services, max_sandbox_concurrency,
+			drift_monitoring_enabled, unified_app_always_on_enabled, webhook_ingestion_enabled, sso_enabled, execution_retention_days
 		FROM fused_runtime_entitlements
 		WHERE singleton_key = 1
 	`
@@ -97,12 +97,12 @@ func (s *postgresStore) GetRuntimeEntitlement(ctx context.Context) (models.Runti
 		&entitlement.MaxAPIFamilies,
 		&entitlement.MaxSDKFamilies,
 		&entitlement.MaxMCPFamilies,
-		&entitlement.MaxExecutionAppFamilies,
-		&entitlement.MaxExecutionAppConcurrency,
+		&entitlement.MaxUnifiedAppFamilies,
+		&entitlement.MaxUnifiedAppConcurrency,
 		&entitlement.MaxServices,
 		&entitlement.MaxSandboxConcurrency,
 		&entitlement.DriftMonitoringEnabled,
-		&entitlement.ExecutionAppAlwaysOnEnabled,
+		&entitlement.UnifiedAppAlwaysOnEnabled,
 		&entitlement.WebhookIngestionEnabled,
 		&entitlement.SSOEnabled,
 		&entitlement.ExecutionRetentionDays,

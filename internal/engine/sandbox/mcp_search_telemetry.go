@@ -31,14 +31,13 @@ func startMCPSearchObservation(ctx context.Context, request mcpJSONRPCRequest, s
 		return nil
 	}
 	_, span := otel.Tracer("engine").Start(ctx, "engine.sandbox.mcp.search_docs")
-	physicalCount, unifiedCount := mcpFixtureKindCounts(sess.fixture)
+	physicalCount := mcpFixtureOperationCount(sess.fixture)
 	// Every mode except the catalogue list may return callable contract material.
 	span.SetAttributes(
 		attribute.String("actor.type", "agent"),
 		attribute.String("mcp.transport", boundedMCPSearchTransport(sess.transport)),
 		attribute.String("mcp.search.mode", mode),
 		attribute.Int("mcp.search.physical_count", physicalCount),
-		attribute.Int("mcp.search.unified_count", unifiedCount),
 		attribute.Bool("mcp.search.include_detail", mode != "list"),
 	)
 	return &mcpSearchObservation{span: span, started: time.Now()}
@@ -75,18 +74,13 @@ func mcpSearchMode(raw json.RawMessage) (string, bool) {
 	return "list", true
 }
 
-// mcpFixtureKindCounts projects only bounded catalogue cardinalities already held by Engine.
-func mcpFixtureKindCounts(fixture *Fixture) (int, int) {
+// mcpFixtureOperationCount projects only bounded physical catalogue size already held by Engine.
+func mcpFixtureOperationCount(fixture *Fixture) int {
 	// A missing fixture is reported as an empty catalogue rather than exposing runtime state.
 	if fixture == nil {
-		return 0, 0
+		return 0
 	}
-	unified := 0
-	// An absent descriptor is the canonical empty Unified catalogue.
-	if fixture.UnifiedOperations != nil {
-		unified = len(fixture.UnifiedOperations.Operations)
-	}
-	return min(len(fixture.Operations), maxMCPSearchTelemetryCount), min(unified, maxMCPSearchTelemetryCount)
+	return min(len(fixture.Operations), maxMCPSearchTelemetryCount)
 }
 
 // boundedMCPSearchTransport collapses unexpected session values to one stable enum.

@@ -16,7 +16,7 @@ interface CliPaths {
 }
 
 const BUILD_FLAGS = new Set(["--config", "--out", "--manifest", "--digest", "--client", "--bindings"]);
-const USAGE = "Usage: fused-execution-build --config spec.json --out bundle.js --manifest manifest.json [--digest digest.json] [--client client.ts] [--bindings operations.d.ts]";
+const USAGE = "Usage: fused-unified-app-build --config spec.json --out bundle.js --manifest manifest.json [--digest digest.json] [--client client.ts] [--bindings operations.d.ts]";
 
 // Each flag can claim one value so output paths remain unambiguous.
 function validFlagPair(flag: string, value: string | undefined, options: Record<string, string>): boolean {

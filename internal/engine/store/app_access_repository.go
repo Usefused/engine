@@ -47,6 +47,7 @@ type AppSelectorQuery struct {
 type AppBuildSelector struct {
 	Resource    accesscontrol.ResourceRef
 	DisplayName string
+	IsDefault   bool
 }
 
 type AppSelectorPage struct {

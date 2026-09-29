@@ -13,10 +13,10 @@ import (
 	"github.com/Usefused/engine/internal/engine/store"
 )
 
-// MCPCapabilityAdapter connects the existing modern execute tool to the durable Execution App command.
+// MCPCapabilityAdapter connects the existing modern execute tool to the durable Unified App command.
 type MCPCapabilityAdapter interface {
-	ExecutionAppInputSchema(context.Context, auth.RuntimeIdentity) (json.RawMessage, bool, error)
-	ExecuteExecutionApp(context.Context, auth.RuntimeIdentity, json.RawMessage) (json.RawMessage, error)
+	UnifiedAppInputSchema(context.Context, auth.RuntimeIdentity) (json.RawMessage, bool, error)
+	ExecuteUnifiedApp(context.Context, auth.RuntimeIdentity, json.RawMessage) (json.RawMessage, error)
 }
 
 type mcpCapabilityAdapterHolder struct{ adapter MCPCapabilityAdapter }
@@ -24,7 +24,7 @@ type mcpCapabilityAdapterHolder struct{ adapter MCPCapabilityAdapter }
 var mcpCapabilityAdapter atomic.Pointer[mcpCapabilityAdapterHolder]
 
 // ErrMCPCapabilityUnavailable distinguishes an absent immutable app execute contract from a runtime failure.
-var ErrMCPCapabilityUnavailable = errors.New("MCP execution app is unavailable")
+var ErrMCPCapabilityUnavailable = errors.New("MCP unified app is unavailable")
 
 // SetMCPCapabilityAdapter installs the API-owned executor shared by SDK, REST, and MCP on this Engine process.
 func SetMCPCapabilityAdapter(adapter MCPCapabilityAdapter) {
@@ -36,10 +36,10 @@ func SetMCPCapabilityAdapter(adapter MCPCapabilityAdapter) {
 	mcpCapabilityAdapter.Store(&mcpCapabilityAdapterHolder{adapter: adapter})
 }
 
-// admittedMCPCapabilityAdapter permits only exact authenticated Execution App versions opted into hosted MCP.
+// admittedMCPCapabilityAdapter permits only exact authenticated Unified App versions opted into hosted MCP.
 func admittedMCPCapabilityAdapter(admission *mcpModernAdmission) MCPCapabilityAdapter {
 	// SDK and MCP-kind apps retain their existing transport behavior.
-	if admission == nil || admission.target == nil || admission.identity.Kind != store.AppKindExecution || !admission.identity.HostedMCP || admission.identity.AppID != admission.target.AppID {
+	if admission == nil || admission.target == nil || admission.identity.Kind != store.AppKindUnifiedApp || !admission.identity.HostedMCP || admission.identity.AppID != admission.target.AppID {
 		return nil
 	}
 	holder := mcpCapabilityAdapter.Load()
@@ -57,17 +57,17 @@ func appendMCPHostedCapabilityTools(ctx context.Context, result map[string]any, 
 	if adapter == nil {
 		return nil
 	}
-	inputSchema, found, err := adapter.ExecutionAppInputSchema(ctx, admission.identity)
+	inputSchema, found, err := adapter.UnifiedAppInputSchema(ctx, admission.identity)
 	if err != nil {
 		return err
 	}
-	// An Execution App version without an attached bundle still exposes selected raw MCP tools.
+	// A Unified App version without an attached bundle still exposes selected raw MCP tools.
 	if !found {
 		return nil
 	}
 	// MCP tools/call arguments must remain an object even for a valid authored schema.
 	if !validMCPToolInputSchema(inputSchema) {
-		return errors.New("execution app input schema is invalid for MCP")
+		return errors.New("unified app input schema is invalid for MCP")
 	}
 	tools, ok := result["tools"].([]any)
 	if !ok {
@@ -96,7 +96,7 @@ func extendMCPExecuteTool(tools []any, inputSchema json.RawMessage) error {
 				"operation": map[string]any{"const": "execute"}, "input": inputSchema,
 			}, "required": []string{"operation", "input"}, "additionalProperties": false,
 		}}}
-		tool["description"] = mcpModernExecuteToolDescription + " For this Execution App, pass operation=execute and typed input to run its authored function."
+		tool["description"] = mcpModernExecuteToolDescription + " For this Unified App, pass operation=execute and typed input to run its authored function."
 		// The two modes have different result envelopes, so a single output schema would mislead clients.
 		delete(tool, "outputSchema")
 		return nil
@@ -136,14 +136,14 @@ func handleMCPHostedCapabilityCall(ctx context.Context, w http.ResponseWriter, r
 		writeMCPModernError(w, request.ID, -32602, err.Error(), http.StatusBadRequest, nil)
 		return true
 	}
-	envelope, err := adapter.ExecuteExecutionApp(ctx, admission.identity, input)
+	envelope, err := adapter.ExecuteUnifiedApp(ctx, admission.identity, input)
 	// A missing exact-version bundle cannot become a child script fallback.
 	if errors.Is(err, ErrMCPCapabilityUnavailable) {
-		writeMCPModernError(w, request.ID, -32602, "execution app is unavailable", http.StatusBadRequest, nil)
+		writeMCPModernError(w, request.ID, -32602, "unified app is unavailable", http.StatusBadRequest, nil)
 		return true
 	}
 	if err != nil {
-		writeMCPModernError(w, request.ID, -32603, "execution app runtime is unavailable", http.StatusServiceUnavailable, nil)
+		writeMCPModernError(w, request.ID, -32603, "unified app runtime is unavailable", http.StatusServiceUnavailable, nil)
 		return true
 	}
 	// The structured result carries the same execution ID, status, typed output, and read handle as REST.
@@ -185,11 +185,11 @@ func decodeMCPHostedExecuteArguments(raw json.RawMessage) (json.RawMessage, erro
 	}
 	// Additional state or script controls would make this execution ambiguous.
 	if decoder.Decode(&arguments) != nil || arguments.Operation != "execute" || len(arguments.Input) == 0 || len(arguments.Input) > maxCapabilityInputBytes || !json.Valid(arguments.Input) {
-		return nil, errors.New("execution app arguments are invalid")
+		return nil, errors.New("unified app arguments are invalid")
 	}
 	var trailing any
 	if decoder.Decode(&trailing) != io.EOF {
-		return nil, errors.New("execution app arguments are invalid")
+		return nil, errors.New("unified app arguments are invalid")
 	}
 	return arguments.Input, nil
 }

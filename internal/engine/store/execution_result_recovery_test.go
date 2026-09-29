@@ -43,7 +43,7 @@ func TestRecoverStaleExecutionResultsPostgres(t *testing.T) {
 	queued := ExecutionResult{ID: uuid.New(), AccountID: uuid.New(), AppFamilyID: uuid.New(), AppID: uuid.New(), AppTokenID: uuid.New(), AppVersion: "1", Status: "queued", Mode: "live", ReadHandleHash: strings.Repeat("a", 64), Input: json.RawMessage(`{}`)}
 	running := queued
 	running.ID = uuid.New()
-	defer pool.Exec(context.Background(), `DELETE FROM fused_execution_app_results WHERE id IN ($1,$2)`, queued.ID, running.ID)
+	defer pool.Exec(context.Background(), `DELETE FROM fused_unified_app_results WHERE id IN ($1,$2)`, queued.ID, running.ID)
 	if err := repository.CreateExecutionResult(ctx, queued); err != nil {
 		t.Fatalf("create queued execution: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestRecoverStaleExecutionResultsPostgres(t *testing.T) {
 	if err := repository.StartExecutionResult(ctx, running.AccountID, running.AppID, running.ID); err != nil {
 		t.Fatalf("start running execution: %v", err)
 	}
-	_, err = pool.Exec(ctx, `UPDATE fused_execution_app_results SET updated_at=NOW()-INTERVAL '3 minutes' WHERE id IN ($1,$2)`, queued.ID, running.ID)
+	_, err = pool.Exec(ctx, `UPDATE fused_unified_app_results SET updated_at=NOW()-INTERVAL '3 minutes' WHERE id IN ($1,$2)`, queued.ID, running.ID)
 	if err != nil {
 		t.Fatalf("age test executions: %v", err)
 	}

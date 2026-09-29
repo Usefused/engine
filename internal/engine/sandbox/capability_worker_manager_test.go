@@ -10,7 +10,7 @@ import (
 )
 
 const managerTestBundle = `globalThis.FusedExecutionManifest={schemaVersion:1,inputSchema:{},outputSchema:{},searchable:[],selectedOperations:[]};
-globalThis.FusedExecutionApp={input:{parse(v){return v}},output:{parse(v){return v}},execute:async({input})=>JSON.parse(await __fusedHost.fetch(JSON.stringify({input:{value:input.name}})))};`
+globalThis.FusedUnifiedApp={input:{parse(v){return v}},output:{parse(v){return v}},execute:async({input})=>JSON.parse(await __fusedHost.fetch(JSON.stringify({input:{value:input.name}})))};`
 
 type managerBlockingHost struct {
 	entered chan struct{}

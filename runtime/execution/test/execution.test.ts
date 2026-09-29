@@ -7,7 +7,7 @@ import vm from "node:vm";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { buildExecutionApp, fused, runExecutionApp, toPublicSchema, validateSearchablePaths } from "../src/index";
+import { buildUnifiedApp, fused, runUnifiedApp, toPublicSchema, validateSearchablePaths } from "../src/index";
 import { buildExecutionBundle, inspectExecutionBundle } from "../src/bundle";
 import { generateExecutionClientSource } from "../src/client_generator";
 import { renderPublicType } from "../src/client_schema";
@@ -110,14 +110,14 @@ test("fused.fetch binds user refs by service", async () => {
 
 // Verify the authored return value is parsed against its declared Zod output.
 test("execution validates input and output", async () => {
-  const app = buildExecutionApp({
+  const app = buildUnifiedApp({
     input: z.object({ value: z.string() }),
     output: z.object({ value: z.number() }),
     // This deliberately violates the output contract to prove runtime validation.
     execute: async () => ({ value: "wrong" as unknown as number }),
   });
-  await assert.rejects(runExecutionApp(app, { value: 3 }), /expected string/);
-  await assert.rejects(runExecutionApp(app, { value: "valid" }), /expected number/);
+  await assert.rejects(runUnifiedApp(app, { value: 3 }), /expected string/);
+  await assert.rejects(runUnifiedApp(app, { value: "valid" }), /expected number/);
 });
 
 // Verify public schemas cannot silently omit an authored custom validation rule.
@@ -150,7 +150,7 @@ test("bundle exports a singular Engine contract", async () => {
   assert.equal(manifest.schemaVersion, 1);
   assert.deepEqual([...manifest.searchable], ["customerId"]);
   assert.equal(manifest.selectedOperations.length, 1);
-  const app = sandbox.FusedExecutionApp as { input: z.ZodType; output: z.ZodType; execute(context: { input: unknown }): Promise<unknown> };
+  const app = sandbox.FusedUnifiedApp as { input: z.ZodType; output: z.ZodType; execute(context: { input: unknown }): Promise<unknown> };
   const parsedInput = app.input.parse({ name: "Jane" });
   const parsedOutput = app.output.parse(await app.execute({ input: parsedInput }));
   assert.deepEqual(JSON.parse(JSON.stringify(parsedOutput)), { customerId: "cus_123" });
@@ -176,7 +176,7 @@ test("bundle rejects imports outside the pinned authoring modules", async () => 
       const entryFile = path.join(directory, "app.ts");
       fs.writeFileSync(entryFile, `import value from ${JSON.stringify(imported)};\nexport default value;\n`);
       // A compiler rejection must happen before an arbitrary import can become executable artifact bytes.
-      await assert.rejects(buildExecutionBundle({ entryFile, selectedOperations }), /Execution App source cannot import/);
+      await assert.rejects(buildExecutionBundle({ entryFile, selectedOperations }), /Unified App source cannot import/);
     }
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -217,7 +217,7 @@ test("selected operation methods compile and omit local schema hints", async () 
     async dbSet(valueJson: string) { stored = valueJson; },
   };
   vm.runInNewContext(bundle.code, sandbox, { timeout: 5000 });
-  const app = sandbox.FusedExecutionApp as { execute(context: { input: unknown }): Promise<unknown> };
+  const app = sandbox.FusedUnifiedApp as { execute(context: { input: unknown }): Promise<unknown> };
   assert.deepEqual(JSON.parse(JSON.stringify(await app.execute({ input: { name: "Jane" } }))), { greeting: "Hello Jane" });
   assert.deepEqual(JSON.parse(stored), { name: "Jane" });
   const manifest = sandbox.FusedExecutionManifest as { selectedOperations: Array<Record<string, unknown>> };
@@ -239,7 +239,7 @@ test("CLI emits singular app artifacts", () => {
   try {
     fs.writeFileSync(specFile, JSON.stringify({ entryFile: path.resolve(__dirname, "../../test/fixture.ts"), selectedOperations }));
     execFileSync(process.execPath, [path.resolve(__dirname, "../src/cli.js"), "--config", specFile, "--out", bundleFile, "--manifest", manifestFile, "--client", clientFile, "--bindings", bindingsFile]);
-    assert.ok(fs.readFileSync(bundleFile, "utf8").includes("FusedExecutionApp"));
+    assert.ok(fs.readFileSync(bundleFile, "utf8").includes("FusedUnifiedApp"));
     assert.deepEqual(JSON.parse(fs.readFileSync(manifestFile, "utf8")).searchable, ["customerId"]);
     const digest = JSON.parse(fs.readFileSync(bundleFile + ".digest.json", "utf8")).bundle_digest;
     assert.equal(digest, "sha256:" + createHash("sha256").update(fs.readFileSync(bundleFile)).digest("hex"));
@@ -268,10 +268,11 @@ test("generated client compiles and routes execution lifecycle calls", async () 
     execFileSync(process.execPath, [compiler, "--ignoreConfig", "--strict", "--target", "ES2020", "--module", "CommonJS", "--moduleResolution", "node", "--ignoreDeprecations", "6.0", "--lib", "ES2020", "--outDir", path.join(directory, "build"), clientFile, usageFile]);
     const generated = require(path.join(directory, "build/client.js")) as { createFusedExecutionClient(options: unknown): any };
     const calls: Array<{ url: string; init: { method: string; headers: Record<string, string>; body?: string } }> = [];
+    // Mock the public execution envelope without the private stored search document.
     const client = generated.createFusedExecutionClient({ baseUrl: "http://engine/", appId: "app-id", token: "secret", async fetcher(url: string, init: { method: string; headers: Record<string, string>; body?: string }) {
       calls.push({ url, init });
       // Search is the only route whose body is a page of records.
-      const payload = url.includes("?where=") ? { items: [] } : { executionId: "run-id", appId: "app-id", version: "v1", status: "succeeded", mode: "live", readHandle: "a".repeat(64), output: { customerId: "cus_123" }, data: null, createdAt: "2026-09-28T00:00:00Z" };
+      const payload = url.includes("?where=") ? { items: [] } : { executionId: "run-id", appId: "app-id", version: "v1", status: "succeeded", mode: "live", readHandle: "a".repeat(64), output: { customerId: "cus_123" }, createdAt: "2026-09-28T00:00:00Z" };
       return { ok: true, status: 200, async json() { return payload; } };
     } });
     await client.execute({ name: "Jane" });
@@ -294,5 +295,31 @@ test("generated client compiles and routes execution lifecycle calls", async () 
     await assert.rejects(denied.search({}), (error: unknown) => error instanceof Error && (error as { code?: string }).code === "access_denied");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// Source-map identities must remain stable across temporary compile directories and omit private source text.
+test("bundles retain stable private TypeScript source maps", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fused-diagnostic-map-"));
+  const source = `import {z} from 'zod';
+import {buildUnifiedApp} from '@fused/unified-app';
+export default buildUnifiedApp({input:z.object({}),output:z.object({}),fetch:{searchable:[]},
+async execute(){throw new Error('private map sentinel');}});`;
+  try {
+    fs.mkdirSync(path.join(directory, "a")); fs.mkdirSync(path.join(directory, "b"));
+    const firstPath = path.join(directory, "a", "app.ts");
+    const secondPath = path.join(directory, "b", "app.ts");
+    fs.writeFileSync(firstPath, source); fs.writeFileSync(secondPath, source);
+    const first = await buildExecutionBundle({entryFile:firstPath,selectedOperations});
+    const second = await buildExecutionBundle({entryFile:secondPath,selectedOperations});
+    assert.equal(first.bundleDigest,second.bundleDigest);
+    const encoded = first.code.match(/sourceMappingURL=data:application\/json;base64,([^\s]+)/)?.[1];
+    assert.ok(encoded);
+    const map = JSON.parse(Buffer.from(encoded,"base64").toString("utf8"));
+    assert.ok(map.sources.includes("unified-app.ts"));
+    assert.equal(map.sourcesContent,undefined);
+    assert.ok(!JSON.stringify(map).includes(directory));
+  } finally {
+    fs.rmSync(directory,{recursive:true,force:true});
   }
 });

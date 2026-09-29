@@ -1,6 +1,6 @@
 import { hasAnyAppPermission } from "~/lib/current-actor-access";
-import { useState, useEffect } from "react";
-import { useNavigate, useSearchParams, type MetaFunction } from "@remix-run/react";
+import { useState, useEffect, useRef } from "react";
+import { Link, useNavigate, useSearchParams, type MetaFunction } from "@remix-run/react";
 
 export const meta: MetaFunction = ({ matches }) => {
   const parentMeta = matches.filter((m) => m.id === "root").flatMap((m) => m.meta ?? []);
@@ -25,7 +25,7 @@ interface SdkListItem {
   description?: string;
   version: string | null;
   version_count: number;
-  kind: "sdk" | "mcp";
+  kind: "sdk" | "mcp" | "unified_app";
   delivery_mode?: "sdk" | "api";
   hosted_mcp?: boolean;
   target_type: string;
@@ -43,9 +43,22 @@ interface SdkListItem {
 
 type SdkPage = { items: SdkListItem[]; total: number };
 type AppCatalogueState = "active" | "archive";
+type AppCatalogueType = "mcp" | "unified_app" | "sdk" | "api";
 type McpLifecycleAction = "deprecate" | "restore";
 
 const SDK_PAGE_SIZE = 20;
+const APP_CATALOGUE_TYPES: Array<{ type: AppCatalogueType; label: string }> = [
+  { type: "mcp", label: "MCP" },
+  { type: "unified_app", label: "Unified App" },
+  { type: "sdk", label: "SDK" },
+  { type: "api", label: "REST" },
+];
+
+/** Resolves one visible app type without broadening an invalid URL to every family. */
+function appCatalogueType(value: string | null): AppCatalogueType {
+  // The first tab is the default for an untyped or unknown catalogue URL.
+  return APP_CATALOGUE_TYPES.find((item) => item.type === value)?.type ?? "mcp";
+}
 
 /** Resolves live or archived family discovery from URL state. */
 function appCatalogueState(value: string | null): AppCatalogueState {
@@ -63,6 +76,8 @@ function appSearchPlaceholder(state: AppCatalogueState): string {
 
 /** Returns the existing exact-version detail route for the row's runtime adapter. */
 function appDetailPath(app: SdkListItem, appId: string): string {
+  // Hosted source uses its own detail surface and the same family lifecycle.
+  if (app.kind === "unified_app") return `/integrations/unified-apps/${appId}`;
   // MCP retains its transport-specific detail controls; SDK and REST share the SDK-kind detail projection.
   if (app.target_type === "mcp") return `/integrations/mcp/${appId}`;
   return `/integrations/sdks/${appId}`;
@@ -76,7 +91,9 @@ function appRemovalScope(targetType: string, plural = false): string {
 }
 
 /** Converts persisted kind and delivery metadata into the row's user-facing delivery type. */
-function appTargetType(app: Pick<SdkListItem, "kind" | "delivery_mode">): "sdk" | "mcp" | "api" {
+function appTargetType(app: Pick<SdkListItem, "kind" | "delivery_mode">): "sdk" | "mcp" | "api" | "unified_app" {
+  // Hosted source remains a distinct persisted kind.
+  if (app.kind === "unified_app") return "unified_app";
   // MCP owns its runtime adapter; SDK-kind families split only by generated-package or direct-REST delivery.
   if (app.kind === "mcp") return "mcp";
   return app.delivery_mode === "api" ? "api" : "sdk";
@@ -84,17 +101,19 @@ function appTargetType(app: Pick<SdkListItem, "kind" | "delivery_mode">): "sdk" 
 
 /** Returns concise product copy for one delivery type without changing family identity. */
 function appTypeLabel(targetType: string): string {
-  // Labels describe delivery, not a third persistence kind.
+  // Hosted source is labelled independently from delivery adapters.
+  if (targetType === "unified_app") return "Unified App";
+  // Labels describe the remaining delivery adapters.
   if (targetType === "mcp") return "MCP server";
   if (targetType === "api") return "REST API";
   return "SDK";
 }
 
-/** Reads one mixed Engine-grouped application page, matching the CLI catalogue contract. */
-function readAppPage(query: string, page: number, state: AppCatalogueState): Promise<SdkPage> {
+/** Reads one authorized, type-filtered application page before server-side pagination. */
+function readAppPage(query: string, page: number, state: AppCatalogueState, type: AppCatalogueType): Promise<SdkPage> {
   const document = `
-    query Applications($search: String!, $archived: Boolean!, $limit: Int!, $offset: Int!) {
-      appFamilies(search: $search, archived: $archived, limit: $limit, offset: $offset) {
+    query Applications($kind: String!, $search: String!, $archived: Boolean!, $limit: Int!, $offset: Int!) {
+      appFamilies(kind: $kind, search: $search, archived: $archived, limit: $limit, offset: $offset) {
         items {
           app_family_id
           app_id: latest_version_id
@@ -116,6 +135,7 @@ function readAppPage(query: string, page: number, state: AppCatalogueState): Pro
   `;
   return api
     .mcpGraphql<{ appFamilies: SdkPage }>(document, {
+      kind: type,
       search: query.trim(),
       archived: state === "archive",
       limit: SDK_PAGE_SIZE,
@@ -172,6 +192,8 @@ function SdkNameCell({ sdk, archived }: { sdk: SdkListItem; archived: boolean })
             MCP
           </span>
         )}
+        {/* Hosted source has a distinct identity in the shared app catalogue. */}
+        {sdk.target_type === "unified_app" && <span className="rounded bg-violet-100 px-2 py-0.5 text-[10px] font-bold uppercase text-violet-700">Unified App</span>}
         {/* One combined family advertises MCP alongside its SDK and REST badges. */}
         {sdk.hosted_mcp && sdk.target_type !== "mcp" && (
           <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-violet-100 text-violet-700 uppercase tracking-wider">MCP</span>
@@ -287,7 +309,7 @@ function SdkActionButtons({ sdk, onDownload, onDeactivate, onArchive, onMcpLifec
         <button type="button" onClick={(event) => { event.stopPropagation(); onMcpLifecycle(sdk, "restore"); }} className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100" title="Restore MCP server"><Play className="h-4 w-4" /></button>
       ) : null}
       <button
-        onClick={(e) => { e.stopPropagation(); onDeactivate(sdk.app_id, sdk.name, sdk.version); }}
+        onClick={(e) => { e.stopPropagation(); onDeactivate(sdk.app_id!, sdk.name, sdk.version!); }}
         className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors cursor-pointer"
         title="Deactivate latest app version"
       >
@@ -409,7 +431,7 @@ function AppCatalogueEmpty({ state, query, canCreate }: { state: AppCatalogueSta
       </p>
 	  {/* Creation stays in one catalogue while the menu makes the delivery adapter explicit. */}
 	  {!archived && !query && canCreate && (
-		<CreateAppMenu className="mt-5 inline-block" />
+		<CreateAppMenu align="center" className="mt-5" />
       )}
     </div>
   );
@@ -521,8 +543,10 @@ function SdkPagination({ page, total, onPage }: {
   );
 }
 
-/** Renders the shared Apps heading and family lifecycle actions. */
-function AppsCatalogueHeader({ canCreate, selectedCount, deactivating, onDeactivateSelected }: {
+/** Renders the selected app type's concise purpose and shared family actions. */
+function AppsCatalogueHeader({ type, canBrowseTemplates, canCreate, selectedCount, deactivating, onDeactivateSelected }: {
+  type: AppCatalogueType;
+  canBrowseTemplates: boolean;
   canCreate: boolean;
   selectedCount: number;
   deactivating: boolean;
@@ -532,7 +556,10 @@ function AppsCatalogueHeader({ canCreate, selectedCount, deactivating, onDeactiv
     <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
       <div className="min-w-0">
         <h1 className="text-xl font-semibold text-slate-900">Apps</h1>
-        <p className="text-slate-500 text-sm mt-1">Choose which services and operations an app can use.</p>
+        {/* Unified Apps need one clear use case, while the other tabs retain the general catalogue introduction. */}
+        <p className="text-slate-500 text-sm mt-1">{type === "unified_app" ? "Combine approved services into one typed action for onboarding, fulfillment, or reporting." : "Choose which services and operations an app can use."}</p>
+        {/* Template discovery belongs to the Unified App section rather than the global sidebar. */}
+        {type === "unified_app" && canBrowseTemplates && <Link className="mt-2 inline-block text-sm font-medium text-[var(--brand-violet)] hover:underline" to="/integrations/unified-apps/templates">Browse Unified App templates</Link>}
       </div>
       <div className="flex w-full sm:w-auto items-center gap-3">
         {/* Bulk lifecycle controls appear only after the user selects manageable exact versions. */}
@@ -546,13 +573,21 @@ function AppsCatalogueHeader({ canCreate, selectedCount, deactivating, onDeactiv
             {deactivating ? "Deactivating..." : `Deactivate selected (${selectedCount})`}
           </button>
         )}
-        {/* One disclosure routes each adapter into the same app builder workflow. */}
+        {/* One menu routes each permitted type to its own creation flow. */}
         {canCreate && (
 		  <CreateAppMenu className="flex-1 sm:flex-none" />
         )}
       </div>
     </div>
   );
+}
+
+/** Keeps Apps navigation in the requested MCP, Unified App, SDK, REST order. */
+function AppCatalogueTypeTabs({ selected, onSelect }: { selected: AppCatalogueType; onSelect: (type: AppCatalogueType) => void }) {
+  return <div role="tablist" aria-label="App type" className="flex flex-wrap gap-2 border-b border-slate-200 pb-3">
+    {/* Every tab controls the same server-filtered result panel. */}
+    {APP_CATALOGUE_TYPES.map((item) => <button key={item.type} id={`app-type-${item.type}`} type="button" role="tab" aria-controls="app-catalogue-panel" aria-selected={selected === item.type} onClick={() => onSelect(item.type)} className={`rounded-lg px-4 py-2 text-sm font-medium ${selected === item.type ? "bg-slate-950 text-white" : "text-slate-600 hover:bg-slate-100"}`}>{item.label}</button>)}
+  </div>;
 }
 
 /** Renders archive as the same compact checkbox filter used by other Fused catalogue lists. */
@@ -576,12 +611,13 @@ function AppArchiveFilter({ archived, onChange }: { archived: boolean; onChange:
   );
 }
 
-/** Renders the paged SDK catalogue and its lifecycle controls. */
+/** Renders the shared paged app catalogue with type-scoped lifecycle controls. */
 export default function SdkHistory() {
   const toast = useToast();
   const { access } = useCurrentActorAccess();
   const [searchParams, setSearchParams] = useSearchParams();
 	const state = appCatalogueState(searchParams.get("state"));
+  const type = appCatalogueType(searchParams.get("type"));
   const [sdks, setSdks] = useState<SdkListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -590,31 +626,35 @@ export default function SdkHistory() {
   const [page, setPage] = useState(0);
   const [total, setTotal] = useState(0);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const requestID = useRef(0);
   const [isDeactivatingMultiple, setIsDeactivatingMultiple] = useState(false);
   const navigate = useNavigate();
   const canRead = hasAnyAppPermission(access, "read");
-  const canCreate = ["sdk", "mcp", "api"].some((kind) => hasWorkspacePermission(access, `app.${kind}.create`));
+  const canCreate = ["sdk", "mcp", "api", "unified_app"].some((kind) => hasWorkspacePermission(access, `app.${kind}.create`));
 
   /** Checks lifecycle management for the exact family represented by one catalogue row. */
   const canManage = (sdk: SdkListItem) => hasResourcePermission(access, `app.${appTargetType(sdk)}.manage`, "APP", sdk.app_family_id);
 
   /** Loads one list or search page through the same paged contract. */
   const fetchSdks = (search: string, pageNumber: number) => {
+    const currentRequest = ++requestID.current;
     // Creation does not imply read; an empty catalogue keeps permitted creation available.
     if (!canRead) { setSdks([]); setTotal(0); setLoading(false); setSearching(false); return Promise.resolve(); }
     const isSearch = Boolean(search.trim());
     setLoading(!isSearch);
     setSearching(isSearch);
     setError("");
-	return readAppPage(search, pageNumber, state)
+	return readAppPage(search, pageNumber, state, type)
       .then(result => {
+        // A slower response for a previous tab must not replace the selected type's page.
+        if (currentRequest !== requestID.current) return;
         // Deactivation can empty the last page; rewinding avoids presenting a
         // false empty state while earlier authorized results still exist.
         if (pageNumber > 0 && result.items.length === 0 && result.total > 0) {
           setPage(pageNumber - 1);
           return;
         }
-        // Persisted family metadata, not a UI tab, determines each row's delivery surface.
+        // The selected tab filters families; persisted metadata still determines each row's delivery surface.
         setSdks((result.items ?? []).map(item => ({
           ...item,
           target_type: appTargetType(item),
@@ -625,11 +665,15 @@ export default function SdkHistory() {
         setSelectedIds([]);
       })
       .catch(e => {
+        // Older failures belong to their original tab and must not hide the current page.
+        if (currentRequest !== requestID.current) return;
         setSdks([]);
         setTotal(0);
         setError(e instanceof Error ? e.message : "Failed to load apps");
       })
       .finally(() => {
+        // Only the latest read can clear the current loading state.
+        if (currentRequest !== requestID.current) return;
         setLoading(false);
         setSearching(false);
       });
@@ -657,7 +701,27 @@ export default function SdkHistory() {
     }
     const id = setTimeout(() => fetchSdks(query, page), 400);
     return () => clearTimeout(id);
-	}, [page, query, state, canRead]);
+	}, [page, query, state, type, canRead]);
+
+  /** Changes the server-side type filter while preserving search and archive intent. */
+  function selectType(nextType: AppCatalogueType) {
+    // Re-selecting the current tab leaves the page and its bulk selection intact.
+    if (nextType === type) return;
+    // Invalidate an outstanding page before the URL change triggers the next read.
+    requestID.current += 1;
+    setLoading(true);
+    setSdks([]);
+    setTotal(0);
+    setPage(0);
+    setSelectedIds([]);
+    setSearchParams((previous) => {
+      const next = new URLSearchParams(previous);
+      // MCP is the first tab and canonical default URL.
+      if (nextType === "mcp") next.delete("type");
+      else next.set("type", nextType);
+      return next;
+    });
+  }
 
 	/** Switches between live apps and retained deletion history without changing the adapter tab. */
 	function selectState(nextState: AppCatalogueState) {
@@ -778,11 +842,15 @@ export default function SdkHistory() {
   return (
     <div className="space-y-6">
       <AppsCatalogueHeader
+		type={type}
+		canBrowseTemplates={hasWorkspacePermission(access, "catalogue.read")}
 		canCreate={canCreate && state === "active"}
 		selectedCount={state === "active" ? selectedIds.length : 0}
         deactivating={isDeactivatingMultiple}
         onDeactivateSelected={handleDeactivateMultiple}
       />
+
+      <AppCatalogueTypeTabs selected={type} onSelect={selectType} />
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <form
@@ -831,6 +899,7 @@ export default function SdkHistory() {
         </div>
       )}
 
+	  <div id="app-catalogue-panel" role="tabpanel" aria-labelledby={`app-type-${type}`}>
       <SdkListContent
 		state={state}
 		canCreate={canCreate && state === "active"}
@@ -848,6 +917,7 @@ export default function SdkHistory() {
         onMcpLifecycle={handleMcpLifecycle}
       />
       {!loading && !searching && <SdkPagination page={page} total={total} onPage={setPage} />}
+	  </div>
     </div>
   );
 }

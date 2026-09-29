@@ -1,3 +1,4 @@
+import { Select } from "../forms/Select.ts";
 import { ChevronLeft, ChevronRight, Database, KeyRound, RefreshCw, Users } from "lucide-react";
 import { type BucketSummary } from "~/lib/api";
 
@@ -107,6 +108,7 @@ function BucketRow({ bucket, selected, onSelect }: { bucket: BucketSummary; sele
   );
 }
 
+/** Uses the shared select while keeping selection state and actions owned by this page. */
 function BucketPagination({ page, pageCount, pageSize, total, onPageChange }: Pick<BucketListProps, "page" | "pageSize" | "total" | "onPageChange"> & { pageCount: number }) {
   const start = total === 0 ? 0 : page * pageSize + 1;
   const end = Math.min(total, (page + 1) * pageSize);
@@ -125,7 +127,7 @@ function BucketPagination({ page, pageCount, pageSize, total, onPageChange }: Pi
           <ChevronLeft className="w-4 h-4" />
         </button>
         <span className="text-xs text-slate-500 pl-2">Page</span>
-        <select
+        <Select
           className="bg-white border border-slate-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 mx-1"
           value={page}
           onChange={(e) => onPageChange(parseInt(e.target.value, 10))}
@@ -133,7 +135,7 @@ function BucketPagination({ page, pageCount, pageSize, total, onPageChange }: Pi
           {Array.from({ length: pageCount }, (_, i) => i).map(p => (
             <option key={p} value={p}>{p + 1}</option>
           ))}
-        </select>
+        </Select>
         <span className="text-xs font-medium text-slate-500 pr-2">of {pageCount}</span>
         <button
           type="button"

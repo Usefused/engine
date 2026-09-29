@@ -146,7 +146,6 @@ describe("runExecute -- call() wiring", () => {
   it("preserves single first-call physical pagination corrections", async () => {
     const cases = [
       { code: "mcp_pagination_not_supported", operationId: "gmail.users.messages.get", message: 'operation "gmail.users.messages.get" is not paginated; use call("gmail.users.messages.get", params)' },
-      { code: "mcp_physical_pagination_not_allowed_for_unified", operationId: "release.provision", message: 'operation "release.provision" is Unified; use call("release.provision", params)' },
     ];
     for (const test of cases) {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({

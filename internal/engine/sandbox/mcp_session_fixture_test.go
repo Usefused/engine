@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/store"
@@ -176,31 +175,6 @@ func seedMCPPaginationMetadata(cache *LocalObjectCache, selections []models.SDKS
 		copyValue.ID = selection.ServiceID
 		copyValue.ServiceVersionID = selection.ServiceVersionID
 		cache.serviceMetadataCache[selection.ServiceID.String()+":"+selection.ServiceVersionID.String()] = &copyValue
-	}
-}
-
-// TestBuildSessionFixtureAttachesAppliedPlanDescriptor verifies the session
-// uses the store-owned public descriptor without changing physical lookup.
-func TestBuildSessionFixtureAttachesAppliedPlanDescriptor(t *testing.T) {
-	database := &mockCacheDB{
-		contractMetadata: &fusedobject.ServiceMetadata{ID: uuid.New(), Name: "Users"},
-		appName:          "users-sync-test", appVersion: "1.0.0", appDescription: "Synchronize test users.",
-		unifiedDescriptors: &models.SDKUnifiedOperationDescriptors{
-			SchemaVersion: models.SDKUnifiedDescriptorSchemaVersion,
-			Operations:    []models.SDKUnifiedOperationDescriptor{{Name: "users.sync", InputSchema: json.RawMessage(`{"type":"object"}`)}},
-		},
-	}
-	fixture, err := buildSessionFixture(context.Background(), NewLocalObjectCache(database), uuid.NewString(), nil, store.AppTokenPolicy{AllowAll: true})
-	if err != nil {
-		t.Fatalf("buildSessionFixture() error = %v", err)
-	}
-	if fixture.UnifiedOperations == nil || len(fixture.UnifiedOperations.Operations) != 1 || fixture.UnifiedOperations.Operations[0].Name != "users.sync" {
-		t.Fatal("Unified descriptor was not attached under its exact authored name")
-	}
-	// One descriptor read per session keeps query count constant as the logical
-	// operation count grows and avoids a new process cache.
-	if database.unifiedCalls != 1 {
-		t.Fatalf("Unified descriptor calls = %d, want 1", database.unifiedCalls)
 	}
 }
 
