@@ -177,6 +177,8 @@ docker_manifests:
 
 archives:
   - id: fused-engine-archive
+    # Linux bundles its required sandbox worker; other platforms ship only the Engine.
+    allow_different_binary_count: true
     ids:
       - fused-engine
       - fused-execution-worker
@@ -194,6 +196,8 @@ archives:
         formats:
           - zip
   - id: fused-engine-headless-archive
+    # The headless Linux package needs the same worker beside its Engine binary.
+    allow_different_binary_count: true
     ids:
       - fused-engine-headless
       - fused-execution-worker
