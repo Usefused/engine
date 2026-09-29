@@ -258,8 +258,8 @@ func capabilityExecutable() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Package tests build and execute the same standalone worker because their transient test
-	// binary has no packaged sibling; production never compiles or self-reexecutes authored code.
+	// Package tests use a packaged sibling or build the standalone worker because their transient
+	// test binary can lack a sibling; production never compiles or self-reexecutes authored code.
 	if strings.HasSuffix(engine, ".test") {
 		return capabilityExecutableForTest()
 	}
@@ -272,10 +272,10 @@ func capabilityExecutable() (string, error) {
 	return worker, nil
 }
 
-// capabilityExecutableForTest builds the actual small worker once for Linux package integration tests.
+// capabilityExecutableForTest resolves a packaged worker or builds one for Linux package integration tests.
 func capabilityExecutableForTest() (string, error) {
 	// macOS package tests exercise the interpreter directly because its nested sandbox profile
-	// is unavailable on this host; Linux integration tests build the actual standalone worker.
+	// is unavailable on this host; Linux integration tests use a packaged or locally built worker.
 	if runtime.GOOS != "linux" {
 		return "", ErrCapabilityWorkerUnavailable
 	}
@@ -284,6 +284,15 @@ func capabilityExecutableForTest() (string, error) {
 		if prebuilt := os.Getenv("FUSED_EXECUTION_WORKER_TEST_BINARY"); filepath.IsAbs(prebuilt) {
 			capabilityTestWorker.path = prebuilt
 			return
+		}
+		// Packaged-image tests can reuse the worker beside their mounted test binary without source or Go.
+		if executable, err := os.Executable(); err == nil {
+			worker := filepath.Join(filepath.Dir(executable), "fused-execution-worker")
+			// Only a regular executable sibling is a plausible packaged worker for this test binary.
+			if info, err := os.Stat(worker); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
+				capabilityTestWorker.path = worker
+				return
+			}
 		}
 		_, source, _, ok := runtime.Caller(0)
 		// Tests cannot substitute an arbitrary working directory for the checked-out worker source.
