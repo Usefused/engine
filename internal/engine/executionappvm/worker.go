@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 )
 
 type processHost struct {
@@ -24,6 +26,9 @@ type processHost struct {
 // Four VMs leave room under the 128 MiB data cap for the worker and host-call buffers.
 const maxWorkerRequests = 4
 
+// WorkerIsolationDeniedExitCode distinguishes host policy rejection before authored code from a worker crash.
+const WorkerIsolationDeniedExitCode = 77
+
 type loadedWorker struct {
 	bundle []byte
 	writer *frameWriter
@@ -37,13 +42,16 @@ type loadedRequest struct {
 	cancel context.CancelFunc
 }
 
-// RunWorker confines the child before handling either legacy inspection or a loaded app version.
+// RunWorker confines the child before handling authored code and reports bootstrap failures without source or input data.
 func RunWorker() int {
 	// Isolation and resource limits must be active before parsing or evaluating authored code.
 	if err := confineWorker(); err != nil {
-		return 1
+		fmt.Fprintf(os.Stderr, "worker confinement failed: %v\n", err)
+		return workerConfinementExitCode(err)
 	}
+	// Resource-limit installation errors remain fatal and are distinguishable from host isolation denials.
 	if err := limitCapabilityWorker(); err != nil {
+		fmt.Fprintf(os.Stderr, "worker resource limits failed: %v\n", err)
 		return 1
 	}
 	scanner := frameScanner(os.Stdin)
@@ -64,6 +72,15 @@ func RunWorker() int {
 		return runLoadedWorker(scanner, w, request)
 	}
 	return executeCapabilityWorkerRequest(ctx, scanner, w, request)
+}
+
+// workerConfinementExitCode marks only OS isolation policy failures; runtime and resource-limit failures remain fatal.
+func workerConfinementExitCode(err error) int {
+	// Hosts can permit clone yet deny chroot inside the new user namespace, so Start alone is not a complete probe.
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.ENOSYS) {
+		return WorkerIsolationDeniedExitCode
+	}
+	return 1
 }
 
 // runLoadedWorker binds one immutable bundle to this process and dispatches bounded requests.

@@ -6,9 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os/exec"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
+
+	"github.com/Usefused/engine/internal/engine/executionappvm"
 )
 
 // TestInspectCapabilityBundleInIsolatedWorker exercises a large authored bundle in the real Linux child.
@@ -17,9 +21,9 @@ func TestInspectCapabilityBundleInIsolatedWorker(t *testing.T) {
 	// The large bundle catches worker limits that a tiny availability probe cannot reveal.
 	bundle := []byte(declaration + strings.Repeat("/* bundled dependency padding */", 25000))
 	manifest, err := InspectCapabilityBundle(context.Background(), bundle)
-	// Only an OS policy that blocks namespace creation can make this integration test inapplicable.
-	if errors.Is(err, ErrCapabilityWorkerUnavailable) && linuxCapabilityNamespaceDenied(t) {
-		t.Skip("Linux host policy denies worker namespaces")
+	// Only explicit OS rejection of namespace creation or chroot makes this integration test inapplicable.
+	if errors.Is(err, ErrCapabilityWorkerUnavailable) && linuxCapabilityIsolationDenied(t) {
+		t.Skip("Linux host policy denies worker isolation")
 	}
 	if err != nil {
 		t.Fatalf("isolated bundle inspection: %v", err)
@@ -32,9 +36,9 @@ func TestInspectCapabilityBundleInIsolatedWorker(t *testing.T) {
 
 // TestRunCapabilityScriptInIsolatedWorker verifies provider and data IPC with the packaged child.
 func TestRunCapabilityScriptInIsolatedWorker(t *testing.T) {
-	// A denied namespace is an environmental restriction; an already-started worker crash must fail.
-	if !IsCapabilityWorkerAvailable(context.Background()) && linuxCapabilityNamespaceDenied(t) {
-		t.Skip("Linux host policy denies worker namespaces")
+	// A denied isolation boundary is environmental; a crash or failed resource cap must still fail.
+	if !IsCapabilityWorkerAvailable(context.Background()) && linuxCapabilityIsolationDenied(t) {
+		t.Skip("Linux host policy denies worker isolation")
 	}
 	const bundle = `globalThis.FusedUnifiedApp={input:{parse(v){return v}},output:{parse(v){return v}},async execute({input}){const found=JSON.parse(await __fusedHost.fetch(JSON.stringify({input:{value:input.name}})));await __fusedHost.dbSet(JSON.stringify({id:found.id}));return {id:found.id}}};`
 	host := &capabilityScriptTestHost{}
@@ -45,21 +49,29 @@ func TestRunCapabilityScriptInIsolatedWorker(t *testing.T) {
 	}
 }
 
-// linuxCapabilityNamespaceDenied distinguishes host policy from a worker crash after isolation.
-func linuxCapabilityNamespaceDenied(t *testing.T) bool {
+// linuxCapabilityIsolationDenied checks the complete isolation bootstrap without evaluating any authored code.
+func linuxCapabilityIsolationDenied(t *testing.T) bool {
 	t.Helper()
-	command, cleanup, err := capabilityWorkerCommand(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command, cleanup, err := capabilityWorkerCommand(ctx)
 	// Command setup failure is a worker regression, so the caller must fail its original assertion.
 	if err != nil {
 		return false
 	}
 	defer cleanup()
-	err = command.Start()
-	// EPERM, EACCES, or ENOSYS indicates the host rejected the namespace boundary itself.
-	if err != nil {
-		return errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.ENOSYS)
+	// Empty stdin exits immediately after confinement and resource limits; captured output contains no authored source.
+	output, err := command.CombinedOutput()
+	// A namespace rejected before exec is distinct from a child that started and crashed.
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.ENOSYS) {
+		return true
 	}
-	_ = command.Process.Kill()
-	_ = command.Wait()
+	var exit *exec.ExitError
+	// Only the reserved pre-evaluation policy-denial exit may skip; generic exit 1, signals, and timeouts cannot.
+	if errors.As(err, &exit) && exit.ExitCode() == executionappvm.WorkerIsolationDeniedExitCode {
+		return true
+	}
+	// Keep unexpected bootstrap failures visible in CI without logging user bundles or invocation data.
+	t.Logf("worker isolation probe: %v; stderr/stdout: %.4096s", err, output)
 	return false
 }

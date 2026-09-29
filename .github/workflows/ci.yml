@@ -59,6 +59,19 @@ jobs:
           # Build the separate sandbox executable before exercising either image variant.
           CGO_ENABLED=0 go build -tags headless -o /tmp/fused-execution-worker ./cmd/execution-worker
 
+      # Ubuntu can allow user-namespace creation yet deny chroot inside it; authorize only the packaged CI worker.
+      - name: Configure CI worker AppArmor profile
+        run: |
+          set -euo pipefail
+          sudo tee /etc/apparmor.d/fused-ci-execution-worker >/dev/null <<'PROFILE'
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile fused-ci-execution-worker /tmp/fused-execution-worker flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          sudo apparmor_parser -r /etc/apparmor.d/fused-ci-execution-worker
+
       - name: Test headless
         env:
           FUSED_EXECUTION_WORKER_TEST_BINARY: /tmp/fused-execution-worker
