@@ -1,6 +1,20 @@
 # Execution App local smoke evidence
 
-The resident-worker validation at the end of this record is the current implementation. Earlier per-invocation timing and two-call limit observations describe the implementation before the resident worker and bounded queue changes.
+## Pagination and fixed service ref, 2026-09-29
+
+A patched Linux arm64 Engine ran in the disposable local container on port 18081. A fresh private Registry service, `fused-pagination-live@1.0.0`, pointed to an HTTPS mock on port 19084. Its `greet` operation had an exact pagination v3 contract with three available pages, a query cursor, and a policy limit of ten pages. The TypeScript app called `fused.fetch` with `pagination: { maxPages: 2 }`; its second immutable version made the same call through `fused.forServiceUserRefs({ "fused-pagination-live": "alice-live" })`.
+
+| Hosted invocation | Result | Provider page hits |
+| --- | --- | --- |
+| Direct fetch, `maxPages: 2` | HTTP 200, `succeeded`, `items` contained pages 1 and 2 | `1, 2` |
+| Service ref helper, `maxPages: 2` | HTTP 200, `succeeded`, `items` contained pages 1 and 2 | `1, 2` |
+| Service ref helper, `maxPages: 0` | HTTP 200 execution record with `failed` status | None |
+| Service ref helper, `maxPages: 10` | HTTP 200 execution record with `failed` status; the requested cap did not tighten the policy limit | None |
+| Two services with refs `alice-live` and `bob-live` | HTTP 200, `succeeded`; each service returned its own two-page greeting | `1, 2` for each service |
+
+The provider hit log was `1, 1, 2, 1, 2, 1, 2, 1, 2`: the first `1` was a direct provider probe, followed by two calls for each successful one-service execution and four for the two-service execution. The failed executions made no provider call. The second service used the operation name `greetB` because an Execution App rejects ambiguous operation names across selected services. Both services use anonymous authentication, so the hosted helper invocation verifies the multi-service app and bridge dispatch, while the package tests verify the distinct selector refs. OAuth connection selection remains untested. Family tokens and read handles are omitted.
+
+The resident-worker validation later in this record covers the current worker design. Earlier per-invocation timing and two-call limit observations describe the implementation before the resident worker and bounded queue changes.
 
 Run on 2026-09-28 against a disposable local Registry, PostgreSQL database, HTTPS mock provider, and Engine Docker container. No remote Engine or production Registry was changed. The test provider had one imported, workspace-enabled `POST /greet` operation. Its certificate was validated against a one-day test CA mounted only into the disposable Engine. The mock counted valid requests without retaining their bodies.
 

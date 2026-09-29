@@ -11,6 +11,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/google/uuid"
@@ -33,10 +34,15 @@ type executionAppManifestOperation struct {
 }
 
 type capabilityHostFetchRequest struct {
-	Service   string                      `json:"service"`
-	Operation string                      `json:"operation"`
-	Input     map[string]any              `json:"input"`
-	Selector  capabilityHostFetchSelector `json:"selector"`
+	Service    string                      `json:"service"`
+	Operation  string                      `json:"operation"`
+	Input      map[string]any              `json:"input"`
+	Selector   capabilityHostFetchSelector `json:"selector"`
+	Pagination *capabilityHostPagination   `json:"pagination,omitempty"`
+}
+
+type capabilityHostPagination struct {
+	MaxPages int `json:"maxPages"`
 }
 
 type capabilityHostFetchSelector struct {
@@ -125,6 +131,14 @@ func (host *executionCapabilityHost) Fetch(ctx context.Context, raw json.RawMess
 	if err := decoder.Decode(&request); err != nil || request.Service == "" || request.Operation == "" || request.Input == nil {
 		return nil, errors.New("execution app workspace operation request is invalid")
 	}
+	var pagination *engine.PaginationIntent
+	// Only a caller-owned page bound may cross the sandbox; operation policy remains Engine-owned.
+	if request.Pagination != nil {
+		pagination = &engine.PaginationIntent{MaxPages: request.Pagination.MaxPages}
+		if err := engine.ValidatePaginationIntent(pagination); err != nil {
+			return nil, err
+		}
+	}
 	binding, allowed := host.bindings[executionOperationKey(request.Service, request.Operation)]
 	// Manifest admission precedes any physical resolver or outbound traffic.
 	if !allowed {
@@ -154,7 +168,7 @@ func (host *executionCapabilityHost) Fetch(ctx context.Context, raw json.RawMess
 	// when another invocation currently occupies the account's physical slots.
 	ctx = sandbox.WithExecutionAppPhysicalQueue(ctx)
 	return host.runtime.ExecuteCapabilityWorkspaceOperation(ctx, host.identity, sandbox.CapabilityWorkspaceOperationRequest{
-		Binding: binding, Input: request.Input, Selectors: selectors,
+		Binding: binding, Input: request.Input, Selectors: selectors, Pagination: pagination,
 		IdempotencyKey: fmt.Sprintf("%s:%d", host.executionID, callNumber), RequestBodyHash: hex.EncodeToString(digest[:]),
 	})
 }

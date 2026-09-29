@@ -53,6 +53,61 @@ test("fused.fetch rejects non-object provider input", async () => {
   await assert.rejects(fused.fetch({ service: "crm", operation: "create", input: [] as unknown as Record<string, never> }), /JSON object/);
 });
 
+// Verify page bounds and a fixed connected-user reference reach the Engine bridge without repeated author inputs.
+test("fused.fetch forwards pagination and a bound user ref", async () => {
+  const requests: unknown[] = [];
+  globalThis.__fusedHost = {
+    // Capture the exact trusted-boundary request for the author's provider call.
+    async fetch(requestJson) { requests.push(JSON.parse(requestJson)); return "null"; },
+    // Provider-only calls do not read execution data in this test.
+    async dbGet() { return "null"; },
+    // Provider-only calls do not write execution data in this test.
+    async dbSet() {},
+  };
+  try {
+    const provider = fused.forUserRef("user-42");
+    await provider.fetch({ service: "crm", operation: "list", input: {}, pagination: { maxPages: 2 }, selector: { authType: "oauth" } });
+    assert.deepEqual(requests, [{
+      service: "crm", operation: "list", input: {}, pagination: { maxPages: 2 },
+      selector: { authType: "oauth", endUserRef: "user-42" },
+    }]);
+    await assert.rejects(provider.fetch({ service: "crm", operation: "list", input: {}, selector: { endUserRef: "another-user" } }), /bound user reference/);
+    await assert.rejects(provider.fetch({ service: "crm", operation: "list", input: {}, pagination: { maxPages: 0 } }), /positive integer/);
+    assert.throws(() => fused.forUserRef(" user-42 "), /unpadded/);
+    assert.equal(requests.length, 1);
+  } finally {
+    globalThis.__fusedHost = undefined;
+  }
+});
+
+// Verify one executor can use separate OAuth user references for separate selected services.
+test("fused.fetch binds user refs by service", async () => {
+  const requests: Array<{ service: string; selector: { endUserRef: string } }> = [];
+  globalThis.__fusedHost = {
+    // Capture each selected service and its connected-user routing identity.
+    async fetch(requestJson) { requests.push(JSON.parse(requestJson)); return "null"; },
+    // This test exercises provider routing without execution data reads.
+    async dbGet() { return "null"; },
+    // This test exercises provider routing without execution data writes.
+    async dbSet() {},
+  };
+  try {
+    const refs = { crm: "crm-user", billing: "billing-user" };
+    const provider = fused.forServiceUserRefs(refs);
+    refs.crm = "changed-after-binding";
+    await provider.fetch({ service: "crm", operation: "customers.list", input: {} });
+    await provider.fetch({ service: "billing", operation: "invoices.list", input: {} });
+    assert.deepEqual(requests.map(({ service, selector }) => [service, selector.endUserRef]), [
+      ["crm", "crm-user"], ["billing", "billing-user"],
+    ]);
+    await assert.rejects(provider.fetch({ service: "mail", operation: "send", input: {} }), /no user reference/);
+    await assert.rejects(provider.fetch({ service: "crm", operation: "customers.list", input: {}, selector: { endUserRef: "billing-user" } }), /bound user reference/);
+    assert.equal(requests.length, 2);
+  } finally {
+    globalThis.__fusedHost = undefined;
+  }
+});
+
 // Verify the authored return value is parsed against its declared Zod output.
 test("execution validates input and output", async () => {
   const app = buildExecutionApp({

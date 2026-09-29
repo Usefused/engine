@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/google/uuid"
 )
 
@@ -29,6 +31,27 @@ func TestCapabilityWorkspaceOperationRejectsUnselectedBinding(t *testing.T) {
 	// A binding mismatch must stop before request validation or provider dispatch.
 	if err == nil || !strings.Contains(err.Error(), "scope") {
 		t.Fatalf("unselected binding error = %v", err)
+	}
+}
+
+// TestCapabilityWorkspaceOperationChecksPaginationPolicy requires a bound to narrow the resolved operation before dispatch.
+func TestCapabilityWorkspaceOperationChecksPaginationPolicy(t *testing.T) {
+	appID, serviceID, versionID, endpointID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	selection := models.SDKSelection{ServiceID: serviceID, ServiceVersionID: versionID, EndpointIDs: []uuid.UUID{endpointID}}
+	cache, _ := exactResolverTestCache(t, appID, []models.SDKSelection{selection}, []fusedobject.Endpoint{
+		{ID: endpointID, Name: "items.list", Method: "GET", Path: "/items", Pagination: &paginationpolicy.Config{
+			Version: paginationpolicy.Version, Limits: paginationpolicy.Limits{MaxPages: 2},
+		}},
+	})
+	identity := auth.RuntimeIdentity{AppID: appID, TokenPolicy: store.AppTokenPolicy{AllowAll: true}}
+	request := CapabilityWorkspaceOperationRequest{Binding: ExactOperationBinding{
+		ServiceID: serviceID, ServiceVersionID: versionID, EndpointID: endpointID, EndpointName: "items.list",
+	}, Input: map[string]any{}, Pagination: &engine.PaginationIntent{MaxPages: 2}}
+	_, err := ExecuteCapabilityWorkspaceOperation(context.Background(), cache, engine.NewDispatcher(), identity, request)
+	var paginationErr *engine.PaginationIntentValidationError
+	// A bound equal to policy would change limit semantics, so it cannot reach provider dispatch.
+	if !errors.As(err, &paginationErr) || paginationErr.Reason != engine.PaginationIntentBoundNotLower {
+		t.Fatalf("equal page bound error = %v, want bound_not_lower", err)
 	}
 }
 

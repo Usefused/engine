@@ -7,6 +7,7 @@ export interface WorkspaceOperationRequest {
   service: string;
   operation: string;
   input: JsonObject;
+  pagination?: { maxPages: number };
   selector?: {
     environment?: string;
     endUserRef?: string;
@@ -158,8 +159,79 @@ async function fetchOperation(request: WorkspaceOperationRequest): Promise<JsonV
   if (!request.input || typeof request.input !== "object" || Array.isArray(request.input) || !isPlainObject(request.input)) {
     throw new Error("fused.fetch input must be a JSON object");
   }
+  validateFetchPagination(request.pagination);
   const response = await host().fetch(encodeJson(request, "fused.fetch request"));
   return JSON.parse(response) as JsonValue;
+}
+
+// Check the author-owned page ceiling locally while leaving operation policy to the Engine.
+function validateFetchPagination(pagination: WorkspaceOperationRequest["pagination"]): void {
+  // Omission retains automatic pagination exactly as configured for the selected provider operation.
+  if (pagination === undefined) {
+    return;
+  }
+  // A supplied bound must be a positive JSON integer before it crosses the worker bridge.
+  if (!pagination || !Number.isSafeInteger(pagination.maxPages) || pagination.maxPages < 1) {
+    throw new Error("fused.fetch pagination.maxPages must be a positive integer");
+  }
+}
+
+type UserBoundFetch = Readonly<{ fetch: (request: WorkspaceOperationRequest) => Promise<JsonValue> }>;
+
+// Validate a stable OAuth connection key before an authored helper can dispatch with it.
+function validateBoundUserRef(endUserRef: string): void {
+  // Empty or padded references would select a different connection from the one used during OAuth consent.
+  if (typeof endUserRef !== "string" || !endUserRef || endUserRef.trim() !== endUserRef) {
+    throw new Error("Fused user reference must be non-empty and unpadded");
+  }
+}
+
+// Apply a reviewed binding without permitting one call to switch provider connections.
+async function fetchWithBoundUserRef(request: WorkspaceOperationRequest, endUserRef: string): Promise<JsonValue> {
+  // Conflicting refs are an authoring error; the helper must never dispatch under another user's connection.
+  if (request?.selector?.endUserRef && request.selector.endUserRef !== endUserRef) {
+    throw new Error("Fused bound fetch cannot override the bound user reference");
+  }
+  return fetchOperation({ ...request, selector: { ...request.selector, endUserRef } });
+}
+
+// Bind one stable connected-user reference to every workspace call made through this helper.
+function forUserRef(endUserRef: string): UserBoundFetch {
+  validateBoundUserRef(endUserRef);
+  return Object.freeze({
+    // The same immutable binding is reused by each call through this helper.
+    async fetch(request: WorkspaceOperationRequest): Promise<JsonValue> {
+      return fetchWithBoundUserRef(request, endUserRef);
+    },
+  });
+}
+
+// Bind each selected service to its own stable connected-user reference.
+function forServiceUserRefs(refs: Readonly<Record<string, string>>): UserBoundFetch {
+  // An empty or non-object map has no safe default for an OAuth-backed service.
+  if (!refs || !isPlainObject(refs) || Object.keys(refs).length === 0) {
+    throw new Error("fused.forServiceUserRefs requires a non-empty service map");
+  }
+  const bindings = new Map<string, string>();
+  for (const [service, endUserRef] of Object.entries(refs)) {
+    // Exact service keys and validated references match the immutable operation selection and OAuth connection.
+    if (!service || service.trim() !== service) {
+      throw new Error("fused.forServiceUserRefs requires unpadded service names");
+    }
+    validateBoundUserRef(endUserRef);
+    bindings.set(service, endUserRef);
+  }
+  return Object.freeze({
+    // A service absent from the map must not inherit another provider's user reference.
+    async fetch(request: WorkspaceOperationRequest): Promise<JsonValue> {
+      const endUserRef = bindings.get(request?.service);
+      // An unmapped service requires an explicit binding before it can use this helper.
+      if (!endUserRef) {
+        throw new Error("fused.forServiceUserRefs has no user reference for this service");
+      }
+      return fetchWithBoundUserRef(request, endUserRef);
+    },
+  });
 }
 
 // Read the current execution's single JSONB document through the Engine bridge.
@@ -174,6 +246,8 @@ async function dbSet(value: JsonValue): Promise<void> {
 
 export const fused = Object.freeze({
   fetch: fetchOperation,
+  forUserRef,
+  forServiceUserRefs,
   db: Object.freeze({ get: dbGet, set: dbSet }),
 });
 

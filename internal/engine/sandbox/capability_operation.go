@@ -17,6 +17,7 @@ type CapabilityWorkspaceOperationRequest struct {
 	Binding            ExactOperationBinding
 	Input              map[string]any
 	Selectors          PhysicalExecutionSelectors
+	Pagination         *engine.PaginationIntent
 	TrustedCredentials map[string]any
 	IdempotencyKey     string
 	RequestBodyHash    string
@@ -59,6 +60,10 @@ func ExecuteCapabilityWorkspaceOperation(
 		return nil, errors.New("capability operation resolution is incomplete")
 	}
 	operation := resolved[0]
+	// A page bound must strictly narrow this exact operation's reviewed pagination policy.
+	if err := ValidateResolvedPhysicalPaginationIntent(operation, request.Pagination); err != nil {
+		return nil, err
+	}
 	// Runtime selectors cannot override the selected operation's auth or environment contract.
 	if err := operation.ValidateSelectors(request.Selectors); err != nil {
 		return nil, err
@@ -83,7 +88,7 @@ func ExecuteCapabilityWorkspaceOperation(
 	}
 	physical := PhysicalExecutionRequest{
 		Params: request.Input, Credentials: credentials, Environment: request.Selectors.Environment,
-		IdempotencyKey: request.IdempotencyKey, RequestBodyHash: request.RequestBodyHash,
+		IdempotencyKey: request.IdempotencyKey, RequestBodyHash: request.RequestBodyHash, Pagination: request.Pagination,
 	}
 	return executeCapabilityPhysicalValue(ctx, dispatcher, identity, operation, physical)
 }
