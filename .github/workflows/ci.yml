@@ -77,6 +77,19 @@ jobs:
           cp -R ui/build/client ui-build
           go build -o /tmp/fused-engine ./cmd/engine
 
+      # Cover every Engine release platform in CI; host-only tests cannot catch Unix APIs leaking into Windows.
+      - name: Cross-compile release targets
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          for target_os in linux darwin windows; do
+            for target_arch in amd64 arm64; do
+              GOOS="$target_os" GOARCH="$target_arch" go build -o /tmp/fused-release-check ./cmd/engine
+              GOOS="$target_os" GOARCH="$target_arch" go build -tags headless -o /tmp/fused-release-check ./cmd/engine
+            done
+          done
+
       - name: Test embedded
         env:
           FUSED_EXECUTION_WORKER_TEST_BINARY: /tmp/fused-execution-worker
