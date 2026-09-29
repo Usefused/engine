@@ -104,7 +104,8 @@ func newCapabilityRouteFixture(baseRuntime *restRuntimeTestDouble, runtime restE
 	}
 	server.tokenValidator = appTestValidator{identity: identity}
 	manifest := `{"schemaVersion":1,"inputSchema":{"type":"object"},"outputSchema":{"type":"object"},"searchable":["value"],"selectedOperations":[{"service":"crm","operation":"createIssue","serviceId":"11111111-1111-4111-8111-111111111111","serviceVersionId":"22222222-2222-4222-8222-222222222222","endpointId":"33333333-3333-4333-8333-333333333333"}]}`
-	bundle := `globalThis.FusedUnifiedApp={input:{parse(v){if(typeof v.value!=="string")throw Error("invalid");return v}},output:{parse(v){if(typeof v.value!=="string")throw Error("invalid");return v}},async execute({input}){await __fusedHost.dbSet(JSON.stringify({value:input.value}));return {value:input.value}}};`
+	// Resident workers inspect the bundled manifest before execution, just as production compiler output requires.
+	bundle := `globalThis.FusedExecutionManifest=` + manifest + `;globalThis.FusedUnifiedApp={input:{parse(v){if(typeof v.value!=="string")throw Error("invalid");return v}},output:{parse(v){if(typeof v.value!=="string")throw Error("invalid");return v}},async execute({input}){await __fusedHost.dbSet(JSON.stringify({value:input.value}));return {value:input.value}}};`
 	fixture := &capabilityRouteStore{Store: base, activeAppID: appID, bundle: store.UnifiedAppBundle{AppID: appID, SourceHash: "sha256:test", BundleJS: bundle, Manifest: json.RawMessage(manifest)}}
 	server.store = fixture
 	router := chi.NewRouter()

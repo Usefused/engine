@@ -45,7 +45,9 @@ func TestUnifiedAppAttachmentExecution(t *testing.T) {
 	familyID := uuid.New()
 	bundleJS := `globalThis.FusedUnifiedApp={input:{parse(v){return v}},output:{parse(v){return v}},async execute({input}){return {value:input.value}}};`
 	bundle := store.UnifiedAppBundle{AppID: targetID, SourceHash: "sha256:test", BundleJS: bundleJS, Manifest: json.RawMessage(`{"schemaVersion":1,"inputSchema":{"type":"object"},"outputSchema":{"type":"object"},"searchable":[],"selectedOperations":[{"service":"crm","operation":"createIssue","serviceId":"11111111-1111-4111-8111-111111111111","serviceVersionId":"22222222-2222-4222-8222-222222222222","endpointId":"33333333-3333-4333-8333-333333333333"}]}`)}
-	digest := store.UnifiedAppBundleDigest([]byte(bundleJS))
+	// Match real compiler output so the resident worker can inspect the manifest before accepting invocations.
+	bundle.BundleJS = "globalThis.FusedExecutionManifest=" + string(bundle.Manifest) + ";" + bundleJS
+	digest := store.UnifiedAppBundleDigest([]byte(bundle.BundleJS))
 	fixture := &attachedExecutionFixture{capabilityRouteStore: &capabilityRouteStore{Store: base, bundle: bundle, activeAppID: targetID}, target: store.AppRuntime{AppID: targetID, AccountID: base.accountID, AppFamilyID: familyID, Kind: store.AppKindUnifiedApp, Status: store.AppStatusActive, Version: "1.0.0", BundleDigest: digest}, binding: models.UnifiedAppBinding{Alias: "lookup", AppID: targetID, AppFamilyID: familyID, SourceHash: bundle.SourceHash, BundleDigest: digest}}
 	server.store = fixture
 	tokenID := uuid.New()

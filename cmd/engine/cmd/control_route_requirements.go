@@ -142,7 +142,7 @@ func (r *storeBackedControlRequirementResolver) resolveDesiredConfigRequirements
 	}
 }
 
-// appAccessRequirements protects private authoring exports with edit authority while ordinary app reads retain read authority.
+// appAccessRequirements separates ordinary reads, private source, and diagnostic access at the persisted family boundary.
 func (r *storeBackedControlRequirementResolver) appAccessRequirements(ctx context.Context, actor accesscontrol.Actor, params map[string]string, request *http.Request) ([]accesscontrol.Requirement, error) {
 	appID, err := uuid.Parse(params["app_id"])
 	// Malformed immutable identity must not fall back to a broader workspace permission.
@@ -154,7 +154,16 @@ func (r *storeBackedControlRequirementResolver) appAccessRequirements(ctx contex
 	if request.Method == http.MethodGet && !strings.HasSuffix(request.URL.Path, "/config") {
 		permission = accesscontrol.PermissionAppRead
 	}
-	return r.appFamilyRequirement(ctx, actor.AccountID, appID, permission)
+	requirements, err := r.appFamilyRequirement(ctx, actor.AccountID, appID, permission)
+	// Resolve ownership before selecting the diagnostics grant; an untrusted URL cannot supply family identity.
+	if err != nil {
+		return nil, err
+	}
+	// Diagnostic access is independently grantable and must not inherit ordinary app read authority.
+	if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/diagnostics") {
+		requirements[0].Permission = accesscontrol.PermissionUnifiedAppDiagnosticsRead
+	}
+	return requirements, nil
 }
 
 // appTokenAccessRequirements derives concrete type-specific authority from the trusted app configuration or family.
@@ -372,8 +381,7 @@ func (r *storeBackedControlRequirementResolver) desiredConfigApplyRequirements(c
 	return append(requirements, selections...), nil
 }
 
-// desiredConfigPlanRequestRequirements retains mutation authority even when a
-// selection cannot resolve, so diagnostics never bypass the app access check.
+// desiredConfigPlanRequestRequirements maps registered routes to canonical config kinds before authorizing mutation and selection.
 func (r *storeBackedControlRequirementResolver) desiredConfigPlanRequestRequirements(ctx context.Context, actor accesscontrol.Actor, request *http.Request) ([]accesscontrol.Requirement, error) {
 	var envelope struct {
 		ConfigKey string          `json:"config_key"`
@@ -384,6 +392,10 @@ func (r *storeBackedControlRequirementResolver) desiredConfigPlanRequestRequirem
 		return nil, err
 	}
 	configType := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/"), "-config/plan")
+	// The public Unified App URL uses hyphens, but its stored config kind and permission namespace use an underscore.
+	if configType == "unified-app" {
+		configType = string(store.ConfigTypeUnifiedApp)
+	}
 	appType, err := accesscontrol.AppTypeFromConfig(configType, envelope.Config)
 	// Reject mismatched route/document types before looking up resources.
 	if err != nil {

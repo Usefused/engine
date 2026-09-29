@@ -36,7 +36,7 @@ type controlRequirementStoreStub struct {
 	families          map[uuid.UUID]store.AppFamily
 }
 
-// TestAppAccessRequirementsUseFamilyBoundary ensures version routes require the persisted family’s concrete permission.
+// TestAppAccessRequirementsUseFamilyBoundary ensures version routes resolve family identity and keep diagnostics separately scoped.
 func TestAppAccessRequirementsUseFamilyBoundary(t *testing.T) {
 	accountID, appID, familyID := uuid.New(), uuid.New(), uuid.New()
 	stores := &controlRequirementStoreStub{apps: map[uuid.UUID]store.App{
@@ -56,6 +56,8 @@ func TestAppAccessRequirementsUseFamilyBoundary(t *testing.T) {
 		// New traffic routes inherit the persisted family kind rather than granting a generic app permission.
 		{method: http.MethodPost, path: "/apps/" + appID.String() + "/promote", permission: accesscontrol.PermissionAppSDKManage},
 		{method: http.MethodGet, path: "/apps/" + appID.String() + "/traffic", permission: accesscontrol.PermissionAppSDKRead},
+		// Reading private payloads requires the dedicated grant, never the ordinary app-read grant.
+		{method: http.MethodGet, path: "/apps/" + appID.String() + "/executions/" + uuid.NewString() + "/diagnostics", permission: accesscontrol.PermissionUnifiedAppDiagnosticsRead},
 		{method: http.MethodGet, path: "/sdks/" + appID.String() + "/download", permission: accesscontrol.PermissionAppSDKRead},
 		{method: http.MethodGet, path: "/apps/" + appID.String() + "/openapi", permission: accesscontrol.PermissionAppSDKRead},
 	}

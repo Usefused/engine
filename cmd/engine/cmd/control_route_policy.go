@@ -85,6 +85,8 @@ var dynamicControlRequirements = map[string]dynamicRequirementKind{
 	http.MethodPost + " /apps/{app_id}/deprecate":            dynamicAppAccess,
 	// A bundle changes hosted behavior and therefore requires the exact family's manage permission.
 	http.MethodPost + " /apps/{app_id}/bundle": dynamicAppAccess,
+	// Diagnostics resolve the immutable version to its family and require a separate private-data grant.
+	http.MethodGet + " /apps/{app_id}/executions/{execution_id}/diagnostics": dynamicAppAccess,
 	// Traffic discovery and promotion use the same family boundary and durable control audit.
 	http.MethodGet + " /apps/{app_id}/traffic":      dynamicAppAccess,
 	http.MethodPost + " /apps/{app_id}/promote":     dynamicAppAccess,
@@ -193,6 +195,8 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodPost, "/apps/{app_id}/deprecate", false, nil},
 	// The dynamic resolver maps this exact version to its family and concrete SDK/API manage grant.
 	{http.MethodPost, "/apps/{app_id}/bundle", false, nil},
+	// The dynamic resolver and handler both protect private execution diagnostics.
+	{http.MethodGet, "/apps/{app_id}/executions/{execution_id}/diagnostics", false, nil},
 	// Explicitly admit these routes to authorization and mutation auditing.
 	{http.MethodGet, "/apps/{app_id}/traffic", false, nil},
 	{http.MethodPost, "/apps/{app_id}/promote", false, nil},
