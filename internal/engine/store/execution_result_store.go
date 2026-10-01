@@ -35,26 +35,27 @@ var (
 // ExecutionResult is the durable record for one exact unified app version.
 // Input and read-handle hashes are deliberately omitted from JSON projections.
 type ExecutionResult struct {
-	ID                 uuid.UUID       `json:"executionId"`
-	AccountID          uuid.UUID       `json:"-"`
-	AppFamilyID        uuid.UUID       `json:"-"`
-	AppID              uuid.UUID       `json:"appId"`
-	AppVersion         string          `json:"version"`
-	AppTokenID         uuid.UUID       `json:"-"`
-	ReadHandleHash     string          `json:"-"`
-	IdempotencyKeyHash string          `json:"-"`
-	Status             string          `json:"status"`
-	Input              json.RawMessage `json:"-"`
-	Output             json.RawMessage `json:"output,omitempty"`
-	Data               json.RawMessage `json:"data"`
-	ErrorCode          string          `json:"-"`
-	ErrorMessage       string          `json:"-"`
-	SourceExecutionID  *uuid.UUID      `json:"sourceExecutionId,omitempty"`
-	Mode               string          `json:"mode"`
-	CreatedAt          time.Time       `json:"createdAt"`
-	UpdatedAt          time.Time       `json:"updatedAt"`
-	CompletedAt        *time.Time      `json:"completedAt,omitempty"`
-	ExpiresAt          *time.Time      `json:"expiresAt,omitempty"`
+	ID                   uuid.UUID       `json:"executionId"`
+	AccountID            uuid.UUID       `json:"-"`
+	AppFamilyID          uuid.UUID       `json:"-"`
+	AppID                uuid.UUID       `json:"appId"`
+	AppVersion           string          `json:"version"`
+	AppTokenID           uuid.UUID       `json:"-"`
+	ReadHandleHash       string          `json:"-"`
+	IdempotencyKeyHash   string          `json:"-"`
+	Status               string          `json:"status"`
+	Input                json.RawMessage `json:"-"`
+	Output               json.RawMessage `json:"output,omitempty"`
+	Data                 json.RawMessage `json:"data"`
+	ErrorCode            string          `json:"-"`
+	ErrorMessage         string          `json:"-"`
+	SourceExecutionID    *uuid.UUID      `json:"sourceExecutionId,omitempty"`
+	SourceWebhookEventID string          `json:"sourceWebhookEventId,omitempty"`
+	Mode                 string          `json:"mode"`
+	CreatedAt            time.Time       `json:"createdAt"`
+	UpdatedAt            time.Time       `json:"updatedAt"`
+	CompletedAt          *time.Time      `json:"completedAt,omitempty"`
+	ExpiresAt            *time.Time      `json:"expiresAt,omitempty"`
 }
 
 // ExecutionResultSearch scopes query terms to one immutable app version and its admitted data paths.
@@ -119,17 +120,35 @@ func validExecutionMode(mode string) bool {
 
 // validateNewExecutionResult keeps untrusted identities and handle digests out of durable rows.
 func validateNewExecutionResult(record ExecutionResult) error {
-	for _, id := range []uuid.UUID{record.ID, record.AccountID, record.AppFamilyID, record.AppID, record.AppTokenID} {
+	for _, id := range []uuid.UUID{record.ID, record.AccountID, record.AppFamilyID, record.AppID} {
 		// Every row must have complete ownership before a worker can start.
 		if id == uuid.Nil {
 			return ErrExecutionResultInvalid
 		}
 	}
+	// Trigger attribution is checked independently of shared app and mode identity.
+	if err := validateExecutionTrigger(record); err != nil {
+		return err
+	}
 	// The exact app version is the authored operation identity; no second capability name is needed.
 	if !boundedExecutionName(record.AppVersion) {
 		return ErrExecutionResultInvalid
 	}
+	// Mode-specific ownership and handle rules remain shared across every trigger.
 	if !validNewExecutionModeFields(record) {
+		return ErrExecutionResultInvalid
+	}
+	return nil
+}
+
+// validateExecutionTrigger distinguishes Engine-owned events from authenticated caller invocations.
+func validateExecutionTrigger(record ExecutionResult) error {
+	// Only an Engine-owned webhook admission may omit caller-token attribution.
+	if record.AppTokenID == uuid.Nil && record.SourceWebhookEventID == "" {
+		return ErrExecutionResultInvalid
+	}
+	// Event provenance cannot be injected into token-backed calls, reruns, or replay records.
+	if record.SourceWebhookEventID != "" && (len(record.SourceWebhookEventID) > 256 || record.Mode != "live" || record.AppTokenID != uuid.Nil) {
 		return ErrExecutionResultInvalid
 	}
 	return nil
@@ -174,19 +193,21 @@ func validExecutionReadHash(hash string) bool {
 func (s *postgresStore) CreateExecutionResult(ctx context.Context, record ExecutionResult) error {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.execution_result.create")
 	defer span.End()
+	// All triggers must persist complete ownership before effects begin.
 	if err := validateNewExecutionResult(record); err != nil {
 		return err
 	}
 	input, err := canonicalExecutionJSON(record.Input, true)
+	// Malformed or oversized input cannot become a durable accepted execution.
 	if err != nil {
 		return err
 	}
 	// A new execution owns an empty document; rerun and replay never inherit durable data.
 	_, err = s.db.Exec(ctx, `INSERT INTO fused_unified_app_results
-		(id, account_id, app_family_id, app_id, app_version, app_token_id, read_handle_hash, idempotency_key_hash, status, input, data, source_execution_id, mode)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),'queued',$9,'null'::jsonb,$10,$11)`,
+		(id, account_id, app_family_id, app_id, app_version, app_token_id, read_handle_hash, idempotency_key_hash, status, input, data, source_execution_id, mode, source_webhook_event_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),'queued',$9,'null'::jsonb,$10,$11,NULLIF($12,''))`,
 		record.ID, record.AccountID, record.AppFamilyID, record.AppID, record.AppVersion,
-		record.AppTokenID, record.ReadHandleHash, record.IdempotencyKeyHash, input, record.SourceExecutionID, record.Mode)
+		record.AppTokenID, record.ReadHandleHash, record.IdempotencyKeyHash, input, record.SourceExecutionID, record.Mode, record.SourceWebhookEventID)
 	return err
 }
 
@@ -300,7 +321,8 @@ func scanExecutionResult(row pgx.Row) (*ExecutionResult, error) {
 	err := row.Scan(&record.ID, &record.AccountID, &record.AppFamilyID, &record.AppID, &record.AppVersion,
 		&record.AppTokenID, &record.ReadHandleHash, &record.Status,
 		&input, &output, &data, &record.ErrorCode, &record.ErrorMessage,
-		&record.SourceExecutionID, &record.Mode, &record.CreatedAt, &record.UpdatedAt, &record.CompletedAt, &record.ExpiresAt)
+		&record.SourceExecutionID, &record.Mode, &record.CreatedAt, &record.UpdatedAt, &record.CompletedAt, &record.ExpiresAt, &record.SourceWebhookEventID)
+	// A partial row cannot be exposed as a valid retained result.
 	if err != nil {
 		return nil, err
 	}
@@ -310,10 +332,10 @@ func scanExecutionResult(row pgx.Row) (*ExecutionResult, error) {
 
 const executionResultColumns = `id, account_id, app_family_id, app_id, app_version,
 	app_token_id, read_handle_hash, status, input, output, data, error_code, error_message,
-	source_execution_id, mode, created_at, updated_at, completed_at, expires_at`
+	source_execution_id, mode, created_at, updated_at, completed_at, expires_at, COALESCE(source_webhook_event_id,'')`
 
 const executionSearchColumns = `id, app_id, app_version, status, output, data,
-	error_code, error_message, source_execution_id, mode, created_at, completed_at`
+	error_code, error_message, source_execution_id, mode, created_at, completed_at, COALESCE(source_webhook_event_id,'')`
 
 // scanExecutionSearchResult omits retained input and handle hashes from multi-row reads.
 func scanExecutionSearchResult(row pgx.Row) (*ExecutionResult, error) {
@@ -321,7 +343,8 @@ func scanExecutionSearchResult(row pgx.Row) (*ExecutionResult, error) {
 	var output, data []byte
 	err := row.Scan(&record.ID, &record.AppID, &record.AppVersion, &record.Status,
 		&output, &data, &record.ErrorCode, &record.ErrorMessage, &record.SourceExecutionID,
-		&record.Mode, &record.CreatedAt, &record.CompletedAt)
+		&record.Mode, &record.CreatedAt, &record.CompletedAt, &record.SourceWebhookEventID)
+	// Incomplete search rows must not drop provenance while appearing to be valid execution results.
 	if err != nil {
 		return nil, err
 	}

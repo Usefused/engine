@@ -72,6 +72,10 @@ func unifiedAppReceipt(ctx context.Context, record *store.ExecutionResult, spec 
 	if spec.transport == "sdk" {
 		transport = models.EngineExecutionTransportSDK
 	}
+	// Automatic provider events retain webhook transport while sharing the normal logical app receipt.
+	if spec.transport == "webhook" {
+		transport = models.EngineExecutionTransportWebhook
+	}
 	event := models.EngineExecutionEvent{ID: record.ID, AccountID: record.AccountID, AppFamilyID: record.AppFamilyID, AppID: record.AppID, AppTokenID: record.AppTokenID, AppVersion: record.AppVersion, ExecutionKind: "unified", EndpointName: "execute", Transport: transport, Direction: models.EngineExecutionDirectionOutbound, Status: status, FailureCode: record.ErrorCode, StartedAt: record.CreatedAt, EndedAt: *record.CompletedAt, LatencyMs: record.CompletedAt.Sub(record.CreatedAt).Milliseconds()}
 	spanContext := trace.SpanContextFromContext(ctx)
 	// Disabled tracing must not fabricate all-zero trace IDs in durable history.

@@ -272,6 +272,7 @@ func runEngine(cmd *cobra.Command) {
 	managedWebhookBroker := startWebhookRelay(ctx, database, natsClient, masterKey, managedAuthBroker, managedAuthClientDependencies, managedAuthBrokerURL)
 
 	r := buildEngineRouter(engineRouterDeps{
+		workers:                  &engineWorkers,
 		ctx:                      ctx,
 		cfg:                      cfg,
 		natsClient:               natsClient,
@@ -465,6 +466,7 @@ func requireRegistryLicense(ctx context.Context) string {
 }
 
 type engineWorkers struct {
+	unifiedAppWebhooks    *api.UnifiedAppWebhookWorker
 	appTokenInvalidations *apptokeninvalidation.Worker
 	appTokenExpiry        *worker.AppTokenExpiryWorker
 	executionEvents       *worker.ExecutionEventWorker
@@ -487,6 +489,10 @@ func (w engineWorkers) Stop(ctx context.Context) {
 
 // stopRuntimeWorkers drains workers that enforce or project live Engine runtime state.
 func (w engineWorkers) stopRuntimeWorkers(ctx context.Context) {
+	// Automatic app invocations drain while result publication and NATS are still available.
+	if w.unifiedAppWebhooks != nil {
+		w.unifiedAppWebhooks.Stop(ctx)
+	}
 	// Token invalidation owns no blocking drain and can stop before the bounded workers.
 	if w.appTokenInvalidations != nil {
 		w.appTokenInvalidations.Stop()
@@ -954,6 +960,7 @@ func loadMasterKey(ctx context.Context) []byte {
 }
 
 type engineRouterDeps struct {
+	workers                  *engineWorkers
 	ctx                      context.Context
 	cfg                      *config.Config
 	natsClient               *messaging.NATSClient
@@ -1090,6 +1097,10 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 		r, deps.natsClient, deps.cfg, deps.localObjectCache, deps.tokenValidator, deps.engineStore, deps.engineStore, deps.configStore, secretResolver,
 		deps.providerRateLimits, port, executionServer.StartConnectSession,
 	)
+	// Automatic webhook triggers start only after the shared physical dispatcher and cache are available.
+	if deps.ctx != nil && deps.workers != nil {
+		deps.workers.unifiedAppWebhooks = startUnifiedAppWebhookExecution(deps.ctx, executionServer)
+	}
 	// Runtime REST execution reuses the same process-wide sandbox cache and
 	// dispatcher initialized above; it never loops back through network gRPC.
 	api.MountAppExecutionRoute(r, executionServer)

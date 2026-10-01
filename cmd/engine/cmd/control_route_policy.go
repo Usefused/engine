@@ -210,6 +210,8 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodGet, "/apps/{app_id}/config", false, nil},
 	{http.MethodPost, "/mcp-config/plan", false, nil},
 	{http.MethodPost, "/mcp-config/apply", false, nil},
+	// Secret replacement is workspace-managed; service, ownership, and bucket checks are also enforced by planning.
+	{http.MethodPost, "/webhook-config/signing-secret/plan", false, []routeRequirement{workspaceRequirement(accesscontrol.PermissionAppWebhookManage)}},
 	{http.MethodPost, "/webhook-config/plan", false, nil},
 	{http.MethodPost, "/webhook-config/apply", false, nil},
 

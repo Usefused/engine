@@ -1,6 +1,6 @@
 {
-  "call_count": 104,
-  "document_count": 122,
+  "call_count": 106,
+  "document_count": 124,
   "calls": [
     {
       "endpoint": "registry",
@@ -298,6 +298,12 @@
     },
     {
       "endpoint": "engine",
+      "file": "app/lib/bucket-secret-target.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
       "file": "app/lib/buckets.ts",
       "call": 1,
       "document_count": 1
@@ -534,6 +540,12 @@
       "endpoint": "registry",
       "file": "app/lib/unified-app-api.ts",
       "call": 3,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/webhook-discovery-api.ts",
+      "call": 1,
       "document_count": 1
     },
     {
@@ -920,7 +932,7 @@
       "file": "app/lib/app-builder.ts",
       "call": 2,
       "variant": 1,
-      "document": "\n    query AppBuildSelectors($ownerTeamId: ID, $resourceType: AppSelectorResourceType!, $search: String, $limit: Int!, $offset: Int!) {\n      appBuildSelectors(owner_team_id: $ownerTeamId, resource_type: $resourceType, search: $search, limit: $limit, offset: $offset) {\n        total\n        items {\n          resource_type resource_id display_name\n        }\n      }\n    }\n  "
+      "document": "\n    query AppBuildSelectors($ownerTeamId: ID, $resourceType: AppSelectorResourceType!, $search: String, $limit: Int!, $offset: Int!) {\n      appBuildSelectors(owner_team_id: $ownerTeamId, resource_type: $resourceType, search: $search, limit: $limit, offset: $offset) {\n        total\n        items {\n          resource_type resource_id display_name is_default\n        }\n      }\n    }\n  "
     },
     {
       "endpoint": "registry",
@@ -970,6 +982,13 @@
       "call": 1,
       "variant": 1,
       "document": "query DescribeSelectionContract($id: String!, $version: String!) {\n      service(id: $id, version: $version) {\n        id name slug canonical_ref provider { name handle } description current_service_version base_url\n        servers { url description environment is_default }\n        endpoint_count webhook_count event_extraction_path incoming_webhook_config { auth_type }\n        resources { id name }\n        webhooks { id name description method }\n      }\n      serviceVersions(serviceId: $id) { id name header_value status }\n      serviceOperations(serviceId: $id, version: $version) { id service_id name description method path resource_name }\n    }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/bucket-secret-target.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "query NamedBucketSecretPage($bucketId: String!, $limit: Int!, $offset: Int!) {\n      secretMetaPage(bucket_id:$bucketId,limit:$limit,offset:$offset) {\n        total items { id bucket_id service_id key_name key_names credential_type expires_at }\n      }\n    }"
     },
     {
       "endpoint": "engine",
@@ -1355,6 +1374,13 @@
       "call": 3,
       "variant": 1,
       "document": "mutation SetUnifiedAppTemplateVisibility($id: ID!, $public: Boolean!) {\n    setUnifiedAppTemplateVisibility(id: $id, public: $public) { id publisher hash public is_owner template }\n  }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/webhook-discovery-api.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "query WebhookRegistrations($serviceId: String!) {\n  workspaceWebhooks(service_id: $serviceId) { label slug callback_url delivery_mode signature signing_secret { bucket_id key_name } created_at }\n}"
     },
     {
       "endpoint": "registry",

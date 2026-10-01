@@ -20,17 +20,18 @@ import (
 const executionSearchGrant = "execution:read"
 
 type executionResultView struct {
-	ExecutionID       uuid.UUID               `json:"executionId"`
-	AppID             uuid.UUID               `json:"-"`
-	AppFamilyID       uuid.UUID               `json:"appFamilyId"`
-	Version           string                  `json:"version"`
-	Status            string                  `json:"status"`
-	Output            json.RawMessage         `json:"output,omitempty"`
-	Error             *restExecutionErrorBody `json:"error,omitempty"`
-	Mode              string                  `json:"mode"`
-	SourceExecutionID *uuid.UUID              `json:"sourceExecutionId,omitempty"`
-	CreatedAt         string                  `json:"createdAt"`
-	CompletedAt       string                  `json:"completedAt,omitempty"`
+	ExecutionID          uuid.UUID               `json:"executionId"`
+	AppID                uuid.UUID               `json:"-"`
+	AppFamilyID          uuid.UUID               `json:"appFamilyId"`
+	Version              string                  `json:"version"`
+	Status               string                  `json:"status"`
+	Output               json.RawMessage         `json:"output,omitempty"`
+	Error                *restExecutionErrorBody `json:"error,omitempty"`
+	Mode                 string                  `json:"mode"`
+	SourceExecutionID    *uuid.UUID              `json:"sourceExecutionId,omitempty"`
+	SourceWebhookEventID string                  `json:"sourceWebhookEventId,omitempty"`
+	CreatedAt            string                  `json:"createdAt"`
+	CompletedAt          string                  `json:"completedAt,omitempty"`
 }
 
 // MountExecutionResultRoutes exposes durable reads only after the shared app POST issues read handles.
@@ -49,12 +50,14 @@ func publicExecutionResult(record *store.ExecutionResult) executionResultView {
 		ExecutionID: record.ID, AppID: record.AppID, AppFamilyID: record.AppFamilyID, Version: record.AppVersion,
 		Status: record.Status, Output: record.Output,
 		Mode: record.Mode, SourceExecutionID: record.SourceExecutionID,
-		CreatedAt: record.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+		SourceWebhookEventID: record.SourceWebhookEventID,
+		CreatedAt:            record.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 	}
 	// A terminal error contains only the bounded public code and message saved by Engine.
 	if record.ErrorCode != "" {
 		view.Error = &restExecutionErrorBody{Code: record.ErrorCode, Message: record.ErrorMessage}
 	}
+	// Pending executions cannot advertise a completion timestamp before the terminal write commits.
 	if record.CompletedAt != nil {
 		view.CompletedAt = record.CompletedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00")
 	}

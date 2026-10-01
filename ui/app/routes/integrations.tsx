@@ -16,7 +16,7 @@ export default function IntegrationsLayout() {
 
   useEffect(() => {
     // Hosted app authoring and access pages belong to the authenticated Engine workspace.
-    const isAuthenticatedStaticRoute = location.pathname.startsWith("/integrations/unified-apps") || location.pathname.startsWith("/integrations/access/") ||
+    const isAuthenticatedStaticRoute = location.pathname.startsWith("/integrations/unified-apps") || location.pathname.startsWith("/integrations/webhooks") || location.pathname.startsWith("/integrations/access/") ||
       location.pathname.startsWith("/integrations/mcp/") ||
       location.pathname.startsWith("/integrations/sdks/") || [
       "/integrations/buckets",

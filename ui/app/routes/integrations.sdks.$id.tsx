@@ -1,3 +1,5 @@
+import { AppExecutionEndpoint } from "~/components/apps/AppExecutionEndpoint";
+import { CopyValue } from "~/components/CopyValue";
 import { useState, useEffect, isValidElement, type ReactNode } from "react";
 import { useParams, Link, useNavigate, useSearchParams, type MetaFunction } from "@remix-run/react";
 import { Download, Copy, Check, Database } from "lucide-react";
@@ -484,7 +486,6 @@ export default function SdkDetails() {
     onDeleteVersion={versionDeletion.deleteVersion}
     onTabChange={setActiveTab}
     onActivityChange={setActivitySection}
-    onCopySandbox={(url) => { navigator.clipboard.writeText(url); toast.success("Sandbox URL copied!"); }}
   />;
 }
 
@@ -508,7 +509,6 @@ type SdkLoadedContentProps = {
   onDeleteVersion: (version: AppVersionHistoryItem) => void;
   onTabChange: (tab: SdkPrimaryTab) => void;
   onActivityChange: (section: SdkActivitySection) => void;
-  onCopySandbox: (url: string) => void;
 };
 
 /** Renders the loaded app version after query and permission state settle. */
@@ -532,7 +532,6 @@ function SdkLoadedContent({
   onDeleteVersion: handleDeleteVersion,
   onTabChange: setActiveTab,
   onActivityChange: setActivitySection,
-  onCopySandbox,
 }: SdkLoadedContentProps) {
   const currentVersionId = sdkCurrentVersionId(id, sdk);
 
@@ -580,6 +579,7 @@ function SdkLoadedContent({
           <AppOverviewBody
             selections={sdk.detailed_selections ?? []}
             adapterDetails={<>
+            <AppDetailSection title="Execution"><AppExecutionEndpoint appID={sdk.app_id} /></AppDetailSection>
             {optionalNode(sdk.hosted_mcp === true, (
               <AppDetailSection title="MCP delivery">
                 {/* Engine projects the exact and stable routes for this shared App version. */}
@@ -592,17 +592,7 @@ function SdkLoadedContent({
                   <p className="text-sm text-slate-700 mb-4 max-w-2xl">
                     Use this URL in your MCP client (Cursor, Claude Desktop) to connect to this server instantly without running it locally.
                   </p>
-                  <div className="flex items-center gap-3">
-                    <code className="flex-1 px-4 py-3 rounded-lg border border-slate-200 bg-white text-slate-800 font-mono text-sm break-all">
-                      {sdk.sandbox_url}
-                    </code>
-                    <button
-                      onClick={() => onCopySandbox(sdk.sandbox_url ?? "")}
-                      className="p-3 bg-white border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 transition-colors shadow-sm cursor-pointer"
-                    >
-                      <Copy className="w-5 h-5" />
-                    </button>
-                  </div>
+                  <CopyValue value={sdk.sandbox_url ?? ""} label="sandbox URL" />
                 </div>
               </AppDetailSection>
             ))}

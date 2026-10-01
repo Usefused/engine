@@ -13,6 +13,7 @@ import { useSearchParams } from "@remix-run/react";
 import { ConnectReturnStatus } from "~/components/buckets/BucketConnectAccount";
 import { BucketAddDropdown } from "~/components/buckets/BucketAddDropdown";
 import { BucketConnectedUsersTable } from "~/components/buckets/BucketConnectedUsersTable";
+import { FocusedBucketSecret } from "~/components/buckets/FocusedBucketSecret";
 import { BucketEntryComposer } from "~/components/buckets/BucketEntryComposer";
 import { BucketEntryList } from "~/components/buckets/BucketEntryList";
 import { BucketOverview } from "~/components/buckets/BucketOverview";
@@ -94,7 +95,7 @@ type BucketDetailsPermissions = {
 
 /** Keeps bucket content in one scroll region beneath a fixed header, including expanded consent and credential forms. */
 export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   // A selected bucket is required before any credential or connection control can target it.
   if (!props.bucket) return null;
 
@@ -136,6 +137,8 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
           showApps={props.permissions.readApps}
           showServices={props.permissions.readServices}
         />}
+        {/* Deep links reveal only a named metadata entry; the existing credential permission controls writes. */}
+        {params.get("secret") && props.permissions.readSecrets && <FocusedBucketSecret key={`${props.bucket.id}:${params.get("secret")}`} bucketID={props.bucket.id} name={params.get("secret")!} canManage={props.permissions.manageCredentials} saving={props.saving} onSave={props.onSaveBucketSecret} onClose={() => { const next=new URLSearchParams(params);next.delete("secret");setParams(next,{replace:true}); }} />}
         {(props.permissions.manageCredentials || props.permissions.manageValues) && <BucketEntryComposer
           kind={props.entryKind}
           saving={props.saving}

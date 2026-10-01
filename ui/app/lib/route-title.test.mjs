@@ -15,6 +15,8 @@ test("titles every primary Engine route", () => {
     ["/integrations/access/people", "People - Fused"],
     ["/integrations/access/teams", "Teams - Fused"],
     ["/integrations/buckets", "Credentials - Fused"],
+    ["/integrations/webhooks", "Webhooks - Fused"],
+    ["/integrations/webhooks/new", "Create webhook - Fused"],
 	["/integrations/activity", "Activity - Fused"],
     ["/integrations/settings", "Settings - Fused"],
   ]);

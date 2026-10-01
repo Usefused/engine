@@ -23,18 +23,19 @@ import (
 )
 
 type capabilityExecutionEnvelope struct {
-	ExecutionID       uuid.UUID               `json:"executionId"`
-	AppID             uuid.UUID               `json:"-"`
-	AppFamilyID       uuid.UUID               `json:"appFamilyId"`
-	Version           string                  `json:"version"`
-	Status            string                  `json:"status"`
-	Mode              string                  `json:"mode"`
-	SourceExecutionID *uuid.UUID              `json:"sourceExecutionId,omitempty"`
-	ReadHandle        string                  `json:"readHandle,omitempty"`
-	Output            json.RawMessage         `json:"output,omitempty"`
-	Error             *restExecutionErrorBody `json:"error,omitempty"`
-	CreatedAt         time.Time               `json:"createdAt"`
-	CompletedAt       *time.Time              `json:"completedAt,omitempty"`
+	ExecutionID          uuid.UUID               `json:"executionId"`
+	AppID                uuid.UUID               `json:"-"`
+	AppFamilyID          uuid.UUID               `json:"appFamilyId"`
+	Version              string                  `json:"version"`
+	Status               string                  `json:"status"`
+	Mode                 string                  `json:"mode"`
+	SourceExecutionID    *uuid.UUID              `json:"sourceExecutionId,omitempty"`
+	SourceWebhookEventID string                  `json:"sourceWebhookEventId,omitempty"`
+	ReadHandle           string                  `json:"readHandle,omitempty"`
+	Output               json.RawMessage         `json:"output,omitempty"`
+	Error                *restExecutionErrorBody `json:"error,omitempty"`
+	CreatedAt            time.Time               `json:"createdAt"`
+	CompletedAt          *time.Time              `json:"completedAt,omitempty"`
 }
 
 // MountUnifiedAppRoutes adds rerun and replay to the existing SDK execution endpoint.
@@ -225,8 +226,9 @@ func projectCapabilityExecution(record *store.ExecutionResult, readHandle string
 		ExecutionID: record.ID, AppID: record.AppID, AppFamilyID: record.AppFamilyID, Version: record.AppVersion,
 		Status: record.Status, Mode: record.Mode,
 		SourceExecutionID: record.SourceExecutionID, ReadHandle: readHandle,
-		Output:    record.Output,
-		CreatedAt: record.CreatedAt, CompletedAt: record.CompletedAt,
+		SourceWebhookEventID: record.SourceWebhookEventID,
+		Output:               record.Output,
+		CreatedAt:            record.CreatedAt, CompletedAt: record.CompletedAt,
 	}
 	// Errors have a bounded public projection distinct from private provider diagnostics.
 	if record.ErrorCode != "" {

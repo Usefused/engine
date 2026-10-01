@@ -27,6 +27,7 @@ type capabilityRunSpec struct {
 	transport          string
 	sourceExecutionID  *uuid.UUID
 	idempotencyKeyHash string
+	webhookEventID     string
 }
 
 type admittedCapabilityRun struct {
@@ -168,10 +169,11 @@ func (s *EngineGRPCServer) failCapabilityRuntimeStart(ctx context.Context, admit
 	return loadCapabilityRunEnvelope(finishCtx, admitted.results, spec.identity, admitted.id, admitted.readHandle)
 }
 
-// reserveCapabilityRun creates the durable accepted record or finds an identical rerun reservation.
+// reserveCapabilityRun records fresh calls or atomically acquires existing rerun and webhook delivery ownership.
 func reserveCapabilityRun(ctx context.Context, results store.ExecutionResultStore, spec capabilityRunSpec) (uuid.UUID, string, bool, error) {
 	id := uuid.New()
 	readHandle, readHash, err := newExecutionReadHandle()
+	// No trigger can reserve an execution with an invalid read capability.
 	if err != nil {
 		return uuid.Nil, "", false, err
 	}
@@ -181,6 +183,11 @@ func reserveCapabilityRun(ctx context.Context, results store.ExecutionResultStor
 		AppTokenID: spec.identity.TokenID, ReadHandleHash: readHash,
 		IdempotencyKeyHash: spec.idempotencyKeyHash, Status: "queued", Input: spec.input,
 		Mode: spec.mode, SourceExecutionID: spec.sourceExecutionID,
+		SourceWebhookEventID: spec.webhookEventID,
+	}
+	// Automatic deliveries reserve their event and result atomically across replicas and promoted versions.
+	if spec.webhookEventID != "" {
+		return reserveWebhookCapabilityRun(ctx, results, record)
 	}
 	// Live calls and side-effect-free replays each use a fresh one-time reservation.
 	if spec.mode == "live" || spec.mode == "replay" {

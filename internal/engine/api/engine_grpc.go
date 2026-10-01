@@ -32,10 +32,7 @@ type EngineGRPCServer struct {
 	masterKey      []byte
 	redirectURI    string
 	managedConnect *managedauthclient.ConnectClient
-	// configStore and natsClient are only needed by SubscribeWebhooks
-	// (webhook_grpc_handler.go) -- resolving a connecting SDK/MCP's
-	// webhook_attachment label and bridging to the NATS JetStream durable
-	// consumer and queue group.
+	// SDK receivers and automatic Unified App triggers share Engine-owned attachment state and JetStream delivery.
 	configStore          store.ConfigRepository
 	natsClient           *messaging.NATSClient
 	tokenValidator       auth.TokenValidator

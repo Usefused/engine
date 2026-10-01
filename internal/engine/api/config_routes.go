@@ -72,6 +72,8 @@ func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store
 	// already use, reused here only to fetch each referenced service's
 	// webhook auth shape (resolveWebhookAuthShape).
 	r.Route("/webhook-config", func(r chi.Router) {
+		// A secret edit reviews the complete existing bundle without exposing its private configuration.
+		r.Post("/signing-secret/plan", WebhookSigningSecretPlanHandler(configStore, s, verifier, registryClient))
 		r.Post("/plan", WebhookConfigPlanHandler(configStore, s, verifier, registryClient))
 		r.Post("/apply", WebhookConfigApplyHandler(configStore, s, verifier, registryClient))
 	})

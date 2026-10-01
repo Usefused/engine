@@ -1648,6 +1648,19 @@ func engineSchemaQueries() []string {
 				OR (status IN ('succeeded', 'failed', 'indeterminate') AND completed_at IS NOT NULL AND expires_at >= completed_at + INTERVAL '24 hours'))
 		);`,
 		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS idempotency_key_hash text;`,
+		// Webhook provenance is retained with the private result; automatic runs carry no caller token.
+		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS source_webhook_event_id text;`,
+		// Payload-free delivery fences outlive result bodies and survive app promotion or worker restart.
+		`CREATE TABLE IF NOT EXISTS fused_unified_app_webhook_deliveries (
+			account_id uuid NOT NULL,
+			app_family_id uuid NOT NULL,
+			event_id text NOT NULL CHECK (octet_length(event_id) BETWEEN 1 AND 256),
+			execution_id uuid NOT NULL,
+			expires_at timestamptz NOT NULL,
+			PRIMARY KEY (app_family_id,event_id)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_webhook_deliveries_expiry
+			ON fused_unified_app_webhook_deliveries(expires_at);`,
 		// A deployed app has one authored execute contract, so this pre-release column must not split its result identity.
 		`ALTER TABLE fused_unified_app_results DROP COLUMN IF EXISTS capability;`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_results_scope

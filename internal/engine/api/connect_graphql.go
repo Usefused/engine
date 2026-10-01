@@ -215,9 +215,14 @@ var workspaceServicePageGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 var workspaceWebhookGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "WorkspaceWebhook",
 	Fields: graphql.Fields{
-		"label":      &graphql.Field{Type: graphql.String},
-		"slug":       &graphql.Field{Type: graphql.String},
-		"created_at": &graphql.Field{Type: graphql.String},
+		"label": &graphql.Field{Type: graphql.String},
+		"slug":  &graphql.Field{Type: graphql.String},
+		// Discovery projects only non-secret routing information under the existing service-read boundary.
+		"callback_url":  &graphql.Field{Type: graphql.String},
+		"delivery_mode": &graphql.Field{Type: graphql.String},
+		// Credential locations are separately gated by bucket and metadata read permissions.
+		"signing_secret": &graphql.Field{Type: graphql.NewObject(graphql.ObjectConfig{Name: "WebhookSigningSecretTarget", Fields: graphql.Fields{"bucket_id": &graphql.Field{Type: graphql.String}, "key_name": &graphql.Field{Type: graphql.String}}})},
+		"created_at":     &graphql.Field{Type: graphql.String},
 		// signature is "set"/"none" only -- never the secret_ref itself. This
 		// backs the CLI's `workspace service <slug> webhooks` SIGNATURE
 		// column, which exists purely so a user can tell at a glance whether
@@ -827,7 +832,7 @@ func workspaceWebhooksGraphQLField(s store.Store) *graphql.Field {
 			if err != nil {
 				return nil, fmt.Errorf("list workspace webhooks: %w", err)
 			}
-			return projectGraphQLWorkspaceWebhooks(webhooks), nil
+			return projectGraphQLWorkspaceWebhooks(webhooks, ctx), nil
 		},
 	}
 }
@@ -2746,12 +2751,21 @@ func authRequiredFields(authType string) []string {
 	}
 }
 
-func projectGraphQLWorkspaceWebhooks(webhooks []store.WorkspaceWebhook) []map[string]interface{} {
+// projectGraphQLWorkspaceWebhooks makes receiving URLs discoverable without exposing verification credentials.
+func projectGraphQLWorkspaceWebhooks(webhooks []store.WorkspaceWebhook, contexts ...context.Context) []map[string]interface{} {
 	items := make([]map[string]interface{}, 0, len(webhooks))
 	for _, webhook := range webhooks {
+		callbackURL, deliveryMode := webhookDiscoveryDestination(webhook)
+		var signingSecret map[string]interface{}
+		// Existing projections without an actor remain metadata-free.
+		if len(contexts) > 0 {
+			signingSecret = webhookSigningSecretTarget(contexts[0], webhook)
+		}
 		items = append(items, map[string]interface{}{
+			"callback_url": callbackURL, "delivery_mode": deliveryMode,
 			"label": webhook.Label, "slug": webhook.Slug, "created_at": formatGraphQLTime(webhook.CreatedAt),
-			"signature": webhookSignatureStatus(webhook.SecretBucketID),
+			"signature":      webhookSignatureStatus(webhook.SecretBucketID),
+			"signing_secret": signingSecret,
 		})
 	}
 	return items

@@ -371,11 +371,15 @@ export function preferredBucketID(
   );
 }
 
+/** Changes buckets without carrying an exact secret target into a different credential set. */
 export function bucketSearchParams(
   current: URLSearchParams,
   bucketId: string
 ): URLSearchParams {
   const next = new URLSearchParams(current);
+  // A named secret belongs to the original bucket only.
+  if (current.get("bucket") !== bucketId) next.delete("secret");
+  // Retain the selected bucket when opening its details.
   if (bucketId) {
     next.set("bucket", bucketId);
     return next;

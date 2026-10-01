@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { CopyValue } from "~/components/CopyValue";
 
 export interface McpTransportURLs {
   streamable_http?: string | null;
@@ -32,30 +31,13 @@ function TransportBadge({ children, legacy = false }: { children: string; legacy
 }
 
 /** Copies one Engine-projected endpoint without reconstructing it in the browser. */
-function EndpointRow({ label, transport, url, copied, onCopy }: {
+function EndpointRow({ label, transport, url, onCopy }: {
   label: string;
   transport: McpTransportName;
   url: string;
-  copied: boolean;
   onCopy: (transport: McpTransportName, url: string) => void;
 }) {
-  return (
-    <div className="mt-2 flex min-w-0 items-center gap-2">
-      <code className="min-w-0 flex-1 break-all rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-800 shadow-sm">
-        {url}
-      </code>
-      <button
-        type="button"
-        data-track={`copy_mcp_${transport}_url`}
-        onClick={() => onCopy(transport, url)}
-        className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm transition-colors hover:bg-slate-50 hover:text-slate-900"
-        title={`Copy ${label} URL`}
-        aria-label={`Copy ${label} URL`}
-      >
-        {copied ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
-      </button>
-    </div>
-  );
+  return <CopyValue value={url} label={`${label} URL`} className="mt-2" onCopied={() => onCopy(transport, url)} />;
 }
 
 /** Reads only typed Engine discovery fields so public-origin rules stay server-owned. */
@@ -65,9 +47,8 @@ function transportURL(endpoints: McpTransportEndpointData, transport: McpTranspo
 }
 
 /** Presents the stable family URL as the endpoint users normally configure once. */
-function RecommendedEndpoint({ url, copied, isDefault, isStable, stableVersionID, onCopy }: {
+function RecommendedEndpoint({ url, isDefault, isStable, stableVersionID, onCopy }: {
   url: string;
-  copied: boolean;
   isDefault: boolean;
   isStable: boolean;
   stableVersionID: string;
@@ -83,7 +64,7 @@ function RecommendedEndpoint({ url, copied, isDefault, isStable, stableVersionID
       </div>
       {url && !isStable && stableVersionID ? <p className="mt-2 text-xs text-amber-700">This URL currently routes to Version ID <code>{stableVersionID}</code>.</p> : null}
       {url ? (
-        <EndpointRow label="Streamable HTTP" transport="streamable_http" url={url} copied={copied} onCopy={onCopy} />
+        <EndpointRow label="Streamable HTTP" transport="streamable_http" url={url} onCopy={onCopy} />
       ) : (
         <p className="mt-2 text-xs text-slate-500">No version is currently promoted to the stable endpoint.</p>
       )}
@@ -92,11 +73,10 @@ function RecommendedEndpoint({ url, copied, isDefault, isStable, stableVersionID
 }
 
 /** Renders one immutable version URL with only compatibility metadata that adds new information. */
-function VersionEndpoint({ label, transport, url, copied, legacy = false, onCopy }: {
+function VersionEndpoint({ label, transport, url, legacy = false, onCopy }: {
   label: string;
   transport: McpTransportName;
   url: string;
-  copied: boolean;
   legacy?: boolean;
   onCopy: (transport: McpTransportName, url: string) => void;
 }) {
@@ -109,15 +89,14 @@ function VersionEndpoint({ label, transport, url, copied, legacy = false, onCopy
         {/* Legacy belongs to the exact endpoint it qualifies, not to an ambiguous group heading. */}
         {legacy ? <TransportBadge legacy>Legacy</TransportBadge> : null}
       </div>
-      <EndpointRow label={label} transport={transport} url={url} copied={copied} onCopy={onCopy} />
+      <EndpointRow label={label} transport={transport} url={url} onCopy={onCopy} />
     </div>
   );
 }
 
 /** Shows the stable SSE compatibility route with its lifecycle identity attached. */
-function LegacyStableEndpoint({ stableURL, copied, onCopy }: {
+function LegacyStableEndpoint({ stableURL, onCopy }: {
   stableURL: string;
-  copied: boolean;
   onCopy: (transport: McpTransportName, url: string) => void;
 }) {
   // Engines without SSE discovery should not render an empty compatibility endpoint.
@@ -129,14 +108,13 @@ function LegacyStableEndpoint({ stableURL, copied, onCopy }: {
         <TransportBadge>Stable</TransportBadge>
         <TransportBadge legacy>Legacy</TransportBadge>
       </div>
-      <EndpointRow label="stable SSE" transport="sse" url={stableURL} copied={copied} onCopy={onCopy} />
+      <EndpointRow label="stable SSE" transport="sse" url={stableURL} onCopy={onCopy} />
     </div>
   );
 }
 
 /** Renders Engine-owned MCP transport discovery without rebuilding endpoint URLs in the browser. */
 export function McpTransportEndpoints({ endpoints, enabled = true, onCopied }: McpTransportEndpointsProps) {
-  const [copied, setCopied] = useState<McpTransportName | null>(null);
 
   // A non-runnable exact version must not expose either stable or pinned copy controls.
   if (!enabled) {
@@ -147,10 +125,9 @@ export function McpTransportEndpoints({ endpoints, enabled = true, onCopied }: M
     );
   }
 
-  /** Records only the route kind after the browser copies the Engine-owned URL. */
-  const copyEndpoint = async (transport: McpTransportName, url: string) => {
-    await navigator.clipboard.writeText(url);
-    setCopied(transport);
+  /** Receives confirmation only after the shared control has copied the Engine-owned URL. */
+  const copyEndpoint = (transport: McpTransportName) => {
+    // Notification callbacks run only after confirmed clipboard success.
     if (onCopied) onCopied(transport);
   };
 
@@ -158,7 +135,6 @@ export function McpTransportEndpoints({ endpoints, enabled = true, onCopied }: M
     <div className="space-y-3" data-default-transport={endpoints.default_transport || "unknown"}>
       <RecommendedEndpoint
         url={transportURL(endpoints, "streamable_http")}
-        copied={copied === "streamable_http"}
         isDefault={endpoints.default_transport === "streamable_http"}
         isStable={endpoints.stable === true}
         stableVersionID={typeof endpoints.stable_version_id === "string" ? endpoints.stable_version_id : ""}
@@ -166,7 +142,6 @@ export function McpTransportEndpoints({ endpoints, enabled = true, onCopied }: M
       />
       <LegacyStableEndpoint
         stableURL={transportURL(endpoints, "sse")}
-        copied={copied === "sse"}
         onCopy={copyEndpoint}
       />
     </div>
@@ -175,18 +150,16 @@ export function McpTransportEndpoints({ endpoints, enabled = true, onCopied }: M
 
 /** Renders only the immutable endpoints belonging to one expanded version-history card. */
 export function McpVersionTransportEndpoints({ endpoints, enabled = true, onCopied }: McpTransportEndpointsProps) {
-  const [copied, setCopied] = useState<McpTransportName | null>(null);
 
   // Deactivated versions must not retain copyable runtime addresses in history.
   if (!enabled) {
     return <p className="text-xs italic text-slate-500">This version is no longer available for connections.</p>;
   }
 
-  /** Copies one immutable URL and reports its exact transport identity to the parent route. */
-  const copyEndpoint = async (transport: McpTransportName, url: string) => {
-    await navigator.clipboard.writeText(url);
-    setCopied(transport);
+  /** Reports the exact transport identity after the shared control confirms a successful copy. */
+  const copyEndpoint = (transport: McpTransportName) => {
     // Copy feedback remains optional so the history card can be reused in read-only surfaces.
+    // Notification callbacks run only after confirmed clipboard success.
     if (onCopied) onCopied(transport);
   };
 
@@ -196,14 +169,12 @@ export function McpVersionTransportEndpoints({ endpoints, enabled = true, onCopi
         label="Streamable HTTP · Version-pinned"
         transport="versioned_streamable_http"
         url={transportURL(endpoints, "versioned_streamable_http")}
-        copied={copied === "versioned_streamable_http"}
         onCopy={copyEndpoint}
       />
       <VersionEndpoint
         label="SSE · Version-pinned"
         transport="versioned_sse"
         url={transportURL(endpoints, "versioned_sse")}
-        copied={copied === "versioned_sse"}
         legacy
         onCopy={copyEndpoint}
       />

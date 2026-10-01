@@ -1,3 +1,4 @@
+import { CopyButton } from "~/components/CopyValue";
 import { createContext, useContext, useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { AuthNameField } from "~/components/AuthNameField";
@@ -1734,19 +1735,21 @@ function ServiceConfiguration({ srv }: { srv: Service }) {
   );
 }
 
+/** Shows authoritative provider URLs with copy controls that do not toggle the disclosure. */
 function ServerConfigCard({ srv }: { srv: Service }) {
   const multiple = Boolean(srv.servers && srv.servers.length > 1);
+  const baseURL = srv.base_url || srv.servers?.[0]?.url || "";
   return (
     <details className={`${configCardClass} ${multiple ? "cursor-pointer hover:bg-slate-100" : ""}`}>
       <summary className="flex list-none items-start justify-between outline-none">
-        <div><dt className="text-xs text-slate-500">Base URL</dt><dd className="mt-1 break-all font-mono text-xs text-slate-800">{srv.base_url || srv.servers?.[0]?.url || "Not declared"}</dd></div>
+        <div className="min-w-0 flex-1"><dt className="text-xs text-slate-500">Base URL</dt><dd className="mt-1 flex min-w-0 items-start gap-2"><code className="min-w-0 flex-1 select-all break-all text-xs text-slate-800">{baseURL || "Not declared"}</code>{/* Missing URLs are not copyable placeholders. */}{baseURL && <CopyButton value={baseURL} label="base URL" />}</dd></div>
         {multiple && <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />}
       </summary>
       {multiple && (
         <div className="mt-3 space-y-2 border-t border-slate-200 pt-3 text-xs text-slate-700">
           {srv.servers?.map((server, index) => (
             <div key={index}>
-              <div className="break-all font-mono text-slate-800">{server.url}</div>
+              <div className="flex min-w-0 items-center gap-2"><code className="min-w-0 flex-1 select-all break-all text-slate-800">{server.url}</code><CopyButton value={server.url} label="server URL" /></div>
               <div className="mt-0.5 flex gap-2 text-slate-500">
                 {server.environment && <span>{server.environment}</span>}
                 {server.is_default && <span className="rounded bg-blue-100 px-1 text-[10px] font-bold uppercase text-blue-700">Default</span>}

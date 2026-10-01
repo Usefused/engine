@@ -1375,6 +1375,8 @@ export const api = {
     }).then(unwrapGraphQLResponse),
 
   appConfig: {
+    // Engine preserves the complete webhook bundle while reviewing one signing-secret replacement.
+    webhookSecretPlan: <T>(slug: string, secret: string) => req<T>("/webhook-config/signing-secret/plan", { method: "POST", body: JSON.stringify({ slug, secret }) }),
     // Private bodies require a fresh Engine permission check and never enter activity queries.
     diagnostics: (appID: string, executionID: string) => req<PrivateExecutionDiagnostics>(`/apps/${encodeURIComponent(appID)}/executions/${encodeURIComponent(executionID)}/diagnostics`),
     // Read the authoritative serving pointer before offering an explicit traffic switch.
@@ -1384,14 +1386,14 @@ export const api = {
     // Exact private source is Engine-local and requires app edit authority.
     source: <T>(appID: string) => req<T>(`/apps/${encodeURIComponent(appID)}/config`),
     // plan validates an immutable app config without changing active state.
-    plan: <T>(kind: "sdk" | "mcp" | "unified-app", input: {
+    plan: <T>(kind: "sdk" | "mcp" | "unified-app" | "webhook", input: {
       owner_team?: string;
       config_key: string;
       source_hash: string;
       config: Record<string, unknown>;
     }) => req<T>(`/${kind}-config/plan`, { method: "POST", body: JSON.stringify(input) }),
     // apply activates a previously validated immutable config plan.
-    apply: <T>(kind: "sdk" | "mcp" | "unified-app", input: { plan_id: string; source_hash: string }) =>
+    apply: <T>(kind: "sdk" | "mcp" | "unified-app" | "webhook", input: { plan_id: string; source_hash: string }) =>
       req<T>(`/${kind}-config/apply`, { method: "POST", body: JSON.stringify(input) }),
   },
 

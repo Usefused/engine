@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams, useSearchParams, type MetaFunction } from "@remix-run/react";
-import { Copy } from "lucide-react";
-import { AppDetailBackLink, AppDetailHeader, AppDetailPrimaryAction, AppDetailTabs, AppVersionSwitcher, type AppDetailTab } from "~/components/apps/AppDetailChrome";
+import { CopyButton } from "~/components/CopyValue";
+import { AppDetailBackLink, AppDetailHeader, AppDetailTabs, AppVersionSwitcher, type AppDetailTab } from "~/components/apps/AppDetailChrome";
 import { AppChangesBody, AppDetailBody, AppDetailSection, AppOverviewBody } from "~/components/apps/AppDetailBody";
 import { type AppConnectedServiceSelection } from "~/components/apps/AppConnectedServices";
 import { type AppVersionHistoryItem } from "~/components/apps/AppVersionHistory";
@@ -217,11 +217,11 @@ export default function McpServerDetails() {
     }
   };
 
-  return <McpDetailState id={id} state={state} activeTab={activeTab} canReadActivity={canReadActivity} canManageVersions={canManageVersions} deletingVersionId={deletingVersionId} onNavigate={navigate} onTabChange={setActiveTab} onDeleteVersion={handleDeleteVersion} onCopyPrimary={(url) => { navigator.clipboard.writeText(url); toast.success("Stable Streamable HTTP URL copied to clipboard!"); }} onCopied={(transport) => toast.success(`${mcpTransportLabel(transport)} URL copied to clipboard!`)} />;
+  return <McpDetailState id={id} state={state} activeTab={activeTab} canReadActivity={canReadActivity} canManageVersions={canManageVersions} deletingVersionId={deletingVersionId} onNavigate={navigate} onTabChange={setActiveTab} onDeleteVersion={handleDeleteVersion} onCopied={(transport) => toast.success(`${mcpTransportLabel(transport)} URL copied to clipboard!`)} />;
 }
 
 /** Selects the bounded loading, failure, or immutable-version detail surface. */
-function McpDetailState({ id, state, activeTab, canReadActivity, canManageVersions, deletingVersionId, onNavigate, onTabChange, onDeleteVersion, onCopyPrimary, onCopied }: {
+function McpDetailState({ id, state, activeTab, canReadActivity, canManageVersions, deletingVersionId, onNavigate, onTabChange, onDeleteVersion, onCopied }: {
   id?: string;
   state: ReturnType<typeof useMcpServerDetail>;
   activeTab: McpDetailTab;
@@ -231,17 +231,16 @@ function McpDetailState({ id, state, activeTab, canReadActivity, canManageVersio
   onNavigate: (path: string) => void;
   onTabChange: (tab: McpDetailTab) => void;
   onDeleteVersion: (version: McpVersion) => void;
-  onCopyPrimary: (url: string) => void;
   onCopied: (transport: McpTransportName) => void;
 }) {
   // Loading and failure states must not mount version lifecycle controls without an authorized family.
   if (state.loading) return <div className="flex flex-col items-center justify-center py-20 text-slate-500"><div className="mb-4 h-8 w-8 animate-spin rounded-full border-4 border-blue-500 border-t-transparent" />Loading MCP server details...</div>;
   if (state.error || !state.server || !id) return <div className="space-y-6"><AppDetailBackLink to="/integrations/sdks" /><div className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">{state.error || "MCP server not found"}</div></div>;
-  return <McpLoadedContent id={id} server={state.server} versions={state.versions} activeTab={activeTab} canReadActivity={canReadActivity} canManageVersions={canManageVersions} deletingVersionId={deletingVersionId} onNavigate={onNavigate} onTabChange={onTabChange} onDeleteVersion={onDeleteVersion} onCopyPrimary={onCopyPrimary} onCopied={onCopied} />;
+  return <McpLoadedContent id={id} server={state.server} versions={state.versions} activeTab={activeTab} canReadActivity={canReadActivity} canManageVersions={canManageVersions} deletingVersionId={deletingVersionId} onNavigate={onNavigate} onTabChange={onTabChange} onDeleteVersion={onDeleteVersion} onCopied={onCopied} />;
 }
 
 /** Renders one loaded MCP version while routing transport copy events through fixed labels. */
-function McpLoadedContent({ id, server, versions, activeTab, canReadActivity, canManageVersions, deletingVersionId, onNavigate, onTabChange, onDeleteVersion, onCopyPrimary, onCopied }: {
+function McpLoadedContent({ id, server, versions, activeTab, canReadActivity, canManageVersions, deletingVersionId, onNavigate, onTabChange, onDeleteVersion, onCopied }: {
   id: string;
   server: McpServerDetail;
   versions: McpVersion[];
@@ -252,7 +251,6 @@ function McpLoadedContent({ id, server, versions, activeTab, canReadActivity, ca
   onNavigate: (path: string) => void;
   onTabChange: (tab: McpDetailTab) => void;
   onDeleteVersion: (version: McpVersion) => void;
-  onCopyPrimary: (url: string) => void;
   onCopied: (transport: McpTransportName) => void;
 }) {
   const primaryURL = mcpPrimaryURL(server);
@@ -267,7 +265,7 @@ function McpLoadedContent({ id, server, versions, activeTab, canReadActivity, ca
         status={server.status}
         version={server.version}
         createdAt={server.created_at}
-        action={primaryURL ? <AppDetailPrimaryAction icon={<Copy className="h-4 w-4" />} label="Copy server URL" onClick={() => onCopyPrimary(primaryURL)} /> : null}
+        action={primaryURL ? <CopyButton value={primaryURL} label="server URL" /> : null}
       />
 
       <AppVersionSwitcher label="App version" versions={versions} currentId={id} onSelect={(appId) => onNavigate(`/integrations/mcp/${appId}`)} />

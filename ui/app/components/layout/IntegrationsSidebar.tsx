@@ -2,7 +2,7 @@ import { hasAnyAppPermission } from "~/lib/current-actor-access";
 import { useState, type ComponentType } from "react";
 import { Link, useLocation, useNavigate } from "@remix-run/react";
 import { Logo } from "~/components/Logo";
-import { Layers, Boxes, KeyRound, ShieldCheck, Activity, Settings, LogOut, ChevronLeft, ChevronRight, Menu, X, LogIn, PlusCircle } from "lucide-react";
+import { Layers, Boxes, KeyRound, ShieldCheck, Activity, Settings, LogOut, ChevronLeft, ChevronRight, Menu, X, LogIn, PlusCircle, Webhook } from "lucide-react";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasAnyPermission, hasWorkspacePermission, type CurrentActorAccess } from "~/lib/current-actor-access";
 import { workspaceActivityTabs } from "~/lib/activity-access";
@@ -44,6 +44,13 @@ const AUTH_NAV_ITEMS: SidebarItem[] = [
     // Builders may create a permitted type before they have any app to read.
     // Template readers reach their catalogue through Unified Apps even without app ownership.
     visible: (access) => hasAnyAppPermission(access, "read") || hasWorkspacePermission(access, "catalogue.read") || ["sdk", "mcp", "api", "unified_app"].some((kind) => hasWorkspacePermission(access, `app.${kind}.create`)),
+  },
+  {
+    to: "/integrations/webhooks",
+    label: "Webhooks",
+    Icon: Webhook,
+    // Existing service readers can discover URLs; creators can start before they have any registrations.
+    visible: (access) => hasAnyPermission(access, "service.read") || hasWorkspacePermission(access, "app.webhook.create"),
   },
   {
     to: "/integrations/buckets",

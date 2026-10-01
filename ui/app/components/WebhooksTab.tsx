@@ -1,3 +1,5 @@
+import { Link } from "@remix-run/react";
+import { hasWorkspacePermission } from "~/lib/current-actor-access";
 import { useState } from "react";
 import { Info, AlertTriangle, Search } from "lucide-react";
 import type { IntegrationObject, Service } from "~/lib/api";
@@ -32,6 +34,7 @@ export default function WebhooksTab({
 	const [search, setSearch] = useState("");
   const [editing, setEditing] = useState(false);
   const { access } = useCurrentActorAccess();
+  const canCreate = hasWorkspacePermission(access, "app.webhook.create");
   const canEdit = canEditWebhook(srv.is_owner, access);
 
   // A confirmed commit refreshes the same selected version, never workspace registration or secrets.
@@ -44,6 +47,10 @@ export default function WebhooksTab({
 
   return (
     <div className="bg-white rounded-xl border border-slate-200">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-5">
+        <div><h2 className="font-semibold text-slate-900">Receive events</h2><p className="mt-1 text-sm text-slate-500">Find a receiving URL or create one for this service.</p></div>
+        <div className="flex flex-wrap gap-3"><Link to={`/integrations/webhooks?service=${encodeURIComponent(srv.id)}`} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium">View webhook URLs</Link>{/* Provisioning stays separate from editing provider event definitions. */}{canCreate && <Link to={`/integrations/webhooks/new?service=${encodeURIComponent(srv.id)}`} className="rounded-lg bg-[var(--brand-violet)] px-3 py-2 text-sm font-semibold text-white">Create webhook</Link>}</div>
+      </div>
       <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-3">
           <div className="relative">
