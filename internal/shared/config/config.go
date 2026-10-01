@@ -51,14 +51,15 @@ const DefaultInitialCreditBalance = 10_000_000.0
 var GlobalEncryptionKey []byte
 
 type EngineConfig struct {
-	RegistryEndpoint       string `yaml:"registry_endpoint"`
-	PublicURL              string `yaml:"public_url"`
-	PublicGRPCURL          string `yaml:"public_grpc_url"`
-	AccountID              string `yaml:"account_id"`
-	LicenseKey             string `yaml:"license_key"`
-	LicenseKeySource       string `yaml:"-"`
-	ExecutionRetentionDays int    `yaml:"execution_retention_days"`
-	ExecutionCleanupBatch  int    `yaml:"execution_cleanup_batch"`
+	UnifiedApps            UnifiedAppAdmissionConfig `yaml:"unified_apps"`
+	RegistryEndpoint       string                    `yaml:"registry_endpoint"`
+	PublicURL              string                    `yaml:"public_url"`
+	PublicGRPCURL          string                    `yaml:"public_grpc_url"`
+	AccountID              string                    `yaml:"account_id"`
+	LicenseKey             string                    `yaml:"license_key"`
+	LicenseKeySource       string                    `yaml:"-"`
+	ExecutionRetentionDays int                       `yaml:"execution_retention_days"`
+	ExecutionCleanupBatch  int                       `yaml:"execution_cleanup_batch"`
 	// ConnectedAuthRefreshWorkers is the exact bounded OAuth refresh pool size
 	// selected by the Engine operator.
 	ConnectedAuthRefreshWorkers int `yaml:"connected_auth_refresh_workers"`
@@ -102,16 +103,23 @@ func WithEngineLicenseSources(sources EngineLicenseSources) LoadOption {
 }
 
 type ObservabilityConfig struct {
-	OTELTarget string `yaml:"otel_target"`
+	OTELTarget      string `yaml:"otel_target"`
+	Environment     string `yaml:"environment"`
+	ServiceName     string `yaml:"service_name"`
+	TracesEndpoint  string `yaml:"traces_endpoint"`
+	MetricsEndpoint string `yaml:"metrics_endpoint"`
+	LogsEndpoint    string `yaml:"logs_endpoint"`
 }
 
 type Config struct {
-	EncryptionKey string `yaml:"encryption_key"`
-	Database      struct {
-		URL string `yaml:"url"`
-	} `yaml:"database"`
-	WorkerPool      WorkerPoolConfig `yaml:"worker_pool"`
-	DriftWorkerPool WorkerPoolConfig `yaml:"drift_worker_pool"`
+	// Only explicitly declared YAML values may populate the process environment.
+	environmentDefaults map[string]string
+	EncryptionKey       string           `yaml:"encryption_key"`
+	Database            DatabaseConfig   `yaml:"database"`
+	Server              ServerConfig     `yaml:"server"`
+	NATS                NATSConfig       `yaml:"nats"`
+	WorkerPool          WorkerPoolConfig `yaml:"worker_pool"`
+	DriftWorkerPool     WorkerPoolConfig `yaml:"drift_worker_pool"`
 	// HomepageURL remains shared configuration for Registry-oriented packages;
 	// Engine's embedded UI is same-origin and needs no configurable UI origin.
 	HomepageURL   string              `yaml:"homepage_url"`
@@ -123,8 +131,10 @@ type Config struct {
 
 // Load reads the YAML configuration file and parses it.
 // If the file does not exist, it returns a Config struct with default values.
+// Unified App admission resolves defaults, YAML, then environment before any runtime starts.
 func Load(path string, options ...LoadOption) (*Config, error) {
 	cfg := defaultConfig()
+	// Invalid files must fail before process overrides or dependencies can be used.
 	if err := loadYAML(path, cfg); err != nil {
 		return nil, err
 	}
@@ -132,14 +142,31 @@ func Load(path string, options ...LoadOption) (*Config, error) {
 	for _, option := range options {
 		option(&settings)
 	}
+	// Preserve inherited overrides before validating the effective deployment settings.
 	if err := applyEnvironment(cfg); err != nil {
 		return nil, err
 	}
+	// Resolve execution admission once so transports do not reread environment over the selected YAML.
+	admission, err := ResolveUnifiedAppAdmission(cfg.Engine.UnifiedApps)
+	// Invalid settings stop startup instead of causing later execution failures.
+	if err != nil {
+		return nil, err
+	}
+	cfg.Engine.UnifiedApps = admission
+	// Resolve pool policy before any dependency opens a connection.
+	cfg.Database, err = ResolveDatabaseConfig(cfg.Database)
+	// Bad pool limits are startup errors, not deferred runtime failures.
+	if err != nil {
+		return nil, err
+	}
+	cfg.Server = ResolveServerConfig(cfg.Server)
 	resolveEngineLicense(cfg, settings)
 	finalizeEncryptionKey(cfg)
+	// Keep the legacy minimum worker fallback for existing configuration files.
 	if cfg.WorkerPool.Size <= 0 {
 		cfg.WorkerPool.Size = 1
 	}
+	// Refresh concurrency must remain bounded before any worker starts.
 	if err := validateConnectedAuthRefreshWorkers(cfg.Engine.ConnectedAuthRefreshWorkers); err != nil {
 		return nil, err
 	}
@@ -151,6 +178,9 @@ func Load(path string, options ...LoadOption) (*Config, error) {
 func defaultConfig() *Config {
 	return &Config{
 		EncryptionKey: "fused-default-encrypt-key-32b",
+		Database:      DefaultDatabaseConfig(),
+		Server:        ServerConfig{HTTPPort: "8081", GRPCHost: "127.0.0.1", GRPCPort: "50051"},
+		NATS:          NATSConfig{RateLimitReplicas: 1},
 		WorkerPool: WorkerPoolConfig{
 			Size: 5, // Default worker pool size
 		},
@@ -185,6 +215,7 @@ func defaultConfig() *Config {
 			},
 		},
 		Engine: EngineConfig{
+			UnifiedApps:                 DefaultUnifiedAppAdmissionConfig(),
 			RegistryEndpoint:            "https://registry.usefused.com/graphql",
 			ExecutionRetentionDays:      30,
 			ExecutionCleanupBatch:       1000,
@@ -193,15 +224,41 @@ func defaultConfig() *Config {
 	}
 }
 
+// loadYAML expands scalar environment references before decoding into the defaulted configuration.
 func loadYAML(path string, cfg *Config) error {
 	data, err := os.ReadFile(path)
+	// Missing files preserve supported environment-only startup.
 	if os.IsNotExist(err) {
 		return nil
 	}
+	// Other filesystem failures must not masquerade as missing configuration.
 	if err != nil {
 		return err
 	}
-	return yaml.Unmarshal(data, cfg)
+	var document yaml.Node
+	// Invalid YAML must not partially alter the default configuration.
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return err
+	}
+	// Reference errors are reported before any dependency starts.
+	if err := expandYAMLEnvironment(&document); err != nil {
+		return err
+	}
+	// Empty configuration files retain the same default behavior as missing files.
+	if len(document.Content) == 0 {
+		return nil
+	}
+	// Decode into defaults first so malformed typed YAML never reaches os.Setenv.
+	if err := document.Decode(cfg); err != nil {
+		return err
+	}
+	defaults, err := yamlEnvironmentDefaults(&document)
+	// An invalid environment binding must not partially mutate process state.
+	if err != nil {
+		return err
+	}
+	cfg.environmentDefaults = defaults
+	return nil
 }
 
 // applyEnvironment accepts only Engine-owned process overrides and rejects

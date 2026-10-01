@@ -5,12 +5,37 @@
 # encryption in Engine-local storage, and connect session state signing.
 # Override in production via the FUSED_ENCRYPTION_KEY environment variable.
 # Generate a secure key: openssl rand -base64 32
-encryption_key: "B2Ey1ye+mKA5/04WHlbFxuT6Oq5kFMassjNLLLqsZCI="
 database:
   url: "postgres://opensync:password@192.168.0.112:5432/opensync?sslmode=disable"
+  # YAML fills absent environment settings; inherited environment values still win.
+  max_conns: 10
+  max_conn_idle_time: 30m
+server:
+  http_port: 8081
+  grpc_host: "127.0.0.1"
+  grpc_port: 50051
+  # Empty means webhook ingress shares the main HTTP listener.
+  webhook_port: ""
+nats:
+  # Omit url for embedded NATS; NATS_URL still works without any YAML entry.
+  # url: "nats://broker:4222"
+  # store_dir: "/var/lib/fused/nats"
+  rate_limit_replicas: 1
+  # Choose one credentials file or NKey seed file, or keep auth in NATS_* env vars.
+  # credentials_file: "/run/secrets/nats.creds"
+  # nkey_seed_file: "/run/secrets/nats.seed"
+  # tls:
+  #   ca_file: "/run/secrets/nats-ca.pem"
+  #   cert_file: "/run/secrets/nats-client.pem"
+  #   key_file: "/run/secrets/nats-client-key.pem"
+  #   server_name: "nats.example.com"
 engine:
+  # Shared execution budget; increase concurrency for I/O-heavy workloads after measurement.
+  unified_apps:
+    max_concurrency: 1
+    queue_capacity: 256
+    queue_timeout_seconds: 5
   registry_endpoint: "http://127.0.0.1:8090/graphql"
-  license_key: "fk_com_1707be57-95ed-45c8-a341-672a87fb2609"
   execution_retention_days: 30
   execution_cleanup_batch: 1000
   # Bounded OAuth refresh concurrency. Override with
@@ -20,5 +45,11 @@ engine:
   # FUSED_SCHEMA_MAX_DEFINITIONS (1..500000); must match Registry's value.
 
 observability:
+  environment: "production"
+  service_name: "fused"
+  # Optional signal URLs include their complete OTLP HTTP path.
+  # traces_endpoint: "http://collector:4318/v1/traces"
+  # metrics_endpoint: "http://collector:4318/v1/metrics"
+  # logs_endpoint: "http://collector:4318/v1/logs"
   # Engine exports OTLP over HTTP; environment signal endpoints take precedence.
   otel_target: "http://localhost:4318"

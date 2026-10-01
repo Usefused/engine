@@ -90,7 +90,7 @@ var startCmd = &cobra.Command{
 		if cmd.Flags().Changed("environment") {
 			os.Setenv(observability.EngineEnvironmentEnvVar, environment)
 		}
-		runEngine()
+		runEngine(cmd)
 	},
 }
 
@@ -107,7 +107,7 @@ func init() {
 }
 
 // runEngine assembles one process-wide dependency graph before accepting HTTP, gRPC, or background work.
-func runEngine() {
+func runEngine(cmd *cobra.Command) {
 	licenseSources := loadEngineEnv()
 	licenseSources.Flag = licenseKey
 
@@ -116,6 +116,19 @@ func runEngine() {
 
 	// Configuration must precede telemetry because YAML remains the fallback OTLP destination.
 	cfg := loadEngineConfiguration(ctx, licenseSources)
+	// YAML fills process settings once; all existing consumers continue to read os.Getenv.
+	if err := cfg.ExportEnvironment(); err != nil {
+		slog.ErrorContext(ctx, "Invalid Engine environment configuration", slog.Any("error", err))
+		os.Exit(1)
+	}
+	listeners, listenerErr := resolveListenerFlags(cmd, config.ResolveServerConfig(config.ServerConfig{HTTPPort: "8081", GRPCHost: "127.0.0.1", GRPCPort: "50051"}))
+	// Reject invalid listener settings before opening any dependencies.
+	if listenerErr != nil {
+		slog.ErrorContext(ctx, "Invalid Engine listener configuration", slog.Any("error", listenerErr))
+		os.Exit(1)
+	}
+	port, grpcHost, grpcPort, webhookPort = listeners.HTTPPort, listeners.GRPCHost, listeners.GRPCPort, listeners.WebhookPort
+
 	observability.InitLogs(ctx, cfg.Observability.OTELTarget)
 	defer closeEngineLogs()
 	observability.Init(ctx, cfg.Observability.OTELTarget)

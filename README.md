@@ -41,6 +41,10 @@ Open the Admin UI at [localhost:8081](http://localhost:8081); SDK gRPC listens o
 
 For file-based configuration, see **[engine.yaml](https://github.com/Usefused/engine/blob/main/engine.yaml)**
 and start with `fused-engine start --config /path/to/engine.yaml`.
+See [Engine configuration](docs/engine-configuration.md) for supported YAML fields
+and their environment-variable equivalents. Startup copies declared YAML settings
+into unset environment settings before consumers initialize; existing environment
+configuration remains supported.
 Replace its placeholder values and remove the local `registry_endpoint` to use
 the default Fused Cloud Registry.
 
