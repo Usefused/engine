@@ -3,7 +3,7 @@ const path = require("node:path");
 const ts = require("typescript");
 
 const MAX_COMPLEXITY = 10;
-const FILES = ["src/index.ts", "src/bundle.ts", "src/bindings.ts", "src/cli.ts", "src/client_generator.ts", "src/client_schema.ts", "src/manifest-worker.ts", "test/fixture.ts", "test/execution.test.ts", "examples/live-greeting.ts"];
+const FILES = ["src/verify-operations.ts", "src/typecheck.ts", "test/typecheck.test.ts", "src/aliases.ts", "test/bindings.test.ts", "src/index.ts", "src/bundle.ts", "src/bindings.ts", "src/cli.ts", "src/client_generator.ts", "src/client_schema.ts", "test/fixture.ts", "test/execution.test.ts", "examples/live-greeting.ts"];
 const FUNCTION_KINDS = new Set([
   ts.SyntaxKind.FunctionDeclaration, ts.SyntaxKind.FunctionExpression,
   ts.SyntaxKind.ArrowFunction, ts.SyntaxKind.MethodDeclaration,

@@ -1,3 +1,4 @@
+import { FieldLabel } from "~/components/forms/FieldLabel";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Check, AlertCircle, Loader2, Sparkles } from "lucide-react";
 import { Select } from "~/components/forms/Select";
@@ -106,7 +107,7 @@ function CreationModes({ mode, setMode, disabled }: { mode: string; setMode: (mo
 /** Presents the same bounded natural-language input and disclosure for every app type. */
 function DescribeForm({ goal, setGoal, disabled, onSubmit }: { goal: string; setGoal: (goal: string) => void; disabled: boolean; onSubmit: (event: FormEvent) => void }) {
   return <form onSubmit={onSubmit} className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 sm:p-6">
-    <label htmlFor="app-goal" className="block font-semibold text-slate-900">What would you like to build?</label>
+    <label htmlFor="app-goal" className="block font-semibold text-slate-900"><FieldLabel required>What would you like to build?</FieldLabel></label>
     <textarea id="app-goal" required maxLength={16384} value={goal} disabled={disabled} onChange={(event) => setGoal(event.target.value)} className="min-h-36 w-full resize-y rounded-lg border border-slate-300 px-3 py-2 text-sm focus:ring-2 focus:ring-[var(--brand-violet)]" placeholder="Describe the services and capabilities you need…" />
     <p className="text-xs leading-relaxed text-slate-500">Your description is sent to Fused Registry’s configured model. Operation discovery uses Jev. Unified App drafting also sends selected operation contracts. Provider credentials and execution data are not included.</p>
     <button type="submit" disabled={disabled || !goal.trim()} className="inline-flex items-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"><Sparkles className="h-4 w-4" />Describe app</button>
@@ -123,7 +124,7 @@ function ServiceChoice({ reference, candidates, onFinish }: { reference: string;
       <h2 className="font-semibold text-slate-900">Choose a service for “{reference}”</h2>
       <p className="mt-1 text-sm text-slate-500">More than one service matches. Choose the publisher you want to use to continue your description.</p>
     </div>
-    <label htmlFor="describe-service" className="block text-sm font-medium text-slate-700">Service and publisher</label>
+    <label htmlFor="describe-service" className="block text-sm font-medium text-slate-700"><FieldLabel required>Service and publisher</FieldLabel></label>
     <Select id="describe-service" required autoFocus value={selected} onChange={(event) => setSelected(event.target.value)} className="w-full">
       <option value="" disabled>Select a service…</option>
       {candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name} — @{candidate.provider?.handle}/{candidate.slug}</option>)}

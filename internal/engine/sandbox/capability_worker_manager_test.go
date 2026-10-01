@@ -49,6 +49,8 @@ func (host *managerBlockingHost) DBSet(context.Context, json.RawMessage) error {
 // requireResidentWorker skips OS-dependent integration checks when isolation is unavailable.
 func requireResidentWorker(t *testing.T) {
 	t.Helper()
+	// These tests exercise per-family concurrency independently of host CPU sizing.
+	t.Setenv("FUSED_UNIFIED_APP_MAX_CONCURRENCY", "4")
 	if !IsCapabilityWorkerAvailable(context.Background()) {
 		t.Skip("isolated execution worker is unavailable on this host")
 	}
@@ -274,7 +276,8 @@ func TestCapabilityWorkerQueueRejectsOverflow(t *testing.T) {
 	for range capabilityWorkerQueueLimit {
 		worker.queue <- struct{}{}
 	}
-	_, err := worker.run(context.Background(), json.RawMessage(`{}`), &capabilityScriptTestHost{}, CapabilityDeterminism{}, capabilityWorkerCapacity)
+	_, err := worker.run(context.Background(), json.RawMessage(`{}`), &capabilityScriptTestHost{}, CapabilityDeterminism{}, capabilityWorkerCapacity, func() { /* No global lease is held by this local overflow fixture. */ })
+	// Overflow must remain distinguishable from authored failures.
 	if !errors.Is(err, ErrCapabilityWorkerOverloaded) {
 		t.Fatalf("queue overflow = %v", err)
 	}
@@ -352,5 +355,51 @@ func TestCapabilityWorkerZeroPlanDoesNotStartProcess(t *testing.T) {
 	// A zero limit is a plan denial, not a reason to allocate a resident worker.
 	if !errors.Is(err, ErrCapabilityWorkerConcurrencyDisabled) || len(manager.entries) != 0 {
 		t.Fatalf("zero concurrency = %v, workers=%d", err, len(manager.entries))
+	}
+}
+
+// TestCapabilityFailedWarmDoesNotStrandEviction releases an in-progress reservation when declaration inspection times out.
+func TestCapabilityFailedWarmDoesNotStrandEviction(t *testing.T) {
+	requireResidentWorker(t)
+	manager := NewCapabilityWorkerManager()
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	warmCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	warmDone := make(chan error, 1)
+	go func() { warmDone <- manager.Warm(warmCtx, "family", "v1", []byte(`while(true){}`)) }()
+	waitCapabilityLoading(t, ctx, manager)
+	evicted := make(chan struct{})
+	go func() { manager.Evict("family"); close(evicted) }()
+	stop()
+	// A failed load must release its reference as well as its map entry.
+	if err := <-warmDone; err == nil {
+		t.Fatal("canceled warm succeeded")
+	}
+	select {
+	case <-evicted:
+	case <-ctx.Done():
+		t.Fatal("failed load stranded family eviction")
+	}
+}
+
+// waitCapabilityLoading observes the reservation under its mutex without relying on compiler timing.
+func waitCapabilityLoading(t *testing.T, ctx context.Context, manager *CapabilityWorkerManager) {
+	t.Helper()
+	for {
+		manager.mu.Lock()
+		entry := manager.entries["family"]
+		loading := entry != nil && entry.loading
+		manager.mu.Unlock()
+		// Only an observed reservation can make the cancellation/eviction race meaningful.
+		if loading {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("warm did not reserve family")
+		case <-time.After(time.Millisecond):
+		}
 	}
 }

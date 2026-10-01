@@ -1,3 +1,5 @@
+> Historical test record: local manifest/client generation now requires a matching `fused-engine` inspector and its packaged isolated worker. The old Node manifest evaluator has been removed; use Engine inline-source planning on supported Linux hosts.
+
 # Unified App local smoke evidence
 
 ## Pagination and fixed service ref, 2026-09-29

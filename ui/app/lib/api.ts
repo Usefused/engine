@@ -1262,7 +1262,21 @@ export interface BucketValue {
   updated_at?: string;
 }
 
+/** One OAuth consent belonging to the signed-in person, projected by the Engine. */
+export interface OAuthConnectedApp {
+  client_id: string;
+  client_name: string;
+  scope: string[];
+  granted_at: string;
+}
+
 export const api = {
+  connectedApps: {
+    // The authenticated Engine actor determines whose consents are returned.
+    list: () => req<{ connected_apps: OAuthConnectedApp[] }>("/oauth/connected-apps"),
+    // Disconnect only the selected client through the normal session and CSRF boundary.
+    revoke: (clientID: string) => req<void>(`/oauth/connected-apps/${encodeURIComponent(clientID)}`, { method: "DELETE" }),
+  },
   auth: {
     session: () => req<{ authenticated: boolean; subject_kind?: string }>("/auth/session"),
     startManaged: () => req<{
@@ -1521,6 +1535,14 @@ export const api = {
   // The Engine owns which services are in a workspace; the Registry owns the
   // service definitions themselves.
   workspace: {
+    // Refresh only the reviewed immutable version through Engine's authenticated contract admission path.
+    refreshServiceContract: (serviceId: string, serviceVersionId: string) =>
+      reqWithTimeout<{ status: string }>(
+        `/workspace/services/${encodeURIComponent(serviceId)}/versions/${encodeURIComponent(serviceVersionId)}/refresh`,
+        { method: "POST" },
+        60_000,
+        "Refreshing the service contract timed out. Review and compile again to check its current state."
+      ),
     // addService bounds the complete activation while retaining an exact Registry version when the caller has one.
     addService: (
       serviceId: string,

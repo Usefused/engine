@@ -119,6 +119,7 @@ func TestValidateCompiledExecutionPinsRejectsRepeatedBinding(t *testing.T) {
 
 // TestRunExecutionCompilerProducesPlanArtifact exercises Engine-owned TypeScript compilation without a CLI bundle.
 func TestRunExecutionCompilerProducesPlanArtifact(t *testing.T) {
+	requireCompileIsolation(t)
 	t.Setenv("FUSED_EXECUTION_COMPILER", "../../../runtime/execution/dist/src/cli.js")
 	pins := []executionCompilerSelection{{Service: "greeting", Operation: "greet", ServiceID: uuid.New().String(), ServiceVersionID: uuid.New().String(), EndpointID: uuid.New().String()}}
 	source := `import * as z from "zod/mini";
@@ -147,6 +148,7 @@ export default buildUnifiedApp({
 
 // TestUnifiedAppConfigHTTPPlanCompilesInlineSource checks the public cart path and retained apply artifact.
 func TestUnifiedAppConfigHTTPPlanCompilesInlineSource(t *testing.T) {
+	requireCompileIsolation(t)
 	t.Setenv("FUSED_EXECUTION_COMPILER", "../../../runtime/execution/dist/src/cli.js")
 	serviceID, versionID := uuid.New(), uuid.New()
 	workspace := &executionHTTPTestStore{&workspaceTestStore{accountID: uuid.New(), workspaceID: uuid.New(), workspaceServices: []store.WorkspaceService{{ServiceID: serviceID, ServiceName: "greeting", Version: "1.0"}}, workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{serviceID: {{ServiceID: serviceID, ServiceVersionID: versionID, Version: "1.0"}}}}}

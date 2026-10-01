@@ -1,3 +1,4 @@
+import { FieldLabel } from "~/components/forms/FieldLabel";
 import { Select } from "../forms/Select.ts";
 import { type FormEvent, useEffect, useState } from "react";
 import { Check, X } from "lucide-react";
@@ -264,6 +265,7 @@ function composerGridClass(
   return "grid grid-cols-1 items-end gap-2 lg:grid-cols-[minmax(220px,0.9fr)_150px_minmax(220px,0.9fr)_170px_auto]";
 }
 
+/** A credential or stored value always targets one selected service. */
 function ComposerServiceSelect({
   services,
   search,
@@ -281,6 +283,7 @@ function ComposerServiceSelect({
     <div className="min-w-0">
       <BucketServiceSelect
         id="bucket-entry-service"
+        required
         label="Service"
         placeholder={
           services.length === 0 ? "No workspace services" : "Search services"
@@ -577,6 +580,7 @@ function ClientCredentialFields({
   );
 }
 
+/** All composer text fields are required by the credential/value validator; expiry remains separate and optional. */
 function ComposerInput({
   label,
   value,
@@ -593,10 +597,11 @@ function ComposerInput({
   return (
     <label className="min-w-0">
       <span className="mb-1 block text-xs font-medium text-slate-500">
-        {label}
+        <FieldLabel required>{label}</FieldLabel>
       </span>
       <input
         type={type}
+        required
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}

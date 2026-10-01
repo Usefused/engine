@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -217,6 +218,12 @@ func bindExecutionCompilerMatches(selections []models.SDKSelection, keys []strin
 
 // runExecutionCompiler invokes the Engine-owned compiler with bounded source and private temporary artifacts.
 func runExecutionCompiler(ctx context.Context, source string, pins []executionCompilerSelection) (*executionPlanArtifact, error) {
+	release, err := admitExecutionCompile(ctx)
+	// Limit the aggregate compiler and inspection footprint before creating temporary files or processes.
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	compiler := os.Getenv("FUSED_EXECUTION_COMPILER")
 	// Packaged Engine images pin one compiler; local development can use the same repository package.
 	if compiler == "" {
@@ -239,17 +246,19 @@ func runExecutionCompiler(ctx context.Context, source string, pins []executionCo
 	if err := os.WriteFile(paths[1], spec, 0600); err != nil {
 		return nil, workspaceConfigHTTPError{status: 503, message: "unified app compiler storage is unavailable"}
 	}
-	// The outer deadline leaves startup margin around the compiler's own isolated manifest worker limit.
+	// One deadline covers trusted compilation and the subsequent confined declaration inspection.
 	compileCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	command := exec.CommandContext(compileCtx, "node", "--max-old-space-size=256", compiler, "--config", paths[1], "--out", paths[2], "--manifest", paths[3], "--digest", paths[4])
+	command := exec.CommandContext(compileCtx, "node", "--max-old-space-size=256", compiler, "--config", paths[1], "--out", paths[2], "--bundle-only", "true", "--digest", paths[4])
 	command.Env = []string{"PATH=" + os.Getenv("PATH")}
-	output, err := command.CombinedOutput()
+	output := &executionCompilerOutput{}
+	command.Stdout, command.Stderr = output, output
+	err = command.Run()
 	// Compiler diagnostics are returned in bounded form for source correction, never written to OTEL.
 	if err != nil {
-		return nil, executionCompilerFailure(compileCtx, err, output)
+		return nil, executionCompilerFailure(compileCtx, err, output.bytes)
 	}
-	return readExecutionCompilerArtifacts(paths[2], paths[3], paths[4])
+	return readExecutionCompilerArtifacts(compileCtx, paths[2], paths[4])
 }
 
 // executionCompilerFailure distinguishes authoring errors from missing or stalled Engine compiler infrastructure.
@@ -268,8 +277,8 @@ func executionCompilerFailure(ctx context.Context, err error, output []byte) err
 }
 
 // readExecutionCompilerArtifacts validates byte identity before a plan can retain executable source.
-func readExecutionCompilerArtifacts(bundlePath, manifestPath, digestPath string) (*executionPlanArtifact, error) {
-	bundle, manifest, digest, err := readBoundedCompilerOutputs(bundlePath, manifestPath, digestPath)
+func readExecutionCompilerArtifacts(ctx context.Context, bundlePath, digestPath string) (*executionPlanArtifact, error) {
+	bundle, digest, err := readBoundedCompilerOutputs(bundlePath, digestPath)
 	if err != nil {
 		return nil, err
 	}
@@ -277,8 +286,13 @@ func readExecutionCompilerArtifacts(bundlePath, manifestPath, digestPath string)
 		BundleDigest string `json:"bundle_digest"`
 	}
 	// The digest sidecar must identify exactly the bytes retained in the plan.
-	if json.Unmarshal(digest, &identity) != nil || identity.BundleDigest != store.UnifiedAppBundleDigest(bundle) || !json.Valid(manifest) {
+	if json.Unmarshal(digest, &identity) != nil || identity.BundleDigest != store.UnifiedAppBundleDigest(bundle) {
 		return nil, workspaceConfigHTTPError{status: 503, message: "unified app compiler artifact digest mismatch"}
+	}
+	manifest, err := sandbox.InspectCapabilityBundle(ctx, bundle)
+	// Top-level source is executable too: evaluate it only inside the OS-confined worker.
+	if err != nil {
+		return nil, unifiedAppBundleInspectionError(err)
 	}
 	if _, err := parseUnifiedAppManifest(manifest); err != nil {
 		return nil, workspaceConfigHTTPError{status: 400, message: "unified app manifest is invalid"}
@@ -287,17 +301,16 @@ func readExecutionCompilerArtifacts(bundlePath, manifestPath, digestPath string)
 }
 
 // readBoundedCompilerOutputs keeps compiler products finite before the plan serializes them into JSONB.
-func readBoundedCompilerOutputs(bundlePath, manifestPath, digestPath string) ([]byte, []byte, []byte, error) {
-	bundle, bundleErr := os.ReadFile(bundlePath)
-	manifest, manifestErr := os.ReadFile(manifestPath)
-	digest, digestErr := os.ReadFile(digestPath)
+func readBoundedCompilerOutputs(bundlePath, digestPath string) ([]byte, []byte, error) {
+	bundle, bundleErr := readBoundedCompilerFile(bundlePath, 2<<20)
+	digest, digestErr := readBoundedCompilerFile(digestPath, 1<<10)
 	// Missing outputs indicate a compiler packaging fault rather than an authoring error.
-	if bundleErr != nil || manifestErr != nil || digestErr != nil {
-		return nil, nil, nil, workspaceConfigHTTPError{status: 503, message: "unified app compiler produced invalid artifacts"}
+	if bundleErr != nil || digestErr != nil {
+		return nil, nil, workspaceConfigHTTPError{status: 503, message: "unified app compiler produced invalid artifacts"}
 	}
 	// Size checks also cap the in-transaction immutable artifact write.
-	if len(bundle) == 0 || len(bundle) > 2<<20 || len(manifest) > 1<<20 || len(digest) > 1<<10 {
-		return nil, nil, nil, workspaceConfigHTTPError{status: 503, message: "unified app compiler produced invalid artifacts"}
+	if len(bundle) == 0 {
+		return nil, nil, workspaceConfigHTTPError{status: 503, message: "unified app compiler produced invalid artifacts"}
 	}
-	return bundle, manifest, digest, nil
+	return bundle, digest, nil
 }

@@ -28,7 +28,7 @@ func (s *EngineGRPCServer) loadUnifiedAppSource(ctx context.Context, request *ht
 	if requestErr != nil {
 		return unifiedAppSource{}, requestErr
 	}
-	scope, identity, requestErr := s.authenticateRESTApp(request.WithContext(ctx), appID)
+	scope, identity, requestErr := s.authenticateRESTEndpoint(request.WithContext(ctx), appID)
 	if requestErr != nil {
 		return unifiedAppSource{}, requestErr
 	}
@@ -37,7 +37,7 @@ func (s *EngineGRPCServer) loadUnifiedAppSource(ctx context.Context, request *ht
 		return unifiedAppSource{}, newRESTExecutionError(http.StatusForbidden, "app_scope_unavailable", "Unified App scope is unavailable")
 	}
 	// A retained source is readable after promotion, but replay and rerun create new traffic.
-	if requestErr := s.admitUnifiedAppTraffic(ctx, appID); requestErr != nil {
+	if requestErr := s.admitUnifiedAppTraffic(ctx, identity.AppID); requestErr != nil {
 		return unifiedAppSource{}, requestErr
 	}
 	sourceID, err := uuid.Parse(chi.URLParam(request, "execution_id"))
@@ -45,11 +45,15 @@ func (s *EngineGRPCServer) loadUnifiedAppSource(ctx context.Context, request *ht
 	if err != nil || sourceID == uuid.Nil {
 		return unifiedAppSource{}, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "execution_id must be a UUID")
 	}
-	result, requestErr := s.authorizedExecutionResult(ctx, request, identity.AccountID, appID, sourceID)
+	result, requestErr := s.authorizedEndpointExecutionResult(ctx, request, scope, appID, sourceID)
 	if requestErr != nil {
 		return unifiedAppSource{}, requestErr
 	}
-	return unifiedAppSource{scope: scope, identity: identity, appID: appID, result: result}, nil
+	// Retained input and replay evidence belong to their original code contract; never silently reinterpret them.
+	if result.AppID != identity.AppID {
+		return unifiedAppSource{}, newRESTExecutionError(http.StatusConflict, "app_version_not_current", "source execution belongs to a different version; submit a new execution to use current traffic")
+	}
+	return unifiedAppSource{scope: scope, identity: identity, appID: identity.AppID, result: result}, nil
 }
 
 // handleCapabilityRerun starts a new live execution from retained input only after explicit caller authorization.

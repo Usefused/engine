@@ -1,3 +1,4 @@
+import { FieldLabel } from "../forms/FieldLabel.ts";
 import { Select } from "../forms/Select.ts";
 import { createElement, type ChangeEvent, type FormEvent, type ReactElement } from "react";
 import type {
@@ -194,17 +195,19 @@ function appGrantForm(props: TeamAccessControlsProps): ReactElement {
   return createElement(
     "form",
     {
-      className: "grid gap-2 py-3 sm:grid-cols-[1fr_110px_auto]",
+      className: "grid items-end gap-2 py-3 sm:grid-cols-[1fr_110px_auto]",
       onSubmit: (event: FormEvent<HTMLFormElement>) => submitAppGrant(event, props),
     },
-    createElement("input", {
-      name: "app_family_id",
-      required: true,
-      disabled: props.disabled,
-      placeholder: "App family ID",
-      "aria-label": "App family ID",
-      className: "rounded-lg border border-slate-300 px-3 py-2 text-sm",
-    }),
+    createElement("label", { className: "flex min-w-0 flex-col gap-1 text-xs font-medium text-slate-700" },
+      createElement(FieldLabel, { required: true }, "App family ID"),
+      createElement("input", {
+        name: "app_family_id",
+        required: true,
+        disabled: props.disabled,
+        placeholder: "App family ID",
+        "aria-label": "App family ID",
+        className: "rounded-lg border border-slate-300 px-3 py-2 text-sm",
+      })),
     createElement(
       Select,
       { name: "level", disabled: props.disabled, "aria-label": "App or server access", className: "rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm" },

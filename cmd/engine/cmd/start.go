@@ -70,9 +70,10 @@ var (
 // observability/UX label (Task 8) so the CLI can print a "you're talking to
 // production" warning before a destructive workspace apply.
 type healthResponse struct {
-	Status      string `json:"status"`
-	Plane       string `json:"plane"`
-	Environment string `json:"environment"`
+	Status                string `json:"status"`
+	Plane                 string `json:"plane"`
+	Environment           string `json:"environment"`
+	UnifiedAppWorkerReady bool   `json:"unified_app_worker_ready"`
 }
 
 var startCmd = &cobra.Command{
@@ -982,18 +983,20 @@ type engineRouterDeps struct {
 	managedWebhookBroker     *webhookrelay.Broker
 }
 
-// probeExecutionWorkerReadiness checks the real packaged isolation path once for hosted deployments.
+// probeExecutionWorkerReadiness reports actual isolation availability even on optional-worker installations.
 func probeExecutionWorkerReadiness(check func(context.Context) bool) bool {
-	// Legacy or local Engines can serve raw operations without a hosted worker requirement.
-	if os.Getenv("FUSED_UNIFIED_APP_WORKER_REQUIRED") != "true" {
-		return true
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return check(ctx)
 }
 
+// executionWorkerBlocksReadiness preserves raw-operation availability while enforcing hosted isolation requirements.
+func executionWorkerBlocksReadiness(ready bool) bool {
+	return !ready && os.Getenv("FUSED_UNIFIED_APP_WORKER_REQUIRED") == "true"
+}
+
 // buildEngineRouter mounts Engine runtime and control adapters on one process-owned origin.
+// buildEngineRouter binds the resolved deployment policy before starting shared hosted app transports.
 func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	// Router
 	r := chi.NewRouter()
@@ -1042,7 +1045,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	workerReady := probeExecutionWorkerReadiness(sandbox.IsCapabilityWorkerAvailable)
 	r.Get("/health", func(w http.ResponseWriter, req *http.Request) {
 		// Hosted readiness must expose a missing or namespace-denied worker before accepting app traffic.
-		if !workerReady {
+		if executionWorkerBlocksReadiness(workerReady) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(healthResponse{Status: "execution worker unavailable", Plane: "engine", Environment: engineEnvironment})
 			return
@@ -1058,7 +1061,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 		// environment is a pure observability/UX label (Task 8) so the CLI
 		// can warn "you're talking to production" before a destructive
 		// workspace apply -- it has no bearing on health status itself.
-		body, _ := json.Marshal(healthResponse{Status: status, Plane: "engine", Environment: engineEnvironment})
+		body, _ := json.Marshal(healthResponse{Status: status, Plane: "engine", Environment: engineEnvironment, UnifiedAppWorkerReady: workerReady})
 		w.Write(body)
 	})
 
@@ -1069,6 +1072,12 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	executionServer := api.NewEngineGRPCServer(
 		deps.engineStore, deps.registryClient, deps.masterKey, deps.configStore, deps.natsClient, deps.tokenValidator, deps.managedAuthConnectClient, deps.connectRedirectURI,
 	)
+	// Config.Load has already validated this policy; pass the same resolved YAML to every HTTP/MCP app adapter.
+	if err := executionServer.ConfigureUnifiedAppAdmission(deps.cfg.Engine.UnifiedApps); err != nil {
+		// Invalid embedded startup wiring must never leave an executor silently using different limits.
+		slog.Error("FATAL: Failed to configure Unified App admission", "error", err)
+		panic(err)
+	}
 	// Production startup keeps promoted Unified Apps resident only while their plan permits it.
 	if deps.ctx != nil {
 		executionServer.StartUnifiedAppWarmReconciler(deps.ctx)

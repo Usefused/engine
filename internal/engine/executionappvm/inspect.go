@@ -12,10 +12,16 @@ import (
 
 // InspectInProcess evaluates declarations only inside the already-confined worker.
 func InspectInProcess(ctx context.Context, bundle []byte) (json.RawMessage, error) {
-	// A missing or oversized script cannot enter the build-time interpreter.
-	if len(bundle) == 0 || len(bundle) > MaxBundleBytes {
+	program, err := compileCapabilityBundle(bundle)
+	// Invalid source never reaches declaration evaluation or acquires a host bridge.
+	if err != nil {
 		return nil, errors.New("capability bundle is invalid")
 	}
+	return inspectCapabilityProgram(ctx, program)
+}
+
+// inspectCapabilityProgram validates the exact cached bytecode in a disposable runtime without host authority.
+func inspectCapabilityProgram(ctx context.Context, program *goja.Program) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	vm := goja.New()
@@ -24,15 +30,11 @@ func InspectInProcess(ctx context.Context, bundle []byte) (json.RawMessage, erro
 	vm.SetMaxCallStackSize(512)
 	stopInterrupt := context.AfterFunc(ctx, func() { vm.Interrupt("capability declaration timed out") })
 	defer stopInterrupt()
-	program, err := compileDiagnosticBundle("fused-capability-declarations.js", string(bundle))
-	// Compile errors cannot be replaced by a caller-provided manifest.
-	if err != nil {
-		return nil, errors.New("capability bundle is invalid")
-	}
 	// No __fusedHost or Node objects exist here, so top-level code cannot reach provider or DB effects.
 	if _, err := vm.RunProgram(program); err != nil {
 		return nil, errors.New("capability declaration evaluation failed")
 	}
+	// Only a complete typed export may publish a manifest.
 	if err := validateUnifiedAppDeclaration(vm); err != nil {
 		return nil, err
 	}

@@ -21,7 +21,8 @@ const executionSearchGrant = "execution:read"
 
 type executionResultView struct {
 	ExecutionID       uuid.UUID               `json:"executionId"`
-	AppID             uuid.UUID               `json:"appId"`
+	AppID             uuid.UUID               `json:"-"`
+	AppFamilyID       uuid.UUID               `json:"appFamilyId"`
 	Version           string                  `json:"version"`
 	Status            string                  `json:"status"`
 	Output            json.RawMessage         `json:"output,omitempty"`
@@ -45,7 +46,7 @@ func MountExecutionResultRoutes(router chi.Router, server *EngineGRPCServer) {
 // publicExecutionResult projects the authored output without exposing stored search data, input, or read-handle hashes.
 func publicExecutionResult(record *store.ExecutionResult) executionResultView {
 	view := executionResultView{
-		ExecutionID: record.ID, AppID: record.AppID, Version: record.AppVersion,
+		ExecutionID: record.ID, AppID: record.AppID, AppFamilyID: record.AppFamilyID, Version: record.AppVersion,
 		Status: record.Status, Output: record.Output,
 		Mode: record.Mode, SourceExecutionID: record.SourceExecutionID,
 		CreatedAt: record.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
@@ -76,7 +77,7 @@ func executionReadHandleDigest(request *http.Request) (string, bool) {
 	return hex.EncodeToString(digest[:]), true
 }
 
-// handleExecutionResultGet requires both exact-app bearer authorization and the execution's read handle.
+// handleExecutionResultGet requires app authorization and a read handle across family promotions.
 func (s *EngineGRPCServer) handleExecutionResultGet(writer http.ResponseWriter, request *http.Request) {
 	ctx, span := otel.Tracer("engine").Start(request.Context(), "engine.execution_result.get")
 	defer span.End()
@@ -85,7 +86,7 @@ func (s *EngineGRPCServer) handleExecutionResultGet(writer http.ResponseWriter, 
 		writeRESTExecutionError(writer, requestErr)
 		return
 	}
-	identityScope, _, requestErr := s.authenticateRESTApp(request.WithContext(ctx), appID)
+	identityScope, _, requestErr := s.authenticateRESTEndpoint(request.WithContext(ctx), appID)
 	if requestErr != nil {
 		writeRESTExecutionError(writer, requestErr)
 		return
@@ -95,7 +96,7 @@ func (s *EngineGRPCServer) handleExecutionResultGet(writer http.ResponseWriter, 
 		writeRESTExecutionError(writer, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "execution_id must be a UUID"))
 		return
 	}
-	record, requestErr := s.authorizedExecutionResult(ctx, request, identityScope.AccountID, appID, executionID)
+	record, requestErr := s.authorizedEndpointExecutionResult(ctx, request, identityScope, appID, executionID)
 	if requestErr != nil {
 		writeRESTExecutionError(writer, requestErr)
 		return
@@ -194,7 +195,7 @@ func (s *EngineGRPCServer) handleExecutionResultSearch(writer http.ResponseWrite
 		writeRESTExecutionError(writer, requestErr)
 		return
 	}
-	scope, identity, requestErr := s.authenticateRESTApp(request.WithContext(ctx), appID)
+	scope, identity, requestErr := s.authenticateRESTEndpoint(request.WithContext(ctx), appID)
 	if requestErr != nil {
 		writeRESTExecutionError(writer, requestErr)
 		return
@@ -209,7 +210,7 @@ func (s *EngineGRPCServer) handleExecutionResultSearch(writer http.ResponseWrite
 		writeRESTExecutionError(writer, requestErr)
 		return
 	}
-	items, requestErr := s.searchExecutionResults(ctx, scope.AccountID, appID, where, limit)
+	items, requestErr := s.searchExecutionResults(ctx, scope.AccountID, identity.AppID, where, limit)
 	if requestErr != nil {
 		writeRESTExecutionError(writer, requestErr)
 		return

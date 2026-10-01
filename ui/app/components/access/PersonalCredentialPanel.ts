@@ -1,3 +1,4 @@
+import { FieldLabel } from "../forms/FieldLabel.ts";
 import { createElement, useState, type FormEvent, type ReactElement } from "react";
 import type { ControlCredential } from "../../lib/people";
 
@@ -11,6 +12,7 @@ interface PersonalCredentialPanelProps {
   onClearSecret: () => void;
 }
 
+/** Shows the required key name alongside existing credential controls. */
 export function PersonalCredentialPanel(props: PersonalCredentialPanelProps): ReactElement {
   const [name, setName] = useState("personal");
   const submit = (event: FormEvent) => {
@@ -26,8 +28,8 @@ export function PersonalCredentialPanel(props: PersonalCredentialPanelProps): Re
     props.issuedSecret ? issuedSecretNotice(props.issuedSecret, props.onClearSecret) : null,
     createElement("form", { onSubmit: submit, className: "flex items-end gap-2 p-4 border-b border-slate-100" },
       createElement("label", { className: "flex-1 flex flex-col gap-1" },
-        createElement("span", { className: "text-xs font-medium text-slate-700" }, "Key name"),
-        createElement("input", { value: name, onChange: (event) => setName(event.target.value), disabled: props.disabled, className: "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" })),
+        createElement("span", { className: "text-xs font-medium text-slate-700" }, createElement(FieldLabel, { required: true }, "Key name")),
+        createElement("input", { required: true, value: name, onChange: (event) => setName(event.target.value), disabled: props.disabled, className: "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" })),
       createElement("button", { type: "submit", disabled: props.disabled, className: "rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50" }, "Create key")),
     props.truncated ? createElement("p", { className: "border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900", role: "status" }, "Showing the 100 most recent personal keys.") : null,
     createElement("div", { className: "divide-y divide-slate-100 px-4" }, ...credentialRows(props))

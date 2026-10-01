@@ -66,11 +66,12 @@ type restExecutionPlan struct {
 }
 
 type restExecutionSuccess struct {
-	AppID      string `json:"app_id"`
-	Operation  string `json:"operation"`
-	Kind       string `json:"kind"`
-	StatusCode int    `json:"status_code,omitempty"`
-	Results    any    `json:"results"`
+	AppID       string `json:"app_id,omitempty"`
+	AppFamilyID string `json:"app_family_id,omitempty"`
+	Operation   string `json:"operation"`
+	Kind        string `json:"kind"`
+	StatusCode  int    `json:"status_code,omitempty"`
+	Results     any    `json:"results"`
 }
 
 type restExecutionErrorEnvelope struct {
@@ -99,18 +100,20 @@ func MountAppExecutionRoute(router chi.Router, server *EngineGRPCServer) {
 	router.Post("/v1/apps/{app_id}/executions", server.handleRESTExecution)
 }
 
-// handleRESTExecution authenticates one exact SDK or Unified App version and dispatches its selected operation.
+// handleRESTExecution resolves stable Unified App traffic or an exact SDK before dispatch.
 func (s *EngineGRPCServer) handleRESTExecution(writer http.ResponseWriter, request *http.Request) {
 	appID, requestErr := parseRESTAppID(chi.URLParam(request, "app_id"))
 	if requestErr != nil {
 		writeRESTExecutionError(writer, requestErr)
 		return
 	}
-	scope, identity, requestErr := s.authenticateRESTApp(request, appID)
+	scope, identity, requestErr := s.authenticateRESTEndpoint(request, appID)
 	if requestErr != nil {
 		writeRESTExecutionError(writer, requestErr)
 		return
 	}
+	// Resolve once so dispatch and receipts use the same immutable version.
+	appID = identity.AppID
 	// Only the family-selected ready Unified App version accepts new invocations, including raw operations.
 	if scope.Kind == store.AppKindUnifiedApp {
 		if requestErr := s.admitUnifiedAppTraffic(request.Context(), appID); requestErr != nil {
@@ -131,7 +134,9 @@ func (s *EngineGRPCServer) handleRESTExecution(writer http.ResponseWriter, reque
 		return
 	}
 	// Attached hosted capabilities use the same consumer authentication and durable executor.
-	if s.tryAttachedUnifiedAppRun(writer, request, identity, decoded) { return }
+	if s.tryAttachedUnifiedAppRun(writer, request, identity, decoded) {
+		return
+	}
 	s.handleRawRESTExecution(writer, request, appID, scope, identity, decoded, canonical)
 }
 
@@ -157,6 +162,10 @@ func (s *EngineGRPCServer) handleRawRESTExecution(writer http.ResponseWriter, re
 	if requestErr != nil {
 		writeRESTExecutionError(writer, requestErr)
 		return
+	}
+	// Unified App callers keep stable family identity even when dispatching a selected physical operation.
+	if scope.Kind == store.AppKindUnifiedApp {
+		response.AppID, response.AppFamilyID = "", identity.AppFamilyID.String()
 	}
 	writeRESTExecutionJSON(writer, http.StatusOK, response)
 }

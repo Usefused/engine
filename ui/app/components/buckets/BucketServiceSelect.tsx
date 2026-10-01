@@ -1,3 +1,4 @@
+import { FieldLabel } from "~/components/forms/FieldLabel";
 import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, Search, X } from "lucide-react";
 
@@ -18,6 +19,7 @@ type BucketServiceSelectProps = {
   allowAll?: boolean;
   allLabel?: string;
   hideLabel?: boolean;
+  required?: boolean;
   searchPlaceholder?: string;
   emptyLabel?: string;
   preserveSelectionOnSearch?: boolean;
@@ -31,11 +33,13 @@ const defaultSelectProps = {
   allowAll: false,
   allLabel: "All services",
   hideLabel: false,
+  required: false,
   searchPlaceholder: "Search services",
   emptyLabel: "No services found.",
   preserveSelectionOnSearch: false,
 };
 
+/** Shares the field badge for mandatory selections while leaving service filters optional. */
 export function BucketServiceSelect(props: BucketServiceSelectProps) {
   // Centralized defaults keep every bucket selector visually consistent while
   // allowing the connect-auth instance to use bucket-specific copy.
@@ -51,6 +55,7 @@ export function BucketServiceSelect(props: BucketServiceSelectProps) {
     allowAll,
     allLabel,
     hideLabel,
+    required,
     searchPlaceholder,
     emptyLabel,
     preserveSelectionOnSearch,
@@ -76,14 +81,16 @@ export function BucketServiceSelect(props: BucketServiceSelectProps) {
             : "mb-1 block text-xs font-medium text-slate-500"
         }
       >
-        {label}
+        <FieldLabel required={required}>{label}</FieldLabel>
       </span>
+      {/* Custom selection is validated by the caller; its requirement must also be announced to assistive technology. */}
       <button
         type="button"
         onClick={() => setOpen((next) => !next)}
         className={`flex h-[38px] w-full items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 text-left text-sm text-slate-800 shadow-sm outline-none hover:border-slate-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 ${buttonClassName}`}
         aria-expanded={open}
         aria-controls={id}
+        aria-label={required ? `${label} (required)` : label}
       >
         <span
           className={`truncate ${

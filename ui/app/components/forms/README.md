@@ -31,3 +31,28 @@ The shared stylesheet owns caret placement and reserved text space. Do not add a
 second caret or page-specific arrow padding. Multiple selections and listboxes keep
 their native presentation; forced-color mode restores the native dropdown indicator.
 The select contract test prevents new raw dropdowns outside this component.
+
+# Field labels
+
+Use `FieldLabel` inside a semantic `label` for form fields across Fused. It shows
+our neutral **Required** badge only when the user must provide a value. Keep
+optional fields plain; filters and read-only summaries do not need a badge.
+
+```tsx
+import { FieldLabel } from "~/components/forms/FieldLabel";
+
+<label htmlFor="app-name" className="block text-sm font-medium">
+  <FieldLabel required>App name</FieldLabel>
+</label>
+<input id="app-name" name="name" required />
+```
+
+Pass the same boolean to the label and control for conditional requirements:
+`<FieldLabel required={needsVersion}>Version</FieldLabel>` and
+`<input required={needsVersion} />`. Keep existing validation and error messages;
+the badge is a label, not an error. Associate labels with controls through
+`htmlFor`/`id` or by nesting the control in the label. Custom controls must expose
+the requirement accessibly and keep their existing submit validation. The badge
+itself is hidden from assistive technology to avoid repeating native required state.
+
+The component also works with `createElement(FieldLabel, { required: true }, "Name")`.

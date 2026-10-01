@@ -22,6 +22,8 @@ type capabilityRouteStore struct {
 	mu           sync.Mutex
 	bundle       store.UnifiedAppBundle
 	activeAppID  uuid.UUID
+	familyID     uuid.UUID
+	server       *EngineGRPCServer
 	record       store.ExecutionResult
 	records      map[uuid.UUID]store.ExecutionResult
 	startEntered chan struct{}
@@ -46,31 +48,25 @@ func TestUnifiedAppRejectsUnboundManifest(t *testing.T) {
 // TestUnifiedAppKeepsSelectedRawRESTOperation proves authored execute does not replace physical access.
 func TestUnifiedAppKeepsSelectedRawRESTOperation(t *testing.T) {
 	runtime := &restRuntimeTestDouble{physicalFound: true}
-	server, appID := newRESTPhysicalServer(runtime)
-	fixture := server.store.(*grpcRuntimeStore)
-	fixture.scope.Kind = store.AppKindUnifiedApp
-	server.tokenValidator = appTestValidator{identity: auth.RuntimeIdentity{
-		AccountID: fixture.accountID, AppID: appID, AppFamilyID: uuid.New(),
-		Kind: store.AppKindUnifiedApp, Status: store.AppStatusActive, TokenPolicy: store.AppTokenPolicy{AllowAll: true},
-	}}
-	response := performRESTExecution(t, server, appID, "fsk_test", `{"operation":"issues.get","input":{"id":7}}`, "")
+	_, fixture, familyID := newCapabilityRouteFixture(runtime, nil)
+	response := performRESTExecution(t, fixture.server, familyID, "fsk_test", `{"operation":"issues.get","input":{"id":7}}`, "")
 	// Selected physical calls still use the Engine dispatcher and its request-scoped cache.
 	if response.Code != http.StatusOK || runtime.connects != 1 || runtime.resolvedOperation != "issues.get" {
 		t.Fatalf("raw execution status=%d connects=%d operation=%q body=%s", response.Code, runtime.connects, runtime.resolvedOperation, response.Body.String())
 	}
 }
 
-// TestUnifiedAppOldVersionRejectsNewTraffic keeps an exact token from reopening a promoted sibling.
+// TestUnifiedAppOldVersionRejectsNewTraffic prevents exact version IDs from becoming public aliases.
 func TestUnifiedAppOldVersionRejectsNewTraffic(t *testing.T) {
-	router, fixture, appID := newCapabilityRouteFixture(&restRuntimeTestDouble{}, nil)
-	fixture.activeAppID = uuid.New()
+	router, fixture, _ := newCapabilityRouteFixture(&restRuntimeTestDouble{}, nil)
+	appID := fixture.bundle.AppID
 	request := httptest.NewRequest(http.MethodPost, "/v1/apps/"+appID.String()+"/executions", strings.NewReader(`{"operation":"execute","input":{"value":"old"}}`))
 	request.Header.Set("Authorization", "Bearer fsk_test")
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	// The refusal happens before accepting a durable execution or touching the provider.
-	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "app_version_not_current") || len(fixture.records) != 0 {
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "app_family_id_required") || len(fixture.records) != 0 {
 		t.Fatalf("old version status=%d body=%s records=%d", response.Code, response.Body.String(), len(fixture.records))
 	}
 }
@@ -106,13 +102,14 @@ func newCapabilityRouteFixture(baseRuntime *restRuntimeTestDouble, runtime restE
 	manifest := `{"schemaVersion":1,"inputSchema":{"type":"object"},"outputSchema":{"type":"object"},"searchable":["value"],"selectedOperations":[{"service":"crm","operation":"createIssue","serviceId":"11111111-1111-4111-8111-111111111111","serviceVersionId":"22222222-2222-4222-8222-222222222222","endpointId":"33333333-3333-4333-8333-333333333333"}]}`
 	// Resident workers inspect the bundled manifest before execution, just as production compiler output requires.
 	bundle := `globalThis.FusedExecutionManifest=` + manifest + `;globalThis.FusedUnifiedApp={input:{parse(v){if(typeof v.value!=="string")throw Error("invalid");return v}},output:{parse(v){if(typeof v.value!=="string")throw Error("invalid");return v}},async execute({input}){await __fusedHost.dbSet(JSON.stringify({value:input.value}));return {value:input.value}}};`
-	fixture := &capabilityRouteStore{Store: base, activeAppID: appID, bundle: store.UnifiedAppBundle{AppID: appID, SourceHash: "sha256:test", BundleJS: bundle, Manifest: json.RawMessage(manifest)}}
+	base.scope.AppFamilyID = identity.AppFamilyID
+	fixture := &capabilityRouteStore{Store: base, server: server, familyID: identity.AppFamilyID, activeAppID: appID, bundle: store.UnifiedAppBundle{AppID: appID, SourceHash: "sha256:test", BundleJS: bundle, Manifest: json.RawMessage(manifest)}}
 	server.store = fixture
 	router := chi.NewRouter()
 	MountAppExecutionRoute(router, server)
 	MountUnifiedAppRoutes(router, server)
 	MountExecutionResultRoutes(router, server)
-	return router, fixture, appID
+	return router, fixture, identity.AppFamilyID
 }
 
 // IsUnifiedAppTrafficTarget models the persisted family pointer for route admission tests.
@@ -267,7 +264,7 @@ func TestUnifiedAppPromotionRetainsHistoricalFetch(t *testing.T) {
 	runtime := &restRuntimeTestDouble{}
 	router, fixture, appID := newCapabilityRouteFixture(runtime, nil)
 	result := invokeCapabilityRouteForTest(t, router, fixture, appID)
-	fixture.activeAppID = uuid.New()
+	promoteCapabilityFixture(fixture)
 	// Promotion changes execution admission, not the caller's already-issued result handle.
 	assertCapabilityResultFetch(t, router, runtime, appID, result)
 	rerun := httptest.NewRequest(http.MethodPost, "/v1/apps/"+appID.String()+"/executions/"+result.ExecutionID.String()+"/rerun", nil)

@@ -1,3 +1,4 @@
+import { FieldLabel } from "~/components/forms/FieldLabel";
 import { Select } from "../forms/Select.ts";
 import type { FormEvent } from "react";
 import { ExecutionTokenField } from "~/components/apps/ExecutionTokenField";
@@ -93,8 +94,9 @@ function NameField({ generationMode, sdkName, setSdkName, setIsDuplicate, checkD
   const label = generationMode === "app" ? "App name" : generationMode === "mcp" ? "Server name" : generationMode === "api" ? "API name" : "SDK name";
   return (
     <div>
-      <label className="mb-1 block text-sm font-medium text-slate-700">{label}</label>
+      <label htmlFor="app-name" className="mb-1 block text-sm font-medium text-slate-700"><FieldLabel required>{label}</FieldLabel></label>
       <input
+        id="app-name"
         type="text"
         required
         placeholder={placeholder}
@@ -114,8 +116,9 @@ function WebhookBundleField({ totalSelectedWebhooks, webhookAttachment, setWebho
   if (totalSelectedWebhooks === 0) return null;
   return (
     <div>
-      <label className="mb-1 block text-sm font-medium text-slate-700">Webhook bundle</label>
+      <label htmlFor="webhook-bundle-name" className="mb-1 block text-sm font-medium text-slate-700"><FieldLabel required>Webhook bundle</FieldLabel></label>
       <input
+        id="webhook-bundle-name"
         type="text"
         required
         placeholder="customer-events"
@@ -136,8 +139,8 @@ function VersionField({ generationMode, appVersion, setAppVersion, setIsDuplicat
   const isSdkKind = generationMode !== "mcp";
   return (
     <div>
-      <label htmlFor="app-version" className="mb-1 flex justify-between text-sm font-medium text-slate-700">
-        <span>Version</span>
+      <label htmlFor="app-version" className="mb-1 block text-sm font-medium text-slate-700">
+        <FieldLabel required>Version</FieldLabel>
         {isSdkKind && checkingDuplicate && <span className="text-xs text-slate-400">Checking...</span>}
       </label>
       <input
@@ -518,7 +521,7 @@ function McpDescriptionField(props: ConsumerGenerationPanelProps) {
   // A combined App has one user-facing identity, while MCP-only creation describes its server.
   const isApp = props.generationMode === "app";
   return <div>
-    <label className="block text-sm font-medium text-slate-700">{isApp ? "App description" : "Server description"}
+    <label className="block text-sm font-medium text-slate-700"><FieldLabel required>{isApp ? "App description" : "Server description"}</FieldLabel>
       {/* Preserve a description for MCP discovery in both creation modes. */}
       <textarea required rows={2} maxLength={1024} value={props.mcpDescription} onChange={event => props.setMcpDescription(event.target.value)}
         placeholder={isApp ? "Describe the services and tasks this app enables." : "Describe the services and tasks this server enables."}

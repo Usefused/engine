@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/executionappvm"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/config"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -37,7 +39,7 @@ func (s *EngineGRPCServer) runUnifiedAppWorker(ctx context.Context, identity aut
 	return output, err
 }
 
-// capabilityWorkerManager keeps one process registry across REST, MCP, and replay on this Engine server.
+// capabilityWorkerManager keeps one family worker registry across REST, MCP, and replay on this Engine server.
 func (s *EngineGRPCServer) capabilityWorkerManager() *sandbox.CapabilityWorkerManager {
 	s.capabilityWorkerOnce.Do(func() {
 		s.capabilityWorkers = sandbox.NewCapabilityWorkerManager()
@@ -57,7 +59,7 @@ func (s *EngineGRPCServer) runUnifiedAppWarmReconciler(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		s.reconcileUnifiedAppWarmTargets(ctx)
-		// Cancellation must stop children instead of leaving their process lifetime tied to an HTTP request.
+		// Cancellation retires resident sandboxes independently of any individual HTTP request.
 		select {
 		case <-ctx.Done():
 			return
@@ -99,9 +101,27 @@ func (s *EngineGRPCServer) reconcileUnifiedAppWarmTargets(ctx context.Context) {
 	_, span := otel.Tracer("engine").Start(ctx, "engine.unified_app.warm_reconcile")
 	defer span.End()
 	span.SetAttributes(attribute.Int("unified_app.warm_target_count", len(targets)))
-	// A failed process load stays observable and can be retried on the next bounded refresh.
+	// A failed sandbox load stays observable and can be retried on the next bounded refresh.
 	if err := manager.ReconcileWarmTargets(readCtx, targets); err != nil {
 		span.SetStatus(codes.Error, "unified_app_warm_reconcile_failed")
 		slog.WarnContext(ctx, "Unified App warm reconciliation failed", "error", err)
 	}
+}
+
+// ConfigureUnifiedAppAdmission binds the resolved deployment policy before any transport or reconciler runs.
+func (s *EngineGRPCServer) ConfigureUnifiedAppAdmission(policy config.UnifiedAppAdmissionConfig) error {
+	// Invalid policies must not reserve the once guard or replace a working manager.
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	configured := false
+	// Admission is immutable for the lifetime of this Engine; live replacement would split capacity accounting.
+	s.capabilityWorkerOnce.Do(func() { s.capabilityWorkers = sandbox.NewCapabilityWorkerManagerWithConfig(policy); configured = true })
+	// Callers must configure the shared REST/MCP executor before its first use.
+	if !configured {
+		return errors.New("Unified App worker manager is already initialized")
+	}
+	// Operators can verify effective deployment limits without logging configuration secrets.
+	slog.Info("Unified App execution admission configured", "max_concurrency", policy.MaxConcurrency, "queue_capacity", policy.QueueCapacity, "queue_timeout_seconds", policy.QueueTimeoutSeconds)
+	return nil
 }

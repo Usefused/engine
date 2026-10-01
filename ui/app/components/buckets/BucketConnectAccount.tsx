@@ -1,3 +1,4 @@
+import { FieldLabel } from "~/components/forms/FieldLabel";
 import { Select } from "../forms/Select.ts";
 import { useState, type FormEvent } from "react";
 import { ArrowUpRight, Loader2 } from "lucide-react";
@@ -54,7 +55,7 @@ export function BucketConnectAccount({ bucket, service }: { bucket: BucketSummar
     {open && <form onSubmit={connect} className="mt-4 space-y-4">
       <fieldset disabled={pending} className="space-y-4 disabled:opacity-60">
         <ConnectScheme options={options} selected={auth?.id ?? ""} onChange={setAuthId} />
-        <label className="block text-xs font-medium text-slate-600">User reference
+        <label className="block text-xs font-medium text-slate-600"><FieldLabel required>User reference</FieldLabel>
           <input required value={endUserRef} onChange={(event) => { /* Preserve the caller's stable account identity across reconnects. */ setEndUserRef(event.target.value); }} placeholder="e.g. team-account" className={fieldClass} />
           <span className="mt-1 block font-normal text-slate-500">Identifies this connected account in {bucket.name}.</span>
         </label>
@@ -76,7 +77,7 @@ export function BucketConnectAccount({ bucket, service }: { bucket: BucketSummar
 function ConnectScheme({ options, selected, onChange }: { options: ReturnType<typeof bucketConnectOptions>; selected: string; onChange: (id: string) => void }) {
   // The service must be selected before a meaningful scheme can be displayed.
   if (!options.length) return null;
-  return <label className="block text-xs font-medium text-slate-600">Authentication
+  return <label className="block text-xs font-medium text-slate-600"><FieldLabel required>Authentication</FieldLabel>
     <Select required value={selected} onChange={(event) => { /* Selection pins both auth type and name in the request. */ onChange(event.target.value); }} className={fieldClass}>
       <option value="" disabled>Choose authentication</option>
       {options.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.key_prefix}</option>)}

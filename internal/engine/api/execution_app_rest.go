@@ -12,6 +12,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/executionappvm"
+	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -23,7 +24,8 @@ import (
 
 type capabilityExecutionEnvelope struct {
 	ExecutionID       uuid.UUID               `json:"executionId"`
-	AppID             uuid.UUID               `json:"appId"`
+	AppID             uuid.UUID               `json:"-"`
+	AppFamilyID       uuid.UUID               `json:"appFamilyId"`
 	Version           string                  `json:"version"`
 	Status            string                  `json:"status"`
 	Mode              string                  `json:"mode"`
@@ -175,6 +177,13 @@ func capabilityCompletion(runErr, ctxErr error, providerStarted bool) (string, s
 	if ctxErr != nil && providerStarted {
 		return "indeterminate", "execution_interrupted"
 	}
+	// Admission failures happen before authored code and remain safe, actionable public categories.
+	if errors.Is(runErr, sandbox.ErrCapabilityAdmissionFull) || errors.Is(runErr, sandbox.ErrCapabilityWorkerOverloaded) {
+		return "failed", "execution_capacity_exceeded"
+	}
+	if errors.Is(runErr, sandbox.ErrCapabilityAdmissionTimeout) {
+		return "failed", "execution_queue_timeout"
+	}
 	// Error categories are bounded metadata; exception messages remain private.
 	var diagnostic *executionappvm.DiagnosticError
 	if errors.As(runErr, &diagnostic) {
@@ -200,13 +209,20 @@ func capabilityPublicError(code string) string {
 	if code == "" {
 		return ""
 	}
+	// Infrastructure queue failures disclose no authored input, provider output, or exception details.
+	switch code {
+	case "execution_capacity_exceeded":
+		return "Unified App execution capacity is full; try again later."
+	case "execution_queue_timeout":
+		return "Unified App execution did not start before the queue wait expired."
+	}
 	return "unified app did not complete successfully"
 }
 
 // projectCapabilityExecution returns the authored output and one-time read handle while keeping stored search data private.
 func projectCapabilityExecution(record *store.ExecutionResult, readHandle string) capabilityExecutionEnvelope {
 	projected := capabilityExecutionEnvelope{
-		ExecutionID: record.ID, AppID: record.AppID, Version: record.AppVersion,
+		ExecutionID: record.ID, AppID: record.AppID, AppFamilyID: record.AppFamilyID, Version: record.AppVersion,
 		Status: record.Status, Mode: record.Mode,
 		SourceExecutionID: record.SourceExecutionID, ReadHandle: readHandle,
 		Output:    record.Output,

@@ -1,3 +1,4 @@
+import { FieldLabel } from "~/components/forms/FieldLabel";
 import { Select } from "../forms/Select.ts";
 import { newWebhookEvent, webhookPayloadField, webhookRecord, type WebhookDraftEvent, type WebhookEditorDraft } from "~/lib/webhook-editor-draft";
 
@@ -21,7 +22,7 @@ export function WebhookEventEditor({ draft, onChange }: { draft: WebhookEditorDr
 function EventFields({ event, onChange, onRemove }: { event: WebhookDraftEvent; onChange: (patch: Partial<WebhookDraftEvent>) => void; onRemove: () => void }) {
   return <fieldset className="min-w-0 rounded-lg border border-slate-200 p-3">
     <legend className="sr-only">Webhook event</legend>
-    <label className="block text-sm">Event name<input className={webhookFieldClass} value={event.name} onChange={(e) => onChange({ name: e.target.value })} placeholder="invoice.created" /></label>
+    <label className="block text-sm"><FieldLabel required>Event name</FieldLabel><input required className={webhookFieldClass} value={event.name} onChange={(e) => onChange({ name: e.target.value })} placeholder="invoice.created" /></label>
     <label className="mt-3 block text-sm">Description<textarea className={webhookFieldClass} rows={2} value={event.description} onChange={(e) => onChange({ description: e.target.value })} /></label>
     <DeliveryMethod event={event} onChange={onChange} />
     <PayloadFields event={event} onChange={onChange} />

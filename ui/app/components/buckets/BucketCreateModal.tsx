@@ -1,3 +1,4 @@
+import { FieldLabel } from "~/components/forms/FieldLabel";
 import { type FormEvent, useEffect, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { api } from "~/lib/api";
@@ -8,6 +9,7 @@ type BucketCreateModalProps = {
   onCreated: (name: string) => void;
 };
 
+/** Labels the credential-set name as required before creating a bucket. */
 export function BucketCreateModal({ open, onClose, onCreated }: BucketCreateModalProps) {
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
@@ -64,9 +66,10 @@ export function BucketCreateModal({ open, onClose, onCreated }: BucketCreateModa
         </div>
 
         <div className="px-5 py-4 space-y-3">
-          <label className="block text-sm font-medium text-slate-700" htmlFor="credential-set-name">Name</label>
+          <label className="block text-sm font-medium text-slate-700" htmlFor="credential-set-name"><FieldLabel required>Name</FieldLabel></label>
           <input
             id="credential-set-name"
+            required
             value={name}
             onChange={(event) => setName(event.target.value)}
             autoFocus

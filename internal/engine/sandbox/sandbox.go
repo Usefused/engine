@@ -339,7 +339,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// InitSandbox wires the process-owned physical, event, and logical execution edges used by SDK and MCP transports.
+// InitSandbox wires SDK/MCP execution edges while leaving Engine-owned readiness routes authoritative.
 func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, cache ObjectCache, validator auth.TokenValidator, routeResolver MCPRouteResolver, eventRuntimeStore MCPEventRuntimeStore, eventConfigStore MCPEventConfigStore, resolver SecretResolver, rateLimits store.ProviderRateLimitStore, enginePort string, connectSessionStart MCPConnectSessionStartFunc) {
 	cfg = appCfg
 	globalNATSClient = nc
@@ -361,10 +361,7 @@ func InitSandbox(r chi.Router, nc *messaging.NATSClient, appCfg *config.Config, 
 	rl := cfg.Sandbox.RateLimit
 	initRateLimiters(rl.SSEConnectionsPerMinute, rl.SSEBurst, rl.MessagesPerMinute, rl.MessagesBurst)
 
-	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"status":"ok"}`))
-	})
-
+	// A transport initializer must never replace the Engine's isolation-aware readiness handler.
 	registerMCPRoutes(r)
 }
 

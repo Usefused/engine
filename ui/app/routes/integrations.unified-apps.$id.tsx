@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "@remix-run/react";
+import { Link, useNavigate, useParams, useSearchParams } from "@remix-run/react";
 import { UnifiedAppUsage } from "~/components/apps/UnifiedAppUsage";
-import { Loader2 } from "lucide-react";
+import { Loader2, Pencil } from "lucide-react";
 import { api } from "~/lib/api";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasResourcePermission, hasWorkspacePermission } from "~/lib/current-actor-access";
@@ -16,7 +16,7 @@ interface UnifiedApp { app_id: string; app_family_id: string; name: string; desc
 interface AppService { service_id: string; service_name: string; service_slug: string; version: string; endpoint_count: number }
 type DetailTab = "overview" | "analytics" | "requests" | "changes";
 
-/** Reuses the app detail chrome and canonical execution receipts for hosted source apps. */
+/** Shares app detail chrome and exposes immutable source editing only to family managers. */
 export default function UnifiedAppDetails() {
   const { id: routeID } = useParams();
   const id = String(routeID);
@@ -118,10 +118,11 @@ export default function UnifiedAppDetails() {
   const active = selectedTab(tabs, params.get("tab"));
   return <div className="space-y-6">
     <AppDetailBackLink to="/integrations/sdks?type=unified_app" />
-    <AppDetailHeader name={app.name} summary={app.description || "Combine approved services into one typed action for onboarding, fulfillment, or reporting."} status={app.status} version={app.version} createdAt={app.created_at} leadingMetadata={<span className="text-[var(--brand-violet)]">Unified App</span>} />
+    {/* Private source and successor deployment require management of this exact family. */}
+    <AppDetailHeader name={app.name} summary={app.description || "Combine approved services into one typed action for onboarding, fulfillment, or reporting."} status={app.status} version={app.version} createdAt={app.created_at} leadingMetadata={<span className="text-[var(--brand-violet)]">Unified App</span>} action={canManage ? <Link to={`/integrations/unified-apps/new?edit=${encodeURIComponent(id)}`} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"><Pencil className="h-4 w-4" aria-hidden="true" />Edit app</Link> : null} />
     <AppDetailTabs label="Unified App details" active={active} tabs={tabs} onChange={(tab) => setParams({ tab })} />
     {/* Only the selected permission-checked tab mounts its data consumer. */}
-    {active === "overview" && <div className="space-y-6"><UnifiedAppUsage app={app} /><section className="rounded-xl border border-slate-200 bg-white p-5"><h2 className="font-semibold text-slate-900">Execution</h2><p className="mt-2 text-sm text-slate-500">Call this immutable version with an app execution token. Only the family’s promoted version accepts new executions.</p><code className="mt-4 block break-all rounded-lg bg-slate-50 p-3 text-xs">POST /v1/apps/{id}/executions</code></section><section className="overflow-hidden rounded-xl border border-slate-200 bg-white"><h2 className="border-b border-slate-100 px-5 py-4 font-semibold">Connected services</h2>{services.map((service) => <div key={service.service_id} className="flex flex-wrap justify-between gap-2 border-b border-slate-100 px-5 py-4 text-sm"><span className="font-medium">{service.service_name}</span><span className="text-slate-500">{service.version} · {service.endpoint_count} operations</span></div>)}</section></div>}
+    {active === "overview" && <div className="space-y-6"><UnifiedAppUsage app={app} /><section className="rounded-xl border border-slate-200 bg-white p-5"><h2 className="font-semibold text-slate-900">Execution</h2><p className="mt-2 text-sm text-slate-500">Use this stable app URL with an execution token. Switching traffic changes the version that runs without changing your URL or token.</p><code className="mt-4 block break-all rounded-lg bg-slate-50 p-3 text-xs">POST /v1/apps/{app.app_family_id}/executions</code></section><section className="overflow-hidden rounded-xl border border-slate-200 bg-white"><h2 className="border-b border-slate-100 px-5 py-4 font-semibold">Connected services</h2>{services.map((service) => <div key={service.service_id} className="flex flex-wrap justify-between gap-2 border-b border-slate-100 px-5 py-4 text-sm"><span className="font-medium">{service.service_name}</span><span className="text-slate-500">{service.version} · {service.endpoint_count} operations</span></div>)}</section></div>}
     {active === "analytics" && <AppActivityOverview key={id} appId={id} downloads={null} pendingDriftCount={0} hostedSource services={services} />}
     {active === "requests" && <AppRequestsPanel key={id} appId={id} consumerName={app.name} />}
     {active === "changes" && <AppVersionSelect versions={versions} current={{ id, version: app.version, created_at: app.created_at }} activeId={traffic} busy={[promoting, deleting].some(Boolean)} canDelete={canManage} onSelect={(next) => navigate(`/integrations/unified-apps/${next}?tab=changes`)} onDelete={deleteVersion} actions={versionActions({ id, version: app.version, created_at: app.created_at })} />}

@@ -1,17 +1,16 @@
 package sandbox
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
-	"os/exec"
 	"sync"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/entitlement"
+	"github.com/Usefused/engine/internal/shared/config"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -34,35 +33,50 @@ type CapabilityWarmTarget struct {
 	Bundle   []byte
 }
 
-// CapabilityWorkerManager owns at most one confined worker for each app family.
+// CapabilityWorkerManager owns at most one confined process for each app family.
 type CapabilityWorkerManager struct {
-	mu      sync.Mutex
-	cond    *sync.Cond
-	entries map[string]*capabilityWorkerEntry
-	ctx     context.Context
-	cancel  context.CancelFunc
-	closed  bool
+	mu           sync.Mutex
+	cond         *sync.Cond
+	entries      map[string]*capabilityWorkerEntry
+	ctx          context.Context
+	cancel       context.CancelFunc
+	closed       bool
+	admission    *capabilityAdmission
+	admissionErr error
 }
 
 type capabilityWorkerEntry struct {
 	appID    string
 	digest   [32]byte
 	worker   *persistentCapabilityWorker
+	loading  bool
 	refs     int
 	draining bool
 	keepWarm bool
 	idle     *time.Timer
 }
 
-// NewCapabilityWorkerManager creates the Engine-owned process pool without starting authored code.
+// NewCapabilityWorkerManager creates the Engine-owned family worker registry without starting authored code.
 func NewCapabilityWorkerManager() *CapabilityWorkerManager {
+	gate, err := configuredCapabilityAdmission()
+	return newCapabilityWorkerManager(gate, err)
+}
+
+// NewCapabilityWorkerManagerWithConfig uses the policy already resolved from engine.yaml and its overrides.
+func NewCapabilityWorkerManagerWithConfig(policy config.UnifiedAppAdmissionConfig) *CapabilityWorkerManager {
+	gate, err := capabilityAdmissionFromConfig(policy)
+	return newCapabilityWorkerManager(gate, err)
+}
+
+// newCapabilityWorkerManager centralizes lifecycle initialization independently of configuration provenance.
+func newCapabilityWorkerManager(gate *capabilityAdmission, err error) *CapabilityWorkerManager {
 	ctx, cancel := context.WithCancel(context.Background())
-	manager := &CapabilityWorkerManager{entries: make(map[string]*capabilityWorkerEntry), ctx: ctx, cancel: cancel}
+	manager := &CapabilityWorkerManager{entries: make(map[string]*capabilityWorkerEntry), ctx: ctx, cancel: cancel, admission: gate, admissionErr: err}
 	manager.cond = sync.NewCond(&manager.mu)
 	return manager
 }
 
-// Run executes one request in the loaded family worker with its own host and Goja VM.
+// Run executes one request in the loaded family worker with request-local authority and a fresh JavaScript realm.
 func (manager *CapabilityWorkerManager) Run(ctx context.Context, familyID, appID string, bundle []byte, input json.RawMessage, host CapabilityScriptHost, control CapabilityDeterminism, keepWarm bool, planConcurrency *int) (json.RawMessage, error) {
 	// Invalid authority or replay inputs never start or reuse a resident sandbox.
 	if familyID == "" || appID == "" || host == nil || len(input) > maxCapabilityInputBytes || !json.Valid(input) || !control.Valid() {
@@ -73,8 +87,19 @@ func (manager *CapabilityWorkerManager) Run(ctx context.Context, familyID, appID
 	if limit == 0 {
 		return nil, ErrCapabilityWorkerConcurrencyDisabled
 	}
-	entry, err := manager.acquire(ctx, familyID, appID, bundle, keepWarm)
+	// Deployment admission precedes cold worker creation, bounding startup and execution together.
+	if manager.admissionErr != nil {
+		return nil, manager.admissionErr
+	}
+	release, err := manager.admission.acquire(ctx, manager.ctx, familyID, limit)
+	// Queue rejection must not create or acquire an app worker.
 	if err != nil {
+		return nil, err
+	}
+	entry, err := manager.acquire(ctx, familyID, appID, bundle, keepWarm)
+	// A failed load never transfers lease ownership to a child.
+	if err != nil {
+		release()
 		return nil, err
 	}
 	defer manager.release(familyID, entry)
@@ -83,7 +108,7 @@ func (manager *CapabilityWorkerManager) Run(ctx context.Context, familyID, appID
 		attribute.Int("worker.pid", entry.worker.command.Process.Pid), attribute.Int("worker.concurrency_limit", limit),
 	))
 	defer span.End()
-	return entry.worker.run(ctx, input, host, control, limit)
+	return entry.worker.run(ctx, input, host, control, limit, release)
 }
 
 // effectiveCapabilityWorkerConcurrency applies the plan while preserving the process safety ceiling.
@@ -110,7 +135,7 @@ func (manager *CapabilityWorkerManager) Evict(familyID string) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	entry := manager.entries[familyID]
-	// A missing family has no process to terminate.
+	// A missing family has no sandbox to retire.
 	if entry == nil {
 		return
 	}
@@ -168,7 +193,7 @@ func (manager *CapabilityWorkerManager) SetAlwaysOn(enabled bool) {
 func (manager *CapabilityWorkerManager) Close() {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	// Repeated shutdown calls must not race process cleanup or close the context twice.
+	// Repeated shutdown calls must not race sandbox cleanup or close the context twice.
 	if manager.closed {
 		return
 	}
@@ -211,11 +236,12 @@ func (manager *CapabilityWorkerManager) acquire(ctx context.Context, familyID, a
 		if immutableCapabilityBundleChanged(entry, appID, digest) {
 			return nil, errors.New("unified app bundle changed for an immutable version")
 		}
-		if entry.draining {
+		// In-flight startup owns this reservation until a validated child or failure is published.
+		if entry.draining || entry.loading {
 			manager.cond.Wait()
 			continue
 		}
-		// A dead child is replaced before any new invocation acquires it.
+		// A dead sandbox is replaced before any new invocation acquires it.
 		if capabilityWorkerNeedsReplacement(entry, appID) {
 			manager.retireEntryLocked(familyID, entry)
 			continue
@@ -225,7 +251,7 @@ func (manager *CapabilityWorkerManager) acquire(ctx context.Context, familyID, a
 	}
 }
 
-// validCapabilityWorkerTarget keeps process identity and source size bounded before acquisition.
+// validCapabilityWorkerTarget keeps family identity and source size bounded before acquisition.
 func validCapabilityWorkerTarget(familyID, appID string, bundle []byte) bool {
 	return familyID != "" && appID != "" && len(bundle) > 0 && len(bundle) <= maxCapabilityBundleBytes
 }
@@ -235,12 +261,12 @@ func immutableCapabilityBundleChanged(entry *capabilityWorkerEntry, appID string
 	return entry.appID == appID && entry.digest != digest
 }
 
-// capabilityWorkerNeedsReplacement reaps a dead child or a superseded app version.
+// capabilityWorkerNeedsReplacement reaps a dead sandbox or a superseded app version.
 func capabilityWorkerNeedsReplacement(entry *capabilityWorkerEntry, appID string) bool {
 	return entry.appID != appID || entry.worker.isClosed()
 }
 
-// reuseEntryLocked pins one existing process while new traffic is admitted.
+// reuseEntryLocked pins one existing sandbox while new traffic is admitted.
 func (manager *CapabilityWorkerManager) reuseEntryLocked(entry *capabilityWorkerEntry, keepWarm bool) {
 	entry.refs++
 	entry.keepWarm = keepWarm
@@ -251,27 +277,36 @@ func (manager *CapabilityWorkerManager) reuseEntryLocked(entry *capabilityWorker
 	}
 }
 
-// loadEntryLocked starts one exact version and records bounded startup telemetry.
+// loadEntryLocked reserves family capacity atomically, then starts the child outside the global registry lock.
 func (manager *CapabilityWorkerManager) loadEntryLocked(ctx context.Context, familyID, appID string, bundle []byte, digest [32]byte, keepWarm bool) (*capabilityWorkerEntry, error) {
-	start := time.Now()
-	startCtx, span := otel.Tracer("engine").Start(ctx, "engine.unified_app.worker.start", trace.WithAttributes(
-		attribute.String("app.family_id", familyID), attribute.String("app.id", appID),
-	))
-	worker, err := startPersistentCapabilityWorker(startCtx, manager.ctx, bundle)
-	elapsed := time.Since(start)
-	span.SetAttributes(attribute.Int64("worker.startup_ms", elapsed.Milliseconds()))
-	// Startup failures are observable without logging bundles, inputs, or secrets.
-	if err != nil {
-		span.RecordError(err)
+	limit := entitlement.LiveEntitlement.Load().MaxUnifiedAppFamilies
+	// Registry owns account policy; explicit zero blocks and negative/missing limits remain unlimited.
+	if limit != nil && *limit >= 0 && len(manager.entries) >= *limit {
+		return nil, ErrCapabilityWorkerOverloaded
 	}
-	span.End()
-	if err != nil {
-		return nil, err
-	}
-	slog.InfoContext(ctx, "Unified App worker loaded", "app_family_id", familyID, "app_id", appID,
-		"worker_pid", worker.command.Process.Pid, "startup_ms", elapsed.Milliseconds())
-	entry := &capabilityWorkerEntry{appID: appID, digest: digest, worker: worker, refs: 1, keepWarm: keepWarm}
+	entry := &capabilityWorkerEntry{appID: appID, digest: digest, refs: 1, keepWarm: keepWarm, loading: true}
 	manager.entries[familyID] = entry
+	manager.mu.Unlock()
+	start := time.Now()
+	worker, err := startPersistentCapabilityWorker(ctx, manager.ctx, bundle)
+	manager.mu.Lock()
+	// Shutdown or a failed process start removes the reservation before waking other family callers.
+	if err != nil || manager.closed {
+		entry.refs, entry.loading = 0, false
+		delete(manager.entries, familyID)
+		manager.cond.Broadcast()
+		if worker != nil {
+			worker.stop()
+		}
+		if err != nil {
+			return nil, err
+		}
+		return nil, ErrCapabilityWorkerUnavailable
+	}
+	entry.worker, entry.loading = worker, false
+	manager.cond.Broadcast()
+	slog.InfoContext(ctx, "Unified App worker loaded", "app_family_id", familyID, "app_id", appID,
+		"worker_pid", worker.command.Process.Pid, "startup_ms", time.Since(start).Milliseconds())
 	return entry, nil
 }
 
@@ -329,300 +364,15 @@ func (manager *CapabilityWorkerManager) retireIdle(familyID string, entry *capab
 	manager.removeLocked(familyID, entry)
 }
 
-// removeLocked stops one child before allowing a replacement child for its family.
+// removeLocked stops one sandbox before allowing a replacement sandbox for its family.
 func (manager *CapabilityWorkerManager) removeLocked(familyID string, entry *capabilityWorkerEntry) {
 	if entry.idle != nil {
 		entry.idle.Stop()
 	}
-	entry.worker.stop()
+	// A reserved family may still be starting its child when Engine shutdown begins.
+	if entry.worker != nil {
+		entry.worker.stop()
+	}
 	delete(manager.entries, familyID)
 	manager.cond.Broadcast()
-}
-
-type persistentCapabilityWorker struct {
-	command  *exec.Cmd
-	stdin    io.WriteCloser
-	writer   *capabilityFrameWriter
-	cleanup  func()
-	queue    chan struct{}
-	slots    chan struct{}
-	slotCond *sync.Cond
-	closed   chan struct{}
-	once     sync.Once
-	mu       sync.Mutex
-	nextID   uint64
-	pending  map[uint64]*capabilityInvocation
-}
-
-type capabilityInvocation struct {
-	ctx      context.Context
-	host     CapabilityScriptHost
-	result   chan capabilityInvocationResult
-	ids      map[uint64]struct{}
-	ordinals map[int]struct{}
-	parallel chan struct{}
-}
-
-type capabilityInvocationResult struct {
-	output json.RawMessage
-	err    error
-}
-
-// startPersistentCapabilityWorker launches a confined process and validates its one loaded bundle.
-func startPersistentCapabilityWorker(ctx, lifetime context.Context, bundle []byte) (*persistentCapabilityWorker, error) {
-	command, cleanup, err := capabilityWorkerCommand(lifetime)
-	if err != nil {
-		return nil, ErrCapabilityWorkerUnavailable
-	}
-	stdin, err := command.StdinPipe()
-	// Both pipes must be established before untrusted code can start.
-	if err != nil {
-		cleanup()
-		return nil, ErrCapabilityWorkerUnavailable
-	}
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		cleanup()
-		return nil, ErrCapabilityWorkerUnavailable
-	}
-	command.Stderr = io.Discard
-	if err := command.Start(); err != nil {
-		cleanup()
-		return nil, ErrCapabilityWorkerUnavailable
-	}
-	worker := &persistentCapabilityWorker{
-		command: command, stdin: stdin, writer: &capabilityFrameWriter{encoder: json.NewEncoder(stdin)}, cleanup: cleanup,
-		queue: make(chan struct{}, capabilityWorkerQueueLimit), slots: make(chan struct{}, capabilityWorkerCapacity),
-		closed: make(chan struct{}), pending: make(map[uint64]*capabilityInvocation),
-	}
-	worker.slotCond = sync.NewCond(&worker.mu)
-	ready := make(chan error, 1)
-	go worker.readLoop(capabilityFrameScanner(stdout), ready)
-	if err := worker.writer.write(capabilityProcessFrame{Kind: "load", Bundle: bundle}); err != nil {
-		worker.stop()
-		return nil, ErrCapabilityWorkerUnavailable
-	}
-	// Load includes a five-second declaration inspection inside the confined process.
-	select {
-	case err := <-ready:
-		if err != nil {
-			worker.stop()
-			return nil, err
-		}
-	case <-ctx.Done():
-		worker.stop()
-		return nil, ctx.Err()
-	case <-time.After(7 * time.Second):
-		worker.stop()
-		return nil, ErrCapabilityWorkerUnavailable
-	}
-	return worker, nil
-}
-
-// run reserves one interpreter slot and correlates all frames by request ID.
-func (worker *persistentCapabilityWorker) run(ctx context.Context, input json.RawMessage, host CapabilityScriptHost, control CapabilityDeterminism, limit int) (json.RawMessage, error) {
-	start := time.Now()
-	if err := worker.admit(ctx, limit); err != nil {
-		return nil, err
-	}
-	trace.SpanFromContext(ctx).SetAttributes(attribute.Int64("worker.queue_wait_ms", time.Since(start).Milliseconds()))
-	defer func() { <-worker.queue }()
-	invocation := &capabilityInvocation{
-		ctx: ctx, host: host, result: make(chan capabilityInvocationResult, 1),
-		ids: make(map[uint64]struct{}, maxCapabilityHostCalls), ordinals: make(map[int]struct{}, maxCapabilityHostCalls),
-		parallel: make(chan struct{}, maxCapabilityParallel),
-	}
-	worker.mu.Lock()
-	// Failure after a slot is acquired must release it before returning.
-	if worker.isClosedLocked() {
-		worker.releaseSlotLocked()
-		worker.mu.Unlock()
-		return nil, ErrCapabilityWorkerUnavailable
-	}
-	worker.nextID++
-	id := worker.nextID
-	worker.pending[id] = invocation
-	worker.mu.Unlock()
-	request := capabilityProcessFrame{Kind: "run", RequestID: id, Input: input, Determinism: control}
-	if err := worker.writer.write(request); err != nil {
-		worker.stop()
-		return nil, ErrCapabilityWorkerUnavailable
-	}
-	return worker.await(ctx, id, invocation)
-}
-
-// admit bounds waiting callers and reserves one interpreter slot in the shared child.
-func (worker *persistentCapabilityWorker) admit(ctx context.Context, limit int) error {
-	select {
-	case worker.queue <- struct{}{}:
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-worker.closed:
-		return ErrCapabilityWorkerUnavailable
-	default:
-		// A bounded waiting room prevents an overloaded family from accumulating HTTP goroutines.
-		return ErrCapabilityWorkerOverloaded
-	}
-	// A separate slot gate lets a plan change take effect without replacing the app process.
-	if err := worker.reserveSlot(ctx, limit); err != nil {
-		<-worker.queue
-		return err
-	}
-	return nil
-}
-
-// reserveSlot waits for the plan's per-app ceiling within the fixed process safety capacity.
-func (worker *persistentCapabilityWorker) reserveSlot(ctx context.Context, limit int) error {
-	worker.mu.Lock()
-	defer worker.mu.Unlock()
-	stopWake := context.AfterFunc(ctx, func() {
-		worker.mu.Lock()
-		worker.slotCond.Broadcast()
-		worker.mu.Unlock()
-	})
-	defer stopWake()
-	for {
-		// A canceled or dead request must leave the bounded queue without claiming an interpreter.
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if worker.isClosedLocked() {
-			return ErrCapabilityWorkerUnavailable
-		}
-		// The mutex makes occupancy checks and slot claims atomic across competing requests.
-		if len(worker.slots) < limit {
-			worker.slots <- struct{}{}
-			return nil
-		}
-		worker.slotCond.Wait()
-	}
-}
-
-// releaseSlotLocked wakes queued calls only after a completed interpreter frees capacity.
-func (worker *persistentCapabilityWorker) releaseSlotLocked() {
-	<-worker.slots
-	worker.slotCond.Broadcast()
-}
-
-// await returns one invocation's result without taking a slot from unrelated requests.
-func (worker *persistentCapabilityWorker) await(ctx context.Context, id uint64, invocation *capabilityInvocation) (json.RawMessage, error) {
-	select {
-	case result := <-invocation.result:
-		return result.output, result.err
-	case <-ctx.Done():
-		// An abandoned HTTP request releases its slot only when the child finishes canceling.
-		_ = worker.writer.write(capabilityProcessFrame{Kind: "cancel", RequestID: id})
-		return nil, ctx.Err()
-	case <-worker.closed:
-		return nil, ErrCapabilityWorkerUnavailable
-	}
-}
-
-// readLoop validates the load acknowledgement and then dispatches one shared IPC stream.
-func (worker *persistentCapabilityWorker) readLoop(scanner *bufio.Scanner, ready chan<- error) {
-	if !scanner.Scan() {
-		ready <- ErrCapabilityWorkerUnavailable
-		worker.stop()
-		return
-	}
-	loaded, err := decodeCapabilityFrame(scanner.Bytes())
-	// No invocation may start unless the child acknowledged its exact resident bundle.
-	if err != nil || loaded.Kind != "loaded" || loaded.RequestID != 0 {
-		ready <- ErrCapabilityWorkerUnavailable
-		worker.stop()
-		return
-	}
-	ready <- nil
-	for scanner.Scan() {
-		frame, err := decodeCapabilityFrame(scanner.Bytes())
-		// A malformed worker frame invalidates the entire confined process.
-		if err != nil || worker.handleFrame(frame) != nil {
-			worker.stop()
-			return
-		}
-	}
-	worker.stop()
-}
-
-// handleFrame routes a child call or result only to its originating invocation.
-func (worker *persistentCapabilityWorker) handleFrame(frame capabilityProcessFrame) error {
-	worker.mu.Lock()
-	invocation := worker.pending[frame.RequestID]
-	worker.mu.Unlock()
-	// Unknown request IDs cannot acquire an unrelated execution's host authority.
-	if invocation == nil || frame.RequestID == 0 {
-		return errors.New("capability worker protocol failed")
-	}
-	output, done, err := handleCapabilityProcessFrame(invocation.ctx, worker.writer, "run", invocation.host, frame, invocation.ids, invocation.ordinals, invocation.parallel)
-	// An invalid host call is a process protocol violation; an authored done error belongs only to this request.
-	if err != nil && !done {
-		return err
-	}
-	if done {
-		worker.finish(frame.RequestID, capabilityInvocationResult{output: output, err: err})
-	}
-	return nil
-}
-
-// finish releases capacity exactly once after the child's final frame.
-func (worker *persistentCapabilityWorker) finish(id uint64, result capabilityInvocationResult) {
-	worker.mu.Lock()
-	invocation := worker.pending[id]
-	delete(worker.pending, id)
-	// A late frame after process shutdown has no slot left to release.
-	if invocation != nil {
-		worker.releaseSlotLocked()
-	}
-	worker.mu.Unlock()
-	// Canceled callers may no longer be listening, so the result channel is buffered.
-	if invocation != nil {
-		invocation.result <- result
-	}
-}
-
-// active reports interpreter slots that have not yet emitted a final frame.
-func (worker *persistentCapabilityWorker) active() int {
-	worker.mu.Lock()
-	defer worker.mu.Unlock()
-	return len(worker.pending)
-}
-
-// isClosed lets the manager replace a child that exhausted its cumulative CPU budget.
-func (worker *persistentCapabilityWorker) isClosed() bool {
-	worker.mu.Lock()
-	defer worker.mu.Unlock()
-	return worker.isClosedLocked()
-}
-
-// isClosedLocked checks process state while the pending map lock is held.
-func (worker *persistentCapabilityWorker) isClosedLocked() bool {
-	select {
-	case <-worker.closed:
-		return true
-	default:
-		return false
-	}
-}
-
-// stop terminates the child and fails every pending execution without duplicating cleanup.
-func (worker *persistentCapabilityWorker) stop() {
-	worker.once.Do(func() {
-		worker.mu.Lock()
-		close(worker.closed)
-		pending := worker.pending
-		worker.pending = make(map[uint64]*capabilityInvocation)
-		// Process shutdown must wake every queued plan-slot waiter and release admitted slots once.
-		for range pending {
-			worker.releaseSlotLocked()
-		}
-		worker.slotCond.Broadcast()
-		worker.mu.Unlock()
-		for _, invocation := range pending {
-			invocation.result <- capabilityInvocationResult{err: ErrCapabilityWorkerUnavailable}
-		}
-		_ = worker.stdin.Close()
-		_ = worker.command.Process.Kill()
-		_ = worker.command.Wait()
-		worker.cleanup()
-	})
 }

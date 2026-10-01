@@ -1,6 +1,7 @@
 import type { ChooseDescribeService, DescribeProgress, DescribeSelectionReady } from "./app-describe-contract";
 import { describeApp } from "./app-describe-api";
 import { api } from "./api";
+import { APIRequestError } from "./authorization-error";
 import { decodeUnifiedRelease, type UnifiedDraft, type UnifiedRelease, type UnifiedTemplate } from "./unified-app-contract";
 import type { AppPlanResponse } from "./app-builder-contract";
 
@@ -13,8 +14,8 @@ export async function describeUnifiedApp(goal: string, progress: DescribeProgres
   return { ...proposal, source: proposal.source! };
 }
 
-/** Activates the reviewed exact dependencies, retaining successful activations if a later stage fails. */
-export async function planUnifiedApp(config: Record<string, unknown>, services: UnifiedDraft["services"], progress: (message: string) => void): Promise<AppPlanResponse> {
+/** Retains the app owner while activating reviewed dependencies and compiling a fresh immutable plan. */
+export async function planUnifiedApp(config: Record<string, unknown>, services: UnifiedDraft["services"], progress: (message: string) => void, ownerTeam = ""): Promise<AppPlanResponse> {
   const activated: string[] = [];
   try {
     const workspace = await api.workspace.getServices();
@@ -29,10 +30,33 @@ export async function planUnifiedApp(config: Record<string, unknown>, services: 
     progress("Compiling and validating your app…");
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(config)));
     const source_hash = `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-    return await api.appConfig.plan<AppPlanResponse>("unified-app", { config_key: `unified_app:${config.name}:${config.version}`, source_hash, config });
+    const request = { owner_team: ownerTeam, config_key: `unified_app:${config.name}:${config.version}`, source_hash, config };
+    try {
+      return await api.appConfig.plan<AppPlanResponse>("unified-app", request);
+    } catch (cause) {
+      // Only a typed legacy-identity failure permits refreshing exact reviewed pins; other failures remain untouched.
+      if (!(cause instanceof APIRequestError) || cause.code !== "service_provider_identity_unavailable") throw cause;
+      await refreshUnifiedServiceContracts(services, progress);
+      progress("Service metadata refreshed. Compiling and validating your app…");
+      // A single fresh plan binds the refreshed contract; a repeated failure must surface instead of looping.
+      return await api.appConfig.plan<AppPlanResponse>("unified-app", request);
+    }
   } catch (cause) {
     // Service activation is a separate durable boundary and must be visible after partial failure.
     throw new Error(`${String(cause)} Services enabled during this attempt: ${activated.join(", ") || "none"}.`);
+  }
+}
+
+/** Repairs saved identities without selecting newer versions or changing authored operations. */
+async function refreshUnifiedServiceContracts(services: UnifiedDraft["services"], progress: (message: string) => void): Promise<void> {
+  const refreshed = new Set<string>();
+  for (const [key, pin] of Object.entries(services)) {
+    const identity = `${pin.service_id}:${pin.service_version_id}`;
+    // Multiple aliases of one immutable version share one authoritative refresh.
+    if (refreshed.has(identity)) continue;
+    progress(`Refreshing saved metadata for ${key} ${pin.version}…`);
+    await api.workspace.refreshServiceContract(pin.service_id, pin.service_version_id);
+    refreshed.add(identity);
   }
 }
 

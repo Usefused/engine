@@ -86,7 +86,6 @@ export function UnifiedExecutionDetails({ event, consumerName, rows, loading, un
       <p className="mt-1">{outcome.message} {outcome.action}</p>
     </div>
     <dl className="mt-6 grid grid-cols-2 gap-4"><ReceiptField label="App" value={consumerName} /><ReceiptField label="Version" value={event.app_version || "Not recorded"} /><ReceiptField label="Access path" value={event.transport.toUpperCase()} /><ReceiptField label="Total elapsed" value={`${event.latency_ms} ms`} /></dl>
-    <p className="mt-4 text-xs leading-5 text-slate-500">Operation results are shown below.</p>
     <UnifiedAppTrace event={event} consumerName={consumerName} />
     {/* Loading and unavailable states cannot silently imply that every child was skipped. */}
     {loading ? <p role="status" className="mt-4 flex items-center gap-2 text-xs text-slate-500"><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading execution receipts…</p> : null}

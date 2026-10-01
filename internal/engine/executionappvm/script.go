@@ -53,9 +53,15 @@ func RunInProcess(ctx context.Context, bundle []byte, input json.RawMessage, hos
 	return RunInProcessWithDeterminism(ctx, bundle, input, host, control)
 }
 
-// RunInProcessWithDeterminism installs Engine-provided sources before evaluating authored code.
+// RunInProcessWithDeterminism compiles one-off requests inside the confined worker.
 func RunInProcessWithDeterminism(ctx context.Context, bundle []byte, input json.RawMessage, host Host, control Determinism) (output json.RawMessage, runErr error) {
-	if err := validateCapabilityScriptRequest(bundle, input, host); err != nil {
+	return runInProcessWithProgram(ctx, bundle, nil, input, host, control)
+}
+
+// runInProcessWithProgram shares only immutable bytecode; globals, promises and host authority remain invocation-local.
+func runInProcessWithProgram(ctx context.Context, bundle []byte, program *goja.Program, input json.RawMessage, host Host, control Determinism) (output json.RawMessage, runErr error) {
+	// Cached bytecode never bypasses request limits or the requirement for an Engine-owned host.
+	if err := validateCapabilityScriptInput(input, host); err != nil {
 		return nil, err
 	}
 	// Invalid controls may indicate corrupted replay evidence or a malformed worker request.
@@ -78,6 +84,7 @@ func RunInProcessWithDeterminism(ctx context.Context, bundle []byte, input json.
 		results:   make(chan capabilityHostResult, MaxHostCalls),
 		semaphore: make(chan struct{}, MaxParallel),
 	}
+	// A missing invocation bridge must fail before any authored code runs.
 	if err := session.installGlobals(input); err != nil {
 		return nil, err
 	}
@@ -90,12 +97,21 @@ func RunInProcessWithDeterminism(ctx context.Context, bundle []byte, input json.
 	}()
 	_ = vm.Set("__fusedExecutionPhaseTiming", clock.next)
 	clock.next("compilation")
-	program, err := compileDiagnosticBundle("fused-capability.js", string(bundle))
-	// Compilation never falls back to interpreting request data as JavaScript.
-	if err != nil {
-		return nil, runtimeDiagnostic(err, "compilation")
+	cached := program != nil
+	// Resident workers supply immutable bytecode; only one-off requests compile during execution.
+	if !cached {
+		var err error
+		program, err = compileCapabilityBundle(bundle)
+		// Compilation never falls back to interpreting request data as JavaScript.
+		if err != nil {
+			return nil, runtimeDiagnostic(err, "compilation")
+		}
 	}
 	clock.next("initialization")
+	// Preserve the fixed telemetry schema without charging load-time compilation to each cached request.
+	if cached {
+		clock.entries[0].Duration = 0
+	}
 	// Initialization errors retain private source context before any authored execute call.
 	if _, err := vm.RunProgram(program); err != nil {
 		return nil, runtimeDiagnostic(err, "initialization")
@@ -103,14 +119,14 @@ func RunInProcessWithDeterminism(ctx context.Context, bundle []byte, input json.
 	return invokeCapabilityScript(ctx, vm, session.results)
 }
 
-// validateCapabilityScriptRequest bounds material before authored JavaScript can allocate memory.
-func validateCapabilityScriptRequest(bundle []byte, input json.RawMessage, host Host) error {
+// validateCapabilityScriptInput bounds request material even when the bundle was compiled at load time.
+func validateCapabilityScriptInput(input json.RawMessage, host Host) error {
 	// A missing Engine-owned host cannot acquire execution authority.
 	if host == nil {
 		return errors.New("capability invocation is invalid")
 	}
-	// Source and input limits are independent of the caller's HTTP body limit.
-	if len(bundle) == 0 || len(bundle) > MaxBundleBytes || len(input) > MaxInputBytes || !json.Valid(input) {
+	// Input limits remain independent of the caller's HTTP body limit and the cached program.
+	if len(input) > MaxInputBytes || !json.Valid(input) {
 		return errors.New("capability invocation is invalid")
 	}
 	return nil
@@ -203,10 +219,10 @@ func scheduleCapabilityHostCall(ctx context.Context, vm *goja.Runtime, results c
 	return promise
 }
 
-// invokeCapabilityScript validates Zod input and output around the authored execute function.
-func invokeCapabilityScript(ctx context.Context, vm *goja.Runtime, results <-chan capabilityHostResult) (json.RawMessage, error) {
-	const invocation = `(async () => {
+// These Engine-owned programs hold no runtime values and can be shared by independent interpreters.
+var capabilityInvocationProgram = goja.MustCompile("fused-invocation.js", `(async () => {
 		const app = globalThis.FusedUnifiedApp;
+		// Runtime initialization must still produce a complete typed export on every execution.
 		if (!app || !app.input || !app.output || typeof app.execute !== "function") throw new Error("capability unavailable");
 		globalThis.__fusedExecutionPhase = "input_validation";
         globalThis.__fusedExecutionPhaseTiming("input_validation");
@@ -218,16 +234,22 @@ func invokeCapabilityScript(ctx context.Context, vm *goja.Runtime, results <-cha
         globalThis.__fusedExecutionPhaseTiming("output_validation");
 		globalThis.__fusedRawOutput = JSON.stringify(output);
 		return JSON.stringify(app.output.parse(output));
-	})()`
-	value, err := vm.RunString(invocation)
+	})()`, false)
+var capabilityContinuationProgram = goja.MustCompile("fused-continuation.js", "", false)
+
+// invokeCapabilityScript validates Zod input and output around the authored execute function.
+func invokeCapabilityScript(ctx context.Context, vm *goja.Runtime, results <-chan capabilityHostResult) (json.RawMessage, error) {
+	value, err := vm.RunProgram(capabilityInvocationProgram)
 	// Authored exceptions stay private because they can include input or provider data.
 	if err != nil {
 		return nil, errors.New("capability execution failed")
 	}
 	promise, ok := value.Export().(*goja.Promise)
+	// Only the asynchronous wrapper may supply the result promise.
 	if !ok {
 		return nil, errors.New("capability result is invalid")
 	}
+	// Cancellation must stop this invocation before its output can be accepted.
 	if err := waitCapabilityPromise(ctx, vm, promise, results); err != nil {
 		return nil, err
 	}
@@ -245,7 +267,7 @@ func waitCapabilityPromise(ctx context.Context, vm *goja.Runtime, promise *goja.
 		case result := <-results:
 			resolveCapabilityHostResult(result)
 			// A zero-length interpreter turn drains the author's await continuations.
-			if _, err := vm.RunString(""); err != nil {
+			if _, err := vm.RunProgram(capabilityContinuationProgram); err != nil {
 				return errors.New("capability execution failed")
 			}
 		case <-ctx.Done():

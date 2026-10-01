@@ -160,6 +160,10 @@ func verifyUnifiedAppBundleManifest(ctx context.Context, script string, submitte
 
 // unifiedAppBundleInspectionError separates unavailable worker isolation from invalid authored code.
 func unifiedAppBundleInspectionError(err error) error {
+	// Global inspection admission applies equally to inline planning and direct bundle attachment.
+	if errors.Is(err, sandbox.ErrCapabilityWorkerOverloaded) {
+		return workspaceConfigHTTPError{status: http.StatusServiceUnavailable, message: "unified app worker is busy; retry later"}
+	}
 	// A missing OS isolation boundary is an Engine deployment fault, so retrying other bundle bytes cannot help.
 	if errors.Is(err, sandbox.ErrCapabilityWorkerUnavailable) {
 		return workspaceConfigHTTPError{status: http.StatusServiceUnavailable, message: "unified app worker is unavailable"}

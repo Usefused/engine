@@ -1,3 +1,4 @@
+import { FieldLabel } from "../forms/FieldLabel.ts";
 import { Select } from "../forms/Select.ts";
 import { createElement, useState, type ChangeEvent, type FormEvent, type ReactElement } from "react";
 import type { TeamMember, TeamMembershipRole } from "../../lib/people";
@@ -23,8 +24,10 @@ export function TeamMembersControls(props: TeamMembersControlsProps): ReactEleme
     createElement("div", { className: "bg-slate-50 px-4 py-3 border-b border-slate-200" },
       createElement("h3", { className: "text-sm font-semibold text-slate-900" }, "People"),
       createElement("p", { className: "text-xs text-slate-500 mt-0.5" }, "Add by email. If they are new, a person record is created without sending an email. They need a personal key to sign in.")),
-    createElement("form", { onSubmit: submit, className: "grid gap-2 p-4 sm:grid-cols-[1fr_130px_auto] border-b border-slate-100" },
-      createElement("input", { type: "email", value: email, onChange: (event) => setEmail(event.target.value), disabled: props.disabled, required: true, placeholder: "person@example.com", "aria-label": "Member email", className: "rounded-lg border border-slate-300 px-3 py-2 text-sm" }),
+    createElement("form", { onSubmit: submit, className: "grid items-end gap-2 p-4 sm:grid-cols-[1fr_130px_auto] border-b border-slate-100" },
+      createElement("label", { className: "flex min-w-0 flex-col gap-1 text-xs font-medium text-slate-700" },
+        createElement(FieldLabel, { required: true }, "Member email"),
+        createElement("input", { type: "email", value: email, onChange: (event) => setEmail(event.target.value), disabled: props.disabled, required: true, placeholder: "person@example.com", "aria-label": "Member email", className: "rounded-lg border border-slate-300 px-3 py-2 text-sm" })),
       createElement(Select, { value: role, onChange: (event: ChangeEvent<HTMLSelectElement>) => setRole(event.target.value as TeamMembershipRole), disabled: props.disabled, "aria-label": "Membership role", className: "rounded-lg border border-slate-300 px-2 py-2 text-sm" },
         createElement("option", { value: "MEMBER" }, "Member"), createElement("option", { value: "MANAGER" }, "Manager")),
       createElement("button", { type: "submit", disabled: props.disabled, className: "rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50" }, "Add person")),

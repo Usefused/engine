@@ -99,7 +99,6 @@ test("renders SDK and MCP parent receipts with clickable forward and rollback ev
     assert.match(html, /aria-label="Inspect rollback execution first"/);
     assert.doesNotMatch(html, /aria-label="Inspect (?:forward|rollback) execution (?:second|third)"/);
     assert.match(html, /Compensates first/);
-    assert.match(html, /Operation results are shown below/);
     assert.match(html, /75 ms/);
     assert.doesNotMatch(html, /Provider round trip|Engine work/);
   }

@@ -1,3 +1,4 @@
+import { FieldLabel } from "~/components/forms/FieldLabel";
 import { Select } from "../components/forms/Select.ts";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import type { MetaFunction } from "@remix-run/react";
@@ -5,7 +6,7 @@ import { KeyRound, Plus, Ban, X } from "lucide-react";
 import { useToast } from "~/components/Toast";
 import { WorkspacePermissionGate, useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
-import { SectionTabs } from "~/components/layout/SectionTabs";
+import { AccessTabs } from "~/components/access/AccessTabs";
 import {
   createOAuthClient,
   listOAuthClients,
@@ -16,20 +17,14 @@ import {
   type OAuthScope,
 } from "~/lib/oauth-clients";
 
-const ACCESS_TABS = [
-  { label: "People", to: "/integrations/access/people" },
-  { label: "Teams", to: "/integrations/access/teams" },
-  { label: "OAuth Clients", to: "/integrations/access/oauth-clients" },
-  { label: "Connected Apps", to: "/integrations/access/connected-apps" },
-];
-
 export const meta: MetaFunction = () => [{ title: "OAuth Clients - Fused" }];
 
+/** Shares responsive Access navigation while retaining this page's permission boundary. */
 export default function OAuthClientsPage() {
   const { access } = useCurrentActorAccess();
   return (
     <>
-      <SectionTabs tabs={ACCESS_TABS} />
+      <AccessTabs />
       <WorkspacePermissionGate permission="access.read" area="OAuth client registrations">
         <OAuthClientsManager canManage={hasWorkspacePermission(access, "access.manage")} />
       </WorkspacePermissionGate>
@@ -178,23 +173,25 @@ function OAuthClientCreateForm(props: {
   return (
     <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
       <h2 className="text-base font-semibold text-slate-900 mb-3">Register a client</h2>
-      <form onSubmit={props.onSubmit} className="grid gap-3 md:grid-cols-2">
-        <label className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-slate-700">Client name</span>
-          <input value={props.name} onChange={(event) => props.onName(event.target.value)} required maxLength={100} placeholder="Third-party app name" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+      <form onSubmit={props.onSubmit} className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-2">
+        <label className="flex min-w-0 flex-col gap-1">
+          <span className="text-xs font-medium text-slate-700"><FieldLabel required>Client name</FieldLabel></span>
+          <input value={props.name} onChange={(event) => props.onName(event.target.value)} required maxLength={100} placeholder="Third-party app name" className="min-h-11 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-base sm:text-sm" />
         </label>
-        <label className="flex flex-col gap-1">
+        <label className="flex min-w-0 flex-col gap-1">
           <span className="text-xs font-medium text-slate-700">Client type</span>
-          <Select value={props.clientType} onChange={(event) => props.onClientType(event.target.value as OAuthClientType)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm">
-            <option value="CONFIDENTIAL">Confidential (server-side app, gets a secret)</option>
-            <option value="PUBLIC">Public (native/SPA, PKCE only)</option>
+          <Select aria-describedby="oauth-client-type-help" value={props.clientType} onChange={(event) => props.onClientType(event.target.value as OAuthClientType)} className="min-h-11 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-base sm:text-sm">
+            <option value="CONFIDENTIAL">Confidential</option>
+            <option value="PUBLIC">Public</option>
           </Select>
+          {/* Explain the selected authentication model without making the native select wider than its card. */}
+          <span id="oauth-client-type-help" className="text-xs leading-5 text-slate-500">{props.clientType === "CONFIDENTIAL" ? "Server-side app. Uses a client secret." : "Native or browser app. Uses PKCE without a secret."}</span>
         </label>
-        <label className="flex flex-col gap-1 md:col-span-2">
-          <span className="text-xs font-medium text-slate-700">Redirect URIs (one per line)</span>
-          <textarea value={props.redirectURIs} onChange={(event) => props.onRedirectURIs(event.target.value)} required rows={2} placeholder="https://app.example.com/oauth/callback" className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono" />
+        <label className="flex min-w-0 flex-col gap-1 md:col-span-2">
+          <span className="text-xs font-medium text-slate-700"><FieldLabel required>Redirect URIs (one per line)</FieldLabel></span>
+          <textarea value={props.redirectURIs} onChange={(event) => props.onRedirectURIs(event.target.value)} required rows={2} placeholder="https://app.example.com/oauth/callback" className="min-h-11 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-base sm:text-sm font-mono" />
         </label>
-        <div className="flex flex-col gap-1 md:col-span-2">
+        <div className="flex min-w-0 flex-col gap-1 md:col-span-2">
           <span className="text-xs font-medium text-slate-700">Allowed scopes</span>
           <ScopeMultiSelect value={props.allowedScopes} options={props.availableScopes} onChange={props.onAllowedScopes} />
           {props.availableScopes.length === 0 && (
@@ -202,7 +199,7 @@ function OAuthClientCreateForm(props: {
           )}
         </div>
         <div className="md:col-span-2">
-          <button type="submit" disabled={props.saving} className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50">
+          <button type="submit" disabled={props.saving} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50 sm:w-auto">
             <Plus className="w-4 h-4" /> Register client
           </button>
         </div>
@@ -278,12 +275,12 @@ function ScopeMultiSelect({
   }
 
   return (
-    <div ref={containerRef} className="relative">
+    <div ref={containerRef} className="relative min-w-0">
       <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-slate-300 px-2 py-1.5 focus-within:ring-2 focus-within:ring-slate-400">
         {value.map((scope) => (
-          <span key={scope} className="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 text-xs font-mono text-slate-800">
-            {scope}
-            <button type="button" onClick={() => removeScope(scope)} className="text-slate-500 hover:text-slate-800" aria-label={`Remove scope ${scope}`}>
+          <span key={scope} className="inline-flex max-w-full items-center gap-1 rounded bg-slate-100 px-2 py-0.5 text-xs font-mono text-slate-800">
+            <span className="min-w-0 break-all">{scope}</span>
+            <button type="button" onClick={() => removeScope(scope)} className="shrink-0 p-1 text-slate-500 hover:text-slate-800" aria-label={`Remove scope ${scope}`}>
               <X className="w-3 h-3" />
             </button>
           </span>
@@ -294,7 +291,8 @@ function ScopeMultiSelect({
           onFocus={() => setOpen(true)}
           onKeyDown={handleKeyDown}
           placeholder={value.length === 0 ? "Search scopes…" : ""}
-          className="min-w-[8rem] flex-1 border-none py-0.5 text-sm outline-none"
+          className="min-h-9 min-w-0 flex-[1_1_8rem] border-none py-0.5 text-base outline-none sm:text-sm"
+          aria-label="Search allowed scopes"
           role="combobox"
           aria-expanded={open}
           aria-autocomplete="list"
@@ -307,9 +305,9 @@ function ScopeMultiSelect({
               <button
                 type="button"
                 onClick={() => addScope(option.value)}
-                className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-slate-50"
+                className="flex min-h-11 w-full flex-col items-start px-3 py-2 text-left hover:bg-slate-50"
               >
-                <span className="text-sm font-mono text-slate-900">{option.value}</span>
+                <span className="max-w-full break-all text-sm font-mono text-slate-900">{option.value}</span>
                 <span className="text-xs text-slate-500">{option.label}</span>
               </button>
             </li>
@@ -345,6 +343,7 @@ function CreatedSecretNotice({ secret, onClear }: { secret: string | null; onCle
   );
 }
 
+/** Presents readable client rows and a settled empty state without changing registration permissions. */
 function OAuthClientsList(props: { clients: OAuthClient[]; loading: boolean; canManage: boolean; saving: boolean; onRevoke: (client: OAuthClient) => void }) {
   return (
     <section className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
@@ -353,7 +352,12 @@ function OAuthClientsList(props: { clients: OAuthClient[]; loading: boolean; can
       </div>
       <div className="divide-y divide-slate-100">
         {props.loading && <p className="p-4 text-sm text-slate-500">Loading OAuth clients…</p>}
-        {!props.loading && props.clients.length === 0 && <p className="p-4 text-sm text-slate-500">No OAuth clients registered yet.</p>}
+        {/* Wait for the list before offering guidance, and only suggest registration to managers. */}
+        {!props.loading && props.clients.length === 0 && <div className="flex flex-col items-center px-5 py-8 text-center">
+          <span className="mb-3 rounded-2xl bg-slate-100 p-3 text-slate-400"><KeyRound className="h-6 w-6" aria-hidden="true" /></span>
+          <p className="text-sm font-semibold text-slate-900">No clients registered yet</p>
+          <p className="mt-2 max-w-sm text-sm leading-6 text-slate-500">{props.canManage ? "Register a client above to let an app request access to this workspace." : "Registered OAuth clients will appear here."}</p>
+        </div>}
         {props.clients.map((client) => (
           <OAuthClientRow key={client.id} client={client} canManage={props.canManage} saving={props.saving} onRevoke={props.onRevoke} />
         ))}
@@ -362,19 +366,24 @@ function OAuthClientsList(props: { clients: OAuthClient[]; loading: boolean; can
   );
 }
 
+/** Keeps client identity readable and moves revocation below the details on narrow screens. */
 function OAuthClientRow({ client, canManage, saving, onRevoke }: { client: OAuthClient; canManage: boolean; saving: boolean; onRevoke: (client: OAuthClient) => void }) {
   const revoked = Boolean(client.revoked_at);
   return (
-    <div className="flex items-center justify-between gap-4 px-4 py-3">
-      <div className="min-w-0">
-        <p className="text-sm font-medium text-slate-800 truncate">{client.name}</p>
-        <p className="text-xs text-slate-500 mt-0.5">
-          {client.client_type === "CONFIDENTIAL" ? "Confidential" : "Public"} · {client.client_id} · {revoked ? "Revoked" : "Active"}
-        </p>
-        <p className="text-xs text-slate-500 mt-0.5 truncate">Scopes: {client.allowed_scopes.join(", ")}</p>
+    <div className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+      <div className="min-w-0 flex-1">
+        <p className="break-words text-sm font-medium text-slate-800">{client.name}</p>
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+          {/* Keep the existing public/confidential and revocation distinctions visible at every width. */}
+          <span className="rounded-md bg-slate-100 px-2 py-1">{client.client_type === "CONFIDENTIAL" ? "Confidential" : "Public"}</span>
+          <span>{revoked ? "Revoked" : "Active"}</span>
+        </div>
+        <p className="mt-2 break-all font-mono text-xs leading-5 text-slate-500">{client.client_id}</p>
+        <p className="break-words text-xs leading-5 text-slate-500 mt-1 [overflow-wrap:anywhere]">Scopes: {client.allowed_scopes.join(", ")}</p>
       </div>
+      {/* Read-only and revoked records must never offer the revoke action. */}
       {canManage && !revoked && (
-        <button type="button" onClick={() => onRevoke(client)} disabled={saving} className="inline-flex items-center gap-1.5 text-sm text-rose-600 hover:text-rose-700 disabled:opacity-50 shrink-0">
+        <button type="button" onClick={() => onRevoke(client)} disabled={saving} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-rose-200 px-3 text-sm text-rose-600 hover:bg-rose-50 disabled:opacity-50 sm:shrink-0">
           <Ban className="w-4 h-4" /> Revoke
         </button>
       )}

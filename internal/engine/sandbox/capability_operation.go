@@ -94,7 +94,7 @@ func ExecuteCapabilityWorkspaceOperation(
 	return executeCapabilityPhysicalValue(ctx, dispatcher, identity, operation, physical)
 }
 
-// capabilityFixtureOperation reuses MCP's physical schema view after exact app-scope resolution.
+// capabilityFixtureOperation reuses MCP's schema view and exact-version index after app-scope resolution.
 func capabilityFixtureOperation(operation ResolvedPhysicalOperation) (*FixtureOperation, error) {
 	match := operation.match
 	// An invalid opaque operation cannot become a schema-validation bypass.
@@ -104,6 +104,10 @@ func capabilityFixtureOperation(operation ResolvedPhysicalOperation) (*FixtureOp
 	fixture, err := endpointToFixtureOperation(match.service.ID.String(), match.endpoint, nil)
 	// Unsafe or malformed provider schemas are never admitted into a capability worker call.
 	if err != nil {
+		return nil, err
+	}
+	// JSON conversion omits runtime indexes; rebind every schema surface to the resolved version before validation.
+	if err := bindMCPDefinitionIndex(&fixture, match.service.DefinitionIndex); err != nil {
 		return nil, err
 	}
 	stripMCPAuthParameters(&fixture, match.selection.AuthName)

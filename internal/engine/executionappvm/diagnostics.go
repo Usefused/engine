@@ -101,3 +101,12 @@ func compileDiagnosticBundle(name, source string) (*goja.Program, error) {
 	}
 	return goja.CompileAST(parsed, true)
 }
+
+// compileCapabilityBundle bounds authored source before parsing inside the confined child.
+func compileCapabilityBundle(bundle []byte) (*goja.Program, error) {
+	// Load and one-off execution share the same source limits and source-map policy.
+	if len(bundle) == 0 || len(bundle) > MaxBundleBytes {
+		return nil, errors.New("capability bundle is invalid")
+	}
+	return compileDiagnosticBundle("fused-capability.js", string(bundle))
+}

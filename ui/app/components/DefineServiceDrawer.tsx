@@ -1,3 +1,4 @@
+import { FieldLabel } from "~/components/forms/FieldLabel";
 import { UploadCloud } from "lucide-react";
 import type { FormEvent } from "react";
 import type { SpecificationImportPlan } from "~/lib/api";
@@ -112,11 +113,11 @@ export function DefineServiceDrawer({
           >
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-2">
-                Service name
+                <FieldLabel required>Service name</FieldLabel>
               </label>
               <input
                 type="text"
-                value={newName}
+                required value={newName}
                 onChange={(e) => {
                   const val = e.target.value;
                   setNewName(val);
@@ -131,11 +132,11 @@ export function DefineServiceDrawer({
             </div>
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-2">
-                Service slug
+                <FieldLabel required>Service slug</FieldLabel>
               </label>
               <input
                 type="text"
-                value={newSlug}
+                required value={newSlug}
                 onChange={(e) => {
                   setNewSlug(e.target.value);
                   setIsSlugManuallyEdited(true);
@@ -147,14 +148,12 @@ export function DefineServiceDrawer({
             {(requireVersion || importMethod === "docs" || importPlan) && (
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-2">
-                  Service version
-                  {!importPlan && (
-                    <span className="text-red-500 font-normal"> * (required)</span>
-                  )}
+                  {/* Planned versions are already fixed; only authoring requires a version entry. */}
+                  <FieldLabel required={!importPlan}>Service version</FieldLabel>
                 </label>
                 <input
                   type="text"
-                  value={newVersion}
+                  required={!importPlan} value={newVersion}
                   onChange={(e) => setNewVersion(e.target.value)}
                   readOnly={Boolean(importPlan)}
                   placeholder="1.0"
@@ -237,12 +236,12 @@ export function DefineServiceDrawer({
                       {sourceType === "url" ? (
                         <div>
                           <label className="block text-sm font-medium text-slate-700 mb-1">
-                            {"Schema / Collection URL"}
+                            <FieldLabel required>Schema / Collection URL</FieldLabel>
                           </label>
                           <p className="text-xs text-slate-500 mb-3">Note: Postman Collection support is currently experimental.</p>
                           <input
                             type="url"
-                            value={newUrl}
+                            required value={newUrl}
                             onChange={(e) => {
                               setNewUrl(e.target.value);
                               setRequireVersion(false);
@@ -255,13 +254,13 @@ export function DefineServiceDrawer({
                       ) : (
                         <div>
                           <label className="block text-sm font-medium text-slate-700 mb-1">
-                            {"Upload Schema / Collection File"}
+                            <FieldLabel required>Upload Schema / Collection File</FieldLabel>
                           </label>
                           <p className="text-xs text-slate-500 mb-3">Note: Postman Collection support is currently experimental.</p>
                           <div className="flex flex-col gap-2">
                             <div className="relative border-2 border-dashed border-slate-300 rounded-xl p-8 text-center hover:bg-slate-50 hover:border-[var(--brand-violet)] transition-all group">
                               <input
-                                type="file"
+                                type="file" required
                                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                                 onChange={(e) => {
                                   const file = e.target.files?.[0];
@@ -316,11 +315,11 @@ export function DefineServiceDrawer({
                     <div className="space-y-4">
                       <div>
                         <label className="block text-sm font-medium text-slate-700 mb-2">
-                          Service Docs URL
+                          <FieldLabel required>Service Docs URL</FieldLabel>
                         </label>
                         <input
                           type="url"
-                          value={newUrl}
+                          required value={newUrl}
                           onChange={(e) => setNewUrl(e.target.value)}
                           placeholder="https://stripe.com/docs/api"
                           className="w-full px-4 py-3 rounded-lg border border-slate-300 text-[15px] focus:outline-none focus:ring-2 focus:ring-[var(--brand-violet)]/20 focus:border-[var(--brand-violet)] transition-all"

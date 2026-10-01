@@ -1,3 +1,4 @@
+import { FieldLabel } from "~/components/forms/FieldLabel";
 import { useEffect, useState } from "react";
 
 import { useToast } from "~/components/Toast";
@@ -367,7 +368,7 @@ function BrandingFields(props: BrandingFieldsProps) {
   return (
     <fieldset disabled={props.saving} className="space-y-4">
       <div>
-        <label htmlFor="connect-display-name" className="mb-1 block text-sm font-medium text-slate-700">App name</label>
+        <label htmlFor="connect-display-name" className="mb-1 block text-sm font-medium text-slate-700"><FieldLabel required>App name</FieldLabel></label>
         <input id="connect-display-name" name="display_name" type="text" required value={props.draft.display_name} onChange={props.onFieldChange} className={INPUT_CLASS} aria-invalid={Boolean(props.errors.display_name)} />
         <FieldError message={props.errors.display_name} />
       </div>
@@ -378,7 +379,7 @@ function BrandingFields(props: BrandingFieldsProps) {
         <FieldError message={props.errors.logo_url} />
       </div>
       <div>
-        <label htmlFor="connect-primary-color" className="mb-1 block text-sm font-medium text-slate-700">Primary colour</label>
+        <label htmlFor="connect-primary-color" className="mb-1 block text-sm font-medium text-slate-700"><FieldLabel required>Primary colour</FieldLabel></label>
         <div className="flex gap-2">
           <input id="connect-primary-color-picker" name="primary_color" type="color" value={props.previewColour} onChange={props.onFieldChange} className="h-10 w-12 cursor-pointer rounded border border-slate-300 bg-white p-1" aria-label="Choose primary colour" />
           <input id="connect-primary-color" name="primary_color" type="text" maxLength={7} required value={props.draft.primary_color} onChange={props.onFieldChange} className={INPUT_CLASS} aria-invalid={Boolean(props.errors.primary_color)} />

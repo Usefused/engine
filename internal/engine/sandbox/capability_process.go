@@ -19,6 +19,9 @@ import (
 
 const capabilityFrameBytes = 5 << 20
 
+// Bound transient inspection independently of resident app families and their per-family queues.
+var capabilityProcessSlots = make(chan struct{}, 4)
+
 // ErrCapabilityWorkerUnavailable distinguishes an isolation or IPC failure from invalid authored declarations.
 var ErrCapabilityWorkerUnavailable = errors.New("unified app worker is unavailable")
 
@@ -71,6 +74,13 @@ func capabilityFrameScanner(reader io.Reader) *bufio.Scanner {
 
 // runCapabilityProcess admits one invocation to a disposable OS-confined worker.
 func runCapabilityProcess(ctx context.Context, request capabilityProcessFrame, host CapabilityScriptHost) (json.RawMessage, error) {
+	// Exhausted inspection capacity must reject work before spawning another process.
+	select {
+	case capabilityProcessSlots <- struct{}{}:
+		defer func() { <-capabilityProcessSlots }()
+	default:
+		return nil, ErrCapabilityWorkerOverloaded
+	}
 	deadline := capabilityWallTime
 	// Bundle inspection has a shorter deadline because it has no provider effects.
 	if request.Kind == "inspect" {

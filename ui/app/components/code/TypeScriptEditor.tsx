@@ -35,10 +35,11 @@ interface TypeScriptEditorProps {
   value: string;
   onChange: (value: string) => void;
   disabled?: boolean;
+  required?: boolean;
 }
 
-/** Keeps native text editing accessible while a synchronized TypeScript layer supplies syntax colors. */
-export function TypeScriptEditor({ id, value, onChange, disabled }: TypeScriptEditorProps) {
+/** Retains native editing and required-field semantics while a synchronized layer supplies TypeScript colors. */
+export function TypeScriptEditor({ id, value, onChange, disabled, required }: TypeScriptEditorProps) {
   const textarea = useRef<HTMLTextAreaElement>(null);
   const pendingSelection = useRef<{ start: number; end: number; direction: "forward" | "backward" | "none" } | null>(null);
   const escapeTab = useRef(false);
@@ -97,7 +98,7 @@ export function TypeScriptEditor({ id, value, onChange, disabled }: TypeScriptEd
     <div className="fused-typescript-editor relative h-96 text-slate-800" style={textMetrics}>
       <div ref={highlight} aria-hidden="true" className="fused-code-highlight pointer-events-none absolute inset-0 overflow-hidden">{highlighted}</div>
       <div ref={gutter} aria-hidden="true" className="fused-code-highlight pointer-events-none absolute inset-y-0 left-0 z-10 w-10 overflow-hidden border-r border-slate-100 bg-slate-50 text-right text-slate-400"><pre className="m-0 py-4 pr-2" style={textMetrics}>{Array.from({ length: lineCount }, (_, index) => index + 1).join("\n")}</pre></div>
-      <textarea ref={textarea} id={id} aria-label="TypeScript source" aria-describedby={`${id}-help`} onKeyDown={handleKeyDown} value={value} onChange={updateSource} onScroll={syncScroll} disabled={disabled} spellCheck={false} autoCapitalize="off" autoComplete="off" autoCorrect="off" wrap="off" placeholder="Generated TypeScript will appear here…" className="absolute inset-0 m-0 h-full w-full resize-none overflow-auto border-0 bg-transparent text-transparent caret-slate-900 outline-none placeholder:text-slate-400 selection:bg-violet-200/60 disabled:cursor-wait" style={{ ...textMetrics, padding: "16px 16px 16px 56px" }} />
+      <textarea ref={textarea} id={id} aria-label="TypeScript source" aria-describedby={`${id}-help`} onKeyDown={handleKeyDown} value={value} onChange={updateSource} onScroll={syncScroll} required={required} disabled={disabled} spellCheck={false} autoCapitalize="off" autoComplete="off" autoCorrect="off" wrap="off" placeholder="Generated TypeScript will appear here…" className="absolute inset-0 m-0 h-full w-full resize-none overflow-auto border-0 bg-transparent text-transparent caret-slate-900 outline-none placeholder:text-slate-400 selection:bg-violet-200/60 disabled:cursor-wait" style={{ ...textMetrics, padding: "16px 16px 16px 56px" }} />
     </div>
     <div className="flex justify-between gap-4 border-t border-slate-100 px-4 py-1.5 text-[10px] font-normal text-slate-400"><span id={`${id}-help`}>Tab to indent · Shift+Tab to outdent · Esc then Tab to leave</span><span aria-hidden="true">{lineCount} lines</span></div>
   </div>;

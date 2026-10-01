@@ -1,0 +1,42 @@
+services:
+  engine:
+    image: ${FUSED_ENGINE_IMAGE:?Set a pinned Fused Linux Engine image}
+    # The image already owns /app/data as fused; a fresh named volume preserves that ownership.
+    user: fused
+    entrypoint: ["/sbin/tini", "--", "/app/fused-engine"]
+    command: ["start"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./seccomp.json
+    # Aggregate deployment limits complement per-family limits; tune against measured workload, not app count alone.
+    cpus: ${FUSED_ENGINE_CPUS:-2}
+    mem_limit: ${FUSED_ENGINE_MEMORY:-2g}
+    memswap_limit: ${FUSED_ENGINE_MEMORY:-2g}
+    pids_limit: ${FUSED_ENGINE_PIDS:-1024}
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m,mode=1777
+    environment:
+      FUSED_UNIFIED_APP_WORKER_REQUIRED: "true"
+      # Unset process overrides preserve engine.yaml rather than replacing it with Compose defaults.
+      FUSED_UNIFIED_APP_MAX_CONCURRENCY:
+      FUSED_UNIFIED_APP_QUEUE_CAPACITY:
+      FUSED_UNIFIED_APP_QUEUE_TIMEOUT_SECONDS:
+    ports:
+      - "127.0.0.1:${FUSED_ENGINE_HTTP_PORT:-8081}:8081"
+    volumes:
+      - engine_data:/app/data
+      - type: bind
+        source: ${FUSED_ENGINE_CONFIG:?Set the absolute path to your existing Engine configuration}
+        target: /app/engine.yaml
+        read_only: true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+volumes:
+  engine_data:

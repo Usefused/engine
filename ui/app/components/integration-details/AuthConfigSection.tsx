@@ -1,3 +1,4 @@
+import { FieldLabel } from "~/components/forms/FieldLabel";
 import { Select } from "../forms/Select.ts";
 import { FormEvent } from "react";
 import { Pencil, X } from "lucide-react";
@@ -148,11 +149,12 @@ function OAuth2FlowFields({ auth, name, flow, onChange }: OAuth2FlowFieldsProps)
   );
 }
 
+/** Flow-specific endpoint fields use the shared required label. */
 function OAuth2URLField({ label, value, onChange }: { label: string; value?: string; onChange: (value: string) => void }) {
   return (
     <label className="block text-xs font-medium text-slate-600">
-      {label}
-      <input type="text" value={value ?? ""} onChange={(event) => onChange(event.target.value)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+      <FieldLabel required>{label}</FieldLabel>
+      <input required type="text" value={value ?? ""} onChange={(event) => onChange(event.target.value)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
     </label>
   );
 }
@@ -222,8 +224,8 @@ function EditableAuthConfig({ auth, onChange, onRemove }: EditableAuthConfigProp
         </div>
         {isHTTPConfigType(auth.type) && (
           <div className="flex-1">
-            <label className="block text-xs font-medium text-slate-600 mb-1">Scheme</label>
-            <input type="text" value={auth.scheme || ""} onChange={(event) => onChange({ ...auth, scheme: event.target.value })} placeholder="e.g. bearer, basic" className="w-full text-sm border-slate-200 rounded-md focus:border-blue-500 focus:ring-blue-500" />
+            <label className="block text-xs font-medium text-slate-600 mb-1"><FieldLabel required>Scheme</FieldLabel></label>
+            <input required type="text" value={auth.scheme || ""} onChange={(event) => onChange({ ...auth, scheme: event.target.value })} placeholder="e.g. bearer, basic" className="w-full text-sm border-slate-200 rounded-md focus:border-blue-500 focus:ring-blue-500" />
           </div>
         )}
         {isAPIKeyConfigType(auth.type) && (
@@ -237,8 +239,8 @@ function EditableAuthConfig({ auth, onChange, onRemove }: EditableAuthConfigProp
               </Select>
             </div>
             <div className="flex-1">
-              <label className="block text-xs font-medium text-slate-600 mb-1">Key Name</label>
-              <input type="text" value={auth.key_name || ""} onChange={(event) => onChange({ ...auth, key_name: event.target.value })} placeholder="e.g. Authorization" className="w-full text-sm border-slate-200 rounded-md focus:border-blue-500 focus:ring-blue-500" />
+              <label className="block text-xs font-medium text-slate-600 mb-1"><FieldLabel required>Key Name</FieldLabel></label>
+              <input required type="text" value={auth.key_name || ""} onChange={(event) => onChange({ ...auth, key_name: event.target.value })} placeholder="e.g. Authorization" className="w-full text-sm border-slate-200 rounded-md focus:border-blue-500 focus:ring-blue-500" />
             </div>
           </>
         )}
@@ -247,8 +249,8 @@ function EditableAuthConfig({ auth, onChange, onRemove }: EditableAuthConfigProp
       {isOIDCConfigType(auth.type) && (
         <div className="flex flex-col sm:flex-row gap-4 mt-2">
           <div className="flex-1">
-            <label className="block text-xs font-medium text-slate-600 mb-1">OpenID Connect URL</label>
-            <input type="text" value={auth.open_id_connect_url || ""} onChange={(event) => onChange({ ...auth, open_id_connect_url: event.target.value })} placeholder="https://example.com/.well-known/openid-configuration" className="w-full text-sm border-slate-200 rounded-md focus:border-blue-500 focus:ring-blue-500" />
+            <label className="block text-xs font-medium text-slate-600 mb-1"><FieldLabel required>OpenID Connect URL</FieldLabel></label>
+            <input required type="text" value={auth.open_id_connect_url || ""} onChange={(event) => onChange({ ...auth, open_id_connect_url: event.target.value })} placeholder="https://example.com/.well-known/openid-configuration" className="w-full text-sm border-slate-200 rounded-md focus:border-blue-500 focus:ring-blue-500" />
           </div>
         </div>
       )}

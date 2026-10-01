@@ -1,3 +1,4 @@
+import { FieldLabel } from "~/components/forms/FieldLabel";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import type { MetaFunction } from "@remix-run/react";
 import { UserPlus, Users, X } from "lucide-react";
@@ -5,14 +6,9 @@ import { useToast } from "~/components/Toast";
 import { PersonalCredentialPanel } from "~/components/access/PersonalCredentialPanel";
 import { WorkspacePermissionGate, useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
-import { SectionTabs } from "~/components/layout/SectionTabs";
+import { AccessTabs } from "~/components/access/AccessTabs";
 
-const ACCESS_TABS = [
-  { label: "People", to: "/integrations/access/people" },
-  { label: "Teams", to: "/integrations/access/teams" },
-  { label: "OAuth Clients", to: "/integrations/access/oauth-clients" },
-  { label: "Connected Apps", to: "/integrations/access/connected-apps" },
-];
+
 import {
   changeUserStatus,
   createUser,
@@ -31,10 +27,11 @@ export const meta: MetaFunction = () => [{ title: "People - Fused" }];
 type PersonEditorProps = { user: User | null; email: string; name: string; saving: boolean; issued: IssuedCredentialPayload | null; canManage: boolean; ownerProtected: boolean; currentSubjectId: string; onEmail: (value: string) => void; onName: (value: string) => void; onUpdate: (event: FormEvent) => void; onStatus: () => void; onIssue: (name: string) => void; onRevoke: (id: string) => void; onClearSecret: () => void };
 type PersonDetailsDrawerProps = PersonEditorProps & { onClose: () => void };
 
+/** Shares responsive Access navigation while retaining this page's permission boundary. */
 export default function PeoplePage() {
 	const { access } = useCurrentActorAccess();
 	return <>
-		<SectionTabs tabs={ACCESS_TABS} />
+		<AccessTabs />
 		<WorkspacePermissionGate permission="access.read" area="people and personal keys">
 			<PeopleManager canManage={hasWorkspacePermission(access, "access.manage")} canManageOwners={hasWorkspacePermission(access, "account.manage")} />
 		</WorkspacePermissionGate>
@@ -182,20 +179,21 @@ function PeopleManager({ canManage, canManageOwners }: { canManage: boolean; can
   </div>;
 }
 
+/** Keeps account creation fields within the card and comfortably sized for touch input. */
 function AddPersonForm(props: { email: string; name: string; saving: boolean; onEmail: (value: string) => void; onName: (value: string) => void; onSubmit: (event: FormEvent) => void }) {
   return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
     <h2 className="text-base font-semibold text-slate-900 mb-1">Add a person</h2>
     <p className="text-xs text-slate-500 mb-3">This does not send an email. Create a personal key separately when they need to sign in.</p>
-    <form onSubmit={props.onSubmit} className="grid gap-3 md:grid-cols-[1fr_1fr_auto] items-end" toolname="add_person" tooldescription="Add a person to the workspace without sending an invitation email.">
-      <label className="flex flex-col gap-1">
-        <span className="text-xs font-medium text-slate-700">Email</span>
-        <input type="email" required value={props.email} onChange={(event) => props.onEmail(event.target.value)} placeholder="person@example.com" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+    <form onSubmit={props.onSubmit} className="grid min-w-0 grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_auto] items-end" toolname="add_person" tooldescription="Add a person to the workspace without sending an invitation email.">
+      <label className="flex min-w-0 flex-col gap-1">
+        <span className="text-xs font-medium text-slate-700"><FieldLabel required>Email</FieldLabel></span>
+        <input type="email" required value={props.email} onChange={(event) => props.onEmail(event.target.value)} placeholder="person@example.com" className="min-h-11 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-base sm:text-sm" />
       </label>
-      <label className="flex flex-col gap-1">
-        <span className="text-xs font-medium text-slate-700">Display name</span>
-        <input required value={props.name} onChange={(event) => props.onName(event.target.value)} placeholder="Display name" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+      <label className="flex min-w-0 flex-col gap-1">
+        <span className="text-xs font-medium text-slate-700"><FieldLabel required>Display name</FieldLabel></span>
+        <input required value={props.name} onChange={(event) => props.onName(event.target.value)} placeholder="Display name" className="min-h-11 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-base sm:text-sm" />
       </label>
-      <button type="submit" disabled={props.saving} className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"><UserPlus className="w-4 h-4" /> Add person</button>
+      <button type="submit" disabled={props.saving} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"><UserPlus className="w-4 h-4" /> Add person</button>
     </form>
   </section>;
 }
@@ -210,7 +208,7 @@ function PeopleList(props: { users: UserSummary[]; total: number; search: string
     </div>
     <form onSubmit={(event) => { event.preventDefault(); props.onApplySearch(); }} className="flex gap-2 border-b border-slate-100 p-4"><input type="search" value={props.search} onChange={(event) => props.onSearch(event.target.value)} placeholder="Search people" aria-label="Search people" className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm" /><button type="submit" className="rounded-lg border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700">Search</button></form>
     {!props.loading && props.total > props.users.length && <p className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900" role="status">Showing {props.users.length} of {props.total} people. Search by name or email to find someone outside this list.</p>}
-    <div className="hidden grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] gap-4 border-b border-slate-100 bg-slate-50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500 sm:grid"><span>Name</span><span>Email</span><span>Status</span></div>
+    <div className="hidden grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] gap-4 border-b border-slate-100 bg-slate-50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500 sm:grid"><span>Name</span><span><FieldLabel required>Email</FieldLabel></span><span>Status</span></div>
     <div className="divide-y divide-slate-100">
       {props.loading && <p className="p-4 text-sm text-slate-500">Loading people…</p>}
       {!props.loading && props.users.length === 0 && <p className="p-4 text-sm text-slate-500">No people found.</p>}
@@ -255,14 +253,15 @@ function PersonEditorHeader({ user, canManage, saving, archived, isSelf, onStatu
   return <div className="flex items-start justify-between gap-4"><div><h2 className="text-lg font-semibold text-slate-900">{user.display_name}</h2><p className="text-xs text-slate-500">{statusLabel(user.status)} · {user.id}</p></div>{canManage && !archived && !isSelf && <button type="button" disabled={saving} onClick={onStatus} className="text-sm font-semibold text-rose-600 disabled:opacity-50">{user.status === "SUSPENDED" ? "Reactivate" : "Suspend"}</button>}</div>;
 }
 
+/** Labels required identity fields consistently in the edit form. */
 function PersonDetailsForm(props: { email: string; name: string; canManage: boolean; saving: boolean; archived: boolean; onEmail: (value: string) => void; onName: (value: string) => void; onUpdate: (event: FormEvent) => void }) {
   return <form onSubmit={props.onUpdate} className="grid gap-3 md:grid-cols-[1fr_1fr_auto] items-end">
     <label className="flex flex-col gap-1">
-      <span className="text-xs font-medium text-slate-700">Email</span>
+      <span className="text-xs font-medium text-slate-700"><FieldLabel required>Email</FieldLabel></span>
       <input type="email" required value={props.email} disabled={!props.canManage} onChange={(event) => props.onEmail(event.target.value)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-50" />
     </label>
     <label className="flex flex-col gap-1">
-      <span className="text-xs font-medium text-slate-700">Display name</span>
+      <span className="text-xs font-medium text-slate-700"><FieldLabel required>Display name</FieldLabel></span>
       <input required value={props.name} disabled={!props.canManage} onChange={(event) => props.onName(event.target.value)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-50" />
     </label>
     {props.canManage && <button type="submit" disabled={props.saving || props.archived} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50">Save</button>}

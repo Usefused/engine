@@ -1,3 +1,4 @@
+import { FieldLabel } from "~/components/forms/FieldLabel";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, useSearchParams, type MetaFunction } from "@remix-run/react";
 import { ExternalLink, KeyRound, Loader2 } from "lucide-react";
@@ -193,9 +194,10 @@ export default function Login() {
             </div>
 
             <form onSubmit={handleAPIKeyLogin} className="space-y-3" toolname="login_with_api_key" tooldescription="Use an Engine administrator API Key to sign in.">
-              <label htmlFor="api-key" className="block text-sm font-medium text-slate-700">API Key</label>
+              <label htmlFor="api-key" className="block text-sm font-medium text-slate-700"><FieldLabel required>API Key</FieldLabel></label>
               <input
                 id="api-key"
+                required
                 type="password"
                 value={apiKey}
                 onChange={(event) => setAPIKey(event.target.value)}

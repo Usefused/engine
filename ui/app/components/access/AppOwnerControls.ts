@@ -1,3 +1,4 @@
+import { FieldLabel } from "../forms/FieldLabel.ts";
 import { Select } from "../forms/Select.ts";
 import { createElement, type ChangeEvent, type ReactElement } from "react";
 import type { AppBuildSelector, AppOwningTeam } from "../../lib/app-builder-contract";
@@ -56,7 +57,7 @@ function bucketControl(props: AppOwnerControlsProps): ReactElement {
     createElement(
       "div",
       { className: "mb-1 flex items-center justify-between gap-3" },
-      createElement("label", { className: "block text-sm font-medium text-slate-700" }, "Credential set"),
+      createElement("label", { htmlFor: "app-credential-bucket", className: "block text-sm font-medium text-slate-700" }, createElement(FieldLabel, { required: true }, "Credential set")),
       props.onCreateCredential
         ? createElement(
             "button",
@@ -74,6 +75,7 @@ function bucketControl(props: AppOwnerControlsProps): ReactElement {
       Select,
       {
         required: true,
+        id: "app-credential-bucket",
         value: props.bucketId,
         disabled: props.buckets.length === 0,
         onChange: (event: ChangeEvent<HTMLSelectElement>) => props.onBucketChange(event.target.value),

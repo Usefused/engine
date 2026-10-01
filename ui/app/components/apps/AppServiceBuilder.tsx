@@ -1,3 +1,4 @@
+import { FieldLabel } from "~/components/forms/FieldLabel";
 import type { ChooseDescribeService, DescribeProgress } from "~/lib/app-describe-contract";
 import { Select } from "../forms/Select.ts";
 import { AppCreationFlow } from "./AppCreationFlow";
@@ -722,6 +723,8 @@ type BuilderServiceInteractions = {
 };
 
 type BuilderSelectionPaneProps = BuilderServiceInteractions & {
+  browsingServices: boolean;
+  setBrowsingServices: (value: boolean) => void;
   workflows: Workflow[];
   setWorkflows: (items: Workflow[]) => void;
   generating: boolean;
@@ -1250,10 +1253,13 @@ function BuilderPagination(props: Pick<
   );
 }
 
-// BuilderSelectionPane composes search, service cards, and pagination.
+// BuilderSelectionPane keeps review focused on selected services while exposing the same catalogue for additions.
 function BuilderSelectionPane(props: BuilderSelectionPaneProps) {
   // Physical service selection is the only builder catalogue after graph retirement.
   const [pane, setPane] = useState("services");
+  const selected = props.data.filter((row) => hasServiceSelection(row.service.id, props));
+  // A cleared selection returns to discovery so removing the last operation cannot strand the user.
+  const browsing = props.browsingServices || selected.length === 0;
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0">
       <div role="tablist" aria-label="App capabilities" className="mb-4 flex gap-1 rounded-lg bg-slate-100 p-1">
@@ -1269,10 +1275,12 @@ function BuilderSelectionPane(props: BuilderSelectionPaneProps) {
           <p className="mb-3">Existing service operations and credentials are preserved.</p>
           <ul className="space-y-2">{Object.entries(props.existingConfig.services).map(([name, config]) => <li key={name} className="flex flex-wrap items-center gap-2"><span>{name}</span><span className="rounded bg-slate-100 px-2 py-0.5 text-xs">{config.version}</span></li>)}</ul>
         </div> : <>
-        <BuilderSearchForm {...props} />
+        {/* Review shows only selected services; catalogue browsing is an explicit, reversible choice. */}
+        {selected.length > 0 && <div className="mb-4 flex items-center justify-between gap-3"><p className="text-sm font-medium text-slate-700">{selected.length} selected {selected.length === 1 ? "service" : "services"}</p><button type="button" onClick={() => props.setBrowsingServices(!browsing)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">{browsing ? "Done selecting" : "Add services"}</button></div>}
+        {browsing && <BuilderSearchForm {...props} />}
         <div className="flex-1 overflow-y-auto pr-2 pb-8 space-y-4">
-          <BuilderServiceList {...props} />
-          <BuilderPagination {...props} />
+          <BuilderServiceList {...props} data={browsing ? props.data : selected} />
+          {browsing && <BuilderPagination {...props} />}
         </div>
         </>}
       </div>
@@ -1448,6 +1456,8 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   const initialSelectedServiceId = initialBuilderServiceId(searchParams, loaderData.services);
 
   const [data, setData] = useState<ServiceData[]>([]);
+  // Described selections enter review; an empty/manual builder starts in discovery.
+  const [browsingServices, setBrowsingServices] = useState(!picker || Object.keys(picker.seed).length === 0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -1524,8 +1534,10 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   const emittedSelection = useRef("");
   const hydratedSeed = useRef<Record<string, AppServicePin> | null>(null);
 
-  /** Commits a fully hydrated proposal atomically so failed discovery leaves previous manual work intact. */
+  /** Commits exact proposal pins and focuses review without discarding catalogue rows needed for later additions. */
   function acceptSelection(proposal: Awaited<ReturnType<typeof loadDescribedSelection>>) {
+    // Empty seed hydration must leave manual service discovery reachable.
+    setBrowsingServices(proposal.data.length === 0);
     selectionRef.current = new Set(proposal.data.map((row) => row.service.id));
     setData((previous) => [...proposal.data, ...previous.filter((row) => !proposal.loadedServices[row.service.id])]); setSelections(proposal.selections); setWebhookSelections(proposal.webhookSelections);
     setSelectAllServices(proposal.selectAllServices); setVersionSelections(proposal.versionSelections);
@@ -1689,10 +1701,10 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     });
   };
 
-  // loadData fetches one authorized selector page and hydrates its services.
+  // loadData fetches catalogue pages only during explicit discovery, not selected-service review.
   async function loadData(pageNum: number, search = "") {
     // Existing app scope is already authorized by app.manage and needs no create-only selector.
-    if (source) return;
+    if (source || !browsingServices) return;
     setLoading(true);
     setError("");
     try {
@@ -1791,13 +1803,17 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     });
   };
 
+  // Owner changes refresh credential choices independently of catalogue visibility.
   useEffect(() => {
-    setPage(1);
-    Promise.all([
-      loadData(1, query.trim()),
-      loadAvailableBuckets(),
-    ]).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not load team access."));
+    loadAvailableBuckets().catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not load team access."));
   }, [ownerTeamId, workflowContext.appID]);
+
+  // Reopening discovery fetches current authorized services; review never broad-loads the catalogue.
+  useEffect(() => {
+    if (!browsingServices) return;
+    setPage(1);
+    void loadData(1, query.trim());
+  }, [ownerTeamId, workflowContext.appID, browsingServices]);
 
   useEffect(() => {
     const refreshAfterCredentialTab = () => {
@@ -2279,6 +2295,8 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   };
   const selection: BuilderSelectionPaneProps = {
     ...serviceInteractions,
+    browsingServices,
+    setBrowsingServices,
     workflows,
     existingConfig: workflowContext.config,
     setWorkflows,
@@ -2347,7 +2365,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   // Workflow extensions choose a destination within the same builder, never through a parallel installer.
   const destination = <>
     {/* The named hosted selection stays visible beside the existing review and generation controls. */}
-    {attachment && <section className="mb-5 rounded-xl border border-slate-200 bg-white p-5"><div className="flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">{attachment.name}</h2><span className="text-sm text-slate-500">Unified App · {attachment.version}</span></div><label className="mt-4 block text-sm font-medium">Call name<input value={attachmentAlias} onChange={(event) => setAttachmentAlias(event.target.value)} className="mt-2 min-h-11 w-full rounded-lg border border-slate-300 px-3 text-sm" /></label><p className="mt-2 text-xs text-slate-500">This name identifies the app in your SDK or MCP. Existing operations and settings are preserved when creating a new version.</p></section>}
+    {attachment && <section className="mb-5 rounded-xl border border-slate-200 bg-white p-5"><div className="flex flex-wrap items-center justify-between gap-2"><h2 className="font-semibold">{attachment.name}</h2><span className="text-sm text-slate-500">Unified App · {attachment.version}</span></div><label className="mt-4 block text-sm font-medium"><FieldLabel required>Call name</FieldLabel><input required value={attachmentAlias} onChange={(event) => setAttachmentAlias(event.target.value)} className="mt-2 min-h-11 w-full rounded-lg border border-slate-300 px-3 text-sm" /></label><p className="mt-2 text-xs text-slate-500">This name identifies the app in your SDK or MCP. Existing operations and settings are preserved when creating a new version.</p></section>}
     {/* Hosted-app destinations were chosen in the overview dropdown; do not ask again here. */}
     {!attachment && <BuilderDestinationControl count={workflows.length} appID={workflowContext.appID} onSelect={selectDestination} disabled={generating || navigation.state !== "idle"} />}
   </>;

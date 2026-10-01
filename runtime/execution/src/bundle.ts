@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { build } from "esbuild";
 import { validateSearchablePaths } from "./index";
 import { generateExecutionBindingsSource } from "./bindings";
+import { validateExecutionSource } from "./typecheck";
 
 export interface ExactOperationBinding {
   service: string;
@@ -89,9 +90,10 @@ function exactSelections(operations: readonly SelectedOperation[]): ExactOperati
   return operations.map(({ service, operation, serviceId, serviceVersionId, endpointId }) => ({ service, operation, serviceId, serviceVersionId, endpointId }));
 }
 
-// Bundle one default-exported builder and pinned Zod into a self-contained worker script.
+// Type-check one default-exported builder before bundling it with pinned Zod for the worker.
 export async function buildExecutionBundle(spec: BundleSpec): Promise<ExecutionBundle> {
   validateSelections(spec.selectedOperations);
+  validateExecutionSource(spec);
   const entryFile = path.resolve(spec.entryFile);
   const entryRealPath = fs.realpathSync(entryFile);
   // Bundle the ESM-capable source so esbuild can remove unused Zod/runtime branches.

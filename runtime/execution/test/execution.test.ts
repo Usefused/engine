@@ -223,13 +223,13 @@ test("selected operation methods compile and omit local schema hints", async () 
   const manifest = sandbox.FusedExecutionManifest as { selectedOperations: Array<Record<string, unknown>> };
   assert.deepEqual(Object.keys(manifest.selectedOperations[0]).sort(), ["endpointId", "operation", "service", "serviceId", "serviceVersionId"]);
   const declaration = generateExecutionBindingsDeclaration(spec.selectedOperations);
-  assert.match(declaration, /"greet": \(input: Operation0Input\) => Promise<Operation0Output>/);
+  assert.match(declaration, /"greet": \(input: Operation0Input, options\?: OperationOptions\) => Promise<Operation0Output>/);
   const compiler = path.resolve(__dirname, "../../node_modules/typescript/bin/tsc");
   execFileSync(process.execPath, [compiler, "-p", path.resolve(__dirname, "../../examples/tsconfig.json")]);
 });
 
-// Verify the CLI emits the one manifest, exact-byte digest, and typed client.
-test("CLI emits singular app artifacts", () => {
+// Verify compilation emits exact bytes and bindings without executing authored declarations.
+test("CLI compiles without evaluating top-level source", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fused-execution-test-"));
   const specFile = path.join(directory, "spec.json");
   const bundleFile = path.join(directory, "bundle.js");
@@ -237,13 +237,18 @@ test("CLI emits singular app artifacts", () => {
   const clientFile = path.join(directory, "client.ts");
   const bindingsFile = path.join(directory, "operations.d.ts");
   try {
-    fs.writeFileSync(specFile, JSON.stringify({ entryFile: path.resolve(__dirname, "../../test/fixture.ts"), selectedOperations }));
-    execFileSync(process.execPath, [path.resolve(__dirname, "../src/cli.js"), "--config", specFile, "--out", bundleFile, "--manifest", manifestFile, "--client", clientFile, "--bindings", bindingsFile]);
+    const sourceFile = path.join(directory, "app.ts");
+    fs.writeFileSync(sourceFile, `throw new Error("top-level code must not execute in Node");\n` + fs.readFileSync(path.resolve(__dirname, "../../test/fixture.ts"), "utf8"));
+    fs.writeFileSync(specFile, JSON.stringify({ entryFile: sourceFile, selectedOperations }));
+    execFileSync(process.execPath, [path.resolve(__dirname, "../src/cli.js"), "--config", specFile, "--out", bundleFile, "--bundle-only", "true", "--bindings", bindingsFile]);
     assert.ok(fs.readFileSync(bundleFile, "utf8").includes("FusedUnifiedApp"));
-    assert.deepEqual(JSON.parse(fs.readFileSync(manifestFile, "utf8")).searchable, ["customerId"]);
+    assert.equal(fs.existsSync(manifestFile), false);
     const digest = JSON.parse(fs.readFileSync(bundleFile + ".digest.json", "utf8")).bundle_digest;
     assert.equal(digest, "sha256:" + createHash("sha256").update(fs.readFileSync(bundleFile)).digest("hex"));
-    assert.ok(fs.readFileSync(clientFile, "utf8").includes("execute(input: ExecutionInput)"));
+    assert.equal(fs.existsSync(clientFile), false);
+    // Without a supported Engine inspector the CLI must fail, never evaluate source in Node.
+    assert.throws(() => execFileSync(process.execPath, [path.resolve(__dirname, "../src/cli.js"), "--config", specFile, "--out", bundleFile, "--manifest", manifestFile, "--inspector", path.join(directory, "missing-inspector")], { stdio: "pipe" }), /Confined manifest inspection failed/);
+    assert.equal(fs.existsSync(manifestFile), false);
     assert.ok(fs.readFileSync(bindingsFile, "utf8").includes("declare module \"@fused/operations\""));
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -263,16 +268,16 @@ test("generated client compiles and routes execution lifecycle calls", async () 
     const clientFile = path.join(directory, "client.ts");
     const usageFile = path.join(directory, "usage.ts");
     fs.writeFileSync(clientFile, source);
-    fs.writeFileSync(usageFile, `import { createFusedExecutionClient } from "./client";\nconst client = createFusedExecutionClient({baseUrl:"http://engine",appId:"app",token:"token"});\nclient.execute({name:"Jane"});\nclient.search({"data.customerId":"cus_123"});\n// @ts-expect-error Invalid input must be rejected by the generated contract.\nclient.execute({name:42});\n// @ts-expect-error Unlisted data fields are not searchable.\nclient.search({"data.unlisted":"x"});\n`);
+    fs.writeFileSync(usageFile, `import { createFusedExecutionClient } from "./client";\nconst client = createFusedExecutionClient({baseUrl:"http://engine",appFamilyId:"app",token:"token"});\nclient.execute({name:"Jane"});\nclient.search({"data.customerId":"cus_123"});\n// @ts-expect-error Invalid input must be rejected by the generated contract.\nclient.execute({name:42});\n// @ts-expect-error Unlisted data fields are not searchable.\nclient.search({"data.unlisted":"x"});\n`);
     const compiler = path.resolve(__dirname, "../../node_modules/typescript/bin/tsc");
     execFileSync(process.execPath, [compiler, "--ignoreConfig", "--strict", "--target", "ES2020", "--module", "CommonJS", "--moduleResolution", "node", "--ignoreDeprecations", "6.0", "--lib", "ES2020", "--outDir", path.join(directory, "build"), clientFile, usageFile]);
     const generated = require(path.join(directory, "build/client.js")) as { createFusedExecutionClient(options: unknown): any };
     const calls: Array<{ url: string; init: { method: string; headers: Record<string, string>; body?: string } }> = [];
     // Mock the public execution envelope without the private stored search document.
-    const client = generated.createFusedExecutionClient({ baseUrl: "http://engine/", appId: "app-id", token: "secret", async fetcher(url: string, init: { method: string; headers: Record<string, string>; body?: string }) {
+    const client = generated.createFusedExecutionClient({ baseUrl: "http://engine/", appFamilyId: "app-id", token: "secret", async fetcher(url: string, init: { method: string; headers: Record<string, string>; body?: string }) {
       calls.push({ url, init });
       // Search is the only route whose body is a page of records.
-      const payload = url.includes("?where=") ? { items: [] } : { executionId: "run-id", appId: "app-id", version: "v1", status: "succeeded", mode: "live", readHandle: "a".repeat(64), output: { customerId: "cus_123" }, createdAt: "2026-09-28T00:00:00Z" };
+      const payload = url.includes("?where=") ? { items: [] } : { executionId: "run-id", appFamilyId: "app-id", version: "v1", status: "succeeded", mode: "live", readHandle: "a".repeat(64), output: { customerId: "cus_123" }, createdAt: "2026-09-28T00:00:00Z" };
       return { ok: true, status: 200, async json() { return payload; } };
     } });
     await client.execute({ name: "Jane" });
@@ -288,7 +293,7 @@ test("generated client compiles and routes execution lifecycle calls", async () 
     assert.match(calls[2].url, /\?where=/);
     assert.ok(calls[3].url.endsWith("/replay"));
     assert.equal(calls[4].init.headers["Idempotency-Key"], "new-key");
-    const denied = generated.createFusedExecutionClient({ baseUrl: "http://engine", appId: "app-id", token: "secret", async fetcher() {
+    const denied = generated.createFusedExecutionClient({ baseUrl: "http://engine", appFamilyId: "app-id", token: "secret", async fetcher() {
       // Preserve the Engine's bounded public error code without copying private details.
       return { ok: false, status: 403, async json() { return { error: { code: "access_denied", message: "search denied" } }; } };
     } });

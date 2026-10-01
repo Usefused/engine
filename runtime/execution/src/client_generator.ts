@@ -9,7 +9,7 @@ export type SearchField = /* SEARCH_FIELDS */;
 export type SearchWhere = Partial<Record<SearchField, SearchScalar>>;
 export interface ExecutionResult {
   executionId: string;
-  appId: string;
+  appFamilyId: string;
   version: string;
   status: ExecutionStatus;
   mode: ExecutionMode;
@@ -28,7 +28,7 @@ export interface FetchLike {
 }
 export interface FusedExecutionClientOptions {
   baseUrl: string;
-  appId: string;
+  appFamilyId: string;
   token: string;
   fetcher?: FetchLike;
 }
@@ -49,10 +49,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 class ExecutionTransport {
   private readonly baseUrl: string;
   private readonly fetcher: FetchLike;
-  // Bind this client to one exact immutable Unified App version and family token.
+  // Bind this client to one stable Unified App family URL and execution token.
   constructor(private readonly options: FusedExecutionClientOptions) {
     // Credentials and app identity must be explicit before any request can run.
-    if (!options.baseUrl || !options.appId || !options.token) throw new Error("Fused Execution client requires baseUrl, appId, and token");
+    if (!options.baseUrl || !options.appFamilyId || !options.token) throw new Error("Fused Execution client requires baseUrl, appFamilyId, and token");
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     const available = options.fetcher ?? (globalThis as { fetch?: FetchLike }).fetch;
     // No transport fallback should silently change where authored code executes.
@@ -85,7 +85,7 @@ class ExecutionTransport {
 
   // Encode the exact app ID in one place for every generated method.
   appPath(): string {
-    return "/v1/apps/" + encodeURIComponent(this.options.appId);
+    return "/v1/apps/" + encodeURIComponent(this.options.appFamilyId);
   }
 }
 

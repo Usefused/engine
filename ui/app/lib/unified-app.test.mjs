@@ -5,8 +5,9 @@ import ts from "typescript";
 import { webcrypto } from "node:crypto";
 import * as contract from "./unified-app-contract.ts";
 import * as describeContract from "./app-describe-contract.ts";
+import * as authorization from "./authorization-error.ts";
 
-// Load the real client against a recorded transport without invoking a model or mutating an Engine.
+// Load the real client and typed errors against a recorded transport without invoking a model or mutating an Engine.
 function client(mock, module = "unified-app-api") {
   const source = readFileSync(new URL(`./${module}.ts`, import.meta.url), "utf8");
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -19,6 +20,8 @@ function client(mock, module = "unified-app-api") {
     if (name === "./app-describe-contract") return describeContract;
     if (name === "./api") return { api: mock };
     if (name === "./unified-app-contract") return contract;
+    // Recovery must recognize the same typed error emitted by the production transport.
+    if (name === "./authorization-error") return authorization;
     throw new Error(`Unexpected dependency ${name}`);
   };
   new Function("require", "exports", "crypto", code)(require, exports, webcrypto);
@@ -58,6 +61,58 @@ test("describe uses the CLI API chain without activating or applying", async () 
     ["registry", "ParsePromptIntent"], ["registry", "UnifiedAppCandidates"], ["registry", "UnifiedAppServiceVersion"], ["engine", "ClassifyPromptOperation"], ["registry", "DraftPromptUnifiedApp"],
   ]);
   assert.deepEqual(JSON.parse(mock.calls.at(-1).variables.selections), [{ service: "@stripe/stripe", service_id: "service-id", version: "v1", operation: "getCustomer" }]);
+});
+
+// Legacy provider metadata refreshes exact reviewed pins once, then reuses unchanged source and selection.
+test("plan repairs missing provider identity once without changing the requested app", async () => {
+  const calls = [];
+  const requestConfig = { name: "Customer", version: "1.0.0", source };
+  const mock = {
+    workspace: {
+      // An enabled version still needs metadata repair when created by an older Engine.
+      getServices: async () => [{ service_id: service.service_id, enabled_versions: [{ service_version_id: service.service_version_id, status: "active" }] }],
+      // Record exact pins rather than accepting an inferred latest version.
+      refreshServiceContract: async (...args) => calls.push(["refresh", ...args]),
+    },
+    appConfig: {
+      // The first admission fails before creating a plan; the second binds refreshed metadata.
+      plan: async (kind, request) => {
+        calls.push(["plan", kind, request]);
+        // Trigger migration recovery only before the recorded refresh.
+        if (calls.length === 1) throw new authorization.APIRequestError(409, { code: "service_provider_identity_unavailable" });
+        return { plan_id: "repaired" };
+      },
+    },
+  };
+  const result = await client(mock).planUnifiedApp(requestConfig, { stripe: service, alias: service }, () => {});
+  assert.equal(result.plan_id, "repaired");
+  assert.deepEqual(calls[1], ["refresh", "service-id", "version-id"]);
+  assert.deepEqual(calls[0], calls[2]);
+  assert.equal(calls.length, 3);
+});
+
+// Admission errors never become unbounded retries or permission-bypassing recovery.
+test("plan stops after one repair and never refreshes unrelated errors", async () => {
+  for (const code of ["service_provider_identity_unavailable", "permission_denied"]) {
+    let attempts = 0;
+    let refreshes = 0;
+    const mock = {
+      workspace: {
+        // Keep the existing immutable activation constant throughout the failed retry.
+        getServices: async () => [{ service_id: service.service_id, enabled_versions: [{ service_version_id: service.service_version_id, status: "active" }] }],
+        // Count repair mutations independently from plan attempts.
+        refreshServiceContract: async () => { refreshes += 1; },
+      },
+      appConfig: {
+        // A persistent server failure must escape the bounded recovery path.
+        plan: async () => { attempts += 1; throw new authorization.APIRequestError(409, { code }); },
+      },
+    };
+    await assert.rejects(client(mock).planUnifiedApp({ name: "Customer", version: "1" }, { stripe: service }, () => {}));
+    // Only the explicit migration error authorizes the one repair attempt.
+    assert.equal(refreshes, code === "service_provider_identity_unavailable" ? 1 : 0);
+    assert.equal(attempts, 1 + refreshes);
+  }
 });
 
 // Ambiguous goals stop before discovery or compilation and remain actionable in the form.
@@ -322,4 +377,23 @@ test("describe scheduler stops queued work on failure", async () => {
 test("source clarification is distinguishable from a retryable transport failure", () => {
   assert.throws(() => contract.decodeUnifiedSource('{"clarification":"Which lookup should be used?"}'), contract.UnifiedSourceClarificationError);
   assert.throws(() => contract.decodeUnifiedSource('{"source":""}'), (error) => !(error instanceof contract.UnifiedSourceClarificationError));
+});
+
+// Editing an existing team-owned app must carry its immutable owner into the shared plan endpoint.
+test("successor planning retains the saved owner team", async () => {
+  let submitted;
+  const mock = {
+    workspace: {
+      // Already-enabled dependencies require no workspace mutation during the successor plan.
+      getServices: async () => [{ service_id: service.service_id, enabled_versions: [{ service_version_id: service.service_version_id, status: "active" }] }],
+    },
+    appConfig: {
+      // Record the exact request crossing the production management boundary.
+      plan: async (kind, request) => { submitted = { kind, request }; return { plan_id: "successor" }; },
+    },
+  };
+  await client(mock).planUnifiedApp({ name: "Customer", version: "1.0.1", source }, { stripe: service }, () => {}, "payments");
+  assert.equal(submitted.kind, "unified-app");
+  assert.equal(submitted.request.owner_team, "payments");
+  assert.equal(submitted.request.config_key, "unified_app:Customer:1.0.1");
 });

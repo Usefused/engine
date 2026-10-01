@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+
+	"github.com/dop251/goja"
 )
 
 type processHost struct {
@@ -30,11 +32,11 @@ const maxWorkerRequests = 4
 const WorkerIsolationDeniedExitCode = 77
 
 type loadedWorker struct {
-	bundle []byte
-	writer *frameWriter
-	mutex  sync.Mutex
-	active map[uint64]*loadedRequest
-	lastID uint64
+	program *goja.Program
+	writer  *frameWriter
+	mutex   sync.Mutex
+	active  map[uint64]*loadedRequest
+	lastID  uint64
 }
 
 type loadedRequest struct {
@@ -83,18 +85,34 @@ func workerConfinementExitCode(err error) int {
 	return 1
 }
 
-// runLoadedWorker binds one immutable bundle to this process and dispatches bounded requests.
-func runLoadedWorker(scanner *bufio.Scanner, writer *frameWriter, load Frame) int {
+// loadCapabilityProgram validates immutable version source before acknowledging a resident worker.
+func loadCapabilityProgram(load Frame) (*goja.Program, error) {
 	// A second bundle cannot silently change the identity of an already loaded app version.
 	if load.RequestID != 0 || len(load.Bundle) == 0 || len(load.Bundle) > MaxBundleBytes {
-		return 1
+		return nil, errors.New("capability bundle is invalid")
+	}
+	program, err := compileCapabilityBundle(load.Bundle)
+	// A failed compile cannot become a resident version or reach declaration evaluation.
+	if err != nil {
+		return nil, errors.New("capability bundle is invalid")
 	}
 	// Validation runs after confinement, so an invalid or active top-level declaration
 	// never becomes a resident version and never gains the host-call bridge.
-	if _, err := InspectInProcess(context.Background(), load.Bundle); err != nil {
+	if _, err := inspectCapabilityProgram(context.Background(), program); err != nil {
+		return nil, errors.New("capability bundle is invalid")
+	}
+	return program, nil
+}
+
+// runLoadedWorker compiles one immutable version after confinement and reuses its bytecode for bounded requests.
+func runLoadedWorker(scanner *bufio.Scanner, writer *frameWriter, load Frame) int {
+	program, err := loadCapabilityProgram(load)
+	// A version becomes resident only after its compiled declarations pass inspection.
+	if err != nil {
 		return 1
 	}
-	worker := &loadedWorker{bundle: load.Bundle, writer: writer, active: make(map[uint64]*loadedRequest)}
+	worker := &loadedWorker{program: program, writer: writer, active: make(map[uint64]*loadedRequest)}
+	// Acknowledgment follows compilation and inspection; no request can observe a partially loaded program.
 	if writer.write(Frame{Kind: "loaded"}) != nil {
 		return 1
 	}
@@ -145,9 +163,9 @@ func (worker *loadedWorker) start(frame Frame) error {
 	return nil
 }
 
-// execute gives each request new JavaScript globals while reusing the confined process.
+// execute reuses version bytecode while giving every request a fresh runtime and host bridge.
 func (worker *loadedWorker) execute(ctx context.Context, frame Frame, host *processHost) {
-	output, err := RunInProcessWithDeterminism(ctx, worker.bundle, frame.Input, host, frame.Determinism)
+	output, err := runInProcessWithProgram(ctx, nil, worker.program, frame.Input, host, frame.Determinism)
 	result := Frame{Kind: "done", RequestID: frame.RequestID, Value: output, Phases: host.phases}
 	// Trusted IPC separates encrypted diagnostics from safe public errors.
 	if err != nil {
