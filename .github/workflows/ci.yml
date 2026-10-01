@@ -23,6 +23,18 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      # The sandbox package embeds generated MCP files, so the Windows Go test needs them first.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+          cache-dependency-path: runtime/mcp/package-lock.json
+      - name: Build embedded MCP runtime
+        working-directory: runtime/mcp
+        run: |
+          npm ci
+          npm run build
       - name: Test interpreter and unsupported-platform boundary
         run: go test ./internal/engine/executionappvm ./internal/engine/sandbox -run 'TestUnsupportedWorker|TestCapabilityUnsupported|TestLoadedWorker|TestPrivateException|TestDiagnostic|TestExecutionPhases' -count=1 -timeout=90s
 
