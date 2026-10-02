@@ -34,7 +34,7 @@ async function resolveServices(services: IntentService[], chooseService?: Choose
   return selected;
 }
 
-/** Grounds a service's intent in one immutable version and a finite set of classified operations. */
+/** Grounds operations and inbound events in one immutable provider version. */
 async function resolveOperations(intent: IntentService, candidate: Candidate, kind: DescribeKind, includeEvents: boolean, schedule: DescribeSchedule, operationDone: (name: string) => void): Promise<[string, AppServicePin]> {
   const result = await schedule(() => api.graphql<{ service: { service_versions: Array<{ id: string; name: string; status: string }> } | null }>(`query UnifiedAppServiceVersion($id: String!) {
     service(id: $id) { service_versions(limit: 1) { id name status } }
@@ -101,10 +101,13 @@ export async function describeApp(goal: string, kind: DescribeKind, progress: De
 
 /** Drafts source from the currently reviewed pins, also supporting manually selected operations. */
 export async function draftAppSource(goal: string, services: Record<string, AppServicePin>, progress: DescribeProgress): Promise<string> {
-  const selections = Object.entries(services).flatMap(([service, pin]) => pin.operations.map((operation) => ({ service, service_id: pin.service_id, version: pin.version, operation })));
-  // The Registry drafter requires an explicit finite allowlist and no inbound capabilities.
-  if (!selections.length || selections.length > 16 || Object.values(services).some((pin) => pin.select_all || pin.webhooks?.length)) throw new Error("Unified Apps require 1 to 16 specific operations and cannot receive webhook events.");
-  progress("Generating TypeScript from your selected operations…", "source");
+  const selections = Object.entries(services).flatMap(([service, pin]) => [
+    ...pin.operations.map((operation) => ({ service, service_id: pin.service_id, version: pin.version, operation })),
+    ...(pin.webhooks ?? []).map((event) => ({ service, service_id: pin.service_id, version: pin.version, event })),
+  ]);
+  // The Registry drafter sees only exact selected contracts, including inbound payload evidence.
+  if (!selections.length || selections.length > 16 || Object.values(services).some((pin) => pin.select_all)) throw new Error("Unified Apps require 1 to 16 specific operations or webhook events.");
+  progress("Generating TypeScript from your selected operations and events…", "source");
   const result = await api.graphql<{ draftPromptUnifiedApp: string }>(`query DraftPromptUnifiedApp($q: String!, $selections: String!) {
     draftPromptUnifiedApp(q: $q, selections: $selections)
   }`, { q: goal.trim(), selections: JSON.stringify(selections) });
@@ -121,8 +124,8 @@ async function resolveEvents(id: string, version: string, queries: string[]): Pr
 
 /** Preserves explicit all-operation and event-only requests without widening missing intent. */
 function operationQueries(intent: IntentService, kind: DescribeKind, includeEvents: boolean): string[] {
-  // Hosted source has stricter capability rules than SDK and MCP adapters.
-  validateHostedSelection(kind, Boolean(intent.select_all_operations || includeEvents));
+  // Hosted source rejects changing operation catalogues while accepting exact inbound events.
+  validateHostedSelection(kind, Boolean(intent.select_all_operations));
   // Plural operation intent is authoritative; the singular field is retained for older Registry responses.
   const queries = intentOperationQueries(intent);
   // Contradictory model output must not silently broaden a specific request.
@@ -166,14 +169,14 @@ function validateAdapterIntent(intent: Intent, kind: DescribeKind): void {
   // Ordered execution needs authored orchestration instead of independent callable capabilities.
   if (intent.sequential && kind !== "unified_app") throw new Error("Sequential workflows require a Unified App.");
   const inbound = intent.webhook_requested || intent.services?.some((service) => service.event_queries?.length);
-  // REST and hosted orchestration have no inbound receiver adapter.
-  if (["unified_app", "api"].includes(kind) && inbound) throw new Error("Use an SDK or MCP app to receive webhook events.");
+  // Direct REST execution has no receiver, while Unified Apps use the hosted trigger worker.
+  if (kind === "api" && inbound) throw new Error("Use a Unified App, SDK, or MCP app to receive webhook events.");
   // The UI must not silently translate a requested emitter it cannot build.
   if (["sdk", "app"].includes(kind) && intent.language && !["typescript", "python"].includes(intent.language)) throw new Error("Choose TypeScript or Python for the SDK.");
 }
 
-/** Prevents wildcard grants or inbound events from entering hosted source drafting. */
+/** Prevents wildcard operation grants from entering hosted source drafting. */
 function validateHostedSelection(kind: DescribeKind, unsupported: boolean): void {
-  // SDK and MCP retain these capabilities; the hosted compiler requires a finite outbound allowlist.
-  if (kind === "unified_app" && unsupported) throw new Error("Unified Apps require specific operations and cannot receive webhook events.");
+  // SDK and MCP can follow an evolving operation catalogue; hosted source needs exact bindings.
+  if (kind === "unified_app" && unsupported) throw new Error("Unified Apps require specific operations.");
 }

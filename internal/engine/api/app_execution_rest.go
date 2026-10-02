@@ -140,7 +140,7 @@ func (s *EngineGRPCServer) handleRESTExecution(writer http.ResponseWriter, reque
 	s.handleRawRESTExecution(writer, request, appID, scope, identity, decoded, canonical)
 }
 
-// handleRawRESTExecution preserves the existing selected physical and Unified operation dispatcher.
+// handleRawRESTExecution preserves the existing selected service operation dispatcher.
 func (s *EngineGRPCServer) handleRawRESTExecution(writer http.ResponseWriter, request *http.Request, appID uuid.UUID, scope *store.AppRuntime, identity auth.RuntimeIdentity, decoded restExecutionRequest, canonical []byte) {
 	if s.restRuntime == nil || s.restRuntime.ConnectAppRuntime(request.Context(), appID) != nil {
 		writeRESTExecutionError(writer, newRESTExecutionError(http.StatusServiceUnavailable, "runtime_unavailable", "app runtime is unavailable"))

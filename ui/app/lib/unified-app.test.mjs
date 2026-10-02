@@ -63,6 +63,28 @@ test("describe uses the CLI API chain without activating or applying", async () 
   assert.deepEqual(JSON.parse(mock.calls.at(-1).variables.selections), [{ service: "@stripe/stripe", service_id: "service-id", version: "v1", operation: "getCustomer" }]);
 });
 
+// Inbound-only Unified App goals pass exact event evidence to Registry without granting a provider operation.
+test("describe drafts a webhook triggered Unified App from an exact event", async () => {
+  const mock = transport({
+    ParsePromptIntent: { parseSDKIntent: { name: "payment-handler", webhook_requested: true, services: [{ name: "Stripe", event_queries: ["successful payments"] }] } },
+    DescribeAppEvents: { service: { webhooks: [{ name: "payment.succeeded", description: "A payment succeeded" }] } },
+  });
+  const draft = await client(mock.api).describeUnifiedApp("Handle successful Stripe payments", () => {});
+  assert.deepEqual(draft.services["@stripe/stripe"].operations, []);
+  assert.deepEqual(draft.services["@stripe/stripe"].webhooks, ["payment.succeeded"]);
+  assert.deepEqual(JSON.parse(mock.calls.at(-1).variables.selections), [{ service: "@stripe/stripe", service_id: "service-id", version: "v1", event: "payment.succeeded" }]);
+  assert.equal(mock.calls.some((call) => call.operation === "ClassifyPromptOperation"), false);
+});
+
+// The reviewed app cart binds the selected event to one applied registration before Engine planning.
+test("Unified App config includes its webhook trigger", () => {
+  const draft = { source, description: "Handle payments", webhookAttachment: "payments-events", services: { stripe: { ...service, operations: [], webhooks: ["payment.succeeded"] } } };
+  const config = contract.unifiedConfig(draft, "payment-handler", "1.0.0", "default");
+  assert.equal(config.webhook_attachment, "payments-events");
+  assert.deepEqual(config.services.stripe.webhooks, ["payment.succeeded"]);
+  assert.throws(() => contract.unifiedConfig({ ...draft, webhookAttachment: "" }, "payment-handler", "1.0.0", "default"), /webhook registration/);
+});
+
 // Legacy provider metadata refreshes exact reviewed pins once, then reuses unchanged source and selection.
 test("plan repairs missing provider identity once without changing the requested app", async () => {
   const calls = [];

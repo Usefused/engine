@@ -148,8 +148,12 @@ func executionCompilerSelections(ctx context.Context, repository store.ServiceCo
 	requests := make([]store.ServiceContractEndpointSelection, 0, len(selections))
 	want := make(map[int]map[string]bool, len(selections))
 	for index, selection := range selections {
-		// Select-all and empty operation sets cannot be represented by a stable source-level method binding.
-		if selection.SelectAll || len(selection.OperationNames) == 0 {
+		// Event-only services contribute no physical method bindings to the compiler.
+		if len(selection.OperationNames) == 0 {
+			continue
+		}
+		// A changing operation catalogue cannot be represented by stable source-level methods.
+		if selection.SelectAll {
 			return nil, workspaceConfigHTTPError{status: 400, message: "unified app source requires explicit operations"}
 		}
 		want[index] = make(map[string]bool, len(selection.OperationNames))
@@ -157,6 +161,10 @@ func executionCompilerSelections(ctx context.Context, repository store.ServiceCo
 			want[index][name] = true
 		}
 		requests = append(requests, store.ServiceContractEndpointSelection{SelectionIndex: index, ServiceID: selection.ServiceID, ServiceVersionID: selection.ServiceVersionID, OperationNames: selection.OperationNames, EndpointNames: selection.OperationNames})
+	}
+	// Event-only code has no physical contract rows to resolve.
+	if len(requests) == 0 {
+		return []executionCompilerSelection{}, nil
 	}
 	matches, err := repository.ListServiceContractEndpointsForSelections(ctx, requests, nil)
 	// A failed local snapshot read cannot be replaced by broader workspace discovery.

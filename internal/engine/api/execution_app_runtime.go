@@ -87,10 +87,10 @@ func parseUnifiedAppManifest(raw json.RawMessage) (*unifiedAppManifest, error) {
 	return &manifest, nil
 }
 
-// validateUnifiedAppManifest requires one typed execute contract and exact selected operation set.
+// validateUnifiedAppManifest requires one typed execute contract and a bounded physical method set.
 func validateUnifiedAppManifest(manifest *unifiedAppManifest) error {
-	// Every Unified App needs at least one exact workspace operation, even if a particular run does not call it.
-	if !json.Valid(manifest.InputSchema) || !json.Valid(manifest.OutputSchema) || len(manifest.SelectedOperations) == 0 || len(manifest.SelectedOperations) > maxUnifiedAppSelectedOperations {
+	// Event-only apps have no physical methods; app config validation separately requires an inbound selection.
+	if !json.Valid(manifest.InputSchema) || !json.Valid(manifest.OutputSchema) || len(manifest.SelectedOperations) > maxUnifiedAppSelectedOperations {
 		return errors.New("unified app manifest is invalid")
 	}
 	_, err := unifiedAppBindings(manifest)

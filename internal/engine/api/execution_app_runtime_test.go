@@ -25,12 +25,12 @@ func TestUnifiedAppFetchRejectsInvalidPagination(t *testing.T) {
 	}
 }
 
-// TestUnifiedAppSelectedOperationBound keeps manifest parsing and scope admission on one finite limit.
+// TestUnifiedAppSelectedOperationBound permits event-only manifests while retaining the finite provider limit.
 func TestUnifiedAppSelectedOperationBound(t *testing.T) {
 	for _, test := range []struct {
 		count   int
 		allowed bool
-	}{{0, false}, {maxUnifiedAppSelectedOperations, true}, {maxUnifiedAppSelectedOperations + 1, false}} {
+	}{{0, true}, {maxUnifiedAppSelectedOperations, true}, {maxUnifiedAppSelectedOperations + 1, false}} {
 		manifest := unifiedAppManifest{
 			SchemaVersion: 1, InputSchema: json.RawMessage(`{"type":"object"}`),
 			OutputSchema: json.RawMessage(`{"type":"object"}`),
@@ -46,9 +46,21 @@ func TestUnifiedAppSelectedOperationBound(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err = parseUnifiedAppManifest(raw)
-		// Empty and excessive manifests must fail before deployment or execution can resolve provider scope.
+		// Empty physical scope is valid for an event-only app; excessive scope still fails admission.
 		if (err == nil) != test.allowed {
 			t.Fatalf("selected operations=%d admitted=%v error=%v", test.count, err == nil, err)
 		}
+	}
+}
+
+// TestUnifiedAppEventOnlyConfigScope requires an explicit trigger when physical operation scope is empty.
+func TestUnifiedAppEventOnlyConfigScope(t *testing.T) {
+	// An event-only app has an inbound capability despite having no provider method binding.
+	if err := validateExecutionOperationScope(map[string]sdkConfigServiceDoc{"issues": {Webhooks: []string{"issue.created"}}}); err != nil {
+		t.Fatalf("event-only scope rejected: %v", err)
+	}
+	// An empty service pin cannot create a callable or triggered hosted app.
+	if err := validateExecutionOperationScope(map[string]sdkConfigServiceDoc{"issues": {}}); err == nil {
+		t.Fatal("empty scope accepted")
 	}
 }

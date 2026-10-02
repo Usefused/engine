@@ -3,12 +3,14 @@ export interface UnifiedServicePin {
   service_version_id: string;
   version: string;
   operations: string[];
+  webhooks?: string[];
 }
 export interface UnifiedDraft {
   name: string;
   description: string;
   source: string;
   services: Record<string, UnifiedServicePin>;
+  webhookAttachment?: string;
 }
 export interface UnifiedTemplate extends UnifiedDraft {
   schema_version: 1;
@@ -44,12 +46,15 @@ export function decodeUnifiedSource(raw: string): string {
   return draft.source;
 }
 
-/** Includes reviewed description and source in the desired state consumed by Unified App planning. */
+/** Includes reviewed source and event scope in the desired state consumed by Unified App planning. */
 export function unifiedConfig(draft: UnifiedDraft, name: string, version: string, bucket: string): Record<string, unknown> {
   // User-reviewed identity is required before compilation or service activation.
   if (!name.trim() || !version.trim() || !bucket.trim()) throw new Error("Name, version, and a credential bucket are required.");
-  const services = Object.fromEntries(Object.entries(draft.services).map(([key, pin]) => [key, { version: pin.version, operations: pin.operations }]));
-  return { apiVersion: "fused/v1", kind: "unified_app", name: name.trim(), description: draft.description, version: version.trim(), bucket: bucket.trim(), services, source: draft.source };
+  const services = Object.fromEntries(Object.entries(draft.services).map(([key, pin]) => [key, { version: pin.version, operations: pin.operations, ...(pin.webhooks?.length ? { webhooks: pin.webhooks } : {}) }]));
+  const hasEvents = Object.values(draft.services).some((pin) => pin.webhooks?.length);
+  // A selected event without an applied registration would never reach the hosted worker.
+  if (hasEvents && !draft.webhookAttachment?.trim()) throw new Error("Choose a webhook registration for the selected events.");
+  return { apiVersion: "fused/v1", kind: "unified_app", name: name.trim(), description: draft.description, version: version.trim(), bucket: bucket.trim(), ...(hasEvents ? { webhook_attachment: draft.webhookAttachment!.trim() } : {}), services, source: draft.source };
 }
 
 /** Decodes published source templates for review before installation. */

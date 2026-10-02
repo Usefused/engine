@@ -162,10 +162,29 @@ test("bundle exports a singular Engine contract", async () => {
 // Verify selected provider targets are exact before bundle admission.
 test("bundle rejects incomplete and non-UUID operation bindings", async () => {
   const entryFile = path.resolve(__dirname, "../../test/fixture.ts");
-  await assert.rejects(buildExecutionBundle({ entryFile, selectedOperations: [] }), /at least one selected operation/);
   await assert.rejects(buildExecutionBundle({ entryFile, selectedOperations: Array.from({ length: 65 }, (_, index) => ({ ...selectedOperations[0], operation: `create${index}` })) }), /at most 64/);
   await assert.rejects(buildExecutionBundle({ entryFile, selectedOperations: [{ ...selectedOperations[0], serviceId: "" }] }), /incomplete/);
   await assert.rejects(buildExecutionBundle({ entryFile, selectedOperations: [{ ...selectedOperations[0], serviceId: "service-id" }] }), /non-UUID/);
+});
+
+// Event-only authored code can validate an inbound envelope without receiving physical provider methods.
+test("bundle accepts a webhook-only execute contract", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fused-execution-webhook-"));
+  try {
+    const entryFile = path.join(directory, "app.ts");
+    fs.writeFileSync(entryFile, `import { z } from "zod";
+import { buildUnifiedApp } from "@fused/unified-app";
+export default buildUnifiedApp({ input: z.object({ body: z.object({ id: z.string() }) }), output: z.object({ id: z.string() }), execute({ input }) { return { id: input.body.id }; } });`);
+    const bundle = await buildExecutionBundle({ entryFile, selectedOperations: [] });
+    const inspected = await inspectExecutionBundle(bundle.code, async () => {
+      const sandbox: Record<string, unknown> = {};
+      vm.runInNewContext(bundle.code, sandbox, { timeout: 5000 });
+      return JSON.parse(JSON.stringify(sandbox.FusedExecutionManifest));
+    });
+    assert.deepEqual(inspected.selectedOperations, []);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 // Verify Engine compilation never reads a tenant-selected local file or Node module into its bundle.

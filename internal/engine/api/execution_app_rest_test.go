@@ -36,12 +36,12 @@ type blockingCapabilityRuntime struct {
 	release chan struct{}
 }
 
-// TestUnifiedAppRejectsUnboundManifest keeps authored code inside a selected workspace operation scope.
-func TestUnifiedAppRejectsUnboundManifest(t *testing.T) {
-	_, err := parseUnifiedAppManifest(json.RawMessage(`{"schemaVersion":1,"inputSchema":{"type":"object"},"outputSchema":{"type":"object"},"searchable":[],"selectedOperations":[]}`))
-	// A valid schema alone cannot establish an executable app version.
+// TestUnifiedAppRejectsUnboundOperation prevents provider names from granting access without immutable bindings.
+func TestUnifiedAppRejectsUnboundOperation(t *testing.T) {
+	_, err := parseUnifiedAppManifest(json.RawMessage(`{"schemaVersion":1,"inputSchema":{"type":"object"},"outputSchema":{"type":"object"},"searchable":[],"selectedOperations":[{"service":"issues","operation":"createIssue"}]}`))
+	// Event-only apps may omit operations, but each declared operation still needs exact provider IDs.
 	if err == nil {
-		t.Fatal("unbound unified app manifest was admitted")
+		t.Fatal("unbound unified app operation was admitted")
 	}
 }
 

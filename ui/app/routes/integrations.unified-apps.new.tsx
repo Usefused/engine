@@ -23,6 +23,24 @@ import { preferredAppBucket, type AppBuildSelector, type AppPlanResponse } from 
 const fieldClass = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-violet)]";
 const buttonClass = "inline-flex items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50";
 
+/** Retains a reviewed registration across source regeneration without inventing one for a new draft. */
+function draftAttachment(draft: UnifiedDraft | null): string { return draft?.webhookAttachment ?? ""; }
+
+/** Detects whether the selected capability scope needs inbound registration coverage. */
+function draftHasWebhookEvents(draft: UnifiedDraft): boolean {
+  return Object.values(draft.services).some((pin) => Boolean(pin.webhooks?.length));
+}
+
+/** Gates validation on a complete event or operation scope and its required registration. */
+function canValidateUnifiedDraft(draft: UnifiedDraft, name: string, version: string, bucket: string, savedVersion?: string): boolean {
+  // Immutable successors require a new version before source can be compiled.
+  if (version.trim() === savedVersion || !canCompile(name, version, bucket, draft.source)) return false;
+  // An empty picker selection cannot create a callable or triggered app.
+  if (!Object.values(draft.services).some((pin) => Boolean(pin.operations.length || pin.webhooks?.length))) return false;
+  // Event-only and mixed scopes both need an applied registration name.
+  return !draftHasWebhookEvents(draft) || Boolean(draft.webhookAttachment?.trim());
+}
+
 /** Shares labeled source authoring, selection, compilation, and deployment for new apps and immutable successors. */
 export default function CreateUnifiedApp() {
   const { access } = useCurrentActorAccess();
@@ -104,7 +122,7 @@ export default function CreateUnifiedApp() {
     function preview(proposal: AppDescription) {
       pendingDescription.current = { goal: goal.trim(), proposal };
       setDraftingSource(true);
-      setDraft({ ...proposal, source: "" }); setPickerSeed(proposal.services);
+      setDraft({ ...proposal, source: "", webhookAttachment: draftAttachment(previous.draft) }); setPickerSeed(proposal.services);
       // Regeneration must never rename an existing family.
       if (!editID) setName(proposal.name);
       invalidatePlan();
@@ -119,11 +137,12 @@ export default function CreateUnifiedApp() {
       } else {
         proposal = await describeUnifiedApp(goal, progress, chooseService, preview);
       }
-      setDraft(proposal);
+      // Re-describing capabilities retains the explicitly chosen registration for review.
+      setDraft({ ...proposal, webhookAttachment: draftAttachment(previous.draft) });
       // Existing family identity remains fixed when its implementation is regenerated.
       if (!editID) setName(proposal.name);
       invalidatePlan(); pendingDescription.current = null;
-      progress("Your source and selected operations are ready.", "review");
+      progress("Your source and selected capabilities are ready.", "review");
     } catch (cause) {
       // Clarification may require different capabilities; only transient failures reuse source-only retries.
       if (cause instanceof UnifiedSourceClarificationError) pendingDescription.current = null;
@@ -155,6 +174,13 @@ export default function CreateUnifiedApp() {
     // Only a loaded draft can supply the rest of the immutable successor configuration.
     if (!draft) return;
     setDraft({ ...draft, description }); invalidatePlan();
+  }
+
+  /** Keeps the selected registration in the same reviewed draft as its event allowlist. */
+  function updateWebhookAttachment(webhookAttachment: string) {
+    // The attachment is meaningful only after service and event selection created a draft.
+    if (!draft) return;
+    setDraft({ ...draft, webhookAttachment }); invalidatePlan();
   }
 
   /** Resolves the selected credential name before compiling the reviewed source and dependencies. */
@@ -193,7 +219,7 @@ export default function CreateUnifiedApp() {
     <AppDetailBackLink to={editID ? `/integrations/unified-apps/${editID}` : "/integrations/sdks?type=unified_app"} />
     <header className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="text-2xl font-bold text-slate-900">{editID ? "Edit Unified App" : "Create a Unified App"}</h1><p className="mt-1 text-slate-500">{editSource ? `Editing version ${editSource.config.version}. Deploy your changes as a new version; your app URL and tokens stay the same.` : "Describe what you want to build. Review it, then run it on Engine."}</p></div>{/* Templates start a separate app rather than replacing a saved editor baseline. */}{!editID && <Link to="/integrations/unified-apps/templates" className="text-sm font-medium text-[var(--brand-violet)] hover:underline">Browse templates</Link>}</header>
     <AppCreationFlow generatesSource onDescribe={describe} onBusyChange={setDescribing} disabled={busy} initialManual={Boolean(editID) || Boolean(templateID) || params.get("mode") === "manual"} hasSelection={Boolean(draft)}>
-    <AppOperationPicker seed={pickerSeed} onChange={selectOperations} onPendingChange={setSelecting} />
+    <AppOperationPicker seed={pickerSeed} onChange={selectOperations} onPendingChange={setSelecting} allowWebhooks />
     {/* Async stages are announced without replacing the user's editable description. */}
     {busy && <p role="status" className="flex items-center gap-2 text-sm text-slate-600"><Loader2 className="h-4 w-4 animate-spin" />{progress || "Loading template…"}</p>}
     {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</p>}
@@ -207,7 +233,7 @@ export default function CreateUnifiedApp() {
       </label>
       <label className="block space-y-2 text-sm font-medium">
         <FieldLabel>Description</FieldLabel>
-        <textarea className={fieldClass} value={draft.description} onChange={(event) => updateDescription(event.target.value)} />
+        <textarea className={fieldClass} maxLength={1024} value={draft.description} onChange={(event) => updateDescription(event.target.value)} />
       </label>
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="space-y-2 text-sm font-medium">
@@ -224,11 +250,17 @@ export default function CreateUnifiedApp() {
           </Select>
         </label>
       </div>
-      <div className="space-y-2 text-sm font-medium"><label htmlFor="unified-app-source" className="block"><FieldLabel required>TypeScript source</FieldLabel></label>{/* The selection is reviewable while hosted source is still being generated. */}{draftingSource && !draft.source && <span role="status" className="block font-normal text-slate-500">Generating TypeScript from your selected operations…</span>}<TypeScriptEditor required id="unified-app-source" value={draft.source} disabled={busy || describing || selecting} onChange={updateSource} /></div>
+      {/* The worker subscribes through an applied registration; event names alone do not provision ingress. */}
+      {draftHasWebhookEvents(draft) && <label className="block space-y-2 text-sm font-medium">
+        <FieldLabel required>Webhook registration</FieldLabel>
+        <input required className={fieldClass} placeholder="team-events" value={draftAttachment(draft)} onChange={(event) => updateWebhookAttachment(event.target.value)} />
+        <span className="block text-xs font-normal text-slate-500">Enter a registration covering every selected event service. <Link className="text-[var(--brand-violet)] hover:underline" to="/integrations/webhooks/new" target="_blank" rel="noreferrer">Create a webhook registration</Link> if you need one.</span>
+      </label>}
+      <div className="space-y-2 text-sm font-medium"><label htmlFor="unified-app-source" className="block"><FieldLabel required>TypeScript source</FieldLabel></label>{/* The selection is reviewable while hosted source is still being generated. */}{draftingSource && !draft.source && <span role="status" className="block font-normal text-slate-500">Generating TypeScript from your selected operations and events…</span>}<TypeScriptEditor required id="unified-app-source" value={draft.source} disabled={busy || describing || selecting} onChange={updateSource} /></div>
       <p className="text-xs text-slate-500">Validate and compile checks TypeScript and selected operation bindings without running provider calls. It enables missing pinned service versions. Deploying is a separate step.</p>
       {/* The plan is invalidated on every edit, so deployment cannot apply stale reviewed content. */}
       {editSource && <p className="text-sm text-slate-600">Deploying switches new traffic to this version. Earlier versions remain available in version history.</p>}
-      {plan ? <section className="space-y-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4"><h2 className="font-semibold text-emerald-900">Ready to deploy</h2><p className="text-sm text-emerald-800">TypeScript validation and compilation passed. Provider operations have not been run.</p><pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-700">{JSON.stringify(plan.summary, null, 2)}</pre><button type="button" className={buttonClass} onClick={deploy}>{editID ? "Deploy new version" : "Deploy Unified App"} <ArrowRight className="h-4 w-4" /></button></section> : <button type="button" className={buttonClass} disabled={version.trim() === editSource?.config.version || !canCompile(name, version, bucket, draft.source) || !Object.values(draft.services).some((pin) => pin.operations.length)} onClick={compile}>Validate and compile <ArrowRight className="h-4 w-4" /></button>}
+      {plan ? <section className="space-y-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4"><h2 className="font-semibold text-emerald-900">Ready to deploy</h2><p className="text-sm text-emerald-800">TypeScript validation and compilation passed. Provider operations have not been run.</p><pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-700">{JSON.stringify(plan.summary, null, 2)}</pre><button type="button" className={buttonClass} onClick={deploy}>{editID ? "Deploy new version" : "Deploy Unified App"} <ArrowRight className="h-4 w-4" /></button></section> : <button type="button" className={buttonClass} disabled={!canValidateUnifiedDraft(draft, name, version, bucket, editSource?.config.version)} onClick={compile}>Validate and compile <ArrowRight className="h-4 w-4" /></button>}
     </fieldset>}
     </AppCreationFlow>
   </div>;

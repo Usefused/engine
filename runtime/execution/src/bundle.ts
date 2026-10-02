@@ -62,13 +62,9 @@ function validateSelection(operation: SelectedOperation): void {
   }
 }
 
-// Require every author-facing operation key to resolve to one immutable Engine endpoint.
+// Require every declared author-facing operation key to resolve to one immutable Engine endpoint.
 function validateSelections(operations: readonly SelectedOperation[]): void {
   const seen = new Set<string>();
-  // Every hosted version must bind at least one admitted workspace operation.
-  if (operations.length === 0) {
-    throw new Error("Unified App requires at least one selected operation");
-  }
   // Engine admission caps each immutable app version at 64 bound endpoints.
   if (operations.length > 64) {
     throw new Error("Unified App supports at most 64 selected operations");

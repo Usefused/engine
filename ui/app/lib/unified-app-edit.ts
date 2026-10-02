@@ -5,7 +5,8 @@ export interface UnifiedAppSource {
   owner_team: string;
   config: Record<string, unknown> & {
     kind: string; name: string; version: string; bucket: string; source?: string; description?: string;
-    services: Record<string, Record<string, unknown> & { version: string; operations: string[] }>;
+    webhook_attachment?: string;
+    services: Record<string, Record<string, unknown> & { version: string; operations: string[]; webhooks?: string[] }>;
   };
   service_pins: Array<{ key: string; service_id: string; service_version_id: string }>;
 }
@@ -21,9 +22,9 @@ export function unifiedEditDraft(saved: UnifiedAppSource): UnifiedDraft {
     const pin = saved.service_pins.find((item) => item.key === key);
     // A missing immutable pin must not silently bind this draft to a different provider or version.
     if (!pin?.service_id || !pin.service_version_id || !service.version || !Array.isArray(service.operations)) throw new Error(`Saved service identity is unavailable for ${key}.`);
-    return [key, { ...pin, version: service.version, operations: [...service.operations] }];
+    return [key, { ...pin, version: service.version, operations: [...service.operations], webhooks: [...(service.webhooks ?? [])] }];
   }));
-  return { name: config.name, description: config.description ?? "", source: config.source, services };
+  return { name: config.name, description: config.description ?? "", source: config.source, services, webhookAttachment: config.webhook_attachment ?? "" };
 }
 
 /** Suggests a new patch version for ordinary semantic versions while leaving custom labels to the author. */
@@ -52,9 +53,16 @@ export function unifiedEditConfig(saved: UnifiedAppSource, draft: UnifiedDraft, 
     const original = saved.service_pins.find((item) => item.key === key && item.service_id === pin.service_id);
     // Retain auth, routing, and bucket overrides only when the selected provider identity is unchanged.
     const settings = original ? saved.config.services[key] : {};
-    return [key, { ...settings, version: pin.version, operations: pin.operations }];
+    return [key, { ...settings, version: pin.version, operations: pin.operations, webhooks: pin.webhooks ?? [] }];
   }));
   const config: Record<string, unknown> = { ...saved.config, version: version.trim(), source: draft.source, description: draft.description, services };
+  const hasEvents = Object.values(draft.services).some((pin) => pin.webhooks?.length);
+  // A successor cannot silently keep an attachment after its final event selection is removed.
+  if (hasEvents) {
+    // A changed event scope still needs an explicit registered bundle before planning.
+    if (!draft.webhookAttachment?.trim()) throw new Error("Choose a webhook registration for the selected events.");
+    config.webhook_attachment = draft.webhookAttachment.trim();
+  } else delete config.webhook_attachment;
   // A prior bundle or local source path cannot compete with the source being compiled in this browser.
   delete config.bundle_digest;
   delete config.source_path;

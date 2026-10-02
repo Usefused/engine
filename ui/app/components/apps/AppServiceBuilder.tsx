@@ -701,6 +701,7 @@ function AddSelectedServiceToWorkspaceButton({
 
 type BuilderServiceInteractions = {
   specificOperationsOnly?: boolean;
+  allowWebhooks?: boolean;
   expanded: Record<string, boolean>;
   loadedServices: Record<string, boolean>;
   selections: Record<string, Set<string>>;
@@ -1059,8 +1060,8 @@ function BuilderExpandedService({
         onSelect={state.handleVersionSelection}
       />
       <BuilderEndpointsSection item={item} view={view} sections={sections} state={state} />
-      {/* SDK and MCP share the same webhook bundle selection contract. */}
-      {!state.specificOperationsOnly && <BuilderWebhooksSection item={item} view={view} sections={sections} state={state} />}
+      {/* Hosted source keeps exact operation pins while using the shared event picker. */}
+      {state.allowWebhooks && <BuilderWebhooksSection item={item} view={view} sections={sections} state={state} />}
     </div>
   );
 }
@@ -1419,12 +1420,19 @@ interface PickerOptions {
   seed: Record<string, AppServicePin>;
   onChange: (services: Record<string, AppServicePin>) => void;
   onPendingChange: (pending: boolean) => void;
+  allowWebhooks?: boolean;
 }
 const pickerLoader: BuilderData = { services: [], total: 0, isAuth: true, workflows: [], source: null, attachment: null };
 
-/** Embeds the same manual picker in Unified App authoring, without SDK setup or mutation controls. */
-export function AppOperationPicker({ seed, onChange, onPendingChange }: PickerOptions) {
-  return <AppServiceBuilder loaderData={pickerLoader} picker={{ seed, onChange, onPendingChange }} />;
+/** Keeps inbound event visibility independent of the hosted operation select-all restriction. */
+function pickerAllowsWebhooks(picker?: PickerOptions): boolean {
+  // SDK and MCP builders retain event selection when no embedded picker is present.
+  return picker ? Boolean(picker.allowWebhooks) : true;
+}
+
+/** Embeds exact operation and event selection in Unified App authoring without SDK mutation controls. */
+export function AppOperationPicker({ seed, onChange, onPendingChange, allowWebhooks }: PickerOptions) {
+  return <AppServiceBuilder loaderData={pickerLoader} picker={{ seed, onChange, onPendingChange, allowWebhooks }} />;
 }
 
 /** Owns one manual selection for both described proposals and direct SDK/MCP authoring. */
@@ -1583,7 +1591,8 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
       const operations = appOperations(selection, row);
       // Selected row IDs must all have loaded exact names before source compilation can see them.
       if (operations.length !== selection.endpoint_ids.length) return;
-      pins[serviceReference(row.service)] = { service_id: selection.service_id, service_version_id: version.id, version: version.name, operations };
+      // The hosted worker needs exact event names from the same immutable version as the selected operations.
+      pins[serviceReference(row.service)] = { service_id: selection.service_id, service_version_id: version.id, version: version.name, operations, webhooks: appWebhooks(selection, row) };
     }
     const serialized = describeSelectionKey(pins);
     // Referentially new callbacks and catalogue refreshes do not count as user edits.
@@ -2272,7 +2281,9 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   };
 
   const serviceInteractions: BuilderServiceInteractions = {
+    // Hosted source always needs exact operation pins even when events are selectable.
     specificOperationsOnly: Boolean(picker),
+    allowWebhooks: pickerAllowsWebhooks(picker),
     expanded,
     loadedServices,
     selections,

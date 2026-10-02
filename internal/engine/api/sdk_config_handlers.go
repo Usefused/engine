@@ -601,9 +601,13 @@ func validateExecutionIdentityAndRuntime(doc sdkConfigDocument) error {
 	if err := validateExecutionSourceMode(doc); err != nil {
 		return err
 	}
-	// MCP discovery settings belong to a hosted MCP declaration.
-	if doc.FusedIntelligentClassifier || strings.TrimSpace(doc.Description) != "" {
+	// Classifier consent belongs only to MCP discovery, not authored app execution.
+	if doc.FusedIntelligentClassifier {
 		return errors.New("Unified App config contains unsupported discovery fields")
+	}
+	// The browser's authored summary is metadata rather than executable source and remains bounded.
+	if len(doc.Description) > models.MCPServerDescriptionMaxBytes {
+		return errors.New("Unified App description is too long")
 	}
 	return nil
 }
@@ -613,10 +617,10 @@ func validExecutionDocumentIdentity(doc sdkConfigDocument) bool {
 	return doc.APIVersion == "fused/v1" && doc.Kind == store.AppKindUnifiedApp.String() && strings.TrimSpace(doc.Name) != "" && validAppVersion(doc.Version)
 }
 
-// validateExecutionOperationScope bounds exact raw selections so bundle admission can verify one finite manifest.
+// validateExecutionOperationScope bounds raw calls while admitting an explicitly selected inbound trigger.
 func validateExecutionOperationScope(services map[string]sdkConfigServiceDoc) error {
-	// A webhook-only selection cannot back the synchronous fused.fetch operation surface.
 	operationCount := 0
+	eventCount := 0
 	for _, service := range services {
 		// Explicit names reserve execute for the authored entry; select_all could include that raw name.
 		if service.SelectAll {
@@ -628,10 +632,15 @@ func validateExecutionOperationScope(services map[string]sdkConfigServiceDoc) er
 			}
 			operationCount++
 		}
+		eventCount += len(service.Webhooks)
+		// An all-event selection is still an explicit inbound capability.
+		if service.WebhooksSelectAll {
+			eventCount++
+		}
 	}
-	// The compiler manifest and Engine runtime cap one App at 64 selected operations.
-	if operationCount == 0 || operationCount > 64 {
-		return errors.New("Unified App config requires 1 to 64 selected operations")
+	// Event-only apps still have a bounded, reviewed capability surface.
+	if operationCount > 64 || (operationCount == 0 && eventCount == 0) {
+		return errors.New("Unified App config requires an event or 1 to 64 selected operations")
 	}
 	return nil
 }
@@ -870,7 +879,7 @@ func validateAppServiceDocs(services map[string]sdkConfigServiceDoc) error {
 		return errors.New("app config requires at least one service")
 	}
 	for name, service := range services {
-		// A service may select only webhooks because SDK streams and MCP resources are complete receive capabilities.
+		// An inbound event is a complete capability for SDK, MCP, and hosted Unified App consumers.
 		if err := validateAppServiceDoc(name, service); err != nil {
 			return err
 		}

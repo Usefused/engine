@@ -10,7 +10,8 @@ function savedApp() {
       kind: "unified_app", name: "customer-app", version: "1.0.0", bucket: "production",
       source: "export default buildUnifiedApp({});", description: "Original description",
       bundle_digest: "sha256:old", source_path: "app.ts", timeout: 1000,
-      services: { Stripe: { version: "v1", operations: ["GetCustomers"], auth: { name: "bearerAuth" }, bucket: "billing" } },
+      webhook_attachment: "payment-events",
+      services: { Stripe: { version: "v1", operations: ["GetCustomers"], webhooks: ["payment.succeeded"], auth: { name: "bearerAuth" }, bucket: "billing" } },
     },
     service_pins: [{ key: "Stripe", service_id: "stripe-id", service_version_id: "stripe-v1" }],
   };
@@ -34,6 +35,8 @@ test("editing preserves family identity, provider overrides and exact pins", () 
   assert.equal(config.services.Stripe.bucket, "billing");
   assert.equal(config.bundle_digest, undefined);
   assert.equal(config.source_path, undefined);
+  assert.equal(config.webhook_attachment, "payment-events");
+  assert.deepEqual(config.services.Stripe.webhooks, ["payment.succeeded"]);
   assert.deepEqual(saved, before);
 });
 
@@ -54,6 +57,16 @@ test("provider replacement does not inherit previous authentication settings", (
   const draft = unifiedEditDraft(saved);
   draft.services.Stripe.service_id = "other-provider";
   assert.equal(unifiedEditConfig(saved, draft, "1.0.1").services.Stripe.auth, undefined);
+});
+
+// Removing the last event from a successor also removes its obsolete registration reference.
+test("editing can remove webhook delivery", () => {
+  const saved = savedApp();
+  const draft = unifiedEditDraft(saved);
+  draft.services.Stripe.webhooks = [];
+  const config = unifiedEditConfig(saved, draft, "1.0.1");
+  assert.equal(config.webhook_attachment, undefined);
+  assert.deepEqual(config.services.Stripe.webhooks, []);
 });
 
 // Existing versions, absent source, and incomplete pins must fail before planning can create side effects.
