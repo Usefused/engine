@@ -157,8 +157,6 @@ const appRuntimeSelectColumns = `a.account_id, a.app_family_id, a.app_id,
 COALESCE(f.mcp_stable_app_id, '00000000-0000-0000-0000-000000000000'::uuid),
 f.owner_subject_id, f.owner_team_id,
 fb.bucket_id, a.scope_schema_version, a.selections,
-a.unified_definition_schema_version, a.unified_definitions,
-a.unified_definition_hash, a.unified_codegen_descriptor_hash,
 a.status, f.kind, a.hosted_mcp, f.display_name,
 COALESCE((
 	SELECT applied.resolved_payload->>'description'
@@ -196,8 +194,7 @@ func scanAppRuntimeRow(row pgx.Row, includeTotal bool) (*AppRuntime, int, error)
 	targets := []any{
 		&scope.AccountID, &scope.AppFamilyID, &scope.AppID, &scope.StableAppID, &ownerSubjectID, &ownerTeamID,
 		&bucketID, &scope.ScopeSchemaVersion, &scope.Selections,
-		&scope.UnifiedDefinitionSchemaVersion, &scope.UnifiedDefinitions,
-		&scope.UnifiedDefinitionHash, &scope.UnifiedCodegenDescriptorHash, &scope.Status,
+		&scope.Status,
 		&scope.Kind, &scope.HostedMCP, &name, &scope.Description, &scope.FusedIntelligentClassifier, &version, &configKey, &scope.CreatedAt,
 	}
 	if includeTotal {

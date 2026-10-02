@@ -42,14 +42,14 @@ export function ExecutionDetailsDrawer({ event, onClose, children, onBack, scrol
   }, [onClose]);
 
   // Logical parents have no provider; retain the authored operation as their navigation context.
-  const service = event.execution_kind === "unified" ? "Unified operation" : event.service_name || event.service_slug || "Service metadata unavailable";
+  const service = event.execution_kind === "unified" ? "Unified App" : event.service_name || event.service_slug || "Service metadata unavailable";
   return <>
     <button type="button" aria-label="Close execution details" className="fixed inset-0 z-40 cursor-default bg-slate-900/20" onClick={onClose} />
     <aside role="dialog" aria-modal="true" aria-labelledby="execution-details-title" className="receipt-drawer-enter fixed inset-y-0 right-0 z-50 flex h-dvh max-h-dvh w-full max-w-full flex-col overflow-hidden border-l border-slate-200 bg-white shadow-2xl md:w-[calc(100vw-4rem)] md:max-w-[940px] xl:max-w-[1080px]">
       <div className="z-10 flex shrink-0 items-center justify-between gap-4 border-b border-slate-100 bg-white/90 px-4 py-4 backdrop-blur sm:px-6">
         <div className="min-w-0">
           {/* Back replaces content in this drawer; it never stacks a second dialog over the first. */}
-          {onBack ? <button type="button" onClick={onBack} className="mb-2 inline-flex items-center gap-1.5 text-xs font-medium text-blue-700 hover:underline"><ArrowLeft className="h-3.5 w-3.5" />Back to Unified</button> : null}
+          {onBack ? <button type="button" onClick={onBack} className="mb-2 inline-flex items-center gap-1.5 text-xs font-medium text-blue-700 hover:underline"><ArrowLeft className="h-3.5 w-3.5" />Back to app execution</button> : null}
           <h2 ref={titleRef} tabIndex={-1} id="execution-details-title" className="text-lg font-semibold text-slate-900 outline-none">Execution details</h2>
           <p className="mt-0.5 truncate text-xs text-slate-500">{service} · {event.transport.toUpperCase()}</p>
         </div>

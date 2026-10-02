@@ -8,7 +8,7 @@ export interface UnifiedStepRow {
 // receiptRequestLabel distinguishes an orchestration from a provider request without inventing a service.
 export function receiptRequestLabel(event: EngineExecutionEventEntry): string {
   // Logical receipts represent several operations and have no single provider route.
-  if (event.execution_kind === "unified") return "Unified operation";
+  if (event.execution_kind === "unified") return "Unified App";
   // Historical physical receipts may predate provider-request metadata.
   return [event.http_method, event.request_path].filter(Boolean).join(" ") || event.direction;
 }

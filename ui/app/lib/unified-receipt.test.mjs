@@ -83,7 +83,7 @@ test("counts logical outcomes independently from compensation and provider attem
 
 // Backward-compatible physical receipts still use the provider route while parents advertise their logical role.
 test("request labels do not invent a provider route for Unified calls", () => {
-  assert.equal(helpers.receiptRequestLabel(parentFixture()), "Unified operation");
+  assert.equal(helpers.receiptRequestLabel(parentFixture()), "Unified App");
   assert.equal(helpers.receiptRequestLabel({ http_method: "GET", request_path: "/items", direction: "outbound" }), "GET /items");
   assert.equal(helpers.receiptRequestLabel({ direction: "outbound" }), "outbound");
   assert.deepEqual(helpers.unifiedStepRows(parentFixture({ unified_steps: undefined }), []), []);
@@ -156,7 +156,7 @@ test("child navigation reuses canonical receipt data and restores parent positio
   assert.match(inspector, /parentScrollTop.current = scrollRef.current\?\.scrollTop/);
   assert.match(inspector, /restoreScrollTop=\{child \? 0 : parentScrollTop.current\}/);
   assert.match(inspector, /<ExecutionDetails event=\{selected\}/);
-  assert.match(drawer, /Back to Unified/);
+  assert.match(drawer, /Back to app execution/);
   assert.match(drawer, /scrollRef.current.scrollTop = restoreScrollTop/);
   assert.match(css, /@keyframes receipt-view-forward/);
   assert.match(css, /@keyframes receipt-view-backward/);

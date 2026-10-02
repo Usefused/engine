@@ -166,7 +166,7 @@ func decodeAppConfigPlanRequest(r *http.Request, kind string) (SDKConfigPlanRequ
 // validateAppConfigDocument enforces the shared app identity while
 // keeping generation-only fields out of an Engine-projected MCP runtime.
 func validateAppConfigDocument(doc sdkConfigDocument, kind string) error {
-	// SDK and MCP admit the same local-only workflow provenance.
+	// SDK and MCP share the same hosted app admission rules.
 	return validateHostedAppDefinition(doc, kind)
 }
 
@@ -229,7 +229,7 @@ func validateMCPServerDescription(doc sdkConfigDocument, kind string) error {
 	return nil
 }
 
-// validateMCPAppRestrictions rejects package-only or unbounded MCP fields before they cross the Unified operation boundary.
+// validateMCPAppRestrictions rejects package-only or unbounded MCP fields before they cross the app configuration boundary.
 func validateMCPAppRestrictions(doc sdkConfigDocument, kind string) error {
 	// SDK documents share this decoder but do not inherit MCP transport restrictions.
 	if kind != store.AppKindMCP.String() {
@@ -495,13 +495,9 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 		serviceBuckets: serviceBuckets,
 		selections:     payload.Selections, scopeSchemaVersion: models.AppScopeSchemaVersion,
 		kind: store.AppKindMCP, name: doc.Name, version: doc.Version, configKey: plan.ConfigKey,
-		description:                    payload.Description,
-		fusedIntelligentClassifier:     payload.FusedIntelligentClassifier,
-		unifiedApps:                    payload.UnifiedApps,
-		unifiedDefinitionSchemaVersion: payload.UnifiedDefinitionSchemaVersion,
-		unifiedDefinitions:             payload.UnifiedDefinitions,
-		unifiedDefinitionHash:          payload.UnifiedDefinitionHash,
-		unifiedCodegenDescriptorHash:   payload.UnifiedCodegenDescriptorHash,
+		description:                payload.Description,
+		fusedIntelligentClassifier: payload.FusedIntelligentClassifier,
+		unifiedApps:                payload.UnifiedApps,
 	})
 	// Runtime scope must be complete before publishing any family version.
 	if err != nil {

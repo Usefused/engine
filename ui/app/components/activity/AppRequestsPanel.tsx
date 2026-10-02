@@ -126,7 +126,7 @@ export function AppRequestsPanel({ appId, consumerName, transport }: AppRequests
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
         <div className="min-w-0 basis-72 flex-1">
           <h3 className="text-sm font-semibold text-slate-900">Execution receipts</h3>
-          <p className="mt-0.5 text-xs text-slate-500">Individual and Unified calls through this {transport === "mcp" ? "MCP server" : "app"}. Open a Unified call to inspect its executions.</p>
+          <p className="mt-0.5 text-xs text-slate-500">Service calls and Unified App runs through this {transport === "mcp" ? "MCP server" : "app"}. Open a run to inspect its service calls.</p>
         </div>
 		<div className="grid w-full grid-cols-1 gap-2 sm:ml-auto sm:flex sm:w-auto sm:shrink-0 sm:items-center">
 

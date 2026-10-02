@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { URL } from "node:url";
 
-// Physical and unified operations use this same responsive table.
+// Service operations and Unified Apps use this same responsive table.
 const sidebarSource = readFileSync(
   new URL("../components/OperationDetailsParts.tsx", import.meta.url),
   "utf8"

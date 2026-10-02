@@ -993,16 +993,12 @@ func publishConfigAppTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, para
 		BundleDigest:   params.Scope.BundleDigest,
 		CapabilityHash: capabilityHash, CapabilityKeys: capabilityKeys,
 		ScopeSchemaVersion: params.Scope.ScopeSchemaVersion, Selections: params.Scope.Selections,
-		UnifiedDefinitionSchemaVersion: params.Scope.UnifiedDefinitionSchemaVersion,
-		UnifiedDefinitions:             params.Scope.UnifiedDefinitions,
-		UnifiedDefinitionHash:          params.Scope.UnifiedDefinitionHash,
-		UnifiedCodegenDescriptorHash:   params.Scope.UnifiedCodegenDescriptorHash,
-		GeneratorVersion:               params.GeneratorVersion,
-		SDKGenerationJobID:             params.SDKGenerationJobID,
-		SDKGenerationStatus:            params.SDKGenerationStatus,
-		HostedMCP:                      params.Scope.HostedMCP,
-		Status:                         status,
-		ExpectedFamilyKind:             params.Scope.Kind,
+		GeneratorVersion:    params.GeneratorVersion,
+		SDKGenerationJobID:  params.SDKGenerationJobID,
+		SDKGenerationStatus: params.SDKGenerationStatus,
+		HostedMCP:           params.Scope.HostedMCP,
+		Status:              status,
+		ExpectedFamilyKind:  params.Scope.Kind,
 	}
 	persisted, created, err := publishAppVersionTx(ctx, tx, app)
 	if err != nil {

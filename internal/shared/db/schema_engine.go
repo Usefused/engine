@@ -8,10 +8,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const (
-	unifiedEmptySetHash = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-)
-
 // mcpSessionEndReasonConstraint keeps every durable session termination cause on the clean schema.
 const mcpSessionEndReasonConstraint = `CONSTRAINT chk_fused_mcp_sessions_end_reason CHECK (
 	end_reason IS NULL OR end_reason IN (
@@ -1386,10 +1382,6 @@ func engineSchemaQueries() []string {
 			capability_hash        text NOT NULL DEFAULT '',
 			scope_schema_version   integer NOT NULL DEFAULT 1,
 			selections             jsonb NOT NULL DEFAULT '[]'::jsonb,
-			unified_definition_schema_version integer NOT NULL DEFAULT 3,
-			unified_definitions    jsonb NOT NULL DEFAULT '[]'::jsonb,
-			unified_definition_hash text NOT NULL DEFAULT '` + unifiedEmptySetHash + `',
-			unified_codegen_descriptor_hash text NOT NULL DEFAULT '` + unifiedEmptySetHash + `',
 			generator_version      text,
 			sdk_generation_job_id  text,
 			sdk_generation_status  text CONSTRAINT chk_fused_apps_sdk_generation_status CHECK (sdk_generation_status IS NULL OR sdk_generation_status IN ('pending', 'complete', 'failed', 'skipped')),
@@ -1433,16 +1425,7 @@ func engineSchemaQueries() []string {
 			UNIQUE (account_id, config_key),
 			FOREIGN KEY (app_family_id, account_id)
 				REFERENCES fused_app_families(app_family_id, account_id)
-				ON DELETE RESTRICT,
-			CONSTRAINT chk_fused_apps_unified_definition_shape CHECK (
-				unified_definition_schema_version = 3
-				AND jsonb_typeof(unified_definitions) = 'array'
-				AND octet_length(unified_definitions::text) <= 1048576
-			),
-			CONSTRAINT chk_fused_apps_unified_hashes CHECK (
-				unified_definition_hash ~ '^sha256:[0-9a-f]{64}$'
-				AND unified_codegen_descriptor_hash ~ '^sha256:[0-9a-f]{64}$'
-			)
+				ON DELETE RESTRICT
 		);`,
 		// Existing app-family Engines gain durable SDK build recovery columns in
 		// place; no app identity or runtime selection is rewritten.
@@ -1967,7 +1950,7 @@ func engineSchemaQueries() []string {
 	}
 	queries = append(queries, oauthProviderSchemaQueries()...)
 	queries = append(queries, managedAuthBrokerSchemaQueries()...)
-	return append(queries, unifiedSchemaConvergenceQueries()...)
+	return queries
 }
 
 // oauthProviderSchemaQueries declares Engine's own OAuth2 authorization-server
@@ -2163,74 +2146,5 @@ func managedAuthBrokerSchemaQueries() []string {
  created_at timestamptz NOT NULL DEFAULT NOW(),
  PRIMARY KEY(service_id,auth_name)
  );`,
-	}
-}
-
-// unifiedSchemaConvergenceQueries makes v3 the only writable Unified shape.
-// Earlier immutable rows remain inert history until their SDKs are reapplied;
-// they are never decoded, relabeled, or rewritten as the current contract.
-func unifiedSchemaConvergenceQueries() []string {
-	return []string{
-		`ALTER TABLE fused_apps ADD COLUMN IF NOT EXISTS unified_definition_schema_version integer NOT NULL DEFAULT 3;`,
-		`ALTER TABLE fused_apps ADD COLUMN IF NOT EXISTS unified_definitions jsonb NOT NULL DEFAULT '[]'::jsonb;`,
-		`ALTER TABLE fused_apps ADD COLUMN IF NOT EXISTS unified_definition_hash text NOT NULL DEFAULT '` + unifiedEmptySetHash + `';`,
-		`ALTER TABLE fused_apps ADD COLUMN IF NOT EXISTS unified_codegen_descriptor_hash text NOT NULL DEFAULT '` + unifiedEmptySetHash + `';`,
-		`ALTER TABLE fused_apps ALTER COLUMN unified_definition_schema_version SET DEFAULT 3;`,
-		`ALTER TABLE fused_apps ALTER COLUMN unified_definitions SET DEFAULT '[]'::jsonb;`,
-		`ALTER TABLE fused_apps ALTER COLUMN unified_definition_hash SET DEFAULT '` + unifiedEmptySetHash + `';`,
-		`ALTER TABLE fused_apps ALTER COLUMN unified_codegen_descriptor_hash SET DEFAULT '` + unifiedEmptySetHash + `';`,
-		`ALTER TABLE fused_apps ALTER COLUMN unified_definition_schema_version SET NOT NULL;`,
-		`ALTER TABLE fused_apps ALTER COLUMN unified_definitions SET NOT NULL;`,
-		`ALTER TABLE fused_apps ALTER COLUMN unified_definition_hash SET NOT NULL;`,
-		`ALTER TABLE fused_apps ALTER COLUMN unified_codegen_descriptor_hash SET NOT NULL;`,
-		`DO $$
-		BEGIN
-			-- The lock serializes constraint replacement across concurrent Engine startups.
-			LOCK TABLE fused_apps IN SHARE ROW EXCLUSIVE MODE;
-			-- Replace any earlier definition-shape constraint with the single v3 write contract.
-			IF EXISTS (
-				SELECT 1
-				FROM pg_constraint
-				WHERE conrelid = 'fused_apps'::regclass
-				  AND conname = 'chk_fused_apps_unified_definition_shape'
-				  AND pg_get_constraintdef(oid) NOT LIKE '%unified_definition_schema_version = 3%'
-			) THEN
-				ALTER TABLE fused_apps DROP CONSTRAINT chk_fused_apps_unified_definition_shape;
-			END IF;
-			-- NOT VALID preserves immutable history while enforcing v3 on every new write.
-			IF NOT EXISTS (
-				SELECT 1
-				FROM pg_constraint
-				WHERE conrelid = 'fused_apps'::regclass
-				  AND conname = 'chk_fused_apps_unified_definition_shape'
-			) THEN
-				ALTER TABLE fused_apps ADD CONSTRAINT chk_fused_apps_unified_definition_shape CHECK (
-					unified_definition_schema_version = 3
-					AND jsonb_typeof(unified_definitions) = 'array'
-					AND octet_length(unified_definitions::text) <= 1048576
-				) NOT VALID;
-			END IF;
-			-- A clean or pre-Unified database can validate immediately; older immutable
-			-- rows keep the constraint unvalidated until their app versions are removed.
-			IF NOT EXISTS (
-				SELECT 1 FROM fused_apps
-				WHERE unified_definition_schema_version <> 3
-			) THEN
-				ALTER TABLE fused_apps VALIDATE CONSTRAINT chk_fused_apps_unified_definition_shape;
-			END IF;
-			-- Existing hash constraints stay untouched to avoid repeated table validation.
-			IF NOT EXISTS (
-				SELECT 1
-				FROM pg_constraint
-				WHERE conrelid = 'fused_apps'::regclass
-				  AND conname = 'chk_fused_apps_unified_hashes'
-			) THEN
-				ALTER TABLE fused_apps ADD CONSTRAINT chk_fused_apps_unified_hashes CHECK (
-					unified_definition_hash ~ '^sha256:[0-9a-f]{64}$'
-					AND unified_codegen_descriptor_hash ~ '^sha256:[0-9a-f]{64}$'
-				);
-			END IF;
-		END
-		$$;`,
 	}
 }

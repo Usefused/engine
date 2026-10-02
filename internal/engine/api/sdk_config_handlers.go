@@ -213,26 +213,22 @@ type appResolvedPayload struct {
 	// (not the authored config key, so apply-time re-verification and
 	// persistence survive a service being re-keyed between plan and apply).
 	// Services without an entry resolve through BucketID (the family default).
-	ServiceBuckets                 map[uuid.UUID]appResolvedBucketRef `json:"service_buckets,omitempty"`
-	Name                           string                             `json:"name,omitempty"`
-	Description                    string                             `json:"description,omitempty"`
-	FusedIntelligentClassifier     bool                               `json:"fused-intelligent-classifier,omitempty"`
-	Version                        string                             `json:"version,omitempty"`
-	Selections                     []models.SDKSelection              `json:"selections"`
-	IncludeMCP                     bool                               `json:"include_mcp,omitempty"`
-	HostedMCP                      bool                               `json:"hosted_mcp,omitempty"`
-	TargetType                     string                             `json:"target_type,omitempty"`
-	TargetLanguage                 string                             `json:"target_language,omitempty"`
-	DefaultEngineURL               string                             `json:"default_engine_url,omitempty"`
-	SkipSandbox                    bool                               `json:"skip_sandbox,omitempty"`
-	SkipPackaging                  bool                               `json:"skip_packaging,omitempty"`
-	ContractBindings               []sdkContractBinding               `json:"contract_bindings,omitempty"`
-	CredentialSourceBindings       []sdkContractBinding               `json:"credential_source_bindings,omitempty"`
-	UnifiedDefinitionSchemaVersion int                                `json:"unified_definition_schema_version,omitempty"`
-	UnifiedDefinitions             json.RawMessage                    `json:"unified_definitions,omitempty"`
-	UnifiedDefinitionHash          string                             `json:"unified_definition_hash,omitempty"`
-	UnifiedCodegenDescriptorHash   string                             `json:"unified_codegen_descriptor_hash,omitempty"`
-	ExecutionBundle                *executionPlanArtifact             `json:"execution_bundle,omitempty"`
+	ServiceBuckets             map[uuid.UUID]appResolvedBucketRef `json:"service_buckets,omitempty"`
+	Name                       string                             `json:"name,omitempty"`
+	Description                string                             `json:"description,omitempty"`
+	FusedIntelligentClassifier bool                               `json:"fused-intelligent-classifier,omitempty"`
+	Version                    string                             `json:"version,omitempty"`
+	Selections                 []models.SDKSelection              `json:"selections"`
+	IncludeMCP                 bool                               `json:"include_mcp,omitempty"`
+	HostedMCP                  bool                               `json:"hosted_mcp,omitempty"`
+	TargetType                 string                             `json:"target_type,omitempty"`
+	TargetLanguage             string                             `json:"target_language,omitempty"`
+	DefaultEngineURL           string                             `json:"default_engine_url,omitempty"`
+	SkipSandbox                bool                               `json:"skip_sandbox,omitempty"`
+	SkipPackaging              bool                               `json:"skip_packaging,omitempty"`
+	ContractBindings           []sdkContractBinding               `json:"contract_bindings,omitempty"`
+	CredentialSourceBindings   []sdkContractBinding               `json:"credential_source_bindings,omitempty"`
+	ExecutionBundle            *executionPlanArtifact             `json:"execution_bundle,omitempty"`
 }
 
 type sdkPlanCall struct {
@@ -536,10 +532,9 @@ func rejectRemovedSDKConfigFields(raw json.RawMessage) error {
 	return nil
 }
 
-// validateSDKConfigDocument admits app identity, workflow provenance, and the shared executable graph.
+// validateSDKConfigDocument validates identity, delivery, and selected services before app attachment.
 func validateSDKConfigDocument(doc sdkConfigDocument) error {
-	// Malformed provenance must not enter immutable app state.
-	// Invalid package identity must fail before service or graph compilation.
+	// Invalid package identity must fail before resolving services or app attachments.
 	if err := validateSDKIdentity(doc); err != nil {
 		return err
 	}
@@ -589,7 +584,7 @@ func validateUnifiedAppConfigDocument(doc sdkConfigDocument) error {
 	return validateExecutionOperationScope(doc.Services)
 }
 
-// validateExecutionIdentityAndRuntime prevents package or graph declarations from entering a hosted execute plan.
+// validateExecutionIdentityAndRuntime validates hosted source identity and rejects unsupported runtime declarations.
 func validateExecutionIdentityAndRuntime(doc sdkConfigDocument) error {
 	// No authored code can be attached unless the compiler identity was planned exactly.
 	if !validExecutionDocumentIdentity(doc) {
@@ -2788,7 +2783,7 @@ func decodeSDKConfigApplyRequest(r *http.Request) (SDKConfigApplyRequest, uuid.U
 	return req, planID, nil
 }
 
-// executeSDKConfigApply routes admitted work through the canonical Unified operation boundary and accounting path.
+// executeSDKConfigApply routes admitted work through the canonical app publication boundary and accounting path.
 func executeSDKConfigApply(
 	ctx context.Context,
 	configStore store.ConfigRepository,
@@ -3090,7 +3085,7 @@ func prepareSDKGenerationForApply(
 	return sdkGenerationApplyInput{plan: plan, existingConfigResourceID: existing, payload: generationPayload}, nil
 }
 
-// reserveSDKGenerationIdentity persists Unified operation identity atomically while preserving immutability checks.
+// reserveSDKGenerationIdentity persists immutable app identity atomically while preserving immutability checks.
 func reserveSDKGenerationIdentity(ctx context.Context, s store.Store, call sdkApplyCall, plan *store.ConfigPlan, doc sdkConfigDocument, resolved appResolvedPayload) (uuid.UUID, uuid.UUID, uuid.UUID, error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.sdk_config.reserve_identity")
 	defer span.End()
@@ -3118,7 +3113,7 @@ func reserveSDKGenerationIdentity(ctx context.Context, s store.Store, call sdkAp
 	if err != nil {
 		return uuid.Nil, uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app_family_conflict"}
 	}
-	appID, existingID, err := reserveSDKVersionIdentityWithUnified(ctx, s, call.planID, family.AppFamilyID, doc.Version, plan.SourceHash, doc.BundleDigest, resolved)
+	appID, existingID, err := reserveSDKVersionIdentityWithRuntime(ctx, s, call.planID, family.AppFamilyID, doc.Version, plan.SourceHash, doc.BundleDigest, resolved)
 	if err != nil {
 		return uuid.Nil, uuid.Nil, uuid.Nil, err
 	}
@@ -3257,18 +3252,13 @@ func sdkConfigDeliveryMode(doc sdkConfigDocument) store.AppDeliveryMode {
 	return store.AppDeliveryModeSDK
 }
 
-// reserveSDKVersionIdentity persists Unified operation identity atomically while preserving immutability checks.
+// reserveSDKVersionIdentity persists immutable app identity atomically while preserving immutability checks.
 func reserveSDKVersionIdentity(ctx context.Context, s store.Store, planID, familyID uuid.UUID, version, sourceHash string) (uuid.UUID, uuid.UUID, error) {
-	return reserveSDKVersionIdentityWithUnified(ctx, s, planID, familyID, version, sourceHash, "", appResolvedPayload{
-		UnifiedDefinitionSchemaVersion: store.UnifiedDefinitionSchemaVersion,
-		UnifiedDefinitions:             json.RawMessage("[]"),
-		UnifiedDefinitionHash:          store.EmptyUnifiedSetHash,
-		UnifiedCodegenDescriptorHash:   store.EmptyUnifiedSetHash,
-	})
+	return reserveSDKVersionIdentityWithRuntime(ctx, s, planID, familyID, version, sourceHash, "", appResolvedPayload{})
 }
 
-// reserveSDKVersionIdentityWithUnified persists Unified operation identity atomically while preserving immutability checks.
-func reserveSDKVersionIdentityWithUnified(ctx context.Context, s store.Store, planID, familyID uuid.UUID, version, sourceHash, bundleDigest string, resolved appResolvedPayload) (uuid.UUID, uuid.UUID, error) {
+// reserveSDKVersionIdentityWithRuntime persists immutable app identity atomically while preserving immutability checks.
+func reserveSDKVersionIdentityWithRuntime(ctx context.Context, s store.Store, planID, familyID uuid.UUID, version, sourceHash, bundleDigest string, resolved appResolvedPayload) (uuid.UUID, uuid.UUID, error) {
 	tombstoned, err := s.AppTombstoneExists(ctx, familyID, version)
 	// Failed identity reads never prove that a version may be reused.
 	if err != nil {
@@ -3288,7 +3278,7 @@ func reserveSDKVersionIdentityWithUnified(ctx context.Context, s store.Store, pl
 		return uuid.Nil, uuid.Nil, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed_to_check_app_version"}
 	}
 	// Repeat code and scope immutability at apply so a reused source label cannot swap compiler output.
-	if existing.SourceHash != sourceHash || existing.BundleDigest != bundleDigest || !existingAppMatchesResolvedUnified(existing, resolved) {
+	if existing.SourceHash != sourceHash || existing.BundleDigest != bundleDigest || existing.HostedMCP != resolved.HostedMCP {
 		return uuid.Nil, uuid.Nil, immutableAppVersionError("apply_admission")
 	}
 	return existing.AppID, existing.AppID, nil
@@ -3297,28 +3287,6 @@ func reserveSDKVersionIdentityWithUnified(ctx context.Context, s store.Store, pl
 // immutableAppVersionError preserves known non-commit through the generic apply error wrapper.
 func immutableAppVersionError(phase string) workspaceConfigHTTPError {
 	return workspaceConfigHTTPError{status: http.StatusConflict, code: "app_version_immutable", message: "app_version_immutable", category: "conflict", phase: phase, commitState: "not_committed", remediation: "Choose a new app version, then run plan and apply again."}
-}
-
-// existingAppMatchesResolvedUnified treats legacy empty fields as the canonical empty set before immutability comparison.
-func existingAppMatchesResolvedUnified(existing *store.App, resolved appResolvedPayload) bool {
-	schemaVersion := existing.UnifiedDefinitionSchemaVersion
-	definitionHash := existing.UnifiedDefinitionHash
-	descriptorHash := existing.UnifiedCodegenDescriptorHash
-	// versions published before Unified fields existed represent the same
-	// immutable empty definition set, rather than a distinct invalid contract.
-	if schemaVersion == 0 {
-		schemaVersion = store.UnifiedDefinitionSchemaVersion
-	}
-	if definitionHash == "" {
-		definitionHash = store.EmptyUnifiedSetHash
-	}
-	if descriptorHash == "" {
-		descriptorHash = store.EmptyUnifiedSetHash
-	}
-	return schemaVersion == resolved.UnifiedDefinitionSchemaVersion &&
-		existing.HostedMCP == resolved.HostedMCP &&
-		definitionHash == resolved.UnifiedDefinitionHash &&
-		descriptorHash == resolved.UnifiedCodegenDescriptorHash
 }
 
 func runTrackedSDKGeneration(ctx context.Context, proxy Forwarder, apiKey string, payload json.RawMessage) (sdkGenerationResult, error) {
@@ -4283,13 +4251,9 @@ type persistAppRuntimeParams struct {
 	generatorVersion           string
 	// Generation identity is mutable lifecycle state for SDK building recovery,
 	// not part of the immutable runtime selection contract.
-	generationJobID                string
-	generationStatus               string
-	unifiedDefinitionSchemaVersion int
-	unifiedDefinitions             json.RawMessage
-	unifiedDefinitionHash          string
-	unifiedCodegenDescriptorHash   string
-	executionBundle                *store.UnifiedAppBundle
+	generationJobID  string
+	generationStatus string
+	executionBundle  *store.UnifiedAppBundle
 }
 
 // appRuntimeForApply copies compiled private definitions and hashes into the immutable runtime record.
@@ -4305,26 +4269,22 @@ func appRuntimeForApply(p persistAppRuntimeParams) (store.AppRuntime, error) {
 		return store.AppRuntime{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "app selections are invalid"}
 	}
 	return store.AppRuntime{
-		UnifiedApps:                    p.unifiedApps,
-		AccountID:                      p.accountID,
-		AppID:                          p.appID,
-		OwnerSubjectID:                 p.ownerSubjectID,
-		OwnerTeamID:                    p.ownerTeamID,
-		BucketID:                       p.bucketID,
-		Selections:                     selections,
-		ScopeSchemaVersion:             p.scopeSchemaVersion,
-		UnifiedDefinitionSchemaVersion: p.unifiedDefinitionSchemaVersion,
-		UnifiedDefinitions:             append([]byte(nil), p.unifiedDefinitions...),
-		UnifiedDefinitionHash:          p.unifiedDefinitionHash,
-		UnifiedCodegenDescriptorHash:   p.unifiedCodegenDescriptorHash,
-		Kind:                           p.kind,
-		Name:                           p.name,
-		Description:                    p.description,
-		FusedIntelligentClassifier:     p.fusedIntelligentClassifier,
-		HostedMCP:                      p.hostedMCP,
-		BundleDigest:                   p.bundleDigest,
-		Version:                        p.version,
-		ConfigKey:                      p.configKey,
+		UnifiedApps:                p.unifiedApps,
+		AccountID:                  p.accountID,
+		AppID:                      p.appID,
+		OwnerSubjectID:             p.ownerSubjectID,
+		OwnerTeamID:                p.ownerTeamID,
+		BucketID:                   p.bucketID,
+		Selections:                 selections,
+		ScopeSchemaVersion:         p.scopeSchemaVersion,
+		Kind:                       p.kind,
+		Name:                       p.name,
+		Description:                p.description,
+		FusedIntelligentClassifier: p.fusedIntelligentClassifier,
+		HostedMCP:                  p.hostedMCP,
+		BundleDigest:               p.bundleDigest,
+		Version:                    p.version,
+		ConfigKey:                  p.configKey,
 	}, nil
 }
 
@@ -4363,7 +4323,7 @@ func appSelectionSchemaMismatchError() error {
 	return workspaceConfigHTTPError{status: http.StatusConflict, message: "app_selection_schema_version_mismatch"}
 }
 
-// applyGeneratedAppRuntime persists Unified operation identity atomically while preserving immutability checks.
+// applyGeneratedAppRuntime persists immutable app identity atomically while preserving immutability checks.
 func applyGeneratedAppRuntime(
 	ctx context.Context,
 	configStore store.ConfigRepository,
@@ -4398,34 +4358,30 @@ func applyGeneratedAppRuntime(
 		return "", uuid.Nil, uuid.Nil, false, err
 	}
 	return applyAppConfigPlan(ctx, configStore, s, call, plan, persistAppRuntimeParams{
-		accountID:                      call.accountID,
-		appID:                          result.AppID,
-		ownerSubjectID:                 planOwnerSubjectID(plan),
-		ownerTeamID:                    planOwnerTeamID(plan),
-		bucketID:                       payload.BucketID,
-		bucketName:                     doc.Bucket,
-		serviceBuckets:                 serviceBuckets,
-		selections:                     selections,
-		scopeSchemaVersion:             result.ScopeSchemaVersion,
-		kind:                           appKindFromDocument(doc),
-		name:                           doc.Name,
-		version:                        doc.Version,
-		configKey:                      plan.ConfigKey,
-		description:                    payload.Description,
-		fusedIntelligentClassifier:     payload.FusedIntelligentClassifier,
-		hostedMCP:                      payload.HostedMCP,
-		bundleDigest:                   doc.BundleDigest,
-		targetLanguage:                 payload.TargetLanguage,
-		sourceHash:                     plan.SourceHash,
-		generatorVersion:               appGeneratorVersionForApply(doc, result),
-		unifiedApps:                    payload.UnifiedApps,
-		unifiedDefinitionSchemaVersion: payload.UnifiedDefinitionSchemaVersion,
-		unifiedDefinitions:             payload.UnifiedDefinitions,
-		unifiedDefinitionHash:          payload.UnifiedDefinitionHash,
-		unifiedCodegenDescriptorHash:   payload.UnifiedCodegenDescriptorHash,
-		generationJobID:                result.JobID,
-		generationStatus:               appGenerationStatusForApply(doc, result),
-		executionBundle:                executionBundle,
+		accountID:                  call.accountID,
+		appID:                      result.AppID,
+		ownerSubjectID:             planOwnerSubjectID(plan),
+		ownerTeamID:                planOwnerTeamID(plan),
+		bucketID:                   payload.BucketID,
+		bucketName:                 doc.Bucket,
+		serviceBuckets:             serviceBuckets,
+		selections:                 selections,
+		scopeSchemaVersion:         result.ScopeSchemaVersion,
+		kind:                       appKindFromDocument(doc),
+		name:                       doc.Name,
+		version:                    doc.Version,
+		configKey:                  plan.ConfigKey,
+		description:                payload.Description,
+		fusedIntelligentClassifier: payload.FusedIntelligentClassifier,
+		hostedMCP:                  payload.HostedMCP,
+		bundleDigest:               doc.BundleDigest,
+		targetLanguage:             payload.TargetLanguage,
+		sourceHash:                 plan.SourceHash,
+		generatorVersion:           appGeneratorVersionForApply(doc, result),
+		unifiedApps:                payload.UnifiedApps,
+		generationJobID:            result.JobID,
+		generationStatus:           appGenerationStatusForApply(doc, result),
+		executionBundle:            executionBundle,
 	})
 }
 
@@ -4607,7 +4563,7 @@ func validateSDKGenerationResult(payload json.RawMessage, call sdkApplyCall, res
 	return nil
 }
 
-// validateSDKGenerationResultEnvelope rejects malformed sdk generation result envelope before it can cross the Unified operation boundary.
+// validateSDKGenerationResultEnvelope rejects malformed sdk generation result envelope before it can cross the app publication boundary.
 func validateSDKGenerationResultEnvelope(call sdkApplyCall, result models.SDKGenerationResult) error {
 	if result.AppID == uuid.Nil {
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: "app_id_required"}

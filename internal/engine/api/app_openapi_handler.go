@@ -93,7 +93,7 @@ func validAppOpenAPIFamilyIdentity(family *store.AppFamily, app *store.App, acco
 }
 
 // buildAppOpenAPIDocument composes the one stable REST route from immutable
-// physical selections and Unified definitions, then enforces the response cap.
+// selected service operations, then enforces the response cap.
 func buildAppOpenAPIDocument(ctx context.Context, contracts appOpenAPIContractStore, app *store.App, family *store.AppFamily, operationFilter string) ([]byte, error) {
 	return buildAppOpenAPIDocumentWithBundle(ctx, contracts, nil, app, family, operationFilter)
 }

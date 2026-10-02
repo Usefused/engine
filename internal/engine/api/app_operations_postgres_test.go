@@ -34,7 +34,7 @@ type mcpOperationPostgresFixture struct {
 	createEndpointID uuid.UUID
 }
 
-// TestLoadMCPAppOperationCatalogueFromPostgres verifies select-all expansion and Unified discovery use persisted exact-version authority.
+// TestLoadMCPAppOperationCatalogueFromPostgres verifies select-all discovery use persisted exact-version authority.
 func TestLoadMCPAppOperationCatalogueFromPostgres(t *testing.T) {
 	fixture := openMCPAppOperationPostgresFixture(t)
 	fixture.seedTeamAndSnapshot(t)
@@ -152,10 +152,7 @@ func (fixture mcpOperationPostgresFixture) seedMCPVersion(t *testing.T) {
 		AppID: fixture.appID, AppFamilyID: family.AppFamilyID, AccountID: fixture.accountID, Version: "2.0.0",
 		ConfigKey: configKey, SourceHash: sourceHash, CapabilityHash: "mcp-operation-test",
 		ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selectionsJSON,
-		UnifiedDefinitionSchemaVersion: store.UnifiedDefinitionSchemaVersion,
-		UnifiedDefinitions:             []byte("[]"), UnifiedDefinitionHash: store.EmptyUnifiedSetHash,
-		UnifiedCodegenDescriptorHash: store.EmptyUnifiedSetHash,
-		Status:                       store.AppStatusActive, ExpectedFamilyKind: store.AppKindMCP,
+		Status: store.AppStatusActive, ExpectedFamilyKind: store.AppKindMCP,
 	})
 	// Publication freezes the exact service selection for the physical catalogue.
 	if err != nil {

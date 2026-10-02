@@ -249,7 +249,6 @@ func (s *postgresStore) PublishAppVersion(ctx context.Context, app App) (*App, b
 // app publication. Standalone lifecycle operations and atomic config apply both
 // use it so tombstone, immutability, and capability semantics cannot drift.
 func publishAppVersionTx(ctx context.Context, tx pgx.Tx, app App) (*App, bool, error) {
-	app = withUnifiedDefaults(app)
 	if err := lockAppFamily(ctx, tx, app); err != nil {
 		return nil, false, err
 	}
@@ -333,37 +332,14 @@ func promoteStableMCPVersionTx(ctx context.Context, tx pgx.Tx, app App) error {
 	return nil
 }
 
-// withUnifiedDefaults maps legacy callers to the canonical empty Unified definition set before publication.
-func withUnifiedDefaults(app App) App {
-	// Existing SDK/MCP callers carry no Unified fields. Giving the empty set a
-	// canonical identity here keeps every publication path on the same immutable
-	// contract without making adapters duplicate defaults.
-	if app.UnifiedDefinitionSchemaVersion == 0 {
-		app.UnifiedDefinitionSchemaVersion = UnifiedDefinitionSchemaVersion
-	}
-	if len(app.UnifiedDefinitions) == 0 {
-		app.UnifiedDefinitions = []byte("[]")
-	}
-	if app.UnifiedDefinitionHash == "" {
-		app.UnifiedDefinitionHash = EmptyUnifiedSetHash
-	}
-	if app.UnifiedCodegenDescriptorHash == "" {
-		app.UnifiedCodegenDescriptorHash = EmptyUnifiedSetHash
-	}
-	return app
-}
-
-// sameImmutableAppVersion compares private definitions and hashes alongside the existing immutable app scope.
+// sameImmutableAppVersion compares compiled code identity and the immutable provider scope.
 func sameImmutableAppVersion(existing, requested App) bool {
-	existing = withUnifiedDefaults(existing)
-	requested = withUnifiedDefaults(requested)
 	// Scalar identity and semantic JSON are checked separately to keep immutable comparison reviewable.
 	return sameImmutableAppScalars(existing, requested) &&
-		sameJSONDocument(existing.Selections, requested.Selections) &&
-		sameJSONDocument(existing.UnifiedDefinitions, requested.UnifiedDefinitions)
+		sameJSONDocument(existing.Selections, requested.Selections)
 }
 
-// sameImmutableAppScalars pins code bytes, source authority, and private graph hashes for one version.
+// sameImmutableAppScalars pins code bytes, source authority, and provider scope for one version.
 func sameImmutableAppScalars(existing, requested App) bool {
 	// The compiler output is version identity even when the caller reuses a source label.
 	return sameImmutableCodeScalars(existing, requested) && sameImmutableScopeScalars(existing, requested)
@@ -372,10 +348,7 @@ func sameImmutableAppScalars(existing, requested App) bool {
 // sameImmutableCodeScalars binds exact compiler output to source and generation provenance.
 func sameImmutableCodeScalars(existing, requested App) bool {
 	return existing.SourceHash == requested.SourceHash && existing.BundleDigest == requested.BundleDigest &&
-		existing.ConfigKey == requested.ConfigKey && existing.GeneratorVersion == requested.GeneratorVersion &&
-		existing.UnifiedDefinitionSchemaVersion == requested.UnifiedDefinitionSchemaVersion &&
-		existing.UnifiedDefinitionHash == requested.UnifiedDefinitionHash &&
-		existing.UnifiedCodegenDescriptorHash == requested.UnifiedCodegenDescriptorHash
+		existing.ConfigKey == requested.ConfigKey && existing.GeneratorVersion == requested.GeneratorVersion
 }
 
 // sameImmutableScopeScalars keeps selected provider authority and hosted transport immutable per version.
@@ -520,24 +493,20 @@ func rejectTombstonedVersion(ctx context.Context, tx pgx.Tx, familyID uuid.UUID,
 	return nil
 }
 
-// insertApp writes one immutable app version together with its private Unified definitions and hashes.
+// insertApp writes the immutable code and provider scope in one publication transaction.
 func insertApp(ctx context.Context, tx pgx.Tx, app App) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO fused_apps
 			(app_id, app_family_id, account_id, version, config_key,
 			 source_hash, bundle_digest, capability_hash, scope_schema_version, selections,
-			 unified_definition_schema_version, unified_definitions,
-			 unified_definition_hash, unified_codegen_descriptor_hash,
 			 generator_version, sdk_generation_job_id, sdk_generation_status, hosted_mcp,
 			 status, created_by, activated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9, $10, $11, $12, $13, $14,
-		        NULLIF($15, ''), NULLIF($16, ''), NULLIF($17, ''), $18, $19,
-		        NULLIF($20, '00000000-0000-0000-0000-000000000000'::uuid),
-		        CASE WHEN $19 = 'active' THEN NOW() ELSE NULL END)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9, $10,
+		        NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, ''), $14, $15,
+		        NULLIF($16, '00000000-0000-0000-0000-000000000000'::uuid),
+		        CASE WHEN $15 = 'active' THEN NOW() ELSE NULL END)
 	`, app.AppID, app.AppFamilyID, app.AccountID, app.Version, app.ConfigKey,
 		app.SourceHash, app.BundleDigest, app.CapabilityHash, app.ScopeSchemaVersion, app.Selections,
-		app.UnifiedDefinitionSchemaVersion, app.UnifiedDefinitions,
-		app.UnifiedDefinitionHash, app.UnifiedCodegenDescriptorHash,
 		app.GeneratorVersion, app.SDKGenerationJobID, app.SDKGenerationStatus,
 		app.HostedMCP, app.Status, app.CreatedBy)
 	if err != nil {
@@ -549,8 +518,6 @@ func insertApp(ctx context.Context, tx pgx.Tx, app App) error {
 const appSelect = `
 SELECT a.app_id, a.app_family_id, a.account_id, a.version, a.config_key,
        a.source_hash, COALESCE(a.bundle_digest, ''), a.capability_hash, a.scope_schema_version, a.selections,
-       a.unified_definition_schema_version, a.unified_definitions,
-	       a.unified_definition_hash, a.unified_codegen_descriptor_hash,
 	       COALESCE(a.generator_version, ''),
 	       COALESCE(a.sdk_generation_job_id, ''), COALESCE(a.sdk_generation_status, ''),
 	       a.hosted_mcp, a.status,
@@ -762,8 +729,6 @@ func scanApp(row pgx.Row) (*App, error) {
 	var depMsg string
 	err := row.Scan(&a.AppID, &a.AppFamilyID, &a.AccountID, &a.Version, &a.ConfigKey,
 		&a.SourceHash, &a.BundleDigest, &a.CapabilityHash, &a.ScopeSchemaVersion, &a.Selections,
-		&a.UnifiedDefinitionSchemaVersion, &a.UnifiedDefinitions,
-		&a.UnifiedDefinitionHash, &a.UnifiedCodegenDescriptorHash,
 		&a.GeneratorVersion, &a.SDKGenerationJobID, &a.SDKGenerationStatus,
 		&a.HostedMCP, &a.Status, &depMsg, &a.PlannedDeactivationAt,
 		&a.CreatedBy, &a.CreatedAt, &a.ActivatedAt)

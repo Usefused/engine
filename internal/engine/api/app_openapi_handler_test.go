@@ -77,7 +77,6 @@ func newAppOpenAPIFixture(t *testing.T) (*appOpenAPITestStore, fusedobject.Endpo
 		app: &store.App{
 			AppID: appID, AppFamilyID: familyID, AccountID: accountID, Version: "1.2.3",
 			ScopeSchemaVersion: models.AppScopeSchemaVersion, Selections: selections, Status: store.AppStatusActive,
-			UnifiedDefinitionSchemaVersion: store.UnifiedDefinitionSchemaVersion, UnifiedDefinitions: []byte("[]"), UnifiedDefinitionHash: store.EmptyUnifiedSetHash,
 		},
 		family:  &store.AppFamily{AppFamilyID: familyID, AccountID: accountID, Kind: store.AppKindSDK, DisplayName: "Issue app"},
 		matches: []store.ServiceContractEndpointMatch{{SelectionIndex: 0, Endpoint: endpoint}},

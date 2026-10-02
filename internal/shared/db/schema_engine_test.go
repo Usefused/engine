@@ -174,28 +174,14 @@ func TestEngineSchemaDefinesCurrentMCPAndActivityShape(t *testing.T) {
 	})
 }
 
-// TestEngineSchemaDefinesImmutableUnifiedOperations keeps v3 direct creation plus its narrow live convergence.
-func TestEngineSchemaDefinesImmutableUnifiedOperations(t *testing.T) {
-	schema := strings.Join(engineSchemaQueries(), "\n")
-	convergence := strings.Join(unifiedSchemaConvergenceQueries(), "\n")
-	assertSchemaContainsAll(t, schema, "Unified app schema missing %q", []string{
-		"unified_definition_schema_version integer NOT NULL DEFAULT 3",
-		"unified_definition_schema_version = 3",
-		"unified_definitions    jsonb NOT NULL DEFAULT '[]'::jsonb",
-		"CONSTRAINT chk_fused_apps_unified_definition_shape",
-		"CONSTRAINT chk_fused_apps_unified_hashes",
-	})
-	assertSchemaContainsAll(t, convergence, "Unified convergence missing %q", []string{
-		"ADD COLUMN IF NOT EXISTS unified_definition_schema_version integer NOT NULL DEFAULT 3",
-		"ADD CONSTRAINT chk_fused_apps_unified_definition_shape",
-		"ADD CONSTRAINT chk_fused_apps_unified_hashes",
-		"NOT VALID",
-		"VALIDATE CONSTRAINT chk_fused_apps_unified_definition_shape",
-	})
-	for _, forbidden := range []string{"UPDATE fused_apps", "IN (2, 3)", "schema v1", "schema v2"} {
-		// Convergence may constrain old rows but must never relabel their bytes.
-		if strings.Contains(convergence, forbidden) {
-			t.Fatalf("Unified convergence retained draft promotion %q", forbidden)
+// TestAppSchemaUsesCompiledCapabilities keeps fresh app storage free of retired graph payloads.
+func TestAppSchemaUsesCompiledCapabilities(t *testing.T) {
+	schema := engineSchemaTable(t, "fused_apps")
+	assertSchemaContainsAll(t, schema, "App schema missing %q", []string{"bundle_digest", "selections", "capability_hash"})
+	for _, obsolete := range []string{"unified_definitions", "unified_definition_hash", "unified_definition_schema_version", "unified_codegen_descriptor_hash"} {
+		// Removed payloads must not return through fresh-schema creation or a startup backfill.
+		if strings.Contains(strings.Join(engineSchemaQueries(), "\n"), obsolete) {
+			t.Fatalf("app schema still provisions retired field %q", obsolete)
 		}
 	}
 }

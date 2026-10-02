@@ -74,8 +74,7 @@ func TestAppFamilyBindingPinsConcreteDeliveryMode(t *testing.T) {
 	}
 }
 
-// TestImmutableAppVersionComparesEntireRuntimeScope proves private definitions,
-// descriptor hashes, selections, and capabilities all participate in version immutability.
+// TestImmutableAppVersionComparesEntireRuntimeScope pins compiled code, selections, and capabilities.
 func TestImmutableAppVersionComparesEntireRuntimeScope(t *testing.T) {
 	existing := App{
 		SourceHash: "source", ConfigKey: "sdk:billing:1.0.0", CapabilityHash: "capability",
@@ -91,9 +90,9 @@ func TestImmutableAppVersionComparesEntireRuntimeScope(t *testing.T) {
 		t.Fatal("changed capabilities must reject an immutable-version retry")
 	}
 	requested = existing
-	requested.UnifiedDefinitionHash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	requested.BundleDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	if sameImmutableAppVersion(existing, requested) {
-		t.Fatal("changed Unified definitions must reject an immutable-version retry")
+		t.Fatal("changed compiled code must reject an immutable-version retry")
 	}
 }
 

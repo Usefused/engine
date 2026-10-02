@@ -56,12 +56,6 @@ var (
 	ErrIdempotencyKeyConflict = errors.New("idempotency key reused with a different request body")
 )
 
-const (
-	// Historical app rows retain the schema marker used by the retired graph format.
-	UnifiedDefinitionSchemaVersion = 3
-	EmptyUnifiedSetHash            = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-)
-
 type AppRuntime struct {
 	// UnifiedApps contributes hosted delegation to immutable publication capability accounting.
 	UnifiedApps []models.UnifiedAppBinding
@@ -72,15 +66,11 @@ type AppRuntime struct {
 	// Exactly one owner is set. Subject ownership is the safe default derived
 	// from the authenticated actor; team ownership is an explicit sharing
 	// decision resolved from a stable team slug by the Engine.
-	OwnerSubjectID                 uuid.UUID
-	OwnerTeamID                    uuid.UUID
-	BucketID                       uuid.UUID
-	Selections                     []byte
-	ScopeSchemaVersion             int
-	UnifiedDefinitionSchemaVersion int
-	UnifiedDefinitions             []byte
-	UnifiedDefinitionHash          string
-	UnifiedCodegenDescriptorHash   string
+	OwnerSubjectID     uuid.UUID
+	OwnerTeamID        uuid.UUID
+	BucketID           uuid.UUID
+	Selections         []byte
+	ScopeSchemaVersion int
 	// BundleDigest pins the compiled capability bytes at apply time; empty means no hosted code was approved.
 	BundleDigest string
 	// Status is projected from the exact app version. Hard-deactivated versions
@@ -151,16 +141,12 @@ type App struct {
 	ConfigKey   string
 	SourceHash  string
 	// BundleDigest is immutable code identity for an authored Unified App version.
-	BundleDigest                   string
-	CapabilityHash                 string
-	CapabilityKeys                 []string
-	ScopeSchemaVersion             int
-	Selections                     []byte // jsonb
-	UnifiedDefinitionSchemaVersion int
-	UnifiedDefinitions             []byte // jsonb
-	UnifiedDefinitionHash          string
-	UnifiedCodegenDescriptorHash   string
-	GeneratorVersion               string // SDK only, empty for MCP
+	BundleDigest       string
+	CapabilityHash     string
+	CapabilityKeys     []string
+	ScopeSchemaVersion int
+	Selections         []byte // jsonb
+	GeneratorVersion   string // SDK only, empty for MCP
 	// SDKGenerationJobID and SDKGenerationStatus retain only the durable,
 	// credential-free Registry job identity needed to recover a building SDK.
 	SDKGenerationJobID  string
