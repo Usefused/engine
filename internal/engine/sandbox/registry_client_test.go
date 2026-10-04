@@ -885,7 +885,7 @@ func TestFetchServiceVisibilityUsesGraphQLBatch(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data": map[string]any{
 				"servicesByIds": []map[string]any{
-					{"id": firstID.String(), "description": "Private service", "icon_url": "https://assets.example.com/private.svg", "base_url": "https://private.example.com", "endpoint_count": 7, "webhook_count": 1, "is_owner": true, "is_public": false, "provider": map[string]any{"name": "Mine", "handle": "mine"}, "canonical_ref": "@mine/first"},
+					{"id": firstID.String(), "name": "Private mail", "description": "Private service", "icon_url": "https://assets.example.com/private.svg", "base_url": "https://private.example.com", "endpoint_count": 7, "webhook_count": 1, "is_owner": true, "is_public": false, "provider": map[string]any{"name": "Mine", "handle": "mine"}, "canonical_ref": "@mine/first"},
 					{"id": secondID.String(), "description": "Public service", "icon_url": "https://assets.example.com/public.svg", "base_url": "https://api.example.com", "endpoint_count": 12, "webhook_count": 3, "is_owner": false, "is_public": true, "provider": map[string]any{"name": "Acme", "handle": "acme"}, "canonical_ref": "@acme/second"},
 				},
 			},
@@ -898,6 +898,10 @@ func TestFetchServiceVisibilityUsesGraphQLBatch(t *testing.T) {
 	got, err := client.FetchServiceVisibility(context.Background(), []uuid.UUID{firstID, secondID}, "user-key")
 	if err != nil {
 		t.Fatalf("FetchServiceVisibility: %v", err)
+	}
+	// Bucket labels depend on the Registry name surviving the same batched transport.
+	if !strings.Contains(gotQuery, "\n\t\t\t\t\tname\n") || got[firstID].Name != "Private mail" {
+		t.Fatal("service name missing from visibility lookup")
 	}
 	if !strings.Contains(gotQuery, "servicesByIds") {
 		t.Fatalf("expected servicesByIds query, got %s", gotQuery)

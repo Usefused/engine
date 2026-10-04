@@ -1,5 +1,6 @@
 import { Copy } from "lucide-react";
-import { type BucketValue, type SecretMeta } from "~/lib/api";
+import { type ActivatedService, type BucketValue, type SecretMeta } from "~/lib/api";
+import { bucketSecretIdentity } from "~/lib/bucket-service-identity";
 import { formatExpiry } from "~/lib/buckets";
 import { bucketEntryActions } from "~/lib/bucket-entry-actions";
 import { BucketPagination } from "~/components/buckets/BucketPagination";
@@ -10,6 +11,7 @@ type BucketEntryListProps = {
   loading: boolean;
   kind: "secrets" | "env";
   secrets: SecretMeta[];
+  services?: ActivatedService[];
   values: BucketValue[];
   total: number;
   page: number;
@@ -35,6 +37,7 @@ export function BucketEntryList({
   loading,
   kind,
   secrets,
+  services = [],
   values,
   total,
   page,
@@ -54,6 +57,7 @@ export function BucketEntryList({
     kind,
     secrets,
     values,
+    services,
     onRemoveSecret,
     onRemoveValue
   );
@@ -90,62 +94,46 @@ export function BucketEntryList({
   );
 }
 
+/** Keeps presentation metadata separate from the original removal targets. */
 function bucketEntries(
   kind: BucketEntryListProps["kind"],
   secrets: SecretMeta[],
   values: BucketValue[],
+  services: ActivatedService[],
   onRemoveSecret: (item: SecretMeta) => void,
   onRemoveValue: (item: BucketValue) => void
 ): EntryRowModel[] {
+  // Only credential rows need service and auth-scheme identity.
   if (kind === "secrets")
-    return secrets.map((item) => secretEntry(item, onRemoveSecret));
+    return secrets.map((item) => secretEntry(item, services, onRemoveSecret));
   return values.map((item) => valueEntry(item, onRemoveValue));
 }
 
 /** Preserves the stored key metadata separately from the credential's friendly type label and masked value. */
 function secretEntry(
   item: SecretMeta,
+  services: ActivatedService[],
   onRemove: (item: SecretMeta) => void
 ): EntryRowModel {
   const expiry = formatExpiry(item.expires_at);
+  const identity = bucketSecretIdentity(item, services);
   return {
     id: `secret-${item.service_id}-${
       item.key_names?.join("-") || item.key_name
     }`,
     kind: "secret",
-    name: credentialLabel(item.credential_type),
+    name: identity.name,
+    // Expiry supplements the identity; it must not replace the service or scheme label.
     detail:
       expiry === "Never"
-        ? item.credential_type
-        : `${item.credential_type} · expires ${expiry}`,
+        ? identity.detail
+        : `${identity.detail} · expires ${expiry}`,
     value: "********",
     storedSecret: { key_name: item.key_name, key_names: item.key_names },
     onRemove: () => onRemove(item),
   };
 }
 
-function credentialLabel(value: string): string {
-  const credentialType = value.toLowerCase().replaceAll("-", "_");
-  if (credentialType === "api_key" || credentialType === "apikey")
-    return "API key";
-  if (credentialType === "basic") return "Basic credentials";
-  if (["mtls", "mutualtls", "mutual_tls"].includes(credentialType))
-    return "mTLS credentials";
-  // OAuth/OIDC store an application client_id/client_secret pair, not a
-  // single connected-user token, so the label must reflect that pairing.
-  if (credentialType === "oauth" || credentialType === "oauth2")
-    return "OAuth credentials";
-  if (credentialType === "oidc" || credentialType === "openidconnect")
-    return "OIDC credentials";
-  if (credentialType === "bearer") return "Bearer token";
-  // Bucket secrets are generic, service-independent values (Engine tags them
-  // with this fixed credential_type rather than a per-auth-scheme one); shown
-  // as plain "Secret" since it's the simpler/default case.
-  if (credentialType === "bucket_secret") return "Secret";
-  // Any other/unrecognized per-service auth type falls back to this label,
-  // named "Service Auth" to distinguish it from the generic kind above.
-  return "Service Auth";
-}
 
 function valueEntry(
   item: BucketValue,
@@ -172,10 +160,10 @@ function EntryRow({ entry, canRemove }: { entry: EntryRowModel; canRemove: boole
           {entry.kind === "secret" ? "{}" : "[]"}
         </span>
         <div className="min-w-0">
-          <p className="truncate font-mono text-sm font-medium text-slate-800">
+          <p title={entry.name} className="break-words text-sm font-medium text-slate-800">
             {entry.name}
           </p>
-          <p className="truncate text-xs text-slate-500">{entry.detail}</p>
+          <p className="break-words text-xs text-slate-500">{entry.detail}</p>
           {/* Only secret rows need separate storage metadata; environment rows already use their key as the title. */}
           {entry.storedSecret && <StoredSecretKeys secret={entry.storedSecret} />}
         </div>

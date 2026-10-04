@@ -1139,6 +1139,7 @@ export interface BucketSDKSummary {
 export interface BucketServiceSummary {
   service_id: string;
   service_name: string;
+  service_slug?: string | null;
   secret_count: number;
   value_count: number;
   application_credential_count: number;
@@ -1237,7 +1238,8 @@ const workspaceConnectionProfileSelection = `
 `;
 
 export interface SecretMeta {
-  id: string;
+  service_name?: string | null;
+  service_slug?: string | null;  id: string;
   workspace_id?: string;
   bucket_id: string;
   service_id: string;

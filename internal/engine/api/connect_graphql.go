@@ -108,6 +108,7 @@ var bucketServiceSummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Fields: graphql.Fields{
 		"service_id":                   &graphql.Field{Type: graphql.String},
 		"service_name":                 &graphql.Field{Type: graphql.String},
+		"service_slug":                 &graphql.Field{Type: graphql.String},
 		"secret_count":                 &graphql.Field{Type: graphql.Int},
 		"value_count":                  &graphql.Field{Type: graphql.Int},
 		"application_credential_count": &graphql.Field{Type: graphql.Int},
@@ -503,6 +504,8 @@ var secretMetaGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"id":              &graphql.Field{Type: graphql.String},
 		"bucket_id":       &graphql.Field{Type: graphql.String},
 		"service_id":      &graphql.Field{Type: graphql.String},
+		"service_name":    &graphql.Field{Type: graphql.String},
+		"service_slug":    &graphql.Field{Type: graphql.String},
 		"key_name":        &graphql.Field{Type: graphql.String},
 		"key_names":       &graphql.Field{Type: graphql.NewList(graphql.String)},
 		"credential_type": &graphql.Field{Type: graphql.String},
@@ -1348,7 +1351,8 @@ func bucketSDKPageGraphQLField(s store.Store) *graphql.Field {
 	}
 }
 
-func bucketServicePageGraphQLField(s store.Store) *graphql.Field {
+// bucketServicePageGraphQLField keeps usage counts local while resolving readable service identities from Registry.
+func bucketServicePageGraphQLField(s store.Store, verifier ServiceVerifier) *graphql.Field {
 	args := bucketIDPageArgs()
 	args["search"] = &graphql.ArgumentConfig{Type: graphql.String}
 	return &graphql.Field{
@@ -1379,7 +1383,7 @@ func bucketServicePageGraphQLField(s store.Store) *graphql.Field {
 			if err != nil {
 				return nil, fmt.Errorf("list bucket services: %w", err)
 			}
-			return map[string]interface{}{"items": projectGraphQLBucketServiceSummaries(services), "total": total}, nil
+			return map[string]interface{}{"items": enrichBucketServiceIdentities(ctx, verifier, projectGraphQLBucketServiceSummaries(services)), "total": total}, nil
 		},
 	}
 }
@@ -1437,7 +1441,7 @@ func bucketValuePageGraphQLField(s store.Store) *graphql.Field {
 
 // secretMetasGraphQLField returns metadata only so the UI can inspect expiry
 // and last-use state without ever reading decrypted secret values.
-func secretMetasGraphQLField(s store.Store) *graphql.Field {
+func secretMetasGraphQLField(s store.Store, verifier ServiceVerifier) *graphql.Field {
 	return &graphql.Field{
 		Type: graphql.NewList(secretMetaGraphQLType),
 		Args: graphql.FieldConfigArgument{
@@ -1455,12 +1459,13 @@ func secretMetasGraphQLField(s store.Store) *graphql.Field {
 			if err != nil {
 				return nil, fmt.Errorf("list secret metadata: %w", err)
 			}
-			return projectGraphQLSecretMetas(secrets), nil
+			return enrichBucketServiceIdentities(ctx, verifier, projectGraphQLSecretMetas(secrets)), nil
 		},
 	}
 }
 
-func secretMetaPageGraphQLField(s store.Store) *graphql.Field {
+// secretMetaPageGraphQLField labels credential families without reading their stored values.
+func secretMetaPageGraphQLField(s store.Store, verifier ServiceVerifier) *graphql.Field {
 	return &graphql.Field{
 		Type: secretMetaPageGraphQLType,
 		Args: bucketIDPageArgs(),
@@ -1481,7 +1486,7 @@ func secretMetaPageGraphQLField(s store.Store) *graphql.Field {
 			if err != nil {
 				return nil, fmt.Errorf("list secret metadata page: %w", err)
 			}
-			return map[string]interface{}{"items": projectGraphQLSecretMetas(secrets), "total": total}, nil
+			return map[string]interface{}{"items": enrichBucketServiceIdentities(ctx, verifier, projectGraphQLSecretMetas(secrets)), "total": total}, nil
 		},
 	}
 }

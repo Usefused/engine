@@ -10,6 +10,7 @@ import {
 import { BucketConnectAccount } from "./BucketConnectAccount";
 import { BucketPagination } from "~/components/buckets/BucketPagination";
 import { BucketServiceSelect } from "~/components/buckets/BucketServiceSelect";
+import { bucketServiceIdentity } from "~/lib/bucket-service-identity";
 import { serviceDetailPath } from "~/lib/service-navigation";
 
 type BucketOverviewProps = {
@@ -74,7 +75,7 @@ export function BucketOverview({
             id="bucket-linked-service-search"
             label="Service"
             placeholder="All services"
-            options={bucketServiceOptions(services)}
+            options={bucketServiceOptions(services, workspaceServices)}
             search={serviceSearch}
             className="w-64"
             hideLabel
@@ -184,21 +185,21 @@ function ServiceRow({
   bucket: BucketSummary;
   workspaceServices: ActivatedService[];
 }) {
-  // A missing cached name still leaves a recognizable service identity.
-  const label = service.service_name || service.service_id.slice(0, 8);
+  const identity = bucketServiceIdentity(service, workspaceServices);
   const workspaceService = workspaceServices.find((item) => item.service_id === service.service_id);
   return (
     <div className="px-4 py-3">
+    {/* Keep metrics below names because overview cards stay narrow even on wide screens. */}
     <Link
       to={serviceDetailHref(service, workspaceServices)}
-      className="grid gap-3 transition-colors hover:bg-slate-50 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
+      className="grid gap-3 transition-colors hover:bg-slate-50"
     >
       <div className="flex min-w-0 items-center gap-3">
         <PlugZap className="h-4 w-4 shrink-0 text-slate-400" />
         <div className="min-w-0">
-          <p className="truncate text-sm font-medium text-slate-900">{label}</p>
+          <p className="truncate text-sm font-medium text-slate-900">{identity.name}</p>
           <p className="truncate text-xs text-slate-500">
-            {service.service_id.slice(0, 8)}
+            {identity.detail}
           </p>
         </div>
       </div>
@@ -242,19 +243,15 @@ function serviceEmptyText(search: string): string {
     : "No services use this credential set yet.";
 }
 
-function bucketServiceOptions(services: BucketServiceSummary[]) {
+/** Gives the service selector the same readable identities as its rows. */
+function bucketServiceOptions(services: BucketServiceSummary[], workspaceServices: ActivatedService[]) {
   return services.map((service) => ({
     id: service.service_id,
-    label: serviceLabel(service),
+    label: bucketServiceIdentity(service, workspaceServices).name,
   }));
 }
 
-function serviceLabel(service: BucketServiceSummary): string {
-  return service.service_name
-    ? `${service.service_name} · ${service.service_id.slice(0, 8)}`
-    : service.service_id.slice(0, 8);
-}
-
+/** Uses the Registry reference when local membership no longer carries a slug. */
 function serviceDetailHref(
   service: BucketServiceSummary,
   workspaceServices: ActivatedService[]
@@ -262,5 +259,5 @@ function serviceDetailHref(
   const workspaceService = workspaceServices.find(
     (item) => item.service_id === service.service_id
   );
-  return serviceDetailPath(service.service_id, workspaceService?.service_slug);
+  return serviceDetailPath(service.service_id, service.service_slug || workspaceService?.service_slug);
 }

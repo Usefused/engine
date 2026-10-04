@@ -429,6 +429,7 @@ type ServiceProviderIdentity struct {
 }
 
 type ServiceVisibility struct {
+	Name          string                  `json:"name"`
 	ServiceID     uuid.UUID               `json:"id"`
 	Description   string                  `json:"description"`
 	IconURL       string                  `json:"icon_url"`
@@ -597,6 +598,7 @@ func (c *HTTPRegistryClient) FetchServiceVisibility(ctx context.Context, service
 			query ServiceVisibility($serviceIds: [String!]!) {
 				servicesByIds(serviceIds: $serviceIds) {
 					id
+					name
 					slug
 					description
 					icon_url

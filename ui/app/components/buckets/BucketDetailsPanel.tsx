@@ -250,6 +250,7 @@ function BucketTabPanel(props: BucketDetailsPanelProps) {
       loading={props.loading}
       kind={props.activeTab}
       secrets={props.secrets}
+      services={props.services}
       values={props.values}
       total={
         props.activeTab === "secrets" ? props.secretTotal : props.valueTotal

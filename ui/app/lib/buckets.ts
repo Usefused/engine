@@ -194,7 +194,7 @@ function readBucketSecrets(
       `query($bucketId: String!, $limit: Int!, $offset: Int!) {
         secretMetaPage(bucket_id: $bucketId, limit: $limit, offset: $offset) {
           total
-          items { id bucket_id service_id key_name key_names credential_type last_used_at expires_at created_at updated_at }
+          items { id bucket_id service_id service_name service_slug key_name key_names credential_type last_used_at expires_at created_at updated_at }
         }
       }`,
       { bucketId, limit: page.limit, offset: page.offset }
@@ -242,7 +242,7 @@ function readBucketConnectionServices(
       `query BucketConnectionServices($bucketId: String!, $search: String, $limit: Int!, $offset: Int!) {
         connectionServicePage: bucketServicePage(bucket_id: $bucketId, search: $search, limit: $limit, offset: $offset) {
           total
-          items { service_id service_name secret_count value_count application_credential_count connected_user_count }
+          items { service_id service_name service_slug secret_count value_count application_credential_count connected_user_count }
         }
       }`,
       {
@@ -299,7 +299,7 @@ function readBucketServices(
       `query($bucketId: String!, $limit: Int!, $offset: Int!, $search: String) {
         bucketServicePage(bucket_id: $bucketId, search: $search, limit: $limit, offset: $offset) {
           total
-          items { service_id service_name secret_count value_count application_credential_count connected_user_count }
+          items { service_id service_name service_slug secret_count value_count application_credential_count connected_user_count }
         }
       }`,
       {

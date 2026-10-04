@@ -422,6 +422,7 @@ var mcpAnalyticsDashboardType = graphql.NewObject(graphql.ObjectConfig{
 
 // newMCPGraphQLSchema keeps session history and execution Activity behind the shared Engine authorization surface.
 // newMCPGraphQLSchema assembles Engine-owned reads and mutations, including the authorized prompt discovery bridge.
+// newMCPGraphQLSchema wires authorized Engine reads and mutations to their shared dependencies.
 func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, verifier ServiceVerifier, registryClient sandbox.RegistryClient, masterKey []byte, oauthProvider OAuthProviderService, managedConnect *managedauthclient.ConnectClient, redirectURIs ...string) (graphql.Schema, error) {
 	publicInsightReader := newPublicInsightReader(registryClient)
 	packageDownloads, _ := registryClient.(sandbox.SDKPackageDownloadCountClient)
@@ -486,11 +487,11 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"appTokens":                   appTokensGraphQLField(s),
 			"sdkBuckets":                  sdkBucketsGraphQLField(s),
 			"bucketSDKPage":               bucketSDKPageGraphQLField(s),
-			"bucketServicePage":           bucketServicePageGraphQLField(s),
+			"bucketServicePage":           bucketServicePageGraphQLField(s, verifier),
 			"bucketValues":                bucketValuesGraphQLField(s),
 			"bucketValuePage":             bucketValuePageGraphQLField(s),
-			"secretMetas":                 secretMetasGraphQLField(s),
-			"secretMetaPage":              secretMetaPageGraphQLField(s),
+			"secretMetas":                 secretMetasGraphQLField(s, verifier),
+			"secretMetaPage":              secretMetaPageGraphQLField(s, verifier),
 			"authConnections":             authConnectionsGraphQLField(s),
 			"authConnectionPage":          authConnectionPageGraphQLField(s),
 			"connectionResources":         connectionResourcesGraphQLField(s),
