@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/fused-open-core/oauthserver"
 	"github.com/google/uuid"
 )
 
@@ -19,11 +20,12 @@ const (
 	MaxActiveOAuthDynamicClientsPerUser = 10
 )
 
-type OAuthClientType string
+// OAuthClientType shares the protocol vocabulary with both Engine consumers.
+type OAuthClientType = oauthserver.OAuthClientType
 
 const (
-	OAuthClientConfidential OAuthClientType = "confidential"
-	OAuthClientPublic       OAuthClientType = "public"
+	OAuthClientConfidential = oauthserver.OAuthClientConfidential
+	OAuthClientPublic       = oauthserver.OAuthClientPublic
 
 	maxOAuthClientNameLength  = 200
 	maxOAuthRedirectURIs      = 10
@@ -31,12 +33,13 @@ const (
 	oauthAuthorizationCodeTTL = 60 * time.Second
 )
 
+// Shared sentinel identity preserves protocol error translation through wrapped storage failures.
 var (
-	ErrInvalidOAuthClient      = errors.New("invalid OAuth client")
-	ErrOAuthClientNotFound     = errors.New("OAuth client not found")
-	ErrOAuthGrantDenied        = errors.New("OAuth grant denied")
-	ErrOAuthGrantReuseDetected = errors.New("OAuth refresh token reuse detected")
-	ErrOAuthConsentNotFound    = errors.New("OAuth consent not found")
+	ErrInvalidOAuthClient      = oauthserver.ErrInvalidOAuthClient
+	ErrOAuthClientNotFound     = oauthserver.ErrOAuthClientNotFound
+	ErrOAuthGrantDenied        = oauthserver.ErrOAuthGrantDenied
+	ErrOAuthGrantReuseDetected = oauthserver.ErrOAuthGrantReuseDetected
+	ErrOAuthConsentNotFound    = oauthserver.ErrOAuthConsentNotFound
 	ErrOAuthDynamicClientLimit = errors.New("active dynamic OAuth client limit reached")
 )
 
@@ -74,62 +77,28 @@ type OAuthClientRegistration struct {
 	Actor     MutationActor
 }
 
-type OAuthConsent struct {
-	ClientID     uuid.UUID
-	SubjectID    uuid.UUID
-	GrantedScope []string
-	GrantedAt    time.Time
-}
+// OAuthConsent retains the shared wire/store contract without copying protocol models.
+type OAuthConsent = oauthserver.OAuthConsent[uuid.UUID]
 
-type OAuthConsentGrant struct {
-	ClientID     uuid.UUID
-	SubjectID    uuid.UUID
-	GrantedScope []string
-}
+// OAuthConsentGrant retains the shared wire/store contract without copying protocol models.
+type OAuthConsentGrant = oauthserver.OAuthConsentGrant[uuid.UUID]
 
-type OAuthAuthorizationCodeIssue struct {
-	ID            uuid.UUID
-	ClientID      uuid.UUID
-	SubjectID     uuid.UUID
-	RedirectURI   string
-	Scope         []string
-	CodeHash      string
-	CodeChallenge string
-	ExpiresAt     time.Time
-}
+// OAuthAuthorizationCodeIssue retains the shared wire/store contract without copying protocol models.
+type OAuthAuthorizationCodeIssue = oauthserver.OAuthAuthorizationCodeIssue[uuid.UUID]
 
 // OAuthCodeExchange is the inbound authorization_code grant request. CodeHash
 // identifies the code; ClientID/RedirectURI/CodeVerifier are all re-checked
 // against the values recorded at Consent time before any token is minted.
-type OAuthCodeExchange struct {
-	CodeHash     string
-	ClientID     uuid.UUID
-	RedirectURI  string
-	CodeVerifier string
-	Issue        OAuthTokenIssue
-}
+type OAuthCodeExchange = oauthserver.OAuthCodeExchange
 
 // OAuthTokenIssue carries only the freshly generated credential material for
 // one token pair; the store assigns its row id and, for a brand-new grant, a
 // new token_family_id -- rotation instead inherits the family id of the
 // refresh token being consumed, which only the store has locked and can see.
-type OAuthTokenIssue struct {
-	AccessTokenHash  string
-	RefreshTokenHash string
-	AccessExpiresAt  time.Time
-	RefreshExpiresAt time.Time
-}
+type OAuthTokenIssue = oauthserver.OAuthTokenIssue
 
-type OAuthTokenMetadata struct {
-	ID                    uuid.UUID
-	ClientID              uuid.UUID
-	SubjectID             uuid.UUID
-	TokenFamilyID         uuid.UUID
-	Scope                 []string
-	AccessExpiresAt       time.Time
-	RefreshExpiresAt      time.Time
-	AuthorizationRevision int64
-}
+// OAuthTokenMetadata retains the shared wire/store contract without copying protocol models.
+type OAuthTokenMetadata = oauthserver.OAuthTokenMetadata[uuid.UUID]
 
 type OAuthClientMutationResult struct {
 	Client                OAuthClient
@@ -137,18 +106,10 @@ type OAuthClientMutationResult struct {
 }
 
 // OAuthRefreshExchange is the inbound refresh_token grant request.
-type OAuthRefreshExchange struct {
-	RefreshTokenHash string
-	ClientID         uuid.UUID
-	Issue            OAuthTokenIssue
-}
+type OAuthRefreshExchange = oauthserver.OAuthRefreshExchange
 
-type OAuthConnectedApp struct {
-	ClientID     uuid.UUID
-	ClientName   string
-	GrantedScope []string
-	GrantedAt    time.Time
-}
+// OAuthConnectedApp retains the shared wire/store contract without copying protocol models.
+type OAuthConnectedApp = oauthserver.OAuthConnectedApp
 
 type OAuthClientStore interface {
 	CreateOAuthClient(context.Context, OAuthClientRegistration) (OAuthClientMutationResult, error)

@@ -551,15 +551,15 @@ func TestRegisterClientMintsTemporaryPair(t *testing.T) {
 	repository.client = store.OAuthClient{ClientID: result.ClientID, ClientType: recorded.ClientType}
 	repository.clientSecret = recorded.ClientSecretHash
 	// Prove the returned secret can authenticate its registered client.
-	if _, err := service.authenticateClient(t.Context(), result.ClientID, result.ClientSecret); err != nil {
+	if err := service.Revoke(t.Context(), RevokeRequest{ClientID: result.ClientID, ClientSecret: result.ClientSecret, Token: "nonexistent-token"}); err != nil {
 		t.Fatalf("authenticate registered client: %v", err)
 	}
 	// Client identity alone must never authenticate a confidential client.
-	if _, err := service.authenticateClient(t.Context(), result.ClientID, ""); !errors.Is(err, ErrUnauthorizedClient) {
+	if err := service.Revoke(t.Context(), RevokeRequest{ClientID: result.ClientID, Token: "nonexistent-token"}); !errors.Is(err, ErrUnauthorizedClient) {
 		t.Fatalf("missing secret: %v", err)
 	}
 	// A different caller's secret must not authenticate the pair.
-	if _, err := service.authenticateClient(t.Context(), result.ClientID, "wrong"); !errors.Is(err, ErrUnauthorizedClient) {
+	if err := service.Revoke(t.Context(), RevokeRequest{ClientID: result.ClientID, ClientSecret: "wrong", Token: "nonexistent-token"}); !errors.Is(err, ErrUnauthorizedClient) {
 		t.Fatalf("wrong secret: %v", err)
 	}
 }
@@ -588,18 +588,27 @@ func TestRegisterClientRejectsInvalidMetadata(t *testing.T) {
 	}
 }
 
-// TestTokenResponseUsesPersistedDeadline prevents clients from assuming a fresh hour after refresh.
+// TestTokenResponseUsesPersistedDeadline covers expiry adjustment through the shared grant path.
 func TestTokenResponseUsesPersistedDeadline(t *testing.T) {
 	now := time.Now().UTC()
-	metadata := store.OAuthTokenMetadata{AccessExpiresAt: now.Add(7 * time.Minute)}
-	response := tokenResponse(metadata, "access", "refresh", now)
-	// Advertise only the time remaining on the stored token.
-	if response.ExpiresIn != 420 {
-		t.Fatalf("expires_in=%d", response.ExpiresIn)
+	client := confidentialClient()
+	repository := &fakeOAuthStore{
+		client: client, clientSecret: hashSecret("secret"),
+		rotateResult: store.OAuthTokenMetadata{AccessExpiresAt: now.Add(7 * time.Minute)},
 	}
-	metadata.AccessExpiresAt = now.Add(-time.Second)
+	service, _ := newTestService(t, repository)
+	// Fix the response clock so the persisted lifetime is asserted exactly.
+	service.now = func() time.Time { return now }
+	request := TokenRequest{GrantType: "refresh_token", ClientID: client.ClientID, ClientSecret: "secret", RefreshToken: "refresh"}
+	response, err := service.Token(t.Context(), request)
+	// Advertise only the time remaining on the stored token.
+	if err != nil || response.ExpiresIn != 420 {
+		t.Fatalf("expires_in=%d, error=%v", response.ExpiresIn, err)
+	}
+	repository.rotateResult.AccessExpiresAt = now.Add(-time.Second)
+	response, err = service.Token(t.Context(), request)
 	// A token expiring during response serialization cannot advertise negative time.
-	if tokenResponse(metadata, "access", "refresh", now).ExpiresIn != 0 {
-		t.Fatal("negative token lifetime")
+	if err != nil || response.ExpiresIn != 0 {
+		t.Fatalf("expires_in=%d, error=%v", response.ExpiresIn, err)
 	}
 }

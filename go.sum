@@ -2,6 +2,8 @@ github.com/Masterminds/semver/v3 v3.5.0 h1:kQceYJfbupGfZOKZQg0kou0DgAKhzDg2NZPAw
 github.com/Masterminds/semver/v3 v3.5.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
 github.com/ThreadifyDev/go-sdk v0.3.0 h1:InVmyyqKwdqgLKHb2krZRtp37I5eCBnBszb+N0XK0BY=
 github.com/ThreadifyDev/go-sdk v0.3.0/go.mod h1:trpcifTpSIINuoAs0E1qoIRtUaO+U8x2mNOBxMPtb70=
+github.com/Usefused/fused-open-core v0.0.0-20260925151058-b91e769354ae h1:udmkEoyoq6M4sEsv/y9D9Ey93k6MlXo2UZrPcDzfwDA=
+github.com/Usefused/fused-open-core v0.0.0-20260925151058-b91e769354ae/go.mod h1:XthLH14IlFFj8zgzH5rYmlQgHr8mtl0Ok3zo8EuV1tQ=
 github.com/antithesishq/antithesis-sdk-go v0.7.0-default-no-op h1:Z/MZK75wC/NSrkgqeNIa7jexam9uWzhLmFTSCPI/kn0=
 github.com/antithesishq/antithesis-sdk-go v0.7.0-default-no-op/go.mod h1:FQyySiasQQM8735Ddel3MRojmy4dA1IqCeyJ5jmPMbI=
 github.com/basgys/goxml2json v1.1.0 h1:4ln5i4rseYfXNd86lGEB+Vi652IsIXIvggKM/BhUKVw=

@@ -7,6 +7,38 @@ end-user "Connected Apps" self-service page, and the security-relevant denial
 and revocation paths. Use a disposable workspace or clean up created OAuth
 clients afterward.
 
+Engine uses `github.com/Usefused/fused-open-core/oauthserver` at
+`v0.0.0-20260925151058-b91e769354ae`, the same version used by Threadify.
+The Fused adapter supplies browser identity, live permission checks, credential
+prefixes, and PostgreSQL storage. It also preserves explicit-scope consent,
+temporary client registration, the active-client quota, and token responses
+based on the persisted expiry. Existing clients and grants use the same tables
+and credential formats; switching the implementation needs no data migration.
+
+The former in-tree protocol implementation has been removed. `oauthprovider/service.go`
+is now the host adapter, and `core_store.go` bridges the shared storage contract.
+Fused-only temporary registration lives in `dynamic_registration.go` because the
+pinned core does not expose that policy. HTTP handlers, consent UI, PostgreSQL
+transactions, and live permission checks remain Engine responsibilities. OAuth
+connections to third-party services are a separate feature and still require
+the `connectauth` implementation. The shared core is a Go dependency embedded in
+Engine, not a remote authorization service.
+
+The local browser smoke test on 2026-10-04 verified denial and successful callback
+state, code exchange, incorrect PKCE rejection, code replay rejection, authenticated
+access, refresh rotation, refresh replay rejection, and Connected Apps disconnection.
+After disconnection, access returned `401` and refresh returned `400 invalid_grant`.
+This used the actual Engine and PostgreSQL with a disposable API-key login and a
+test Registry fixture; external SSO and production deployment were not exercised.
+The diagnostic callback page belonged only to the test client, not the product UI.
+
+For automated validation, set `DATABASE_URL` to a disposable PostgreSQL instance
+and run `go test -race ./internal/engine/oauthprovider` and
+`go test ./internal/engine/store -run OAuth` from the Engine repository. The
+provider lifecycle test creates and removes an isolated schema and exercises
+the shared server against Fused's real persistence layer. Without `DATABASE_URL`,
+database tests skip; a unit-only pass does not verify those paths.
+
 Never print raw client secrets, authorization codes, access tokens, refresh
 tokens, PKCE verifiers, or their hashes while collecting browser, terminal, or
 telemetry evidence. Redact them in any pasted output.

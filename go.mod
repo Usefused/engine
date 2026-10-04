@@ -4,6 +4,7 @@ go 1.26.6
 
 require (
 	github.com/ThreadifyDev/go-sdk v0.3.0
+	github.com/Usefused/fused-open-core v0.0.0-20260925151058-b91e769354ae
 	github.com/basgys/goxml2json v1.1.0
 	github.com/dop251/goja v0.0.0-20260915173639-b3fa02110dbd
 	github.com/getkin/kin-openapi v0.139.0

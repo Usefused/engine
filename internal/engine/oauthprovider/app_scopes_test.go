@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
-	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/google/uuid"
 )
 
@@ -13,6 +12,7 @@ import (
 func TestAppConsentRequiresExplicitType(t *testing.T) {
 	workspace := accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: uuid.New()}
 	grants := []accesscontrol.Grant{}
+	// A workspace owner provides the broadest possible permissions for this ceiling test.
 	for _, permission := range accesscontrol.AllPermissions() {
 		grants = append(grants, accesscontrol.Grant{Permission: permission, Resource: workspace})
 	}
@@ -21,16 +21,23 @@ func TestAppConsentRequiresExplicitType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	actor := accesscontrol.Actor{Authorization: snapshot}
-	client := store.OAuthClient{AllowedScopes: []string{"app.mcp.create", "app.sdk.create", "app.api.create", "app.webhook.create"}}
-	service := &Service{}
-	granted, err := service.resolveGrantableScope(t.Context(), actor, client, []string{"app.mcp.create"})
+	actor := browserActor(t)
+	actor.Authorization = snapshot
+	client := confidentialClient()
+	client.AllowedScopes = []string{"app.mcp.create", "app.sdk.create", "app.api.create", "app.webhook.create"}
+	service, _ := newTestService(t, &fakeOAuthStore{client: client})
+	req := authorizeRequest(client)
+	req.Scope = []string{"app.mcp.create"}
+	result, err := service.Authorize(t.Context(), actor, req)
+	granted := result.Scope
 	// Only the requested MCP grant belongs in the resulting consent.
 	if err != nil || len(granted) != 1 || granted[0] != "app.mcp.create" {
 		t.Fatalf("scope=%v error=%v", granted, err)
 	}
+	// Omitted or retired broad scopes cannot expand explicit app-type consent.
 	for _, requested := range [][]string{nil, {"app.create"}, {"app.manage"}} {
-		_, err := service.resolveGrantableScope(t.Context(), actor, client, requested)
+		req.Scope = requested
+		_, err := service.Authorize(t.Context(), actor, req)
 		// Missing and retired broad scopes must request fresh explicit consent.
 		if !errors.Is(err, ErrInvalidScope) {
 			t.Fatalf("scope %v: %v", requested, err)
