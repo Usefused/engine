@@ -1,10 +1,13 @@
 import { api, type ActivatedService } from "./api";
 import { readAllBoundedPages } from "./bounded-pages";
-import { webhookConfiguration, webhookServiceTag, type WebhookDraft, type WebhookListing, type WebhookRegistration } from "./webhook-discovery-contract";
+import { webhookConfiguration, type WebhookDraft, type WebhookListing } from "./webhook-discovery-contract";
 import type { AppPlanResponse } from "./app-builder-contract";
 
-export const WEBHOOK_REGISTRATIONS_QUERY = `query WebhookRegistrations($serviceId: String!) {
-  workspaceWebhooks(service_id: $serviceId) { label slug callback_url delivery_mode signature signing_secret { bucket_id key_name } created_at }
+export const WEBHOOK_REGISTRATIONS_QUERY = `query WorkspaceWebhookPage($limit: Int, $offset: Int, $serviceId: String, $search: String) {
+  workspaceWebhookPage(limit: $limit, offset: $offset, service_id: $serviceId, search: $search) {
+    total
+    items { service_id service_name service_ref label slug callback_url delivery_mode signature signing_secret { bucket_id key_name } created_at }
+  }
 }`;
 
 /** Reads authorized services completely while keeping accidental request loops bounded. */
@@ -15,23 +18,24 @@ export async function webhookServices(): Promise<ActivatedService[]> {
   }, 100, 100);
 }
 
-/** Reuses the CLI's service registration query with bounded fan-out and explicit partial failures. */
-export async function webhookListings(services: ActivatedService[]): Promise<{ items: WebhookListing[]; failed: string[] }> {
-  const items: WebhookListing[] = [], failed: string[] = [];
-  for (let offset = 0; offset < services.length; offset += 5) {
-    const batch = services.slice(offset, offset + 5);
-    const results = await Promise.allSettled(batch.map(async (service) => {
-      const data = await api.mcpGraphql<{ workspaceWebhooks: WebhookRegistration[] }>(WEBHOOK_REGISTRATIONS_QUERY, { serviceId: service.service_id });
-      // Keep Registry identity alongside the friendly name so tags and search refer to the same service.
-      return data.workspaceWebhooks.map((registration) => ({ ...registration, service_id: service.service_id, service_name: service.service_name, service_ref: webhookServiceTag(service) }));
-    }));
-    results.forEach((result, index) => {
-      // One inaccessible service must not hide readable URLs or masquerade as an empty catalogue.
-      if (result.status === "fulfilled") items.push(...result.value);
-      else failed.push(batch[index].service_name);
-    });
+export interface WebhookPage { items: WebhookListing[]; total: number }
+
+/** Fetches exactly one filtered registration page; neither catalogue discovery nor per-service requests are needed. */
+export async function webhookListings(filters: { limit: number; offset: number; serviceId?: string; search?: string }, signal?: AbortSignal): Promise<WebhookPage> {
+  const deadline = AbortSignal.timeout(15_000);
+  // Navigation cancels the underlying fetch while the deadline also bounds an unresponsive Engine.
+  const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  try {
+    requestSignal.throwIfAborted();
+    const data = await api.mcpGraphql<{ workspaceWebhookPage: WebhookPage }>(
+      WEBHOOK_REGISTRATIONS_QUERY, filters, { signal: requestSignal }
+    );
+    return data.workspaceWebhookPage;
+  } catch (error) {
+    // Navigation aborts stay silent at the route; timeouts provide an actionable retry state.
+    if (deadline.aborted) throw new Error("Loading webhook URLs timed out. Refresh to try again.");
+    throw error;
   }
-  return { items, failed };
 }
 
 /** Creates only a review receipt; provider ingress changes solely after the user presses Create webhook. */

@@ -1072,6 +1072,8 @@ type Store interface {
 	// ListWorkspaceWebhooks returns every registration a workspace holds for
 	// one service, for CLI/visibility output.
 	ListWorkspaceWebhooks(ctx context.Context, serviceID uuid.UUID) ([]WorkspaceWebhook, error)
+	// Page registrations directly with authorization applied before counting; no Registry lookup is needed.
+	ListAuthorizedWorkspaceWebhookPage(ctx context.Context, scope accesscontrol.AuthorizedScope, filter WorkspaceWebhookFilter, limit, offset int) ([]WorkspaceWebhookListing, int, error)
 	// WorkspaceWebhookOwnersByLabel resolves, in one query, which config_key
 	// (if any) already owns the (service_id, label) pair for every service in
 	// serviceIDs -- used by kind: webhook's plan step to detect a conflict

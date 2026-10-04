@@ -1380,7 +1380,7 @@
       "file": "app/lib/webhook-discovery-api.ts",
       "call": 1,
       "variant": 1,
-      "document": "query WebhookRegistrations($serviceId: String!) {\n  workspaceWebhooks(service_id: $serviceId) { label slug callback_url delivery_mode signature signing_secret { bucket_id key_name } created_at }\n}"
+      "document": "query WorkspaceWebhookPage($limit: Int, $offset: Int, $serviceId: String, $search: String) {\n  workspaceWebhookPage(limit: $limit, offset: $offset, service_id: $serviceId, search: $search) {\n    total\n    items { service_id service_name service_ref label slug callback_url delivery_mode signature signing_secret { bucket_id key_name } created_at }\n  }\n}"
     },
     {
       "endpoint": "registry",

@@ -215,8 +215,12 @@ var workspaceServicePageGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 var workspaceWebhookGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "WorkspaceWebhook",
 	Fields: graphql.Fields{
-		"label": &graphql.Field{Type: graphql.String},
-		"slug":  &graphql.Field{Type: graphql.String},
+		// Batch discovery uses persisted service identity rather than Registry enrichment.
+		"service_id":   &graphql.Field{Type: graphql.String},
+		"service_name": &graphql.Field{Type: graphql.String},
+		"service_ref":  &graphql.Field{Type: graphql.String},
+		"label":        &graphql.Field{Type: graphql.String},
+		"slug":         &graphql.Field{Type: graphql.String},
 		// Discovery projects only non-secret routing information under the existing service-read boundary.
 		"callback_url":  &graphql.Field{Type: graphql.String},
 		"delivery_mode": &graphql.Field{Type: graphql.String},
@@ -2754,12 +2758,16 @@ func authRequiredFields(authType string) []string {
 // projectGraphQLWorkspaceWebhooks makes receiving URLs discoverable without exposing verification credentials.
 func projectGraphQLWorkspaceWebhooks(webhooks []store.WorkspaceWebhook, contexts ...context.Context) []map[string]interface{} {
 	items := make([]map[string]interface{}, 0, len(webhooks))
+	// Every registration uses the same routing and metadata permission boundary.
 	for _, webhook := range webhooks {
 		callbackURL, deliveryMode := webhookDiscoveryDestination(webhook)
-		var signingSecret map[string]interface{}
+		var signingSecret interface{}
 		// Existing projections without an actor remain metadata-free.
 		if len(contexts) > 0 {
-			signingSecret = webhookSigningSecretTarget(contexts[0], webhook)
+			// A typed nil map becomes an object of null fields in GraphQL; preserve a genuinely absent link.
+			if target := webhookSigningSecretTarget(contexts[0], webhook); target != nil {
+				signingSecret = target
+			}
 		}
 		items = append(items, map[string]interface{}{
 			"callback_url": callbackURL, "delivery_mode": deliveryMode,

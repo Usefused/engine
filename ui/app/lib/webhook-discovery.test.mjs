@@ -77,13 +77,42 @@ test("configuration rejects raw signing secrets and unsafe destinations", () => 
   assert.equal(contract.webhookConfiguration({...draft,secret:""}).services.stripe.secret,undefined);
 });
 
-// Bounded fan-out must report partial failure rather than incorrectly showing an empty catalogue.
-test("discovery retains readable registrations and identifies failed services", async () => {
-  const client=adapter({mcpGraphql: async (_query, variables) => {
-    // One denied service must not discard another service's permitted receiving URLs.
-    if (variables.serviceId === "denied") throw new Error("denied");
-    return {workspaceWebhooks:[{label:"events",slug:"route",callback_url:"https://engine.example/webhook/route",delivery_mode:"direct",signature:"set",created_at:""}]};
-  }});
-  const result=await client.webhookListings([{service_id:"ok",service_name:"Stripe"},{service_id:"denied",service_name:"GitHub"}]);
-  assert.equal(result.items.length,1); assert.equal(result.items[0].service_name,"Stripe"); assert.deepEqual(result.failed,["GitHub"]);
+// One page must issue one direct query with server filters, even when the total spans many pages.
+test("discovery sends filters once and returns only the requested server page", async () => {
+  const calls = [];
+  const page = {items:[{service_id:"stripe",service_name:"Stripe",slug:"route",label:"events"}],total:1000};
+  const client = adapter({
+    // Any attempted service catalogue request is a regression back to discovery fan-out.
+    workspace: {getServicesPage: async () => { throw new Error("Unexpected service catalogue request"); }},
+    // Record the direct Engine query without automatically fetching subsequent pages.
+    mcpGraphql: async (query,variables,options) => { calls.push({query,variables,options}); return {workspaceWebhookPage:page}; },
+  });
+  const filters = {limit:20,offset:40,serviceId:"stripe",search:"invoice"};
+  assert.deepEqual(await client.webhookListings(filters),page);
+  assert.equal(calls.length,1);
+  assert.deepEqual(calls[0].variables,filters);
+  assert.match(calls[0].query,/workspaceWebhookPage/);
+  assert.doesNotMatch(calls[0].query,/workspaceServices|auth_options/);
+  assert.ok(calls[0].options.signal instanceof AbortSignal);
+});
+
+// A stale load must stop its network work rather than keep a service scan running after navigation.
+test("discovery cancellation reaches the transport and pre-aborted loads issue no request", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const client = adapter({
+    // Emulate fetch cancellation while leaving control of navigation with the test.
+    mcpGraphql: async (_query,_variables,{signal}) => {
+      calls++;
+      return new Promise((_resolve,reject) => {
+        // Fetch rejects once the shared page signal is cancelled.
+        signal.addEventListener("abort",() => reject(signal.reason),{once:true});
+      });
+    },
+  });
+  const pending = client.webhookListings({limit:20,offset:0},controller.signal);
+  controller.abort();
+  await assert.rejects(pending,{name:"AbortError"});
+  await assert.rejects(client.webhookListings({limit:20,offset:0},controller.signal),{name:"AbortError"});
+  assert.equal(calls,1);
 });

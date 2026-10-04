@@ -1368,8 +1368,10 @@ export const api = {
   // reactivate/delete + analytics -- internal/engine/api/mcp_graphql.go),
   // a separate endpoint from api.graphql above, which is a pure Registry
   // forward-proxy with no MCP-aware resolvers of its own.
-  mcpGraphql: <T>(query: string, variables?: Record<string, unknown>) =>
+  // Optional cancellation lets page navigation and deadlines stop obsolete Engine requests.
+  mcpGraphql: <T>(query: string, variables?: Record<string, unknown>, options?: Pick<RequestInit, "signal">) =>
     req<GraphQLResponse<T>>("/engine/graphql", {
+      ...options,
       method: "POST",
       body: JSON.stringify({ query, variables }),
     }).then(unwrapGraphQLResponse),
