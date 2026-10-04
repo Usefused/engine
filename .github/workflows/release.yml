@@ -87,6 +87,11 @@ jobs:
           # External tag events use their ref; main runs use the tag emitted by the version job.
           ref: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || needs.tag.outputs.release_tag }}
 
+      - name: Authenticate shared OAuth core
+        uses: ./.github/actions/setup-private-core
+        with:
+          deploy-key: ${{ secrets.FUSED_OPEN_CORE_DEPLOY_KEY }}
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:

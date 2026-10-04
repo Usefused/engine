@@ -32,6 +32,30 @@ This used the actual Engine and PostgreSQL with a disposable API-key login and a
 test Registry fixture; external SSO and production deployment were not exercised.
 The diagnostic callback page belonged only to the test client, not the product UI.
 
+## Private dependency access for builds
+
+`Usefused/fused-open-core` is private. CI and releases require the Actions secret
+`FUSED_OPEN_CORE_DEPLOY_KEY` on `Usefused/engine`, containing the private half of
+a dedicated SSH deploy key registered with **read-only** access on the core
+repository. The normal workflow `GITHUB_TOKEN` cannot read that other private
+repository. Never commit the key or pass it as a Docker build argument.
+
+The shared setup action configures `GOPRIVATE`, repository-specific SSH routing,
+and GitHub's pinned host key before Go setup. Fork pull requests do not receive
+this secret, so their Go build jobs are skipped; validate reviewed fork changes
+on a trusted branch before merging. Release images use precompiled binaries.
+Source Docker builds receive the key through a temporary BuildKit secret mount:
+
+```sh
+docker build --secret id=fused_open_core_key,src=/path/to/read-only-deploy-key --target full -t fused-engine:local .
+```
+
+Use `--target headless` for the headless image. The secret is available only
+during module download and is not copied into an image layer. Ordinary local
+Go builds need `GOPRIVATE=github.com/Usefused/fused-open-core` plus Git credentials
+that can read the repository. A warm module cache can hide missing credentials;
+verify access with an empty temporary `GOMODCACHE` when changing CI authentication.
+
 For automated validation, set `DATABASE_URL` to a disposable PostgreSQL instance
 and run `go test -race ./internal/engine/oauthprovider` and
 `go test ./internal/engine/store -run OAuth` from the Engine repository. The

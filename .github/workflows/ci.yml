@@ -12,12 +12,19 @@ permissions:
 jobs:
   # Native Windows must keep portable interpreter behavior and reject execution without OS confinement.
   windowsWorkerContract:
+    # Fork PRs cannot receive the private dependency's deploy key; validate them on a trusted branch.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: windows-latest
     env:
       CGO_ENABLED: '0'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Authenticate shared OAuth core
+        uses: ./.github/actions/setup-private-core
+        with:
+          deploy-key: ${{ secrets.FUSED_OPEN_CORE_DEPLOY_KEY }}
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
@@ -39,10 +46,17 @@ jobs:
         run: go test ./internal/engine/executionappvm ./internal/engine/sandbox -run 'TestUnsupportedWorker|TestCapabilityUnsupported|TestLoadedWorker|TestPrivateException|TestDiagnostic|TestExecutionPhases' -count=1 -timeout=90s
 
   buildImages:
+    # Fork PRs cannot receive the private dependency's deploy key; validate them on a trusted branch.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Authenticate shared OAuth core
+        uses: ./.github/actions/setup-private-core
+        with:
+          deploy-key: ${{ secrets.FUSED_OPEN_CORE_DEPLOY_KEY }}
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -144,8 +158,8 @@ jobs:
 
       - name: Build Docker images
         run: |
-          docker build --target full -t fused-engine:test .
-          docker build --target headless -t fused-engine:test-headless .
+          docker build --secret "id=fused_open_core_key,src=$FUSED_OPEN_CORE_KEY_FILE" --target full -t fused-engine:test .
+          docker build --secret "id=fused_open_core_key,src=$FUSED_OPEN_CORE_KEY_FILE" --target headless -t fused-engine:test-headless .
           # The final images must carry the compiler and its native esbuild dependency.
           docker run --rm --entrypoint node fused-engine:test -e "require('node:fs').accessSync('/app/runtime/execution/dist/src/cli.js'); require('/app/runtime/execution/node_modules/esbuild').version"
           docker run --rm --entrypoint node fused-engine:test-headless -e "require('node:fs').accessSync('/app/runtime/execution/dist/src/cli.js'); require('/app/runtime/execution/node_modules/esbuild').version"

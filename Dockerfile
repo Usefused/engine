@@ -41,10 +41,19 @@ FROM golang:1.26.6-alpine AS engine-base
 
 WORKDIR /app
 
-RUN apk upgrade --no-cache && apk add --no-cache git
+RUN apk upgrade --no-cache && apk add --no-cache git openssh-client
 
 COPY go.mod go.sum ./
-RUN go mod download
+# Pin GitHub's published host key instead of trusting a key fetched over the build network.
+COPY .github/actions/setup-private-core/known_hosts /etc/ssh/ssh_known_hosts
+# BuildKit mounts the deploy key only for this download; no credential enters an image layer.
+RUN --mount=type=secret,id=fused_open_core_key,required=true \
+    GOPRIVATE=github.com/Usefused/fused-open-core \
+    GIT_SSH_COMMAND="ssh -i /run/secrets/fused_open_core_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes" \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0=url.ssh://git@github.com/Usefused/fused-open-core.insteadOf \
+    GIT_CONFIG_VALUE_0=https://github.com/Usefused/fused-open-core \
+    go mod download
 
 COPY . ./
 ARG VERSION=dev

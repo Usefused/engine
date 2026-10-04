@@ -1,0 +1,38 @@
+name: Set up private OAuth core
+description: Authenticate Go downloads with a repository-scoped read-only deploy key.
+inputs:
+  deploy-key:
+    description: Read-only deploy key for Usefused/fused-open-core.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Configure private module access
+      shell: bash
+      env:
+        FUSED_OPEN_CORE_DEPLOY_KEY: ${{ inputs.deploy-key }}
+        PRIVATE_CORE_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        # Fail before compiling so missing cross-repository access has an actionable error.
+        if [[ -z "$FUSED_OPEN_CORE_DEPLOY_KEY" ]]; then
+          echo '::error::Set FUSED_OPEN_CORE_DEPLOY_KEY in Actions secrets with read-only access to Usefused/fused-open-core.'
+          exit 1
+        fi
+        key_file="$RUNNER_TEMP/fused-open-core-key"
+        known_hosts="$RUNNER_TEMP/fused-open-core-known-hosts"
+        umask 077
+        printf '%s\n' "$FUSED_OPEN_CORE_DEPLOY_KEY" > "$key_file"
+        cp "$PRIVATE_CORE_ACTION_PATH/known_hosts" "$known_hosts"
+        # Native Git/Go on Windows need paths that also work outside Git Bash.
+        if [[ "$RUNNER_OS" == Windows ]]; then
+          key_file=$(cygpath -m "$key_file")
+          known_hosts=$(cygpath -m "$known_hosts")
+        fi
+        export GIT_SSH_COMMAND="ssh -i '$key_file' -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile='$known_hosts' -o StrictHostKeyChecking=yes"
+        echo "GIT_SSH_COMMAND=$GIT_SSH_COMMAND" >> "$GITHUB_ENV"
+        echo "FUSED_OPEN_CORE_KEY_FILE=$key_file" >> "$GITHUB_ENV"
+        echo 'GOPRIVATE=github.com/Usefused/fused-open-core' >> "$GITHUB_ENV"
+        # Restrict credential routing to this dependency; releases keep their normal HTTPS token.
+        git config --global url."ssh://git@github.com/Usefused/fused-open-core".insteadOf 'https://github.com/Usefused/fused-open-core'
+        git ls-remote https://github.com/Usefused/fused-open-core.git HEAD > /dev/null
