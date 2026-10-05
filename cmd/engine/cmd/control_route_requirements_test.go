@@ -75,6 +75,37 @@ func TestAppAccessRequirementsUseFamilyBoundary(t *testing.T) {
 	}
 }
 
+// TestExecutionFailurePolicyRequiresReceiptGrants protects message reads at the middleware boundary without private diagnostic access.
+func TestExecutionFailurePolicyRequiresReceiptGrants(t *testing.T) {
+	accountID, appID, familyID := uuid.New(), uuid.New(), uuid.New()
+	stores := &controlRequirementStoreStub{apps: map[uuid.UUID]store.App{
+		appID: {AppID: appID, AppFamilyID: familyID, AccountID: accountID},
+	}}
+	resolver := newControlRequirementResolver(stores, nil)
+	actor := accesscontrol.Actor{AccountID: accountID}
+	request := httptest.NewRequest(http.MethodGet, "/apps/"+appID.String()+"/executions/"+uuid.NewString()+"/failure", nil)
+	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), actor))
+	requirements, _, ok := resolveControlRESTPolicy(request, resolver)
+	// An admitted route must enforce both grants before the handler can read a retained result.
+	if !ok || len(requirements) != 2 {
+		t.Fatalf("requirements = %#v, admitted=%v", requirements, ok)
+	}
+	for i, permission := range []accesscontrol.Permission{accesscontrol.PermissionAppUnifiedAppRead, accesscontrol.PermissionAuditRead} {
+		want := accesscontrol.Requirement{Permission: permission, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceApp, ID: familyID}}
+		// Version identifiers must resolve to the stored family for each grant.
+		if requirements[i] != want {
+			t.Fatalf("requirement = %#v, want %#v", requirements[i], want)
+		}
+	}
+	actor.AccountID = uuid.New()
+	request = request.WithContext(accesscontrol.ContextWithActor(request.Context(), actor))
+	_, _, ok = resolveControlRESTPolicy(request, resolver)
+	// Cross-account lookups must fail before any retained error can be read.
+	if ok {
+		t.Fatal("failure route admitted a foreign account")
+	}
+}
+
 // TestAppTokenAccessRequirementsUseFamilyBoundary keeps token management tied to the family rather than a version identifier.
 func TestAppTokenAccessRequirementsUseFamilyBoundary(t *testing.T) {
 	accountID, familyID := uuid.New(), uuid.New()

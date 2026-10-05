@@ -142,7 +142,7 @@ func (r *storeBackedControlRequirementResolver) resolveDesiredConfigRequirements
 	}
 }
 
-// appAccessRequirements separates ordinary reads, private source, and diagnostic access at the persisted family boundary.
+// appAccessRequirements separates ordinary reads, receipt messages, private source, and diagnostics at the persisted family boundary.
 func (r *storeBackedControlRequirementResolver) appAccessRequirements(ctx context.Context, actor accesscontrol.Actor, params map[string]string, request *http.Request) ([]accesscontrol.Requirement, error) {
 	appID, err := uuid.Parse(params["app_id"])
 	// Malformed immutable identity must not fall back to a broader workspace permission.
@@ -162,6 +162,14 @@ func (r *storeBackedControlRequirementResolver) appAccessRequirements(ctx contex
 	// Diagnostic access is independently grantable and must not inherit ordinary app read authority.
 	if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/diagnostics") {
 		requirements[0].Permission = accesscontrol.PermissionUnifiedAppDiagnosticsRead
+	}
+	// Match the message handler's two grants without requiring access to private diagnostic payloads.
+	if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/failure") {
+		requirements[0].Permission = accesscontrol.PermissionAppUnifiedAppRead
+		requirements = append(requirements, accesscontrol.Requirement{
+			Permission: accesscontrol.PermissionAuditRead,
+			Resource:   requirements[0].Resource,
+		})
 	}
 	return requirements, nil
 }
