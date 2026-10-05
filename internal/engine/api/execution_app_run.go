@@ -103,7 +103,7 @@ func (s *EngineGRPCServer) runAdmittedCapability(ctx context.Context, spec capab
 	// Terminal state survives client cancellation and remains attached to its original trace.
 	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer finishCancel()
-	if err := admitted.results.CompleteExecutionResult(finishCtx, spec.identity.AccountID, spec.identity.AppID, admitted.id, status, output, buffer.Data(), errorCode, capabilityPublicError(errorCode)); err != nil {
+	if err := admitted.results.CompleteExecutionResult(finishCtx, spec.identity.AccountID, spec.identity.AppID, admitted.id, status, output, buffer.Data(), errorCode, capabilityPublicError(errorCode, runErr)); err != nil {
 		return capabilityExecutionEnvelope{}, newRESTExecutionError(http.StatusServiceUnavailable, "result_unavailable", "execution result is unavailable")
 	}
 	s.saveExecutionDiagnostics(finishCtx, spec, admitted.id, recorder, runErr)

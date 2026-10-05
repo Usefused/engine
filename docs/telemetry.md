@@ -125,6 +125,14 @@ that value into a short explanation and marks the corresponding trace stage.
 Absent stage evidence remains unknown, and interrupted provider work must not
 imply that retrying is safe.
 
-Raw error messages, stacks, requests, and responses remain available only through
+Authored exception messages (including `throw new Error("…")`) are returned in
+`error.message` and displayed to app receipt readers. Credential failures include
+a recovery command using the service slug and bucket name, with UUID fallback.
+The inspector reads the retained message through
+`GET /apps/{app_id}/executions/{execution_id}/failure`, requiring
+`app.unified_app.read` and `audit.read`; messages do not enter execution events
+or OTEL. Pre-upgrade results keep their original generic messages.
+
+Raw provider errors, stacks, requests, and responses remain available only through
 **Private diagnostics**, with `app.unified_app.diagnostics.read` checked by Engine
 on every read. These payloads are never added to ordinary receipts or OTEL.

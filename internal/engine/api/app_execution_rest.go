@@ -533,6 +533,7 @@ func restActionableAuthError(err error) *restExecutionError {
 	if errors.As(err, &missing) {
 		return newRESTExecutionErrorWithDetails(http.StatusConflict, "bucket_credentials_missing", "provider credentials are not configured", map[string]any{
 			"bucket_id": missing.BucketID, "service_id": missing.ServiceID,
+			"service_slug": missing.ServiceSlug, "bucket_name": missing.BucketName,
 			"auth_type": missing.AuthType, "auth_name": missing.AuthName, "command": missing.Command(),
 		})
 	}

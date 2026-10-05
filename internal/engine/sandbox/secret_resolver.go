@@ -80,7 +80,16 @@ func NewSecretResolver(db store.Store, masterKey []byte) SecretResolver {
 // ResolveExecutionCredentials uses the full dispatch identity so secret and
 // binding queries remain pinned to one service version, operation, and auth
 // scheme rather than loading a service-wide credential set.
-func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, request CredentialRequest) (map[string]any, []store.BucketValue, error) {
+func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, request CredentialRequest) (resolved map[string]any, valuesOut []store.BucketValue, resolveErr error) {
+	// Add readable recovery targets only on failure; successful execution pays no extra database lookup.
+	defer func() {
+		var missing *CredentialMaterialMissingError
+		metadata, supported := r.db.(store.CredentialRecoveryMetadataStore)
+		// Older stores and non-credential failures preserve their original outcome unchanged.
+		if supported && errors.As(resolveErr, &missing) {
+			missing.ServiceSlug, missing.BucketName, _ = metadata.CredentialRecoveryNames(ctx, missing.ServiceID, missing.BucketID)
+		}
+	}()
 	ctx, span := otel.Tracer("engine").Start(ctx, "ResolveCredentials")
 	defer span.End()
 

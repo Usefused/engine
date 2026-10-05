@@ -240,3 +240,18 @@ values `admitted`, `full`, `timeout`, and `cancelled`. The runtime span also car
 `admission.wait_ms` and `admission.outcome`. These measurements exclude payloads,
 credentials, and error text. Budgets are per Engine instance, not a distributed
 quota across replicas.
+
+### Unified App failure messages
+
+A failed execution returns its authored exception in `error.message`, alongside
+the stable error code and execution ID. `throw new Error("Customer not found")`
+therefore produces an actionable caller-facing message. Messages are bounded to
+64 KiB; stack traces and raw provider requests/responses remain in permission-gated
+private diagnostics. Do not put secrets in intentionally thrown messages.
+
+Missing provider credentials return an interactive setup command using the service
+slug and bucket name, for example
+`fused-cli secret set 'stripe' --bucket 'production' --type 'basic' --auth-name 'basicAuth' --interactive`.
+Immutable IDs remain available in structured credential errors and are used as a
+fallback when readable metadata is unavailable or ambiguous. Replay preserves the
+same credential failure seen by the live app.

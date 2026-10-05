@@ -133,6 +133,11 @@ func executeCapabilityPhysicalValue(
 	}
 	// Validation remains inside the physical boundary so result failures produce one failed child receipt.
 	if err := executeResolvedPhysicalBoundary(ctx, dispatcher, identity, operation, request, stream, validate); err != nil {
+		var missing *CredentialMaterialMissingError
+		// Credential failures happen before dispatch and must retain their typed, value-free recovery guidance.
+		if errors.As(err, &missing) {
+			return nil, missing
+		}
 		// Only the privileged recording host receives provider bodies; ordinary errors remain safe.
 		return nil, &executionappvm.DiagnosticError{Phase: "provider", Message: executionappvm.BoundDiagnostic(err.Error()), Response: executionappvm.BoundDiagnostic(stream.String()), Truncated: len(stream.Bytes()) > 65536 || len(err.Error()) > 65536}
 	}

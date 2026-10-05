@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/auth"
@@ -204,8 +205,8 @@ func capabilityCompletion(runErr, ctxErr error, providerStarted bool) (string, s
 	return "failed", "execution_failed"
 }
 
-// capabilityPublicError maps private authored/provider failures to stable public codes.
-func capabilityPublicError(code string) string {
+// capabilityPublicError returns the authored message without the private stack or response payload.
+func capabilityPublicError(code string, failures ...error) string {
 	// Successful records carry no public error message.
 	if code == "" {
 		return ""
@@ -216,6 +217,14 @@ func capabilityPublicError(code string) string {
 		return "Unified App execution capacity is full; try again later."
 	case "execution_queue_timeout":
 		return "Unified App execution did not start before the queue wait expired."
+	}
+	// Only interpreter exceptions are caller-facing; infrastructure errors retain a bounded explanation.
+	if len(failures) > 0 && (code == "execution_failed" || code == "input_validation_failed" || code == "output_validation_failed") {
+		var diagnostic *executionappvm.DiagnosticError
+		// The VM separates message from stack and raw response before this projection.
+		if errors.As(failures[0], &diagnostic) && strings.TrimSpace(diagnostic.Message) != "" {
+			return executionappvm.BoundDiagnostic(diagnostic.Message)
+		}
 	}
 	return "unified app did not complete successfully"
 }

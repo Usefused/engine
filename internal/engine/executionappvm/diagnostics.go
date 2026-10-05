@@ -18,7 +18,7 @@ type DiagnosticError struct {
 	Truncated bool   `json:"truncated,omitempty"`
 }
 
-// Error prevents ordinary logging and caller error handling from disclosing authored values.
+// Error prevents implicit logging from exposing authored values; API responses explicitly project Message.
 func (*DiagnosticError) Error() string { return "capability execution failed" }
 
 // BoundDiagnostic limits retained error text without censoring its debugging content.
@@ -30,7 +30,7 @@ func BoundDiagnostic(value string) string {
 	return value
 }
 
-// PrivateDiagnostic preserves details only through the explicitly privileged diagnostics channel.
+// PrivateDiagnostic preserves full details for private diagnostics; ordinary result projections select only Message.
 func PrivateDiagnostic(err error) *DiagnosticError {
 	var detail *DiagnosticError
 	// Plain infrastructure failures also need an actionable internal message.

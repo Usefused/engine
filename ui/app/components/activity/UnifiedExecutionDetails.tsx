@@ -1,3 +1,4 @@
+import { UnifiedAppFailureMessage } from "~/components/activity/UnifiedAppFailureMessage";
 import { unifiedAppTraceRows } from "~/lib/unified-app-trace";
 import { unifiedAppOutcome } from "~/lib/unified-app-outcome";
 import { UnifiedAppTrace } from "~/components/activity/UnifiedAppTrace";
@@ -80,10 +81,10 @@ export function UnifiedExecutionDetails({ event, consumerName, rows, loading, un
         {successful ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}{successful ? "Successful" : "Failed"}
       </span>
     </div>
-    {/* Fixed explanations remain available to every authorized receipt reader without loading private details. */}
+    {/* The failure message is loaded with receipt permissions; stacks and payloads remain separately gated. */}
     <div className={`mt-4 rounded-lg border p-3 text-xs ${successful ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-red-200 bg-red-50 text-red-900"}`}>
       <p className="font-semibold">{outcome.title}</p>
-      <p className="mt-1">{outcome.message} {outcome.action}</p>
+      <UnifiedAppFailureMessage event={event} fallback={`${outcome.message} ${outcome.action}`} />
     </div>
     <dl className="mt-6 grid grid-cols-2 gap-4"><ReceiptField label="App" value={consumerName} /><ReceiptField label="Version" value={event.app_version || "Not recorded"} /><ReceiptField label="Access path" value={event.transport.toUpperCase()} /><ReceiptField label="Total elapsed" value={`${event.latency_ms} ms`} /></dl>
     <UnifiedAppTrace event={event} consumerName={consumerName} />

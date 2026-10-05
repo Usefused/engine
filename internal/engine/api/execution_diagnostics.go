@@ -56,7 +56,7 @@ func (host *recordingCapabilityHost) diagnostics(runErr error) json.RawMessage {
 	return raw
 }
 
-// saveExecutionDiagnostics records internal details without placing raw errors in spans or caller responses.
+// saveExecutionDiagnostics retains stacks and payloads separately from caller-facing messages and telemetry.
 func (s *EngineGRPCServer) saveExecutionDiagnostics(ctx context.Context, spec capabilityRunSpec, id uuid.UUID, recorder *recordingCapabilityHost, runErr error) {
 	repository, ok := s.store.(store.ExecutionDiagnosticsStore)
 	// Lightweight test stores and older installations report no diagnostics rather than leaking a fallback.

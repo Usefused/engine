@@ -1,3 +1,6 @@
+import { AppServiceAuthFields, type AppAuthService } from "~/components/apps/AppServiceAuthFields";
+import { useAppCredentialReview } from "~/components/apps/useAppCredentialReview";
+import { applyAppAuthEdits, type AppAuthEdits } from "~/lib/app-service-auth";
 import { FieldLabel } from "~/components/forms/FieldLabel";
 import type { ChooseDescribeService, DescribeProgress } from "~/lib/app-describe-contract";
 import { Select } from "../forms/Select.ts";
@@ -26,6 +29,7 @@ import {
   type AppBuildSelector,
   type AppCreationMode,
   type AppOwningTeam,
+  type AppPlanReviewer,
 } from "~/lib/app-builder-contract";
 import { useCredentialSetCreation } from "~/components/buckets/useCredentialSetCreation";
 import { useToast } from "~/components/Toast";
@@ -49,7 +53,7 @@ export type WorkflowAppConfig = Record<string, unknown> & {
   kind: "sdk" | "mcp"; name: string; version: string; bucket: string;
   language?: string; description?: string; generate?: boolean;
   mcp?: { description: string; "fused-intelligent-classifier"?: boolean };
-  services: Record<string, { version: string; operations?: string[] }>;
+  services: Record<string, { version: string; operations?: string[]; select_all?: boolean; auth?: AppAuthService["auth"] }>;
 };
 
 // The service-versions query below fetches header_value (the value clients
@@ -120,6 +124,7 @@ type BuilderCreationContext = {
   mode: GenerationMode;
   ownerTeamSlug: string;
   config: Record<string, unknown>;
+  reviewPlan: AppPlanReviewer;
   selections: AppSelection[];
   name: string;
   version: string;
@@ -413,7 +418,9 @@ async function waitForSDKGeneration(context: SDKStreamContext): Promise<void> {
 /** Deploys one MCP app and projects its Engine-owned transport endpoints. */
 async function deployMCPApp(context: BuilderCreationContext): Promise<void> {
   context.setStatus("Deploying MCP server...");
-  const result = await planAndApplyApp<{ app_id: string; default_transport: string; stable: boolean; stable_version_id: string; transport_urls: McpTransportEndpointData["transport_urls"]; execution_token?: string }>("mcp", context.ownerTeamSlug, context.config);
+  const result = await planAndApplyApp<{ app_id: string; default_transport: string; stable: boolean; stable_version_id: string; transport_urls: McpTransportEndpointData["transport_urls"]; execution_token?: string }>("mcp", context.ownerTeamSlug, context.config, context.reviewPlan);
+  // Cancelling credential review must not report a deployment or synchronize workspace pins.
+  if (!result) return;
   await context.syncWorkspacePins(context.selections);
   context.setMcpDeployment({
     id: result.app_id,
@@ -433,7 +440,10 @@ async function publishRESTApp(context: BuilderCreationContext): Promise<void> {
     appKindForCreationMode(context.mode),
     context.ownerTeamSlug,
     context.config,
+    context.reviewPlan,
   );
+  // Credential setup cancellation leaves the REST app unpublished.
+  if (!result) return;
   // A direct REST apply must terminate as a package-free publication, never as an unexpected Registry job.
   if (result.generation_status !== "skipped") {
     throw new Error("Engine returned an unexpected REST publication state");
@@ -451,7 +461,9 @@ async function publishRESTApp(context: BuilderCreationContext): Promise<void> {
 /** Generates and downloads one typed SDK package before reporting success. */
 async function generateSDKApp(context: BuilderCreationContext): Promise<void> {
   context.setStatus("Planning and generating SDK...");
-  const result = await planAndApplyApp<{ app_id: string; job_id: string; execution_token?: string; hosted_mcp?: boolean; mcp_transport_urls?: McpTransportEndpointData["transport_urls"] }>("sdk", context.ownerTeamSlug, context.config);
+  const result = await planAndApplyApp<{ app_id: string; job_id: string; execution_token?: string; hosted_mcp?: boolean; mcp_transport_urls?: McpTransportEndpointData["transport_urls"] }>("sdk", context.ownerTeamSlug, context.config, context.reviewPlan);
+  // A deferred setup choice must not start a package stream or download.
+  if (!result) return;
   await waitForSDKGeneration({
     controller: new AbortController(),
     appId: result.app_id,
@@ -1437,6 +1449,7 @@ export function AppOperationPicker({ seed, onChange, onPendingChange, allowWebho
 /** Owns one manual selection for both described proposals and direct SDK/MCP authoring. */
 export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderData; picker?: PickerOptions }) {
   const { access } = useCurrentActorAccess();
+  const credentialReview = useAppCredentialReview();
   const canReadApps = hasAnyAppPermission(access, "read");
   const canReadServices = hasAnyPermission(access, "service.read");
   const toast = useToast();
@@ -1446,6 +1459,9 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   const workflows = loaderData.workflows;
   const source = loaderData.source;
   const attachment = loaderData.attachment;
+  const [authEdits, setAuthEdits] = useState<AppAuthEdits>({});
+  // Navigating to another immutable source must not carry unsaved auth overrides into it.
+  useEffect(() => { setAuthEdits({}); }, [source?.appID]);
   const [attachmentAlias, setAttachmentAlias] = useState(() => unifiedAppAlias(attachment?.name ?? ""));
   // Navigating to another hosted app replaces only the pending attachment alias.
   useEffect(() => { setAttachmentAlias(unifiedAppAlias(attachment?.name ?? "")); }, [attachment?.app_id, attachment?.name]);
@@ -2175,6 +2191,20 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     }
   };
 
+  // Auth fields use exact source pins for successors and the same reviewed selections as new-app generation.
+  const authServices: AppAuthService[] = source ? source.service_pins.flatMap((pin) => {
+    const service = source.config.services[pin.key];
+    // Inbound-only selections have no provider request whose auth can be changed.
+    if (!service || (!service.operations?.length && !service.select_all)) return [];
+    return [{ key: pin.key, service_id: pin.service_id, version: service.version, auth: service.auth }];
+  }) : buildAppSelections(data, { selections, selectAllServices, webhookSelections, versionSelections }).flatMap((selection) => {
+    const [key, service] = appServiceEntry(selection, data);
+    // A selected version is required before fetching its auth contract.
+    if (!service.version || (!(service.operations as string[]).length && !selection.select_all)) return [];
+    return [{ key, service_id: selection.service_id, version: String(service.version) }];
+  });
+  const authIdentities = Object.fromEntries(authServices.map((service) => [service.key, service.service_id]));
+
   // handleGenerate validates, plans, applies, and reports one app build.
   const handleGenerate = async (e: FormEvent) => {
     // Direct links and stale UI state cannot select an ungranted app type.
@@ -2247,7 +2277,8 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
       await completeBuilderCreation({
         mode: generationMode,
         ownerTeamSlug,
-        config: composeUnifiedAppConsumer(physicalConfig, source?.config, attachment, attachmentAlias),
+        config: applyAppAuthEdits(composeUnifiedAppConsumer(physicalConfig, source?.config, attachment, attachmentAlias), authEdits, authIdentities),
+        reviewPlan: credentialReview.review,
         selections: selectionPayload,
         name: sdkName,
         version: appVersion,
@@ -2314,6 +2345,10 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     setPage,
   };
   const generation: ConsumerGenerationPanelProps = {
+    serviceAuthentication: <AppServiceAuthFields disabled={generating || describing || selectionPending} services={authServices.map((service) => ({ ...service, auth: authEdits[service.key]?.service_id === service.service_id ? authEdits[service.key].auth : service.auth }))} onChange={(key, auth) => {
+      // Keep the choice bound to the provider that was visible when this control was rendered.
+      setAuthEdits((current) => ({ ...current, [key]: { service_id: authIdentities[key], auth } }));
+    }} />,
     mcpDescription, setMcpDescription, intelligentSearch, setIntelligentSearch,
     existingApp: workflowContext.identity,
     selectedWorkflowCount: workflows.length,
@@ -2383,5 +2418,5 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
         generation={generation}
       />;
   // Source loading requires app.manage; new-app creation remains governed by its workspace create permission.
-  return <BuilderCreationAccess existing={Boolean(source)} mode={generationMode}>{pageContent}{credentialCreation.dialog}</BuilderCreationAccess>;
+  return <BuilderCreationAccess existing={Boolean(source)} mode={generationMode}>{pageContent}{(sdkDeployment || mcpDeployment) && credentialReview.warning}{credentialCreation.dialog}{credentialReview.dialog}</BuilderCreationAccess>;
 }

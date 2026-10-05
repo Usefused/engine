@@ -1,7 +1,13 @@
 {
-  "call_count": 107,
-  "document_count": 125,
+  "call_count": 108,
+  "document_count": 126,
   "calls": [
+    {
+      "endpoint": "registry",
+      "file": "app/components/apps/AppServiceAuthFields.tsx",
+      "call": 1,
+      "document_count": 1
+    },
     {
       "endpoint": "registry",
       "file": "app/components/apps/AppServiceBuilder.tsx",
@@ -646,6 +652,13 @@
     }
   ],
   "documents": [
+    {
+      "endpoint": "registry",
+      "file": "app/components/apps/AppServiceAuthFields.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "query AppServiceAuth($id: String!, $version: String!) { service(id: $id, version: $version) { current_service_version auth_configs { name type scheme deprecated } } }"
+    },
     {
       "endpoint": "registry",
       "file": "app/components/apps/AppServiceBuilder.tsx",

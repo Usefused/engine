@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/dop251/goja"
@@ -148,7 +149,7 @@ func (session *capabilityScriptSession) installGlobals(input json.RawMessage) er
 	return nil
 }
 
-// fetch schedules one JSON-only workspace operation without exposing Engine credentials.
+// fetch schedules JSON-only operations and preserves value-free credential recovery across the worker bridge.
 func (session *capabilityScriptSession) fetch(raw string) *goja.Promise {
 	return scheduleCapabilityHostCall(session.ctx, session.vm, session.results, session.semaphore, &session.hostCalls, func(callCtx context.Context) (any, error) {
 		// Provider input remains bounded before the Engine dispatcher sees it.
@@ -156,6 +157,10 @@ func (session *capabilityScriptSession) fetch(raw string) *goja.Promise {
 			return nil, errors.New("workspace operation input is invalid")
 		}
 		value, err := session.host.Fetch(callCtx, json.RawMessage(raw))
+		// The trusted host already separates credential guidance from private provider errors.
+		if err != nil && strings.HasPrefix(err.Error(), "bucket_credentials_missing:") {
+			return nil, errors.New(BoundDiagnostic(err.Error()))
+		}
 		// The bridge returns bounded canonical JSON to the author's proxy.
 		if err != nil || len(value) > MaxOutputBytes || !json.Valid(value) {
 			return nil, errors.New("workspace operation failed")

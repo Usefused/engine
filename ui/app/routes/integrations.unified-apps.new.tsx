@@ -1,6 +1,10 @@
 import type { ChooseDescribeService, DescribeProgress, AppDescription } from "~/lib/app-describe-contract";
 import { FieldLabel } from "~/components/forms/FieldLabel";
-import { TypeScriptEditor } from "~/components/code/TypeScriptEditor";
+import { AppCredentialWarning } from "~/components/apps/AppCredentialWarning";
+import { useAppCredentialReview } from "~/components/apps/useAppCredentialReview";
+import { UnifiedAppCodeEditor } from "~/components/apps/UnifiedAppCodeEditor";
+import { AppServiceAuthFields, type AppAuthSelection } from "~/components/apps/AppServiceAuthFields";
+import { unifiedEditorYAML, readUnifiedEditorYAML } from "~/lib/unified-app-yaml";
 import { CreateCredentialButton } from "~/components/buckets/CreateCredentialButton";
 import { useCredentialSetCreation } from "~/components/buckets/useCredentialSetCreation";
 import { Select } from "../components/forms/Select.ts";
@@ -8,7 +12,7 @@ import { AppCreationFlow } from "~/components/apps/AppCreationFlow";
 import { AppOperationPicker } from "~/components/apps/AppServiceBuilder";
 import { UnifiedAppCompileAction } from "~/components/apps/UnifiedAppCompileAction";
 import { describeSelectionKey, type AppServicePin } from "~/lib/app-describe-contract";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "@remix-run/react";
 import { ArrowRight, Check, Loader2 } from "lucide-react";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
@@ -16,7 +20,7 @@ import { hasWorkspacePermission } from "~/lib/current-actor-access";
 import { ExecutionTokenField } from "~/components/apps/ExecutionTokenField";
 import { AppDetailBackLink } from "~/components/apps/AppDetailChrome";
 import { describeUnifiedApp, listUnifiedTemplates, planUnifiedApp } from "~/lib/unified-app-api";
-import { UnifiedSourceClarificationError, unifiedConfig, type UnifiedDraft } from "~/lib/unified-app-contract";
+import { UnifiedSourceClarificationError, unifiedConfig, unifiedDraftHasEvents, unifiedServiceSettings, type UnifiedDraft } from "~/lib/unified-app-contract";
 import { draftAppSource } from "~/lib/app-describe-api";
 import { api } from "~/lib/api";
 import { unifiedEditDraft, unifiedEditConfig, unifiedEditSelections, nextUnifiedVersion, type UnifiedAppSource } from "~/lib/unified-app-edit";
@@ -31,7 +35,7 @@ function draftAttachment(draft: UnifiedDraft | null): string { return draft?.web
 
 /** Detects whether the selected capability scope needs inbound registration coverage. */
 function draftHasWebhookEvents(draft: UnifiedDraft): boolean {
-  return Object.values(draft.services).some((pin) => Boolean(pin.webhooks?.length));
+  return unifiedDraftHasEvents(draft);
 }
 
 /** Gates validation on a complete event or operation scope and its required registration. */
@@ -39,7 +43,7 @@ function canValidateUnifiedDraft(draft: UnifiedDraft, name: string, version: str
   // Immutable successors require a new version before source can be compiled.
   if (version.trim() === savedVersion || !canCompile(name, version, bucket, draft.source)) return false;
   // An empty picker selection cannot create a callable or triggered app.
-  if (!Object.values(draft.services).some((pin) => Boolean(pin.operations.length || pin.webhooks?.length))) return false;
+  if (!Object.values(draft.services).some((pin) => Boolean(pin.operations.length)) && !draftHasWebhookEvents(draft)) return false;
   // Event-only and mixed scopes both need an applied registration name.
   return !draftHasWebhookEvents(draft) || Boolean(draft.webhookAttachment?.trim());
 }
@@ -47,6 +51,8 @@ function canValidateUnifiedDraft(draft: UnifiedDraft, name: string, version: str
 /** Shares labeled source authoring, selection, compilation, and deployment for new apps and immutable successors. */
 export default function CreateUnifiedApp() {
   const { access } = useCurrentActorAccess();
+  const credentialReview = useAppCredentialReview();
+  const compiledInput = useRef<{ config: Record<string, unknown>; services: UnifiedDraft["services"]; ownerTeam?: string } | null>(null);
   const [params] = useSearchParams();
   const editID = params.get("edit");
   // Private source takes precedence over a template supplied in the same URL.
@@ -69,6 +75,9 @@ export default function CreateUnifiedApp() {
     setBuckets((current) => [...current.filter((bucket) => bucket.resource_id !== item.resource_id), item]);
     setBucket(item.resource_id); invalidatePlan();
   });
+  const yamlBaseline = useRef<UnifiedDraft | null>(null);
+  const [yamlActive, setYAMLActive] = useState(false);
+  const [yamlError, setYAMLError] = useState("");
   const [plan, setPlan] = useState<AppPlanResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [compiling, setCompiling] = useState(false);
@@ -81,6 +90,7 @@ export default function CreateUnifiedApp() {
     let current = true;
     // A source read enforces family manage permission; a new app still requires workspace create permission.
     if (!editID && !canCreate) return;
+    setYAMLError(""); setYAMLActive(false);
     setDraft(null); setEditSource(null); setPickerSeed({}); setPlan(null); setResult(null); setError("");
     setLoadingSource(Boolean(editID)); setBusy(true);
     pendingDescription.current = null;
@@ -121,7 +131,7 @@ export default function CreateUnifiedApp() {
   }, [canCreate, templateID, editID]);
 
   /** Keeps edited inputs from reusing a plan that described different source or credentials. */
-  function invalidatePlan() { setPlan(null); setError(""); }
+  function invalidatePlan() { compiledInput.current = null; setPlan(null); setError(""); }
 
   /** Exposes grounded selections immediately and resumes source-only retries without repeating discovery. */
   async function describe(goal: string, progress: DescribeProgress, chooseService: ChooseDescribeService) {
@@ -131,7 +141,9 @@ export default function CreateUnifiedApp() {
     function preview(proposal: AppDescription) {
       pendingDescription.current = { goal: goal.trim(), proposal };
       setDraftingSource(true);
-      setDraft({ ...proposal, source: "", webhookAttachment: draftAttachment(previous.draft) }); setPickerSeed(proposal.services);
+      // Re-describing keeps reviewed auth settings bound to their original provider identities.
+      const services = editSource ? unifiedEditSelections(editSource, proposal.services) : proposal.services;
+      setDraft({ ...proposal, services, serviceSettings: previous.draft?.serviceSettings, configSettings: previous.draft?.configSettings, source: "", webhookAttachment: draftAttachment(previous.draft) }); setPickerSeed(services);
       // Regeneration must never rename an existing family.
       if (!editID) setName(proposal.name);
       invalidatePlan();
@@ -147,7 +159,9 @@ export default function CreateUnifiedApp() {
         proposal = await describeUnifiedApp(goal, progress, chooseService, preview);
       }
       // Re-describing capabilities retains the explicitly chosen registration for review.
-      setDraft({ ...proposal, webhookAttachment: draftAttachment(previous.draft) });
+      // Retain saved aliases and auth after regeneration just as manual operation edits do.
+      const services = editSource ? unifiedEditSelections(editSource, proposal.services) : proposal.services;
+      setDraft({ ...proposal, services, serviceSettings: previous.draft?.serviceSettings, configSettings: previous.draft?.configSettings, webhookAttachment: draftAttachment(previous.draft) });
       // Existing family identity remains fixed when its implementation is regenerated.
       if (!editID) setName(proposal.name);
       invalidatePlan(); pendingDescription.current = null;
@@ -192,10 +206,46 @@ export default function CreateUnifiedApp() {
     setDraft({ ...draft, webhookAttachment }); invalidatePlan();
   }
 
+  /** Pins the same service auth pair used by SDK and MCP config without modifying stored secrets. */
+  function updateAuth(key: string, auth?: AppAuthSelection) {
+    // A delayed selector cannot update a service removed from the draft.
+    if (!draft?.services[key]) return;
+    const config = { ...unifiedServiceSettings(draft, key) };
+    // Omitting auth deliberately restores the provider's declared order.
+    if (auth) config.auth = auth;
+    else delete config.auth;
+    setDraft({ ...draft, serviceSettings: { ...draft.serviceSettings, [key]: { service_id: draft.services[key].service_id, config } } });
+    invalidatePlan();
+  }
+
+  /** Keeps the original pins available for YAML undo and hydrates the picker only after editing finishes. */
+  function changeEditorView(yaml: boolean) {
+    // YAML edits may remove and restore entries without needing to rediscover the same provider.
+    if (yaml) yamlBaseline.current = draft;
+    else if (draft) setPickerSeed(draft.services);
+    setYAMLActive(yaml);
+  }
+
+  /** Applies valid YAML to the same form draft; invalid text cannot reuse an earlier deployment plan. */
+  function updateYAML(raw: string) {
+    invalidatePlan();
+    // YAML is only available after service selection has established immutable pins.
+    if (!draft) return;
+    try {
+      const parsed = readUnifiedEditorYAML(raw, { ...draft, services: yamlBaseline.current?.services ?? draft.services }, editSource);
+      const selected = buckets.find((item) => item.display_name === parsed.bucket);
+      // New apps may only choose buckets available to the current builder actor.
+      if (!editSource && !selected) throw new Error("Choose an available bucket by name.");
+      setDraft(parsed.draft); setName(parsed.name); setVersion(parsed.version);
+      setBucket(editSource ? parsed.bucket : selected!.resource_id);
+      setYAMLError("");
+    } catch (cause) { setYAMLError(cause instanceof Error ? cause.message : String(cause)); }
+  }
+
   /** Shows immediate local feedback while resolving credentials and compiling the reviewed draft. */
   async function compile() {
     // Pending work and incomplete drafts cannot start a second compilation request.
-    if (busy || !draft || selecting || describing || (editID && !editSource)) return;
+    if (busy || yamlError || !draft || selecting || describing || (editID && !editSource)) return;
     setCompiling(true); setBusy(true); setError(""); setProgress("Checking selected services…");
     try {
       const selectedBucket = buckets.find((item) => item.resource_id === bucket);
@@ -203,6 +253,7 @@ export default function CreateUnifiedApp() {
       if (!editSource && !selectedBucket) throw new Error("Choose an available bucket before compiling.");
       const config = editSource ? unifiedEditConfig(editSource, draft, version) : unifiedConfig(draft, name, version, selectedBucket!.display_name);
       setPlan(await planUnifiedApp(config, draft.services, setProgress, editSource?.owner_team));
+      compiledInput.current = { config, services: draft.services, ownerTeam: editSource?.owner_team };
     }
     catch (cause) { setError(String(cause)); }
     // Success and failure both restore the action so errors can be corrected and retried.
@@ -212,9 +263,22 @@ export default function CreateUnifiedApp() {
   /** Applies only the exact reviewed receipt and keeps the one-time execution token in memory. */
   async function deploy() {
     // A source edit invalidates the receipt and must force a fresh compilation.
-    if (!plan || selecting || describing) return;
-    setBusy(true); setError(""); setProgress("Deploying your Unified App…");
-    try { setResult(await api.appConfig.apply("unified-app", { plan_id: plan.plan_id, source_hash: plan.source_hash })); }
+    if (!plan || !compiledInput.current || busy || yamlError || selecting || describing) return;
+    const input = compiledInput.current;
+    setBusy(true); setError(""); setProgress("Reviewing credential setup…");
+    try {
+      /** Rechecking reuses the exact reviewed source and service identities while refreshing mutable credentials. */
+      const recheck = async () => {
+        const fresh = await planUnifiedApp(input.config, input.services, () => {}, input.ownerTeam);
+        setPlan(fresh);
+        return fresh;
+      };
+      const approved = await credentialReview.review(plan, recheck);
+      // Cancelling the warning leaves the compiled draft intact and never deploys it.
+      if (!approved) return;
+      setProgress("Deploying your Unified App…");
+      setResult(await api.appConfig.apply("unified-app", { plan_id: approved.plan_id, source_hash: approved.source_hash }));
+    }
     catch (cause) { setError(String(cause)); }
     finally { setBusy(false); setProgress(""); }
   }
@@ -224,12 +288,12 @@ export default function CreateUnifiedApp() {
   // Render permission failures separately from the describe and credential UI.
   if (!editID && !canCreate) return <div className="space-y-4"><AppDetailBackLink to="/integrations/sdks?type=unified_app" /><p className="text-slate-500">Unified App creation access is required.</p></div>;
   // Success deliberately retains the one-time token until the user leaves this page.
-  if (result) return <CreatedUnifiedApp result={result} name={name} version={version} />;
+  if (result) return <CreatedUnifiedApp result={result} name={name} version={version} credentialWarning={credentialReview.warning} />;
   return <div className="mx-auto max-w-5xl space-y-6">
     <AppDetailBackLink to={editID ? `/integrations/unified-apps/${editID}` : "/integrations/sdks?type=unified_app"} />
     <header className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="text-2xl font-bold text-slate-900">{editID ? "Edit Unified App" : "Create a Unified App"}</h1><p className="mt-1 text-slate-500">{editSource ? `Editing version ${editSource.config.version}. Deploy your changes as a new version; your app URL and tokens stay the same.` : "Describe what you want to build. Review it, then run it on Engine."}</p></div>{/* Templates start a separate app rather than replacing a saved editor baseline. */}{!editID && <Link to="/integrations/unified-apps/templates" className="text-sm font-medium text-[var(--brand-violet)] hover:underline">Browse templates</Link>}</header>
-    <AppCreationFlow generatesSource onDescribe={describe} onBusyChange={setDescribing} disabled={busy} initialManual={Boolean(editID) || Boolean(templateID) || params.get("mode") === "manual"} hasSelection={Boolean(draft)}>
-    <AppOperationPicker seed={pickerSeed} onChange={selectOperations} onPendingChange={setSelecting} allowWebhooks />
+    <AppCreationFlow generatesSource onDescribe={describe} onBusyChange={setDescribing} disabled={busy} lockIntent={yamlActive} initialManual={Boolean(editID) || Boolean(templateID) || params.get("mode") === "manual"} hasSelection={Boolean(draft)}>
+    <fieldset disabled={yamlActive || busy || describing} className="min-w-0"><AppOperationPicker seed={pickerSeed} onChange={selectOperations} onPendingChange={setSelecting} allowWebhooks /></fieldset>
     {/* Compilation reports progress by its button; other loading stages remain above the form. */}
     {busy && !compiling && <p role="status" className="flex items-center gap-2 text-sm text-slate-600"><Loader2 className="h-4 w-4 animate-spin" />{progress || "Loading template…"}</p>}
     {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</p>}
@@ -237,6 +301,7 @@ export default function CreateUnifiedApp() {
     {draft && <fieldset aria-labelledby="unified-app-setup-heading" disabled={busy || describing || selecting} className="space-y-6 rounded-xl border border-slate-200 bg-white p-5 sm:p-6">
       {/* An interior heading keeps the card border continuous while naming the grouped controls accessibly. */}
       <h2 id="unified-app-setup-heading" className="text-lg font-semibold text-slate-900">Unified App setup</h2>
+      <fieldset disabled={yamlActive} className="space-y-6">
       <label className="block space-y-2 text-sm font-medium">
         <FieldLabel required>App name</FieldLabel>
         <input required className={fieldClass} readOnly={Boolean(editID)} value={name} onChange={(event) => { setName(event.target.value); invalidatePlan(); }} />
@@ -271,19 +336,24 @@ export default function CreateUnifiedApp() {
         <input required className={fieldClass} placeholder="team-events" value={draftAttachment(draft)} onChange={(event) => updateWebhookAttachment(event.target.value)} />
         <span className="block text-xs font-normal text-slate-500">Enter a registration covering every selected event service. <Link className="text-[var(--brand-violet)] hover:underline" to="/integrations/webhooks/new" target="_blank" rel="noreferrer">Create a webhook registration</Link> if you need one.</span>
       </label>}
-      <div className="space-y-2 text-sm font-medium"><label htmlFor="unified-app-source" className="block"><FieldLabel required>TypeScript source</FieldLabel></label>{/* The selection is reviewable while hosted source is still being generated. */}{draftingSource && !draft.source && <span role="status" className="block font-normal text-slate-500">Generating TypeScript from your selected operations and events…</span>}<TypeScriptEditor required id="unified-app-source" value={draft.source} disabled={busy || describing || selecting} onChange={updateSource} /></div>
+      <AppServiceAuthFields services={Object.entries(draft.services).filter(([, pin]) => pin.operations.length).map(([key, pin]) => ({ key, service_id: pin.service_id, version: pin.version, auth: unifiedServiceSettings(draft, key).auth as AppAuthSelection | undefined }))} onChange={updateAuth} disabled={yamlActive || busy || describing || selecting} />
+      </fieldset>
+      {/* Source drafting keeps the service review visible until code generation finishes. */}
+      {draftingSource && !draft.source && <p role="status" className="text-sm text-slate-500">Generating TypeScript from your selected operations and events…</p>}
+      <UnifiedAppCodeEditor source={draft.source} yaml={unifiedEditorYAML(draft, name, version, editSource?.config.bucket ?? buckets.find((item) => item.resource_id === bucket)?.display_name ?? "", editSource)} disabled={busy || describing || selecting} error={yamlError} onSource={updateSource} onYAML={updateYAML} onViewChange={changeEditorView} />
       <p className="text-xs text-slate-500">Validate and compile checks TypeScript and selected operation bindings without running provider calls. It enables missing pinned service versions. Deploying is a separate step.</p>
       {/* The plan is invalidated on every edit, so deployment cannot apply stale reviewed content. */}
       {editSource && <p className="text-sm text-slate-600">Deploying switches new traffic to this version. Earlier versions remain available in version history.</p>}
-      {plan ? <section className="space-y-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4"><h2 className="font-semibold text-emerald-900">Ready to deploy</h2><p className="text-sm text-emerald-800">TypeScript validation and compilation passed. Provider operations have not been run.</p><pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-700">{JSON.stringify(plan.summary, null, 2)}</pre><button type="button" className={buttonClass} onClick={deploy}>{editID ? "Deploy new version" : "Deploy Unified App"} <ArrowRight className="h-4 w-4" /></button></section> : <UnifiedAppCompileAction className={buttonClass} compiling={compiling} progress={progress} disabled={!canValidateUnifiedDraft(draft, name, version, bucket, editSource?.config.version)} onCompile={compile} />}
+      {plan ? <section className="space-y-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4"><h2 className="font-semibold text-emerald-900">Ready to deploy</h2><p className="text-sm text-emerald-800">TypeScript validation and compilation passed. Provider operations have not been run.</p><AppCredentialWarning readiness={plan.credential_readiness} canManageBucket={credentialReview.canManageBucket} /><pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-700">{JSON.stringify(plan.summary, null, 2)}</pre><button type="button" className={buttonClass} onClick={deploy}>{editID ? "Deploy new version" : "Deploy Unified App"} <ArrowRight className="h-4 w-4" /></button></section> : <UnifiedAppCompileAction className={buttonClass} compiling={compiling} progress={progress} disabled={Boolean(yamlError) || !canValidateUnifiedDraft(draft, name, version, bucket, editSource?.config.version)} onCompile={compile} />}
     </fieldset>}
     </AppCreationFlow>
     {credentialCreation.dialog}
+    {credentialReview.dialog}
   </div>;
 }
 
 /** Groups the created identity, one-time credential and next step in one completion panel. */
-function CreatedUnifiedApp({ result, name, version }: { result: { app_id: string; app_family_id: string; execution_token?: string }; name: string; version: string }) {
+function CreatedUnifiedApp({ result, name, version, credentialWarning }: { result: { app_id: string; app_family_id: string; execution_token?: string }; name: string; version: string; credentialWarning?: ReactNode }) {
   const [copied, setCopied] = useState(false);
 
   /** Confirms copying without persisting the one-time credential beyond this page. */
@@ -291,6 +361,7 @@ function CreatedUnifiedApp({ result, name, version }: { result: { app_id: string
 
   return <div className="mx-auto max-w-3xl space-y-6">
     <AppDetailBackLink to="/integrations/sdks?type=unified_app" />
+    {credentialWarning}
     <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
       <header className="space-y-4 p-5 sm:p-6">
         <div className="flex items-center gap-2 text-sm font-medium text-emerald-700"><Check className="h-4 w-4" aria-hidden="true" />Your Unified App is ready</div>

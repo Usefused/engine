@@ -1,6 +1,6 @@
 import { FieldLabel } from "~/components/forms/FieldLabel";
 import { Select } from "../forms/Select.ts";
-import type { FormEvent } from "react";
+import type { FormEvent, ReactNode } from "react";
 import { ExecutionTokenField } from "~/components/apps/ExecutionTokenField";
 import { AlertTriangle, Check, Download, Globe2, Info, Server } from "lucide-react";
 import { AppOwnerControls } from "~/components/access/AppOwnerControls";
@@ -14,6 +14,7 @@ import { formatVersion } from "~/lib/format";
 // verbatim -- same handleGenerate/planAndApplyApp contract, only moved
 // so that route isn't carrying this JSX inline alongside the service list.
 export interface ConsumerGenerationPanelProps {
+  serviceAuthentication?: ReactNode;
   generationMode: AppCreationMode;
   existingApp?: { name: string; bucket: string; owner: string };
   selectedWorkflowCount?: number;
@@ -443,6 +444,8 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
           tooldescription="Create a generated SDK, direct REST API, or MCP server from selected operations. Requires name and version."
         >
           <GenerationIdentity props={props} />
+          {/* SDK and MCP use the same named auth selector as Unified App authoring. */}
+          {props.serviceAuthentication}
           <WebhookBundleField totalSelectedWebhooks={totalSelectedWebhooks} webhookAttachment={webhookAttachment} setWebhookAttachment={setWebhookAttachment} />
           {/* Reserve room for each label; narrow panels stack complete fields instead of wrapping the required badge. */}
           <div className={showsLanguage ? "flex w-full flex-wrap items-start gap-3" : ""}>

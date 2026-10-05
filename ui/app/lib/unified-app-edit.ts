@@ -1,4 +1,4 @@
-import type { UnifiedDraft } from "./unified-app-contract";
+import { unifiedDraftHasEvents, unifiedServiceSettings, type UnifiedDraft } from "./unified-app-contract.ts";
 
 export interface UnifiedAppSource {
   app_id: string;
@@ -24,7 +24,9 @@ export function unifiedEditDraft(saved: UnifiedAppSource): UnifiedDraft {
     if (!pin?.service_id || !pin.service_version_id || !service.version || !Array.isArray(service.operations)) throw new Error(`Saved service identity is unavailable for ${key}.`);
     return [key, { ...pin, version: service.version, operations: [...service.operations], webhooks: [...(service.webhooks ?? [])] }];
   }));
-  return { name: config.name, description: config.description ?? "", source: config.source, services, webhookAttachment: config.webhook_attachment ?? "" };
+  // Preserve the complete per-service config, including an explicit auth preference, for form and YAML editing.
+  const serviceSettings = Object.fromEntries(Object.entries(services).map(([key, pin]) => [key, { service_id: pin.service_id, config: { ...config.services[key] } }]));
+  return { serviceSettings, configSettings: { ...config }, name: config.name, description: config.description ?? "", source: config.source, services, webhookAttachment: config.webhook_attachment ?? "" };
 }
 
 /** Suggests a new patch version for ordinary semantic versions while leaving custom labels to the author. */
@@ -52,11 +54,11 @@ export function unifiedEditConfig(saved: UnifiedAppSource, draft: UnifiedDraft, 
   const services = Object.fromEntries(Object.entries(draft.services).map(([key, pin]) => {
     const original = saved.service_pins.find((item) => item.key === key && item.service_id === pin.service_id);
     // Retain auth, routing, and bucket overrides only when the selected provider identity is unchanged.
-    const settings = original ? saved.config.services[key] : {};
+    const settings = draft.serviceSettings?.[key] ? unifiedServiceSettings(draft, key) : original ? saved.config.services[key] : {};
     return [key, { ...settings, version: pin.version, operations: pin.operations, webhooks: pin.webhooks ?? [] }];
   }));
-  const config: Record<string, unknown> = { ...saved.config, version: version.trim(), source: draft.source, description: draft.description, services };
-  const hasEvents = Object.values(draft.services).some((pin) => pin.webhooks?.length);
+  const config: Record<string, unknown> = { ...(draft.configSettings ?? saved.config), version: version.trim(), source: draft.source, description: draft.description, services };
+  const hasEvents = unifiedDraftHasEvents(draft);
   // A successor cannot silently keep an attachment after its final event selection is removed.
   if (hasEvents) {
     // A changed event scope still needs an explicit registered bundle before planning.

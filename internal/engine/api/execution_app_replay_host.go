@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/Usefused/engine/internal/engine/executionappvm"
@@ -95,7 +96,7 @@ func canonicalReplayValue(raw json.RawMessage, maxBytes int) (json.RawMessage, e
 	return canonical, nil
 }
 
-// Fetch records invocation and completion order while returning a bounded generic error to authored code.
+// Fetch records deterministic outcomes and exposes credential repair guidance without provider payloads.
 func (host *recordingCapabilityHost) Fetch(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	// A missing live host cannot become a replay-only source of provider authority.
 	if host == nil || host.base == nil {
@@ -120,7 +121,7 @@ func (host *recordingCapabilityHost) Fetch(ctx context.Context, raw json.RawMess
 	host.calls = append(host.calls, capabilityReplayCall{Ordinal: ordinal, Request: request})
 	host.mu.Unlock()
 	response, fetchErr := host.base.Fetch(ctx, request)
-	// Replay and authored code stay stable; raw provider errors are retained only in encrypted diagnostics.
+	// Raw provider errors stay private; Engine-owned credential guidance is safe for authored error handling.
 	if fetchErr != nil {
 		host.mu.Lock()
 		// Allocate private evidence only for failed calls, outside the replay transcript.
@@ -129,8 +130,14 @@ func (host *recordingCapabilityHost) Fetch(ctx context.Context, raw json.RawMess
 		}
 		host.diagnosticErrors[index] = executionappvm.PrivateDiagnostic(fetchErr)
 		host.mu.Unlock()
-		host.finishFetch(index, nil, capabilityRecordedFetchError.Error())
-		return nil, capabilityRecordedFetchError
+		failure := capabilityRecordedFetchError
+		var missing *sandbox.CredentialMaterialMissingError
+		// Credential absence contains metadata and a repair command, never credential values.
+		if errors.As(fetchErr, &missing) {
+			failure = errors.New(executionappvm.BoundDiagnostic(missing.Error()))
+		}
+		host.finishFetch(index, nil, failure.Error())
+		return nil, failure
 	}
 	canonical, err := canonicalReplayValue(response, store.MaxReplayEvidenceBytes)
 	if err != nil {
@@ -280,7 +287,7 @@ func validateReplayCalls(calls []capabilityReplayCall) error {
 	return nil
 }
 
-// validateReplayCall admits one exact invocation, generic failure, and bounded result.
+// validateReplayCall admits exact invocations and the same bounded failures visible during the live run.
 func validateReplayCall(call capabilityReplayCall, count int) error {
 	// An incomplete or contradictory call cannot support deterministic side-effect-free execution.
 	if !validReplayCallShape(call, count) {
@@ -290,7 +297,8 @@ func validateReplayCall(call capabilityReplayCall, count int) error {
 		return ErrCapabilityReplayInvalid
 	}
 	if call.Error != "" {
-		if call.Error != capabilityRecordedFetchError.Error() {
+		// Only Engine-owned credential recovery messages extend the original generic error contract.
+		if call.Error != capabilityRecordedFetchError.Error() && (!strings.HasPrefix(call.Error, "bucket_credentials_missing:") || len(call.Error) > 65536) {
 			return ErrCapabilityReplayInvalid
 		}
 		return nil
@@ -329,7 +337,11 @@ func (host *replayCapabilityHost) Fetch(ctx context.Context, raw json.RawMessage
 	}
 	close(host.completion[call.Completion-1])
 	if call.Error != "" {
-		return nil, capabilityRecordedFetchError
+		// Preserve the legacy sentinel while replaying actionable messages exactly as authored code saw them.
+		if call.Error == capabilityRecordedFetchError.Error() {
+			return nil, capabilityRecordedFetchError
+		}
+		return nil, errors.New(call.Error)
 	}
 	return bytes.Clone(call.Response), nil
 }

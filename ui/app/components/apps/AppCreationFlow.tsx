@@ -10,13 +10,14 @@ interface AppCreationFlowProps {
   children: ReactNode;
   generatesSource?: boolean;
   disabled?: boolean;
+  lockIntent?: boolean;
   initialManual?: boolean;
   hasSelection?: boolean;
   onBusyChange?: (busy: boolean) => void;
 }
 
 /** Shares describe, clarification, and manual review while the parent owns one persistent selection. */
-export function AppCreationFlow({ onDescribe, children, generatesSource, disabled, initialManual, hasSelection, onBusyChange }: AppCreationFlowProps) {
+export function AppCreationFlow({ onDescribe, children, generatesSource, disabled, lockIntent, initialManual, hasSelection, onBusyChange }: AppCreationFlowProps) {
   const [mode, setMode] = useState(initialManual ? "manual" : "describe");
   const [reviewing, setReviewing] = useState(false);
   const [goal, setGoal] = useState("");
@@ -98,7 +99,7 @@ export function AppCreationFlow({ onDescribe, children, generatesSource, disable
   /** Editing the original request invalidates answers that belonged to its previous intent. */
   function changeGoal(value: string) { setGoal(value); setQuestion(""); setAnswer(""); setAnswers([]); setError(""); }
 
-  const locked = busy || Boolean(disabled);
+  const locked = busy || Boolean(disabled) || Boolean(lockIntent);
   const showReview = [hasSelection, reviewing, mode === "manual"].some(Boolean);
   return <div className="space-y-6">
     <CreationModes mode={mode} setMode={setMode} disabled={locked} />
@@ -121,7 +122,8 @@ export function AppCreationFlow({ onDescribe, children, generatesSource, disable
     {choice && <ServiceChoice key={choice.reference} reference={choice.reference} candidates={choice.candidates} onFinish={finishChoice} />}
     {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</p>}
     {/* Keep the picker mounted across mode changes so browsing and unfinished manual edits survive. */}
-    <fieldset disabled={locked} hidden={!showReview} className="min-w-0 space-y-6">
+    {/* Intent can be locked during config editing without locking the editor itself. */}
+    <fieldset disabled={busy || Boolean(disabled)} hidden={!showReview} className="min-w-0 space-y-6">
       {hasSelection && <h2 className="text-lg font-semibold text-slate-900">Review your app</h2>}
       {children}
     </fieldset>

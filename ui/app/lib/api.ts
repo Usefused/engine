@@ -1381,6 +1381,8 @@ export const api = {
   appConfig: {
     // Engine preserves the complete webhook bundle while reviewing one signing-secret replacement.
     webhookSecretPlan: <T>(slug: string, secret: string) => req<T>("/webhook-config/signing-secret/plan", { method: "POST", body: JSON.stringify({ slug, secret }) }),
+    // Ordinary receipt readers can inspect the retained failure without requesting private diagnostics.
+    executionFailure: (appID: string, executionID: string) => req<{ code: string; message: string }>(`/apps/${encodeURIComponent(appID)}/executions/${encodeURIComponent(executionID)}/failure`),
     // Private bodies require a fresh Engine permission check and never enter activity queries.
     diagnostics: (appID: string, executionID: string) => req<PrivateExecutionDiagnostics>(`/apps/${encodeURIComponent(appID)}/executions/${encodeURIComponent(executionID)}/diagnostics`),
     // Read the authoritative serving pointer before offering an explicit traffic switch.

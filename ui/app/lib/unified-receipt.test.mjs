@@ -16,7 +16,7 @@ function source(path) {
   return readFileSync(new URL(path, import.meta.url), "utf8");
 }
 
-// loadDetails compiles the real receipt and trace JSX so ordinary rendering has no API or diagnostics dependency.
+// loadDetails compiles real receipt JSX with an inert API; server rendering must never fetch diagnostics.
 function loadDetails(path = "../components/activity/UnifiedExecutionDetails.tsx") {
   const output = ts.transpileModule(source(path), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
@@ -25,6 +25,10 @@ function loadDetails(path = "../components/activity/UnifiedExecutionDetails.tsx"
   // App aliases use real local implementations; framework imports keep their installed behavior.
   const resolve = (name) => {
     const local = { "~/lib/unified-receipt": helpers, "~/lib/unified-app-trace": traceHelpers, "~/lib/unified-app-outcome": outcomeHelpers };
+    // Server rendering exercises the real fallback while effects remain deferred to the browser.
+    if (name === "~/components/activity/UnifiedAppFailureMessage") return loadDetails("../components/activity/UnifiedAppFailureMessage.tsx");
+    // The narrow API is unused during SSR and prevents accidental live requests from this fixture.
+    if (name === "~/lib/api") return { api: { appConfig: {} } };
     // Nested trace rendering exercises the actual failure marker, not a placeholder component.
     if (name === "~/components/activity/UnifiedAppTrace") return loadDetails("../components/activity/UnifiedAppTrace.tsx");
     return local[name] ?? require(name);

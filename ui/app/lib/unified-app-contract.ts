@@ -11,6 +11,8 @@ export interface UnifiedDraft {
   source: string;
   services: Record<string, UnifiedServicePin>;
   webhookAttachment?: string;
+  serviceSettings?: Record<string, { service_id: string; config: Record<string, unknown> }>;
+  configSettings?: Record<string, unknown>;
 }
 export interface UnifiedTemplate extends UnifiedDraft {
   schema_version: 1;
@@ -56,11 +58,16 @@ export function decodeUnifiedSource(raw: string): string {
 export function unifiedConfig(draft: UnifiedDraft, name: string, version: string, bucket: string): Record<string, unknown> {
   // User-reviewed identity is required before compilation or service activation.
   if (!name.trim() || !version.trim() || !bucket.trim()) throw new Error("Name, version, and a bucket are required.");
-  const services = Object.fromEntries(Object.entries(draft.services).map(([key, pin]) => [key, { version: pin.version, operations: pin.operations, ...(pin.webhooks?.length ? { webhooks: pin.webhooks } : {}) }]));
-  const hasEvents = Object.values(draft.services).some((pin) => pin.webhooks?.length);
+  // Explicit empty event lists clear earlier settings when the picker removes a trigger.
+  const services = Object.fromEntries(Object.entries(draft.services).map(([key, pin]) => [key, { ...unifiedServiceSettings(draft, key), version: pin.version, operations: pin.operations, webhooks: pin.webhooks ?? [] }]));
+  const hasEvents = unifiedDraftHasEvents(draft);
   // A selected event without an applied registration would never reach the hosted worker.
   if (hasEvents && !draft.webhookAttachment?.trim()) throw new Error("Choose a webhook registration for the selected events.");
-  return { apiVersion: "fused/v1", kind: "unified_app", name: name.trim(), description: draft.description, version: version.trim(), bucket: bucket.trim(), ...(hasEvents ? { webhook_attachment: draft.webhookAttachment!.trim() } : {}), services, source: draft.source };
+  const config: Record<string, unknown> = { ...draft.configSettings, apiVersion: "fused/v1", kind: "unified_app", name: name.trim(), description: draft.description, version: version.trim(), bucket: bucket.trim(), services, source: draft.source };
+  // Inline browser source and the reviewed event scope supersede portable file and attachment fields.
+  delete config.source_path; delete config.bundle_digest; delete config.webhook_attachment;
+  if (hasEvents) config.webhook_attachment = draft.webhookAttachment!.trim();
+  return config;
 }
 
 /** Decodes published source templates for review before installation. */
@@ -78,3 +85,15 @@ export function decodeUnifiedRelease(release: Omit<UnifiedRelease, "template"> &
 
 /** Each portable service dependency requires exact identity and an explicit operation allowlist. */
 function invalidServicePin(pin: UnifiedServicePin): boolean { return !pin?.service_id || !pin.service_version_id || !pin.version || !Array.isArray(pin.operations) || !pin.operations.length; }
+
+/** Keeps credential routing attached to a provider identity when the operation picker replaces its pins. */
+export function unifiedServiceSettings(draft: UnifiedDraft, key: string): Record<string, unknown> {
+  const saved = draft.serviceSettings?.[key];
+  // Reusing an alias for another provider must not inherit its credential or injection settings.
+  return saved?.service_id === draft.services[key]?.service_id ? saved?.config ?? {} : {};
+}
+
+/** Includes YAML-authored all-event selections when checking registration requirements. */
+export function unifiedDraftHasEvents(draft: UnifiedDraft): boolean {
+  return Object.entries(draft.services).some(([key, pin]) => Boolean(pin.webhooks?.length) || unifiedServiceSettings(draft, key).webhooks_select_all === true);
+}

@@ -75,7 +75,7 @@ func (s *EngineGRPCServer) executeCapabilityReplay(ctx context.Context, identity
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	// The temporary replay document commits only with this new result's terminal state.
-	if err := admitted.results.CompleteExecutionResult(finishCtx, identity.AccountID, identity.AppID, admitted.id, status, output, host.Data(), code, capabilityPublicError(code)); err != nil {
+	if err := admitted.results.CompleteExecutionResult(finishCtx, identity.AccountID, identity.AppID, admitted.id, status, output, host.Data(), code, capabilityPublicError(code, runErr)); err != nil {
 		return capabilityExecutionEnvelope{}, newRESTExecutionError(http.StatusServiceUnavailable, "result_unavailable", "execution result is unavailable")
 	}
 	return loadCapabilityRunEnvelope(finishCtx, admitted.results, identity, admitted.id, admitted.readHandle)

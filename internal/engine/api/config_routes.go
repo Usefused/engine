@@ -38,6 +38,8 @@ func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store
 	r.Get("/sdks/{app_id}/download", SDKPackageDownloadHandler(s, proxy, packageClient))
 	contractStore, _ := s.(appOpenAPIContractStore)
 	r.Get("/apps/{app_id}/openapi", AppOpenAPIHandler(s, contractStore))
+	// Ordinary receipt readers receive the failure message without private payloads.
+	r.Get("/apps/{app_id}/executions/{execution_id}/failure", ExecutionFailureHandler(s))
 	// Privileged diagnostic reads stay on the management plane, separate from runtime tokens.
 	r.Get("/apps/{app_id}/executions/{execution_id}/diagnostics", ExecutionDiagnosticsHandler(s, masterKey))
 	// Workflow extension reads private source locally and retains the existing plan/apply mutation path.

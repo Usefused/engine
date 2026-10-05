@@ -31,7 +31,25 @@ export interface AppPlanResponse {
   config_key: string;
   source_hash: string;
   summary: Record<string, unknown>;
+  credential_readiness?: AppCredentialReadiness | null;
 }
+
+export interface AppMissingCredential {
+  service_id: string;
+  service?: string;
+  bucket_id: string;
+  bucket_name?: string;
+  auth_type: string;
+  auth_name: string;
+  required_fields: Array<{ name: string; secret_key?: string }>;
+}
+
+export interface AppCredentialReadiness {
+  buckets: Array<{ id: string; name: string }>;
+  missing_credentials: AppMissingCredential[];
+}
+
+export type AppPlanReviewer = (plan: AppPlanResponse, recheck: () => Promise<AppPlanResponse>) => Promise<AppPlanResponse | null>;
 
 export interface AppPlanInput {
   owner_team?: string;

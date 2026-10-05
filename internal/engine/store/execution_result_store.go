@@ -295,8 +295,8 @@ func (s *postgresStore) CompleteExecutionResult(ctx context.Context, accountID, 
 	if err != nil {
 		return err
 	}
-	// Public errors are Engine-owned and bounded so provider payloads cannot become durable messages.
-	if len(errorCode) > 128 || len(errorMessage) > 1024 {
+	// Retained authored messages share the diagnostic text bound; stacks and response payloads are stored separately.
+	if len(errorCode) > 128 || len(errorMessage) > 65536 {
 		return ErrExecutionResultInvalid
 	}
 	tag, err := s.db.Exec(ctx, `UPDATE fused_unified_app_results
