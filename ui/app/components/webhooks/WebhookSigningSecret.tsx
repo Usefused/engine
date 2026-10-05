@@ -1,9 +1,8 @@
 import { useState, type FormEvent } from "react";
-import { Link } from "@remix-run/react";
+import { SecretReferenceField } from "~/components/buckets/SecretReferenceField";
 import { api } from "~/lib/api";
 import { createWebhook } from "~/lib/webhook-discovery-api";
 import type { AppPlanResponse } from "~/lib/app-builder-contract";
-import { FieldLabel } from "~/components/forms/FieldLabel";
 
 /** Reviews a write-only credential reference; Engine never returns the stored signing secret to this form. */
 export function WebhookSigningSecret({ slug, onSaved }: { slug: string; onSaved: () => void }) {
@@ -31,8 +30,8 @@ export function WebhookSigningSecret({ slug, onSaved }: { slug: string; onSaved:
   // Keep credential controls out of the URL row until a manager explicitly opens them.
   if(!open) return <button type="button" onClick={()=>setOpen(true)} className="text-[11px] font-medium text-slate-500 hover:text-[var(--brand-violet)]">Change secret reference</button>;
   return <form onSubmit={review} className="w-full space-y-3 border-t border-slate-100 pt-4"><fieldset disabled={busy || uncertain} className="space-y-3">
-    <label className="block space-y-2 text-sm font-medium"><FieldLabel required>New secret reference</FieldLabel><input required autoComplete="off" value={secret} onChange={(event)=>{setSecret(event.target.value);setPlan(null);setError("");}} placeholder="${bucket.default.secret.signing_key}" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" /></label>
-    <p className="text-xs text-slate-500">Store the new secret in <Link to="/integrations/buckets" className="text-[var(--brand-violet)]">Credentials</Link>, then enter its reference. Your receiving URL stays the same.</p>
+    <SecretReferenceField required label="New secret reference" disabled={busy || uncertain} value={secret} onChange={(reference) => { setSecret(reference); setPlan(null); setError(""); }} />
+    <p className="text-xs text-slate-500">Choose an existing reference or create a secret here. Your receiving URL stays the same.</p>
     {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
     {/* Review and save are distinct; no request retries are hidden behind the button. */}
     <div className="flex flex-wrap items-center gap-3">{plan ? <button type="button" onClick={save} className="rounded-lg bg-[var(--brand-violet)] px-2.5 py-1.5 text-xs font-semibold text-white">{busy ? "Saving…" : "Save reference"}</button> : <button type="submit" className="rounded-lg bg-[var(--brand-violet)] px-2.5 py-1.5 text-xs font-semibold text-white">{busy ? "Reviewing…" : "Review change"}</button>}<button type="button" onClick={()=>{setOpen(false);setPlan(null);setSecret("");setError("");}} className="px-2 py-1.5 text-xs text-slate-500">Cancel</button></div>

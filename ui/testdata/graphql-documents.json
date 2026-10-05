@@ -1,6 +1,6 @@
 {
-  "call_count": 106,
-  "document_count": 124,
+  "call_count": 107,
+  "document_count": 125,
   "calls": [
     {
       "endpoint": "registry",
@@ -47,6 +47,12 @@
     {
       "endpoint": "engine",
       "file": "app/components/buckets/BucketConnectAccount.tsx",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/components/buckets/SecretReferenceField.tsx",
       "call": 1,
       "document_count": 1
     },
@@ -695,6 +701,13 @@
       "call": 1,
       "variant": 1,
       "document": "mutation BucketStartConnectSession($bucketId: String!, $serviceId: String!, $endUserRef: String!, $authType: String, $authName: String, $authRef: String, $scopes: [String!], $returnUrl: String) {\n  startConnectSession(bucket_id: $bucketId, service_id: $serviceId, end_user_ref: $endUserRef, auth_type: $authType, auth_name: $authName, auth_ref: $authRef, scopes: $scopes, return_url: $returnUrl) {\n    authorize_url expires_at\n  }\n}"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/components/buckets/SecretReferenceField.tsx",
+      "call": 1,
+      "variant": 1,
+      "document": "query NewSecretMetadata($bucketId: String!, $limit: Int!, $offset: Int!) {\n            secretMetaPage(bucket_id: $bucketId, limit: $limit, offset: $offset) { total items { key_name key_names service_id } }\n          }"
     },
     {
       "endpoint": "engine",

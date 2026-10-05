@@ -1,3 +1,4 @@
+import { CreateCredentialButton } from "../buckets/CreateCredentialButton.ts";
 import { FieldLabel } from "../forms/FieldLabel.ts";
 import { Select } from "../forms/Select.ts";
 import { createElement, type ChangeEvent, type ReactElement } from "react";
@@ -56,19 +57,11 @@ function bucketControl(props: AppOwnerControlsProps): ReactElement {
     null,
     createElement(
       "div",
-      { className: "mb-1 flex items-center justify-between gap-3" },
+      { className: "mb-2 flex flex-wrap items-center justify-between gap-3" },
       createElement("label", { htmlFor: "app-credential-bucket", className: "block text-sm font-medium text-slate-700" }, createElement(FieldLabel, { required: true }, "Credential set")),
+      // Only actors allowed to create credential sets receive the creation action.
       props.onCreateCredential
-        ? createElement(
-            "button",
-            {
-              type: "button",
-              onClick: props.onCreateCredential,
-              className: "text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline",
-              "data-track": "create_builder_credential",
-            },
-            "Create credential"
-          )
+        ? createElement(CreateCredentialButton, { onClick: props.onCreateCredential })
         : null
     ),
     createElement(
@@ -85,6 +78,7 @@ function bucketControl(props: AppOwnerControlsProps): ReactElement {
       createElement("option", { value: "" }, "Choose a credential set"),
       ...props.buckets.map((bucket) => createElement("option", { key: bucket.resource_id, value: bucket.resource_id }, bucket.display_name))
     ),
+    // Empty choices explain access without forcing users to abandon the form.
     props.buckets.length === 0
       ? createElement("p", { className: "mt-1.5 text-xs text-amber-700" }, props.ownerTeamId ? "You and this team do not share access to a credential set." : "You do not have access to a credential set.")
       : null,
@@ -94,8 +88,8 @@ function bucketControl(props: AppOwnerControlsProps): ReactElement {
           "p",
           { className: "mt-1 text-xs text-slate-500" },
           props.ownerTeamId
-            ? "Create it in a new tab, then return here. Only sets shared with the owning team will appear."
-            : "Create it in a new tab, then return here; this list refreshes automatically."
+            ? "Create a set here. It must also be shared with the owning team before it can be selected."
+            : "Create a set here to select it without leaving this form."
         )
       : null
   );

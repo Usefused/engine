@@ -1,6 +1,8 @@
 import type { ChooseDescribeService, DescribeProgress, AppDescription } from "~/lib/app-describe-contract";
 import { FieldLabel } from "~/components/forms/FieldLabel";
 import { TypeScriptEditor } from "~/components/code/TypeScriptEditor";
+import { CreateCredentialButton } from "~/components/buckets/CreateCredentialButton";
+import { useCredentialSetCreation } from "~/components/buckets/useCredentialSetCreation";
 import { Select } from "../components/forms/Select.ts";
 import { AppCreationFlow } from "~/components/apps/AppCreationFlow";
 import { AppOperationPicker } from "~/components/apps/AppServiceBuilder";
@@ -62,6 +64,11 @@ export default function CreateUnifiedApp() {
   const [version, setVersion] = useState("1.0.0");
   const [bucket, setBucket] = useState("");
   const [buckets, setBuckets] = useState<AppBuildSelector[]>([]);
+  // A newly created set becomes the selection and invalidates any earlier compilation receipt.
+  const credentialCreation = useCredentialSetCreation("", (item) => {
+    setBuckets((current) => [...current.filter((bucket) => bucket.resource_id !== item.resource_id), item]);
+    setBucket(item.resource_id); invalidatePlan();
+  });
   const [plan, setPlan] = useState<AppPlanResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [compiling, setCompiling] = useState(false);
@@ -244,14 +251,18 @@ export default function CreateUnifiedApp() {
           <FieldLabel required>{editID ? "New version" : "Version"}</FieldLabel>
           <input required className={fieldClass} value={version} onChange={(event) => { setVersion(event.target.value); invalidatePlan(); }} />
         </label>
-        <label className="space-y-2 text-sm font-medium">
-          <FieldLabel required>Credential bucket</FieldLabel>
-          <Select required className={fieldClass} disabled={Boolean(editID)} value={bucket} onChange={(event) => { setBucket(event.target.value); invalidatePlan(); }}>
+        <div className="space-y-2 text-sm font-medium">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <label htmlFor="unified-credential-bucket"><FieldLabel required>Credential set</FieldLabel></label>
+            {/* Immutable successors cannot change the family's credential binding. */}
+            {!editID && credentialCreation.create && <CreateCredentialButton onClick={credentialCreation.create} />}
+          </div>
+          <Select id="unified-credential-bucket" required className={fieldClass} disabled={Boolean(editID)} value={bucket} onChange={(event) => { setBucket(event.target.value); invalidatePlan(); }}>
             {/* Existing families retain their bucket; new apps choose an authorized selector. */}
-            {editSource ? <option value={editSource.config.bucket}>{editSource.config.bucket}</option> : <option value="">Choose a bucket</option>}
+            {editSource ? <option value={editSource.config.bucket}>{editSource.config.bucket}</option> : <option value="">Choose a credential set</option>}
             {!editSource && buckets.map((item) => <option key={item.resource_id} value={item.resource_id}>{item.display_name}</option>)}
           </Select>
-        </label>
+        </div>
       </div>
       {/* The worker subscribes through an applied registration; event names alone do not provision ingress. */}
       {draftHasWebhookEvents(draft) && <label className="block space-y-2 text-sm font-medium">
@@ -266,6 +277,7 @@ export default function CreateUnifiedApp() {
       {plan ? <section className="space-y-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4"><h2 className="font-semibold text-emerald-900">Ready to deploy</h2><p className="text-sm text-emerald-800">TypeScript validation and compilation passed. Provider operations have not been run.</p><pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-700">{JSON.stringify(plan.summary, null, 2)}</pre><button type="button" className={buttonClass} onClick={deploy}>{editID ? "Deploy new version" : "Deploy Unified App"} <ArrowRight className="h-4 w-4" /></button></section> : <UnifiedAppCompileAction className={buttonClass} compiling={compiling} progress={progress} disabled={!canValidateUnifiedDraft(draft, name, version, bucket, editSource?.config.version)} onCompile={compile} />}
     </fieldset>}
     </AppCreationFlow>
+    {credentialCreation.dialog}
   </div>;
 }
 

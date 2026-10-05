@@ -29,7 +29,7 @@ export interface ConsumerGenerationPanelProps {
   availableBuckets: AppBuildSelector[];
   bucketId: string;
   setBucketId: (id: string) => void;
-  onCreateCredential: () => void;
+  onCreateCredential?: () => void;
   sdkName: string;
   setSdkName: (name: string) => void;
   setIsDuplicate: (value: boolean) => void;

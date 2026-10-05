@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "@remix-run/react";
-import { Database, Plus, RefreshCw } from "lucide-react";
+import { Database, RefreshCw } from "lucide-react";
+import { CreateCredentialButton } from "~/components/buckets/CreateCredentialButton";
 import { BucketCreateModal } from "~/components/buckets/BucketCreateModal";
 import { useToast } from "~/components/Toast";
 import { type Bucket } from "~/lib/api";
@@ -65,6 +66,7 @@ function visibleCredentialBuckets(buckets: Bucket[], sdkBuckets: Bucket[]): Buck
     .map((bucket) => ({ bucket, isAttached: false }));
 }
 
+/** Keeps credential creation visually aligned with the Create App action. */
 function SectionHeader({ hasAttachedBucket, loading, onRefresh, onCreate }: { hasAttachedBucket: boolean; loading: boolean; onRefresh: () => void; onCreate: () => void }) {
   return (
     <div className="flex items-center justify-between gap-3 mb-3">
@@ -84,14 +86,7 @@ function SectionHeader({ hasAttachedBucket, loading, onRefresh, onCreate }: { ha
         >
           <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
         </button>
-        <button
-          type="button"
-          onClick={onCreate}
-          className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 text-sm font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-800 cursor-pointer"
-        >
-          <Plus className="w-4 h-4" />
-          New credential set
-        </button>
+        <CreateCredentialButton onClick={onCreate} />
       </div>
     </div>
   );

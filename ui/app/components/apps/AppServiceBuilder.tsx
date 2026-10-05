@@ -27,8 +27,7 @@ import {
   type AppCreationMode,
   type AppOwningTeam,
 } from "~/lib/app-builder-contract";
-import { openAuthenticatedTab } from "~/lib/session";
-import { CREATE_CREDENTIAL_PATH } from "~/lib/credential-navigation";
+import { useCredentialSetCreation } from "~/components/buckets/useCredentialSetCreation";
 import { useToast } from "~/components/Toast";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { CheckSquare, Square, ChevronDown, ChevronRight, Search, Loader2, Plus, X, ChevronLeft } from "lucide-react";
@@ -1516,6 +1515,11 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   const [ownerTeamId, setOwnerTeamId] = useState("");
   const [availableBuckets, setAvailableBuckets] = useState<AppBuildSelector[]>([]);
   const [bucketId, setBucketId] = useState("");
+  // Keep the user's service selections intact while adding the authorized credential choice.
+  const credentialCreation = useCredentialSetCreation(ownerTeamId, (item) => {
+    setAvailableBuckets((current) => [...current.filter((bucket) => bucket.resource_id !== item.resource_id), item]);
+    setBucketId(item.resource_id);
+  });
   const [webhookAttachment, setWebhookAttachment] = useState("");
   const [generating, setGenerating] = useState(false);
   const [generateStatus, setGenerateStatus] = useState("");
@@ -1823,25 +1827,6 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     setPage(1);
     void loadData(1, query.trim());
   }, [ownerTeamId, workflowContext.appID, browsingServices]);
-
-  useEffect(() => {
-    const refreshAfterCredentialTab = () => {
-      // A separate tab preserves the in-progress build form. Refreshing on
-      // focus makes newly created, authorized credential sets selectable.
-      loadAvailableBuckets().catch((cause: unknown) =>
-        setError(cause instanceof Error ? cause.message : "Could not refresh credential sets.")
-      );
-    };
-    window.addEventListener("focus", refreshAfterCredentialTab);
-    return () => window.removeEventListener("focus", refreshAfterCredentialTab);
-  }, [ownerTeamId, workflowContext.appID]);
-
-  // createCredential preserves builder state while opening credential creation.
-  const createCredential = () => {
-    if (!openAuthenticatedTab(CREATE_CREDENTIAL_PATH)) {
-      toast.warning("Allow pop-ups to create a credential without losing this build.");
-    }
-  };
 
   // Re-fetch authorized services when page changes for both personal and team ownership.
   useEffect(() => {
@@ -2341,7 +2326,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     availableBuckets,
     bucketId: workflowContext.bucket || bucketId,
     setBucketId,
-    onCreateCredential: createCredential,
+    onCreateCredential: credentialCreation.create,
     sdkName,
     setSdkName,
     setIsDuplicate,
@@ -2398,5 +2383,5 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
         generation={generation}
       />;
   // Source loading requires app.manage; new-app creation remains governed by its workspace create permission.
-  return <BuilderCreationAccess existing={Boolean(source)} mode={generationMode}>{pageContent}</BuilderCreationAccess>;
+  return <BuilderCreationAccess existing={Boolean(source)} mode={generationMode}>{pageContent}{credentialCreation.dialog}</BuilderCreationAccess>;
 }
