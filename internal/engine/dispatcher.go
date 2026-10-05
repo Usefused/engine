@@ -1037,6 +1037,7 @@ func buildJSONRequestBody(content *SelectedRequestRepresentation, bodyParams map
 	return bytes.NewReader(bodyBytes), nil
 }
 
+// buildFormRequestBody honors reviewed form encodings, including indexed nested arrays used by providers such as Stripe.
 func buildFormRequestBody(content *SelectedRequestRepresentation, bodyParams map[string]any) (io.Reader, error) {
 	formValues := queryParameters{}
 	for key, value := range bodyParams {
@@ -1047,6 +1048,13 @@ func buildFormRequestBody(content *SelectedRequestRepresentation, bodyParams map
 		}
 		if hasNestedRequestEncoding(encoding) {
 			return nil, errors.New("nested form encoding is unsupported")
+		}
+		// Form-body deep encodings support bracketed arrays; query deepObject semantics remain unchanged.
+		if encoding.Style == "deepObject" {
+			if err := addDeepFormValue(key, value, formValues, boolValue(encoding.AllowReserved), 0); err != nil {
+				return nil, fmt.Errorf("form property %q: %w", key, err)
+			}
+			continue
 		}
 		parameter := models.Parameter{Name: key, In: "query", Serialization: models.ParameterSerialization{
 			Style: encoding.Style, Explode: encoding.Explode, AllowReserved: encoding.AllowReserved,

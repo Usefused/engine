@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"strings"
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
@@ -38,8 +41,7 @@ func (*EngineGRPCServer) ExecuteCapabilityWorkspaceOperation(
 	return ExecuteCapabilityWorkspaceOperation(ctx, globalObjectCache, globalDispatcher, identity, request)
 }
 
-// ExecuteCapabilityWorkspaceOperation admits one selected workspace operation
-// and dispatches it through the existing bounded physical accounting boundary.
+// ExecuteCapabilityWorkspaceOperation admits selected calls and retains input-validation explanations before dispatch.
 func ExecuteCapabilityWorkspaceOperation(
 	ctx context.Context,
 	cache ObjectCache,
@@ -76,7 +78,7 @@ func ExecuteCapabilityWorkspaceOperation(
 	}
 	// Invalid provider inputs stop before the physical dispatcher can make outbound traffic.
 	if err := validateCallParams(fixture, request.Input); err != nil {
-		return nil, err
+		return nil, &executionappvm.DiagnosticError{Phase: "operation_validation", Message: executionappvm.BoundDiagnostic(err.Error())}
 	}
 	credentials := copyCredentialEnvelope(request.TrustedCredentials)
 	// Anonymous calls still need a writable map when a validated routing selector is present.
@@ -114,8 +116,7 @@ func capabilityFixtureOperation(operation ResolvedPhysicalOperation) (*FixtureOp
 	return &fixture, nil
 }
 
-// executeCapabilityPhysicalValue keeps text and JSON provider results compatible
-// with MCP call() while preserving one physical receipt and the same byte cap.
+// executeCapabilityPhysicalValue preserves one physical receipt and separates provider explanations from raw bodies.
 func executeCapabilityPhysicalValue(
 	ctx context.Context,
 	dispatcher *engine.Dispatcher,
@@ -138,8 +139,39 @@ func executeCapabilityPhysicalValue(
 		if errors.As(err, &missing) {
 			return nil, missing
 		}
-		// Only the privileged recording host receives provider bodies; ordinary errors remain safe.
-		return nil, &executionappvm.DiagnosticError{Phase: "provider", Message: executionappvm.BoundDiagnostic(err.Error()), Response: executionappvm.BoundDiagnostic(stream.String()), Truncated: len(stream.Bytes()) > 65536 || len(err.Error()) > 65536}
+		message := capabilityProviderFailureMessage(stream, err)
+		// Only the selected explanation is public; the complete provider body remains privileged evidence.
+		return nil, &executionappvm.DiagnosticError{Phase: "provider", Message: executionappvm.BoundDiagnostic(message), Response: executionappvm.BoundDiagnostic(stream.String()), Truncated: len(stream.Bytes()) > 65536 || len(message) > 65536}
 	}
 	return result, nil
+}
+
+// capabilityProviderFailureMessage extracts conventional JSON error text without exposing the whole response.
+func capabilityProviderFailureMessage(stream *engine.BufferStream, failure error) string {
+	// Transport and local failures have no authoritative provider error response to parse.
+	if stream.Status() < http.StatusBadRequest {
+		return failure.Error()
+	}
+	var body struct {
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
+		Detail  string          `json:"detail"`
+	}
+	// HTML, malformed JSON, and unknown response shapes stay in permission-gated diagnostics.
+	if json.Unmarshal(stream.Bytes(), &body) != nil {
+		return failure.Error()
+	}
+	var nested struct {
+		Message string `json:"message"`
+	}
+	var plain string
+	_ = json.Unmarshal(body.Error, &nested)
+	_ = json.Unmarshal(body.Error, &plain)
+	for _, message := range []string{nested.Message, plain, body.Message, body.Detail} {
+		// Prefer the provider's specific error over a generic envelope description.
+		if strings.TrimSpace(message) != "" {
+			return fmt.Sprintf("provider returned HTTP %d: %s", stream.Status(), message)
+		}
+	}
+	return failure.Error()
 }

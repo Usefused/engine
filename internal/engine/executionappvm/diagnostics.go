@@ -21,6 +21,24 @@ type DiagnosticError struct {
 // Error prevents implicit logging from exposing authored values; API responses explicitly project Message.
 func (*DiagnosticError) Error() string { return "capability execution failed" }
 
+// OperationError carries the selected explanation without copying private provider evidence into the worker.
+type OperationError struct {
+	Message string
+}
+
+// Error keeps implicit logging safe; the authored-code bridge explicitly reads Message.
+func (*OperationError) Error() string { return "capability workspace operation failed" }
+
+// OperationErrorMessage projects only an explicitly selected operation message across trusted boundaries.
+func OperationErrorMessage(err error) string {
+	var failure *OperationError
+	// Arbitrary infrastructure errors are not authorized for disclosure by implementing error alone.
+	if errors.As(err, &failure) {
+		return BoundDiagnostic(failure.Message)
+	}
+	return ""
+}
+
 // BoundDiagnostic limits retained error text without censoring its debugging content.
 func BoundDiagnostic(value string) string {
 	// Storage and IPC stay finite even when authored code throws a huge value.

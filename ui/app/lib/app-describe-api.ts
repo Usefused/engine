@@ -99,18 +99,27 @@ export async function describeApp(goal: string, kind: DescribeKind, progress: De
   return proposal;
 }
 
-/** Drafts source from the currently reviewed pins, also supporting manually selected operations. */
-export async function draftAppSource(goal: string, services: Record<string, AppServicePin>, progress: DescribeProgress): Promise<string> {
+/** Drafts or revises source using only the reviewed immutable operation contracts. */
+export async function draftAppSource(goal: string, services: Record<string, AppServicePin>, progress: DescribeProgress, source?: string): Promise<string> {
+  // Bound change requests and source independently before sending either to the drafting service.
+  if (!goal.trim() || new TextEncoder().encode(goal).length > 16384) throw new Error("Describe your change in 1 to 16,384 bytes.");
+  if (source !== undefined && (!source.trim() || new TextEncoder().encode(source).length > 128 * 1024)) throw new Error("App source must contain 1 to 128 KiB of TypeScript.");
   const selections = Object.entries(services).flatMap(([service, pin]) => [
     ...pin.operations.map((operation) => ({ service, service_id: pin.service_id, version: pin.version, operation })),
     ...(pin.webhooks ?? []).map((event) => ({ service, service_id: pin.service_id, version: pin.version, event })),
   ]);
   // The Registry drafter sees only exact selected contracts, including inbound payload evidence.
   if (!selections.length || selections.length > 16 || Object.values(services).some((pin) => pin.select_all)) throw new Error("Unified Apps require 1 to 16 specific operations or webhook events.");
-  progress("Generating TypeScript from your selected operations and events…", "source");
-  const result = await api.graphql<{ draftPromptUnifiedApp: string }>(`query DraftPromptUnifiedApp($q: String!, $selections: String!) {
-    draftPromptUnifiedApp(q: $q, selections: $selections)
-  }`, { q: goal.trim(), selections: JSON.stringify(selections) });
+  // Distinguish revising reviewed code from creating the first source draft.
+  progress(source === undefined ? "Generating TypeScript from your selected operations and events…" : "Revising your app against the selected provider contracts…", "source");
+  // Existing creation requests remain compatible with Registry versions that predate source revision.
+  const result = source === undefined
+    ? await api.graphql<{ draftPromptUnifiedApp: string }>(`query DraftPromptUnifiedApp($q: String!, $selections: String!) {
+      draftPromptUnifiedApp(q: $q, selections: $selections)
+    }`, { q: goal.trim(), selections: JSON.stringify(selections) })
+    : await api.graphql<{ draftPromptUnifiedApp: string }>(`query RevisePromptUnifiedApp($q: String!, $selections: String!, $source: String!) {
+      draftPromptUnifiedApp(q: $q, selections: $selections, source: $source)
+    }`, { q: goal.trim(), selections: JSON.stringify(selections), source });
   return decodeUnifiedSource(result.draftPromptUnifiedApp);
 }
 

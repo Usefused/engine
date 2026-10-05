@@ -40,13 +40,13 @@ function ServiceAuthField({ service, disabled, onChange }: { service: AppAuthSer
   /** Changing schemes clears scheme-specific credential references before the next Engine plan. */
   function choose(value: string) {
     const option = options.find((item) => item.key === value);
-    // The empty option explicitly restores provider ordering instead of guessing from stored secrets.
+    // The empty option lets Engine select a unique compatible credential during planning.
     onChange(service.key, option ? { type: option.type, name: option.name } : undefined);
   }
   return <label className="block space-y-2 text-sm font-medium">
     <span className="break-words text-slate-700">{service.key}</span>
     <Select value={selected} disabled={disabled || Boolean(status)} onChange={(event) => choose(event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm">
-      <option value="">Provider default (declared order)</option>
+      <option value="">Automatic (available bucket credentials)</option>
       {/* Keep an unavailable saved scheme visible until the user explicitly replaces it. */}
       {selected && !options.some((option) => option.key === selected) ? <option value={selected}>{service.auth!.type} · {service.auth!.name} (saved)</option> : null}
       {options.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}

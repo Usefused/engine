@@ -149,7 +149,7 @@ func (session *capabilityScriptSession) installGlobals(input json.RawMessage) er
 	return nil
 }
 
-// fetch schedules JSON-only operations and preserves value-free credential recovery across the worker bridge.
+// fetch preserves selected operation explanations while keeping private evidence outside authored code.
 func (session *capabilityScriptSession) fetch(raw string) *goja.Promise {
 	return scheduleCapabilityHostCall(session.ctx, session.vm, session.results, session.semaphore, &session.hostCalls, func(callCtx context.Context) (any, error) {
 		// Provider input remains bounded before the Engine dispatcher sees it.
@@ -157,6 +157,10 @@ func (session *capabilityScriptSession) fetch(raw string) *goja.Promise {
 			return nil, errors.New("workspace operation input is invalid")
 		}
 		value, err := session.host.Fetch(callCtx, json.RawMessage(raw))
+		// Typed messages have already been separated from raw provider bodies by the trusted host.
+		if message := OperationErrorMessage(err); message != "" {
+			return nil, &OperationError{Message: message}
+		}
 		// The trusted host already separates credential guidance from private provider errors.
 		if err != nil && strings.HasPrefix(err.Error(), "bucket_credentials_missing:") {
 			return nil, errors.New(BoundDiagnostic(err.Error()))
@@ -270,7 +274,7 @@ func waitCapabilityPromise(ctx context.Context, vm *goja.Runtime, promise *goja.
 	for promise.State() == goja.PromiseStatePending {
 		select {
 		case result := <-results:
-			resolveCapabilityHostResult(result)
+			resolveCapabilityHostResult(vm, result)
 			// A zero-length interpreter turn drains the author's await continuations.
 			if _, err := vm.RunProgram(capabilityContinuationProgram); err != nil {
 				return errors.New("capability execution failed")
@@ -282,8 +286,19 @@ func waitCapabilityPromise(ctx context.Context, vm *goja.Runtime, promise *goja.
 	return nil
 }
 
-// resolveCapabilityHostResult settles one promise without exposing a Go object to authored code.
-func resolveCapabilityHostResult(result capabilityHostResult) {
+// resolveCapabilityHostResult creates a JavaScript Error for selected messages without exposing a Go object.
+func resolveCapabilityHostResult(vm *goja.Runtime, result capabilityHostResult) {
+	// New operation errors support catch(error).message; legacy string rejections keep their replay behavior.
+	if message := OperationErrorMessage(result.err); message != "" {
+		exception, err := vm.New(vm.Get("Error"), vm.ToValue(message))
+		// An authored replacement of Error must not discard the original failure explanation.
+		if err != nil {
+			_ = result.reject(message)
+			return
+		}
+		_ = result.reject(exception)
+		return
+	}
 	// Provider or storage failures reject only the awaited operation, so authored code can catch them.
 	if result.err != nil {
 		_ = result.reject(result.err.Error())

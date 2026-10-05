@@ -139,3 +139,48 @@ func TestCredentialFailureReachesAuthoredException(t *testing.T) {
 		t.Fatalf("masked credential failure: %s", message)
 	}
 }
+
+// TestProviderFailureReachesCallerAndReplay verifies failed awaits and authored catches receive the real explanation.
+func TestProviderFailureReachesCallerAndReplay(t *testing.T) {
+	for _, execute := range []string{
+		`return await __fusedHost.fetch('{"operation":"create"}')`,
+		`try { await __fusedHost.fetch('{"operation":"create"}') } catch (error) { throw new Error("Checkout failed: " + error.message) }`,
+	} {
+		host := newReplayTestRecorder(t, &diagnosticProviderHost{})
+		bundle := []byte(`globalThis.FusedUnifiedApp={input:{parse(v){return v}},output:{parse(v){return v}},execute:async()=>{` + execute + `}};`)
+		_, runErr := executionappvm.RunInProcess(context.Background(), bundle, json.RawMessage(`{}`), host)
+		message := capabilityPublicError("execution_failed", runErr)
+		// Both the direct rejection and an authored wrapper must preserve the provider's explanation.
+		if !strings.Contains(message, "provider error explanation") || strings.Contains(message, "private body") {
+			t.Fatalf("unexpected live message: %q", message)
+		}
+		history, err := host.History()
+		// Replay evidence must be complete before a no-effects host can be constructed.
+		if err != nil {
+			t.Fatal(err)
+		}
+		replay, err := NewReplayCapabilityHost(history)
+		// Selected messages must pass replay validation without admitting private response bodies.
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, replayErr := executionappvm.RunInProcess(context.Background(), bundle, json.RawMessage(`{}`), replay)
+		// Error-sensitive application logic must behave identically during replay.
+		if got := capabilityPublicError("execution_failed", replayErr); got != message {
+			t.Fatalf("replay changed the message: %q != %q", got, message)
+		}
+	}
+}
+
+// TestReplayRejectsInvalidErrorMessages prevents new explanations from bypassing outcome and size invariants.
+func TestReplayRejectsInvalidErrorMessages(t *testing.T) {
+	for _, call := range []capabilityReplayCall{
+		{Ordinal: 1, Completion: 1, Request: json.RawMessage(`{}`), Response: json.RawMessage(`{}`), ErrorMessage: "failure on a successful call"},
+		{Ordinal: 1, Completion: 1, Request: json.RawMessage(`{}`), Error: capabilityRecordedFetchError.Error(), ErrorMessage: strings.Repeat("x", 65537)},
+	} {
+		// A successful result or oversized message cannot define an authored failure during replay.
+		if validateReplayCall(call, 1) == nil {
+			t.Fatal("invalid failure envelope accepted")
+		}
+	}
+}

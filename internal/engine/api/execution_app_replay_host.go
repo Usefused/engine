@@ -22,11 +22,12 @@ var (
 )
 
 type capabilityReplayCall struct {
-	Ordinal    int             `json:"ordinal"`
-	Request    json.RawMessage `json:"request"`
-	Response   json.RawMessage `json:"response,omitempty"`
-	Error      string          `json:"error,omitempty"`
-	Completion int             `json:"completion"`
+	Ordinal      int             `json:"ordinal"`
+	Request      json.RawMessage `json:"request"`
+	Response     json.RawMessage `json:"response,omitempty"`
+	Error        string          `json:"error,omitempty"`
+	ErrorMessage string          `json:"error_message,omitempty"`
+	Completion   int             `json:"completion"`
 }
 
 type capabilityReplayHistory struct {
@@ -96,7 +97,7 @@ func canonicalReplayValue(raw json.RawMessage, maxBytes int) (json.RawMessage, e
 	return canonical, nil
 }
 
-// Fetch records deterministic outcomes and exposes credential repair guidance without provider payloads.
+// Fetch records selected error explanations for deterministic replay without copying private provider evidence.
 func (host *recordingCapabilityHost) Fetch(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	// A missing live host cannot become a replay-only source of provider authority.
 	if host == nil || host.base == nil {
@@ -121,7 +122,7 @@ func (host *recordingCapabilityHost) Fetch(ctx context.Context, raw json.RawMess
 	host.calls = append(host.calls, capabilityReplayCall{Ordinal: ordinal, Request: request})
 	host.mu.Unlock()
 	response, fetchErr := host.base.Fetch(ctx, request)
-	// Raw provider errors stay private; Engine-owned credential guidance is safe for authored error handling.
+	// Private evidence is retained separately from the explanation delivered to authored code.
 	if fetchErr != nil {
 		host.mu.Lock()
 		// Allocate private evidence only for failed calls, outside the replay transcript.
@@ -130,13 +131,8 @@ func (host *recordingCapabilityHost) Fetch(ctx context.Context, raw json.RawMess
 		}
 		host.diagnosticErrors[index] = executionappvm.PrivateDiagnostic(fetchErr)
 		host.mu.Unlock()
-		failure := capabilityRecordedFetchError
-		var missing *sandbox.CredentialMaterialMissingError
-		// Credential absence contains metadata and a repair command, never credential values.
-		if errors.As(fetchErr, &missing) {
-			failure = errors.New(executionappvm.BoundDiagnostic(missing.Error()))
-		}
-		host.finishFetch(index, nil, failure.Error())
+		failure := capabilityAuthoredOperationFailure(fetchErr)
+		host.finishFetch(index, nil, failure)
 		return nil, failure
 	}
 	canonical, err := canonicalReplayValue(response, store.MaxReplayEvidenceBytes)
@@ -146,17 +142,36 @@ func (host *recordingCapabilityHost) Fetch(ctx context.Context, raw json.RawMess
 		host.mu.Unlock()
 		return nil, err
 	}
-	host.finishFetch(index, canonical, "")
+	host.finishFetch(index, canonical, nil)
 	return canonical, nil
 }
 
-// finishFetch saves the result's completion ordinal independently of invocation order.
-func (host *recordingCapabilityHost) finishFetch(index int, response json.RawMessage, message string) {
+// capabilityAuthoredOperationFailure selects explanations without exposing arbitrary infrastructure errors.
+func capabilityAuthoredOperationFailure(err error) error {
+	var missing *sandbox.CredentialMaterialMissingError
+	// Credential absence contains metadata and a repair command, never credential values.
+	if errors.As(err, &missing) {
+		return errors.New(executionappvm.BoundDiagnostic(missing.Error()))
+	}
+	var detail *executionappvm.DiagnosticError
+	// Explicit diagnostics authorize only their explanation, never the response body or stack.
+	if errors.As(err, &detail) && strings.TrimSpace(detail.Message) != "" {
+		return &executionappvm.OperationError{Message: executionappvm.BoundDiagnostic(detail.Message)}
+	}
+	return capabilityRecordedFetchError
+}
+
+// finishFetch records exactly the message seen by authored code independently of invocation order.
+func (host *recordingCapabilityHost) finishFetch(index int, response json.RawMessage, failure error) {
 	host.mu.Lock()
 	defer host.mu.Unlock()
 	host.completed++
 	host.calls[index].Response = response
-	host.calls[index].Error = message
+	// Successful calls cannot carry an error message into replay.
+	if failure != nil {
+		host.calls[index].Error = failure.Error()
+		host.calls[index].ErrorMessage = executionappvm.OperationErrorMessage(failure)
+	}
 	host.calls[index].Completion = host.completed
 }
 
@@ -203,7 +218,7 @@ func (host *recordingCapabilityHost) DBSet(ctx context.Context, raw json.RawMess
 	return nil
 }
 
-// History serializes only canonical requests, successful results, and generic failures.
+// History serializes canonical calls and selected explanations into the encrypted replay transcript.
 func (host *recordingCapabilityHost) History() (json.RawMessage, error) {
 	if host == nil {
 		return nil, ErrCapabilityReplayInvalid
@@ -293,6 +308,10 @@ func validateReplayCall(call capabilityReplayCall, count int) error {
 	if !validReplayCallShape(call, count) {
 		return ErrCapabilityReplayInvalid
 	}
+	// New messages extend only the generic failure envelope, leaving historical transcripts unchanged.
+	if !validReplayErrorMessage(call) {
+		return ErrCapabilityReplayInvalid
+	}
 	if _, err := canonicalReplayValue(call.Request, store.MaxReplayEvidenceBytes); err != nil {
 		return ErrCapabilityReplayInvalid
 	}
@@ -310,6 +329,11 @@ func validateReplayCall(call capabilityReplayCall, count int) error {
 		return ErrCapabilityReplayInvalid
 	}
 	return nil
+}
+
+// validReplayErrorMessage admits bounded selected explanations only on the existing failure envelope.
+func validReplayErrorMessage(call capabilityReplayCall) bool {
+	return call.ErrorMessage == "" || (call.Error == capabilityRecordedFetchError.Error() && len(call.ErrorMessage) <= 65536)
 }
 
 // validReplayCallShape checks the small structural invariant before JSON validation.
@@ -337,6 +361,10 @@ func (host *replayCapabilityHost) Fetch(ctx context.Context, raw json.RawMessage
 	}
 	close(host.completion[call.Completion-1])
 	if call.Error != "" {
+		// Replay must reject the authored await with exactly the explanation used in the live execution.
+		if call.ErrorMessage != "" {
+			return nil, &executionappvm.OperationError{Message: call.ErrorMessage}
+		}
 		// Preserve the legacy sentinel while replaying actionable messages exactly as authored code saw them.
 		if call.Error == capabilityRecordedFetchError.Error() {
 			return nil, capabilityRecordedFetchError

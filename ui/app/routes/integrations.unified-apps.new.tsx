@@ -3,6 +3,7 @@ import { FieldLabel } from "~/components/forms/FieldLabel";
 import { AppCredentialWarning } from "~/components/apps/AppCredentialWarning";
 import { useAppCredentialReview } from "~/components/apps/useAppCredentialReview";
 import { UnifiedAppCodeEditor } from "~/components/apps/UnifiedAppCodeEditor";
+import { UnifiedAppAIAssistant } from "~/components/apps/UnifiedAppAIAssistant";
 import { AppServiceAuthFields, type AppAuthSelection } from "~/components/apps/AppServiceAuthFields";
 import { unifiedEditorYAML, readUnifiedEditorYAML } from "~/lib/unified-app-yaml";
 import { CreateCredentialButton } from "~/components/buckets/CreateCredentialButton";
@@ -18,13 +19,14 @@ import { ArrowRight, Check, Loader2 } from "lucide-react";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
 import { ExecutionTokenField } from "~/components/apps/ExecutionTokenField";
+import { ExecutionTokenOption } from "~/components/apps/ExecutionTokenOption";
 import { AppDetailBackLink } from "~/components/apps/AppDetailChrome";
 import { describeUnifiedApp, listUnifiedTemplates, planUnifiedApp } from "~/lib/unified-app-api";
 import { UnifiedSourceClarificationError, unifiedConfig, unifiedDraftHasEvents, unifiedServiceSettings, type UnifiedDraft } from "~/lib/unified-app-contract";
 import { draftAppSource } from "~/lib/app-describe-api";
 import { api } from "~/lib/api";
 import { unifiedEditDraft, unifiedEditConfig, unifiedEditSelections, nextUnifiedVersion, type UnifiedAppSource } from "~/lib/unified-app-edit";
-import { listAppBuildSelectors } from "~/lib/app-builder";
+import { applyApp, listAppBuildSelectors } from "~/lib/app-builder";
 import { preferredAppBucket, type AppBuildSelector, type AppPlanResponse } from "~/lib/app-builder-contract";
 
 const fieldClass = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-violet)]";
@@ -69,6 +71,7 @@ export default function CreateUnifiedApp() {
   const [name, setName] = useState("");
   const [version, setVersion] = useState("1.0.0");
   const [bucket, setBucket] = useState("");
+  const [generateExecutionToken, setGenerateExecutionToken] = useState(true);
   const [buckets, setBuckets] = useState<AppBuildSelector[]>([]);
   // A newly created set becomes the selection and invalidates any earlier compilation receipt.
   const credentialCreation = useCredentialSetCreation("", (item) => {
@@ -277,7 +280,7 @@ export default function CreateUnifiedApp() {
       // Cancelling the warning leaves the compiled draft intact and never deploys it.
       if (!approved) return;
       setProgress("Deploying your Unified App…");
-      setResult(await api.appConfig.apply("unified-app", { plan_id: approved.plan_id, source_hash: approved.source_hash }));
+      setResult(await applyApp("unified-app", approved, generateExecutionToken));
     }
     catch (cause) { setError(String(cause)); }
     finally { setBusy(false); setProgress(""); }
@@ -292,7 +295,7 @@ export default function CreateUnifiedApp() {
   return <div className="mx-auto max-w-5xl space-y-6">
     <AppDetailBackLink to={editID ? `/integrations/unified-apps/${editID}` : "/integrations/sdks?type=unified_app"} />
     <header className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="text-2xl font-bold text-slate-900">{editID ? "Edit Unified App" : "Create a Unified App"}</h1><p className="mt-1 text-slate-500">{editSource ? `Editing version ${editSource.config.version}. Deploy your changes as a new version; your app URL and tokens stay the same.` : "Describe what you want to build. Review it, then run it on Engine."}</p></div>{/* Templates start a separate app rather than replacing a saved editor baseline. */}{!editID && <Link to="/integrations/unified-apps/templates" className="text-sm font-medium text-[var(--brand-violet)] hover:underline">Browse templates</Link>}</header>
-    <AppCreationFlow generatesSource onDescribe={describe} onBusyChange={setDescribing} disabled={busy} lockIntent={yamlActive} initialManual={Boolean(editID) || Boolean(templateID) || params.get("mode") === "manual"} hasSelection={Boolean(draft)}>
+    <AppCreationFlow generatesSource onDescribe={describe} onBusyChange={setDescribing} disabled={busy || describing} lockIntent={yamlActive} initialManual={Boolean(editID) || Boolean(templateID) || params.get("mode") === "manual"} hasSelection={Boolean(draft)}>
     <fieldset disabled={yamlActive || busy || describing} className="min-w-0"><AppOperationPicker seed={pickerSeed} onChange={selectOperations} onPendingChange={setSelecting} allowWebhooks /></fieldset>
     {/* Compilation reports progress by its button; other loading stages remain above the form. */}
     {busy && !compiling && <p role="status" className="flex items-center gap-2 text-sm text-slate-600"><Loader2 className="h-4 w-4 animate-spin" />{progress || "Loading template…"}</p>}
@@ -319,7 +322,8 @@ export default function CreateUnifiedApp() {
         </label>
         <div className="min-w-0 flex-[1_1_16rem] space-y-2 text-sm font-medium">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <label htmlFor="unified-credential-bucket"><FieldLabel required>Bucket</FieldLabel></label>
+            {/* Fill the available header width so Required aligns with the neighboring version badge. */}
+            <label className="min-w-0 flex-1" htmlFor="unified-credential-bucket"><FieldLabel required>Bucket</FieldLabel></label>
             {/* Immutable successors cannot change the family's credential binding. */}
             {!editID && credentialCreation.create && <CreateCredentialButton onClick={credentialCreation.create} />}
           </div>
@@ -341,9 +345,13 @@ export default function CreateUnifiedApp() {
       {/* Source drafting keeps the service review visible until code generation finishes. */}
       {draftingSource && !draft.source && <p role="status" className="text-sm text-slate-500">Generating TypeScript from your selected operations and events…</p>}
       <UnifiedAppCodeEditor source={draft.source} yaml={unifiedEditorYAML(draft, name, version, editSource?.config.bucket ?? buckets.find((item) => item.resource_id === bucket)?.display_name ?? "", editSource)} disabled={busy || describing || selecting} error={yamlError} onSource={updateSource} onYAML={updateYAML} onViewChange={changeEditorView} />
+      {/* AI edits retain the exact selected contracts and require explicit source review before recompilation. */}
+      <UnifiedAppAIAssistant source={draft.source} services={draft.services} disabled={busy || describing || selecting || yamlActive || Boolean(yamlError)} onApply={updateSource} onBusyChange={setDescribing} />
       <p className="text-xs text-slate-500">Validate and compile checks TypeScript and selected operation bindings without running provider calls. It enables missing pinned service versions. Deploying is a separate step.</p>
       {/* The plan is invalidated on every edit, so deployment cannot apply stale reviewed content. */}
       {editSource && <p className="text-sm text-slate-600">Deploying switches new traffic to this version. Earlier versions remain available in version history.</p>}
+      {/* Initial issuance is an apply choice; changing it needs no recompilation and never rotates existing tokens. */}
+      {!editID && <ExecutionTokenOption checked={generateExecutionToken} onChange={setGenerateExecutionToken} />}
       {plan ? <section className="space-y-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4"><h2 className="font-semibold text-emerald-900">Ready to deploy</h2><p className="text-sm text-emerald-800">TypeScript validation and compilation passed. Provider operations have not been run.</p><AppCredentialWarning readiness={plan.credential_readiness} canManageBucket={credentialReview.canManageBucket} /><pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-700">{JSON.stringify(plan.summary, null, 2)}</pre><button type="button" className={buttonClass} onClick={deploy}>{editID ? "Deploy new version" : "Deploy Unified App"} <ArrowRight className="h-4 w-4" /></button></section> : <UnifiedAppCompileAction className={buttonClass} compiling={compiling} progress={progress} disabled={Boolean(yamlError) || !canValidateUnifiedDraft(draft, name, version, bucket, editSource?.config.version)} onCompile={compile} />}
     </fieldset>}
     </AppCreationFlow>

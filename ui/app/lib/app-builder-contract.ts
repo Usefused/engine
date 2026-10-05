@@ -61,6 +61,7 @@ export interface AppPlanInput {
 export interface AppApplyInput {
   plan_id: string;
   source_hash: string;
+  skip_token?: boolean;
 }
 
 export interface AppBuilderServiceURL {
@@ -128,10 +129,14 @@ export function appPlanInput(
 	return input;
 }
 
-export function appApplyInput(plan: AppPlanResponse): AppApplyInput {
+/** Keeps token issuance separate from immutable app config while preserving the reviewed receipt. */
+export function appApplyInput(plan: AppPlanResponse, generateExecutionToken = true): AppApplyInput {
   // Apply proves intent with the saved plan and hash. It deliberately has no
   // owner override, preventing a browser or agent from changing ownership.
-  return { plan_id: plan.plan_id, source_hash: plan.source_hash };
+  return { plan_id: plan.plan_id, source_hash: plan.source_hash,
+    // Omission preserves Engine's existing default; only an explicit opt-out suppresses issuance.
+    ...(!generateExecutionToken ? { skip_token: true } : {}),
+  };
 }
 
 // effectiveAppBuilderServiceURL accepts the Registry's effective base URL and

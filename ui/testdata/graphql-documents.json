@@ -1,6 +1,6 @@
 {
-  "call_count": 108,
-  "document_count": 126,
+  "call_count": 109,
+  "document_count": 127,
   "calls": [
     {
       "endpoint": "registry",
@@ -300,6 +300,12 @@
       "endpoint": "registry",
       "file": "app/lib/app-describe-api.ts",
       "call": 6,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/app-describe-api.ts",
+      "call": 7,
       "document_count": 1
     },
     {
@@ -993,12 +999,19 @@
       "file": "app/lib/app-describe-api.ts",
       "call": 5,
       "variant": 1,
-      "document": "query DraftPromptUnifiedApp($q: String!, $selections: String!) {\n    draftPromptUnifiedApp(q: $q, selections: $selections)\n  }"
+      "document": "query DraftPromptUnifiedApp($q: String!, $selections: String!) {\n      draftPromptUnifiedApp(q: $q, selections: $selections)\n    }"
     },
     {
       "endpoint": "registry",
       "file": "app/lib/app-describe-api.ts",
       "call": 6,
+      "variant": 1,
+      "document": "query RevisePromptUnifiedApp($q: String!, $selections: String!, $source: String!) {\n      draftPromptUnifiedApp(q: $q, selections: $selections, source: $source)\n    }"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/app-describe-api.ts",
+      "call": 7,
       "variant": 1,
       "document": "query DescribeAppEvents($id: String!, $version: String!) {\n    service(id: $id, version: $version) { webhooks { name description } }\n  }"
     },

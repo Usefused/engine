@@ -114,8 +114,8 @@ func TestProviderDiagnosticsPreserveRejectedBodyWithoutReplayLeak(t *testing.T) 
 	_, err := recorder.Fetch(context.Background(), json.RawMessage(`{"input":{"customer":"example"},"operation":"read","service":"crm"}`))
 	detail := recorder.diagnostics(err)
 	history, historyErr := recorder.History()
-	// Private failures must retain bodies while authored/replay errors remain safe and deterministic.
-	if !strings.Contains(string(detail), "provider private body") || !strings.Contains(string(detail), "provider private message") || strings.Contains(err.Error(), "private") || historyErr != nil || strings.Contains(string(history), "private") {
+	// Replay retains the selected explanation, while raw bodies remain only in private diagnostics.
+	if !strings.Contains(string(detail), "provider private body") || !strings.Contains(string(detail), "provider error explanation") || strings.Contains(err.Error(), "private") || historyErr != nil || strings.Contains(string(history), "provider private body") {
 		t.Fatalf("bad diagnostic separation: %s / %s / %v", detail, history, err)
 	}
 }
@@ -124,5 +124,5 @@ type diagnosticProviderHost struct{ replayHostFixture }
 
 // Fetch simulates a rejected provider response without granting a real outbound effect.
 func (*diagnosticProviderHost) Fetch(context.Context, json.RawMessage) (json.RawMessage, error) {
-	return nil, &executionappvm.DiagnosticError{Phase: "provider", Message: "provider private message", Response: "provider private body"}
+	return nil, &executionappvm.DiagnosticError{Phase: "provider", Message: "provider error explanation", Response: "provider private body"}
 }

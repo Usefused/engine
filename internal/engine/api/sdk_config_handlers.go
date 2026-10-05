@@ -1387,7 +1387,7 @@ func resolveAppServiceBucketOverrides(ctx context.Context, s store.Store, doc sd
 	return result, nil
 }
 
-// resolveSDKSelections resolves sdk selections from immutable app scope before provider dispatch.
+// resolveSDKSelections binds admitted contracts and bucket metadata while preserving a previously reviewed immutable auth choice.
 func resolveSDKSelections(
 	ctx context.Context,
 	configStore store.ConfigRepository,
@@ -1420,12 +1420,17 @@ func resolveSDKSelections(
 	var resolved []sdkResolvedService
 	stateDoc := doc
 	stateDoc.Services = make(map[string]sdkConfigServiceDoc, len(doc.Services))
+	// Resolve inherited auth without mutating the caller's authored document or source hash.
+	planningDoc := doc
+	planningDoc.Services = make(map[string]sdkConfigServiceDoc, len(doc.Services))
 	// serviceBucketOverrides is keyed by resolved ServiceID (not the authored
 	// config key) so it survives being merged into an appBucketSet alongside
 	// selections/auth-ref checks that only carry ServiceID, not the config key.
 	serviceBucketOverrides := make(map[uuid.UUID]store.Bucket, len(bucketOverrides))
 	for serviceName, serviceDoc := range doc.Services {
 		activation, ok := services[serviceName]
+		serviceDoc = retainPlannedAppAuth(serviceDoc, previous.Services[activation.ServiceName])
+		planningDoc.Services[serviceName] = serviceDoc
 		resolvedServiceVersionID, resolvedVersionStr, err := validateSDKServiceSelection(serviceName, serviceDoc, activation, ok, allowedVersions)
 		// Every service must resolve before a multi-service selection can become plan authority.
 		if err != nil {
@@ -1464,11 +1469,12 @@ func resolveSDKSelections(
 	}
 	buckets := appBucketSet{Default: defaultBucket, Overrides: serviceBucketOverrides}
 	// Auth, credentials, attachments, and exact membership share one final admission boundary.
-	credentialSources, err := validateResolvedSDKSelections(ctx, configStore, s, registryClient, apiKey, doc, services, resolved, selections, buckets)
+	credentialSources, err := validateResolvedSDKSelections(ctx, configStore, s, registryClient, apiKey, planningDoc, previous, services, resolved, selections, buckets)
 	if err != nil {
 		return nil, nil, nil, nil, sdkConfigDocument{}, appBucketSet{}, err
 	}
 
+	pinAppAuthReview(&stateDoc, previous, resolved, selections, summary)
 	return selections, summary, resolved, credentialSources, stateDoc, buckets, nil
 }
 
@@ -1478,7 +1484,7 @@ type sdkSelectionValidator interface {
 }
 
 // validateResolvedSDKSelections admits exact local scope before it can cross the shared app publication boundary.
-func validateResolvedSDKSelections(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, apiKey string, doc sdkConfigDocument, workspaceServices map[string]store.WorkspaceService, resolved []sdkResolvedService, selections []models.SDKSelection, buckets appBucketSet) ([]sdkResolvedService, error) {
+func validateResolvedSDKSelections(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, apiKey string, doc, previous sdkConfigDocument, workspaceServices map[string]store.WorkspaceService, resolved []sdkResolvedService, selections []models.SDKSelection, buckets appBucketSet) ([]sdkResolvedService, error) {
 	// Source-only services join the target auth batch without becoming app operation selections.
 	sourceRequests, err := appAuthSourceContractSelections(doc, workspaceServices)
 	if err != nil {
@@ -1490,6 +1496,11 @@ func validateResolvedSDKSelections(ctx context.Context, configStore store.Config
 	if err != nil {
 		return nil, err
 	}
+	// Omitted auth may use one complete bucket-backed choice; explicit selectors remain untouched.
+	if err := resolveAvailableAppAuth(ctx, s, doc, previous, resolved, selections, contracts, buckets); err != nil {
+		recordSDKAuthResolution(ctx, sdkAuthResolutionTelemetry{}, "invalid_selection")
+		return nil, err
+	}
 	// Reference resolution pins source identity only after the target and source contracts share one batch.
 	if err := resolveAppAuthReferences(doc, workspaceServices, resolved, selections, contracts, buckets); err != nil {
 		return nil, err
@@ -1499,8 +1510,7 @@ func validateResolvedSDKSelections(ctx context.Context, configStore store.Config
 	if err != nil {
 		return nil, err
 	}
-	// Credential material is intentionally absent from immutable selection
-	// admission; readiness is inspected separately after the scope is complete.
+	// Credential values never enter immutable scope; the selected scheme is frozen while readiness remains mutable.
 	// Inbound scope must retain the reviewed attachment coverage alongside outbound scope.
 	if err := validateWebhookAttachmentCoverage(ctx, configStore, s, doc); err != nil {
 		return nil, err

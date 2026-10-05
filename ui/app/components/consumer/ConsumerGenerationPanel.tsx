@@ -2,6 +2,7 @@ import { FieldLabel } from "~/components/forms/FieldLabel";
 import { Select } from "../forms/Select.ts";
 import type { FormEvent, ReactNode } from "react";
 import { ExecutionTokenField } from "~/components/apps/ExecutionTokenField";
+import { ExecutionTokenOption } from "~/components/apps/ExecutionTokenOption";
 import { AlertTriangle, Check, Download, Globe2, Info, Server } from "lucide-react";
 import { AppOwnerControls } from "~/components/access/AppOwnerControls";
 import { McpTransportEndpoints, type McpTransportEndpointData } from "~/components/mcp/McpTransportEndpoints";
@@ -14,6 +15,8 @@ import { formatVersion } from "~/lib/format";
 // verbatim -- same handleGenerate/planAndApplyApp contract, only moved
 // so that route isn't carrying this JSX inline alongside the service list.
 export interface ConsumerGenerationPanelProps {
+  generateExecutionToken: boolean;
+  setGenerateExecutionToken: (value: boolean) => void;
   serviceAuthentication?: ReactNode;
   generationMode: AppCreationMode;
   existingApp?: { name: string; bucket: string; owner: string };
@@ -361,7 +364,7 @@ function SdkDeploymentResult({ generationMode, sdkDeployment, sdkTokenCopied, se
       {sdkDeployment.token ? (
         <p className="mt-2 text-xs text-slate-500">This token is displayed once. Store it securely; the CLI can issue a replacement later.</p>
       ) : (
-        <p className="mt-2 text-xs text-slate-500">This existing app kept its current execution tokens.</p>
+        <p className="mt-2 text-xs text-slate-500">No new execution token was issued. Existing tokens remain valid; you can create a token later.</p>
       )}
       <a
         href={`/integrations/sdks/${sdkDeployment.id}`}
@@ -390,7 +393,8 @@ function McpDeploymentResult({ mcpDeployment, mcpTokenCopied, setMcpTokenCopied,
       {generationMode !== "app" && mcpDeployment.token && (
         <ExecutionTokenField token={mcpDeployment.token} copied={mcpTokenCopied} onCopy={() => setMcpTokenCopied(true)} />
       )}
-      {generationMode !== "app" && <p className="mt-2 text-xs text-slate-500">This token is displayed only when the server is first created. Store it securely.</p>}
+      {/* A skipped initial token must not be described as a secret that was displayed. */}
+      {generationMode !== "app" && <p className="mt-2 text-xs text-slate-500">{mcpDeployment.token ? "This token is displayed once. Store it securely." : "No new execution token was issued. You can create a token later."}</p>}
     </div>
   );
 }
@@ -446,6 +450,8 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
           <GenerationIdentity props={props} />
           {/* SDK and MCP use the same named auth selector as Unified App authoring. */}
           {props.serviceAuthentication}
+          {/* Successor versions reuse family tokens; only new apps offer initial issuance. */}
+          {!props.existingApp && <ExecutionTokenOption checked={props.generateExecutionToken} onChange={props.setGenerateExecutionToken} disabled={generating || props.selectionPending} />}
           <WebhookBundleField totalSelectedWebhooks={totalSelectedWebhooks} webhookAttachment={webhookAttachment} setWebhookAttachment={setWebhookAttachment} />
           {/* Reserve room for each label; narrow panels stack complete fields instead of wrapping the required badge. */}
           <div className={showsLanguage ? "flex w-full flex-wrap items-start gap-3" : ""}>

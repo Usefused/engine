@@ -8,6 +8,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine"
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/executionappvm"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -55,7 +56,7 @@ func TestCapabilityWorkspaceOperationChecksPaginationPolicy(t *testing.T) {
 	}
 }
 
-// TestCapabilityWorkspaceOperationReusesMCPInputValidation ensures selected operations reject invalid provider inputs before dispatch.
+// TestCapabilityWorkspaceOperationReusesMCPInputValidation ensures local rejections retain an authored-code explanation.
 func TestCapabilityWorkspaceOperationReusesMCPInputValidation(t *testing.T) {
 	appID, serviceID, versionID, endpointID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	selection := models.SDKSelection{ServiceID: serviceID, ServiceVersionID: versionID, EndpointIDs: []uuid.UUID{endpointID}}
@@ -72,8 +73,36 @@ func TestCapabilityWorkspaceOperationReusesMCPInputValidation(t *testing.T) {
 		ServiceID: serviceID, ServiceVersionID: versionID, EndpointID: endpointID, EndpointName: "items.get",
 	}, Input: map[string]any{}}
 	_, err := ExecuteCapabilityWorkspaceOperation(context.Background(), cache, engine.NewDispatcher(), identity, request)
+	var detail *executionappvm.DiagnosticError
 	// Missing required input is a local validation error; no provider URL exists in this test.
-	if err == nil || !strings.Contains(err.Error(), "itemId") {
+	if !errors.As(err, &detail) || detail.Phase != "operation_validation" || !strings.Contains(detail.Message, "itemId") {
 		t.Fatalf("invalid input error = %v", err)
+	}
+}
+
+// TestCapabilityProviderFailureMessage exposes conventional explanations without copying raw provider payloads.
+func TestCapabilityProviderFailureMessage(t *testing.T) {
+	for _, test := range []struct {
+		name, body, want string
+		status           int
+	}{
+		{"stripe", `{"error":{"message":"No such price: price_example","type":"invalid_request_error"},"private":"secret"}`, "provider returned HTTP 400: No such price: price_example", 400},
+		{"message", `{"message":"Customer is suspended","private":"secret"}`, "provider returned HTTP 403: Customer is suspended", 403},
+		{"detail", `{"detail":"Too many requests"}`, "provider returned HTTP 429: Too many requests", 429},
+		{"string error", `{"error":"Payment declined"}`, "provider returned HTTP 402: Payment declined", 402},
+		{"html", `<html>private</html>`, "original failure", 502},
+		{"unknown json", `{"private":"secret"}`, "original failure", 400},
+		{"transport", `{"message":"not an error"}`, "original failure", 200},
+	} {
+		// Each fixture separates the public explanation from unrelated response fields.
+		t.Run(test.name, func(t *testing.T) {
+			buffer := engine.NewBoundedBufferStream(4096)
+			_ = engine.SendResponseContract(buffer, test.status, "json")
+			_ = buffer.Send([]byte(test.body))
+			// Unknown response formats must keep the original status/transport explanation.
+			if got := capabilityProviderFailureMessage(buffer, errors.New("original failure")); got != test.want {
+				t.Fatalf("message = %q, want %q", got, test.want)
+			}
+		})
 	}
 }

@@ -282,7 +282,7 @@ func (host *processHost) deliverReply(frame Frame) {
 	}
 }
 
-// exchange sends a JSON-only host request and awaits the matching Engine reply.
+// exchange preserves selected operation explanations while correlating bounded replies to their authored request.
 func (host *processHost) exchange(ctx context.Context, method string, payload json.RawMessage) (json.RawMessage, error) {
 	id := host.nextID.Add(1)
 	result := make(chan Frame, 1)
@@ -303,7 +303,7 @@ func (host *processHost) exchange(ctx context.Context, method string, payload js
 	case reply := <-result:
 		// The child accepts only bounded JSON as a host return value.
 		if reply.Error != "" {
-			return nil, errors.New(reply.Error)
+			return nil, operationReplyError(method, reply)
 		}
 		if len(reply.Value) > MaxOutputBytes || !json.Valid(reply.Value) {
 			return nil, errors.New("capability host result is invalid")
@@ -312,6 +312,15 @@ func (host *processHost) exchange(ctx context.Context, method string, payload js
 	case <-host.ctx.Done():
 		return nil, host.ctx.Err()
 	}
+}
+
+// operationReplyError restricts selected explanations to fetch while preserving legacy errors for replay.
+func operationReplyError(method string, reply Frame) error {
+	// Storage and other host calls must never gain public diagnostics through the operation channel.
+	if method == "fetch" && reply.ErrorMessage != "" {
+		return &OperationError{Message: BoundDiagnostic(reply.ErrorMessage)}
+	}
+	return errors.New(reply.Error)
 }
 
 // Fetch sends one workspace operation request through the parent-owned execution boundary.
@@ -332,19 +341,20 @@ func (host *processHost) DBSet(ctx context.Context, data json.RawMessage) error 
 
 // Frame is the bounded JSON protocol shared with the trusted Engine parent.
 type Frame struct {
-	Phases      []PhaseTiming    `json:"phases,omitempty"`
-	Kind        string           `json:"kind"`
-	RequestID   uint64           `json:"requestId,omitempty"`
-	ID          uint64           `json:"id,omitempty"`
-	Ordinal     int              `json:"ordinal,omitempty"`
-	Method      string           `json:"method,omitempty"`
-	Bundle      []byte           `json:"bundle,omitempty"`
-	Input       json.RawMessage  `json:"input,omitempty"`
-	Payload     json.RawMessage  `json:"payload,omitempty"`
-	Value       json.RawMessage  `json:"value,omitempty"`
-	Diagnostic  *DiagnosticError `json:"diagnostic,omitempty"`
-	Error       string           `json:"error,omitempty"`
-	Determinism Determinism      `json:"determinism,omitempty"`
+	Phases       []PhaseTiming    `json:"phases,omitempty"`
+	Kind         string           `json:"kind"`
+	RequestID    uint64           `json:"requestId,omitempty"`
+	ID           uint64           `json:"id,omitempty"`
+	Ordinal      int              `json:"ordinal,omitempty"`
+	Method       string           `json:"method,omitempty"`
+	Bundle       []byte           `json:"bundle,omitempty"`
+	Input        json.RawMessage  `json:"input,omitempty"`
+	Payload      json.RawMessage  `json:"payload,omitempty"`
+	Value        json.RawMessage  `json:"value,omitempty"`
+	Diagnostic   *DiagnosticError `json:"diagnostic,omitempty"`
+	Error        string           `json:"error,omitempty"`
+	ErrorMessage string           `json:"errorMessage,omitempty"`
+	Determinism  Determinism      `json:"determinism,omitempty"`
 }
 
 const maxFrameBytes = 5 << 20

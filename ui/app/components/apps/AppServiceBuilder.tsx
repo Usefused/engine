@@ -121,6 +121,7 @@ type SDKStreamContext = {
 };
 
 type BuilderCreationContext = {
+  generateExecutionToken: boolean;
   mode: GenerationMode;
   ownerTeamSlug: string;
   config: Record<string, unknown>;
@@ -418,7 +419,7 @@ async function waitForSDKGeneration(context: SDKStreamContext): Promise<void> {
 /** Deploys one MCP app and projects its Engine-owned transport endpoints. */
 async function deployMCPApp(context: BuilderCreationContext): Promise<void> {
   context.setStatus("Deploying MCP server...");
-  const result = await planAndApplyApp<{ app_id: string; default_transport: string; stable: boolean; stable_version_id: string; transport_urls: McpTransportEndpointData["transport_urls"]; execution_token?: string }>("mcp", context.ownerTeamSlug, context.config, context.reviewPlan);
+  const result = await planAndApplyApp<{ app_id: string; default_transport: string; stable: boolean; stable_version_id: string; transport_urls: McpTransportEndpointData["transport_urls"]; execution_token?: string }>("mcp", context.ownerTeamSlug, context.config, context.reviewPlan, context.generateExecutionToken);
   // Cancelling credential review must not report a deployment or synchronize workspace pins.
   if (!result) return;
   await context.syncWorkspacePins(context.selections);
@@ -441,6 +442,7 @@ async function publishRESTApp(context: BuilderCreationContext): Promise<void> {
     context.ownerTeamSlug,
     context.config,
     context.reviewPlan,
+    context.generateExecutionToken,
   );
   // Credential setup cancellation leaves the REST app unpublished.
   if (!result) return;
@@ -461,7 +463,7 @@ async function publishRESTApp(context: BuilderCreationContext): Promise<void> {
 /** Generates and downloads one typed SDK package before reporting success. */
 async function generateSDKApp(context: BuilderCreationContext): Promise<void> {
   context.setStatus("Planning and generating SDK...");
-  const result = await planAndApplyApp<{ app_id: string; job_id: string; execution_token?: string; hosted_mcp?: boolean; mcp_transport_urls?: McpTransportEndpointData["transport_urls"] }>("sdk", context.ownerTeamSlug, context.config, context.reviewPlan);
+  const result = await planAndApplyApp<{ app_id: string; job_id: string; execution_token?: string; hosted_mcp?: boolean; mcp_transport_urls?: McpTransportEndpointData["transport_urls"] }>("sdk", context.ownerTeamSlug, context.config, context.reviewPlan, context.generateExecutionToken);
   // A deferred setup choice must not start a package stream or download.
   if (!result) return;
   await waitForSDKGeneration({
@@ -1265,30 +1267,26 @@ function BuilderPagination(props: Pick<
   );
 }
 
-// BuilderSelectionPane keeps review focused on selected services while exposing the same catalogue for additions.
+// BuilderSelectionPane uses one compact service header for review and catalogue discovery.
 function BuilderSelectionPane(props: BuilderSelectionPaneProps) {
-  // Physical service selection is the only builder catalogue after graph retirement.
-  const [pane, setPane] = useState("services");
   const selected = props.data.filter((row) => hasServiceSelection(row.service.id, props));
   // A cleared selection returns to discovery so removing the last operation cannot strand the user.
   const browsing = props.browsingServices || selected.length === 0;
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0">
-      <div role="tablist" aria-label="App capabilities" className="mb-4 flex gap-1 rounded-lg bg-slate-100 p-1">
-        {[["services", "Services"]].map(([id, label]) => (
-          // Tabs change only discovery; all selected capabilities remain in the same app config.
-          <button key={id} type="button" role="tab" aria-selected={pane === id} onClick={() => setPane(id)}
-            className={`flex-1 rounded-md px-4 py-2 text-sm font-medium ${pane === id ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{label}</button>
-        ))}
-      </div>
-      <div hidden={pane !== "services"}>
+      <div>
         {/* Existing app scope and private routing are preserved; this flow only adds workflow definitions. */}
         {props.existingConfig ? <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600">
+          <h3 className="mb-3 font-semibold text-slate-900">Services</h3>
           <p className="mb-3">Existing service operations and credentials are preserved.</p>
           <ul className="space-y-2">{Object.entries(props.existingConfig.services).map(([name, config]) => <li key={name} className="flex flex-wrap items-center gap-2"><span>{name}</span><span className="rounded bg-slate-100 px-2 py-0.5 text-xs">{config.version}</span></li>)}</ul>
         </div> : <>
         {/* Review shows only selected services; catalogue browsing is an explicit, reversible choice. */}
-        {selected.length > 0 && <div className="mb-4 flex items-center justify-between gap-3"><p className="text-sm font-medium text-slate-700">{selected.length} selected {selected.length === 1 ? "service" : "services"}</p><button type="button" onClick={() => props.setBrowsingServices(!browsing)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">{browsing ? "Done selecting" : "Add services"}</button></div>}
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h3 className="text-sm font-semibold text-slate-900">Services ({selected.length})</h3>
+          {/* With no selection the catalogue is already open, so only selected apps need a toggle. */}
+          {selected.length > 0 && <button type="button" onClick={() => props.setBrowsingServices(!browsing)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">{browsing ? "Done selecting" : "Add services"}</button>}
+        </div>
         {browsing && <BuilderSearchForm {...props} />}
         <div className="flex-1 overflow-y-auto pr-2 pb-8 space-y-4">
           <BuilderServiceList {...props} data={browsing ? props.data : selected} />
@@ -1460,6 +1458,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   const source = loaderData.source;
   const attachment = loaderData.attachment;
   const [authEdits, setAuthEdits] = useState<AppAuthEdits>({});
+  const [generateExecutionToken, setGenerateExecutionToken] = useState(true);
   // Navigating to another immutable source must not carry unsaved auth overrides into it.
   useEffect(() => { setAuthEdits({}); }, [source?.appID]);
   const [attachmentAlias, setAttachmentAlias] = useState(() => unifiedAppAlias(attachment?.name ?? ""));
@@ -2275,6 +2274,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
 
       // Physical selections use the shared SDK and MCP completion lifecycle.
       await completeBuilderCreation({
+        generateExecutionToken,
         mode: generationMode,
         ownerTeamSlug,
         config: applyAppAuthEdits(composeUnifiedAppConsumer(physicalConfig, source?.config, attachment, attachmentAlias), authEdits, authIdentities),
@@ -2345,6 +2345,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     setPage,
   };
   const generation: ConsumerGenerationPanelProps = {
+    generateExecutionToken, setGenerateExecutionToken,
     serviceAuthentication: <AppServiceAuthFields disabled={generating || describing || selectionPending} services={authServices.map((service) => ({ ...service, auth: authEdits[service.key]?.service_id === service.service_id ? authEdits[service.key].auth : service.auth }))} onChange={(key, auth) => {
       // Keep the choice bound to the provider that was visible when this control was rendered.
       setAuthEdits((current) => ({ ...current, [key]: { service_id: authIdentities[key], auth } }));

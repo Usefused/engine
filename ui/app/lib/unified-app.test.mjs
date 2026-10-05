@@ -30,6 +30,26 @@ function client(mock, module = "unified-app-api") {
 const source = 'export default buildUnifiedApp({ input: z.object({}), output: z.object({}), async execute() { return {}; } });';
 const service = { service_id: "service-id", service_version_id: "version-id", version: "v1", operations: ["getCustomer"] };
 
+// Editing uses the existing source and exact reviewed pins without rediscovering services or deploying anything.
+test("AI source revision preserves the baseline and selected provider contracts", async () => {
+  const mock = transport({ RevisePromptUnifiedApp: { draftPromptUnifiedApp: JSON.stringify({ source: source + "\n// revised" }) } });
+  const result = await client(mock.api, "app-describe-api").draftAppSource("Fix the checkout error", { stripe: service }, () => {}, source);
+  assert.equal(result, source + "\n// revised");
+  assert.equal(mock.calls.length, 1);
+  assert.equal(mock.calls[0].operation, "RevisePromptUnifiedApp");
+  assert.equal(mock.calls[0].variables.source, source);
+  assert.deepEqual(JSON.parse(mock.calls[0].variables.selections), [{ service: "stripe", service_id: service.service_id, version: "v1", operation: "getCustomer" }]);
+});
+
+// Failed or oversized revisions must leave the caller's draft unchanged and avoid unbounded paid requests.
+test("AI source revision rejects oversized context and preserves clarification", async () => {
+  const mock = transport({ RevisePromptUnifiedApp: { draftPromptUnifiedApp: JSON.stringify({ source: "", clarification: "Select the price lookup operation first." }) } });
+  const drafter = client(mock.api, "app-describe-api");
+  await assert.rejects(drafter.draftAppSource("Fix", { stripe: service }, () => {}, "x".repeat(128 * 1024 + 1)), /128 KiB/);
+  assert.equal(mock.calls.length, 0);
+  await assert.rejects(drafter.draftAppSource("Fix", { stripe: service }, () => {}, source), /Select the price lookup/);
+});
+
 // Each fixture simulates the exact CLI response envelopes and records the selected transport.
 function transport(overrides = {}) {
   const calls = [];

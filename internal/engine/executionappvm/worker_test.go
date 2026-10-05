@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -14,6 +15,43 @@ globalThis.FusedUnifiedApp = {
   output: {parse(value) {return value}},
   execute: async ({input}) => JSON.parse(await __fusedHost.fetch(JSON.stringify(input)))
 };`
+
+// TestLoadedWorkerPreservesOperationMessage exercises the production framed bridge without OS isolation dependencies.
+func TestLoadedWorkerPreservesOperationMessage(t *testing.T) {
+	inputReader, inputWriter := io.Pipe()
+	outputReader, outputWriter := io.Pipe()
+	defer inputWriter.Close()
+	defer outputReader.Close()
+	// The real resident-worker loop ensures serialization cannot silently erase the typed explanation.
+	go func() {
+		runLoadedWorker(frameScanner(inputReader), &frameWriter{encoder: json.NewEncoder(outputWriter)}, Frame{Kind: "load", Bundle: []byte(workerTestBundle)})
+		_ = outputWriter.Close()
+	}()
+	scanner := frameScanner(outputReader)
+	readWorkerTestFrame(t, scanner)
+	encoder := json.NewEncoder(inputWriter)
+	control, err := NewDeterminism()
+	// A deterministic run uses the same admission path as a deployed app.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := encoder.Encode(Frame{Kind: "run", RequestID: 1, Input: json.RawMessage(`{}`), Determinism: control}); err != nil {
+		t.Fatal(err)
+	}
+	call := readWorkerTestFrame(t, scanner)
+	// The test must observe a real awaited host call, rather than a bundle initialization failure.
+	if call.Kind != "call" {
+		t.Fatalf("expected host call: %#v", call)
+	}
+	if err := encoder.Encode(Frame{Kind: "reply", RequestID: 1, ID: call.ID, Error: "capability workspace operation failed", ErrorMessage: "No such price: price_example"}); err != nil {
+		t.Fatal(err)
+	}
+	done := readWorkerTestFrame(t, scanner)
+	// The worker must return the authored exception with its useful message and a safe implicit Error string.
+	if done.Kind != "done" || done.Diagnostic == nil || !strings.Contains(done.Diagnostic.Message, "No such price: price_example") || done.Error != "capability execution failed" {
+		t.Fatalf("message lost in worker IPC: %#v", done)
+	}
+}
 
 // TestLoadedWorkerRoutesConcurrentReplies ensures overlapping calls with the same local ID stay isolated.
 func TestLoadedWorkerRoutesConcurrentReplies(t *testing.T) {

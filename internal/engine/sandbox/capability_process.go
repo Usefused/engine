@@ -222,7 +222,7 @@ func capabilityProcessOutput(frame capabilityProcessFrame) (json.RawMessage, err
 	return frame.Value, nil
 }
 
-// serveCapabilityHostCall dispatches a worker request through the existing trusted host surface.
+// serveCapabilityHostCall carries selected error messages separately from private diagnostics and Go errors.
 func serveCapabilityHostCall(ctx context.Context, writer *capabilityFrameWriter, host CapabilityScriptHost, request capabilityProcessFrame, semaphore chan struct{}) {
 	// At most four trusted effects can run concurrently even if the child issues all 32 calls.
 	select {
@@ -236,6 +236,10 @@ func serveCapabilityHostCall(ctx context.Context, writer *capabilityFrameWriter,
 	// Authored code sees a bounded error string, never a Go object or credential.
 	if err != nil {
 		result.Error = err.Error()
+		// Only typed operation failures may expose a message to authored code, never their raw evidence.
+		if request.Method == "fetch" {
+			result.ErrorMessage = executionappvm.OperationErrorMessage(err)
+		}
 	} else if len(value) > 0 {
 		// Effect results remain JSON-only and bounded before they cross into the child.
 		if len(value) > maxCapabilityOutputBytes || !json.Valid(value) {

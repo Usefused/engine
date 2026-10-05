@@ -42,17 +42,18 @@ export async function planApp(
 	return api.appConfig.plan<AppPlanResponse>(kind, appPlanInput(kind, ownerTeamSlug, sourceHash, config));
 }
 
-export async function applyApp<T>(kind: AppKind, plan: AppPlanResponse): Promise<T> {
-  return api.appConfig.apply<T>(kind, appApplyInput(plan));
+/** Applies the reviewed plan with the caller's independent initial-token preference. */
+export async function applyApp<T>(kind: AppKind | "unified-app", plan: AppPlanResponse, generateExecutionToken = true): Promise<T> {
+  return api.appConfig.apply<T>(kind, appApplyInput(plan, generateExecutionToken));
 }
 
 /** Defers publication until credential readiness has been reviewed, preserving cancellation and fresh plan receipts. */
-export async function planAndApplyApp<T>(kind: AppKind, ownerTeamSlug: string, config: Record<string, unknown>, review: AppPlanReviewer): Promise<T | null> {
+export async function planAndApplyApp<T>(kind: AppKind, ownerTeamSlug: string, config: Record<string, unknown>, review: AppPlanReviewer, generateExecutionToken = true): Promise<T | null> {
 	const plan = await planApp(kind, ownerTeamSlug, config);
   const approved = await review(plan, () => planApp(kind, ownerTeamSlug, config));
   // Cancelling credential setup leaves the reviewed config editable and creates no app.
   if (!approved) return null;
-  return applyApp<T>(kind, approved);
+  return applyApp<T>(kind, approved, generateExecutionToken);
 }
 
 async function sha256JSON(value: Record<string, unknown>): Promise<string> {

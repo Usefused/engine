@@ -1,10 +1,37 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"testing"
+
+	"github.com/Usefused/engine/internal/engine/executionappvm"
 )
+
+type operationFailureProcessHost struct{ capabilityScriptTestHost }
+
+// Fetch models the recorder's selected explanation without sending private provider data to the worker.
+func (*operationFailureProcessHost) Fetch(context.Context, json.RawMessage) (json.RawMessage, error) {
+	return nil, &executionappvm.OperationError{Message: "No such price: price_example"}
+}
+
+// TestCapabilityHostReplyPreservesOperationMessage checks the parent side of production IPC independently of isolation support.
+func TestCapabilityHostReplyPreservesOperationMessage(t *testing.T) {
+	var output bytes.Buffer
+	writer := &capabilityFrameWriter{encoder: json.NewEncoder(&output)}
+	request := capabilityProcessFrame{Kind: "call", RequestID: 5, ID: 1, Ordinal: 1, Method: "fetch", Payload: json.RawMessage(`{}`)}
+	serveCapabilityHostCall(context.Background(), writer, &operationFailureProcessHost{}, request, make(chan struct{}, 4))
+	var reply capabilityProcessFrame
+	// An error frame must remain decodable rather than breaking the worker connection.
+	if err := json.Unmarshal(output.Bytes(), &reply); err != nil {
+		t.Fatal(err)
+	}
+	// Only the selected message crosses the bridge; diagnostic payloads remain on the trusted side.
+	if reply.ErrorMessage != "No such price: price_example" || reply.Diagnostic != nil || reply.RequestID != 5 {
+		t.Fatalf("unexpected host reply: %#v", reply)
+	}
+}
 
 // TestCapabilityWorkerRejectsDuplicateHostCalls ensures a compromised child cannot repeat an effect or replay ordinal.
 func TestCapabilityWorkerRejectsDuplicateHostCalls(t *testing.T) {

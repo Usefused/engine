@@ -72,6 +72,36 @@ test("rechecking applies only the fresh credential-reviewed receipt", async () =
   assert.deepEqual(app.calls[2].input, { plan_id: "after", source_hash: "sha256:after" });
 });
 
+// Rechecking credentials must not reset the user's independent token-issuance choice.
+test("token opt-out survives credential rechecking without entering immutable config", async () => {
+  for (const kind of ["sdk", "mcp"]) {
+    const app = client([plan("before"), plan("after", null)]);
+    await app.planAndApplyApp(kind, "", { name: "checkout", version: "1.0.0" }, async (_, recheck) => recheck(), false);
+    assert.deepEqual(app.calls.at(-1).input, { plan_id: "after", source_hash: "sha256:after", skip_token: true });
+    assert.equal("skip_token" in app.calls[0].input.config, false);
+  }
+});
+
+// Unified App deployment uses the same reviewed apply request and initial-token preference.
+test("Unified App apply supports token generation and opt-out", async () => {
+  const app = client([]), receipt = plan("compiled", null);
+  await app.applyApp("unified-app", receipt, false);
+  assert.deepEqual(app.calls.at(-1), { action: "apply", kind: "unified-app", input: { plan_id: "compiled", source_hash: "sha256:compiled", skip_token: true } });
+  await app.applyApp("unified-app", receipt, true);
+  assert.deepEqual(app.calls.at(-1).input, { plan_id: "compiled", source_hash: "sha256:compiled" });
+});
+
+// The shared checkbox exposes an accessible opt-in state without controlling immutable app content.
+test("execution token option reflects the selected issuance preference", () => {
+  const { ExecutionTokenOption } = load("../components/apps/ExecutionTokenOption.tsx", {});
+  const enabled = renderToStaticMarkup(createElement(ExecutionTokenOption, { checked: true, onChange: () => {} }));
+  const disabled = renderToStaticMarkup(createElement(ExecutionTokenOption, { checked: false, disabled: true, onChange: () => {} }));
+  assert.match(enabled, /Generate execution token/);
+  assert.match(enabled, /checked=""/);
+  assert.doesNotMatch(disabled, /checked=/);
+  assert.match(disabled, /disabled=""/);
+});
+
 // A readiness lookup failure is not consent to publish with unknown credentials.
 test("failed readiness review does not apply", async () => {
   const app = client([plan("before")]);

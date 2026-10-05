@@ -21,10 +21,19 @@ services:
 ```
 
 Use the service reference and version from your workspace. Both the type and
-scheme name identify the credential; storing `bearerAuth` does not make it the
-default if the provider declares another security alternative first. Without an
-explicit preference, Engine follows the provider contract and applicable connect
-requirements. It does not search stored secrets to choose an alternative.
+scheme name identify the credential. When auth is omitted, Engine checks credential
+metadata in the service's selected bucket (including a per-service override).
+If exactly one compatible scheme has all required credentials, planning selects
+it. Multiple ready schemes require an explicit choice; no ready scheme retains
+the provider's declared order and produces the missing-credentials warning.
+Candidates must support every selected secured operation and satisfy all credentials
+in their selected AND requirements. Anonymous and webhook-only services do not
+trigger credential selection. Secret values are never read for this check.
+The plan summary shows the resolved auth, which is saved in the immutable app
+config. Apply uses that reviewed choice; adding another credential does not
+silently switch an existing app. Explicit auth and managed references are preserved.
+Existing immutable versions retain their reviewed policy; publish a new version
+with auth omitted to use automatic credential selection.
 An explicit choice must satisfy every selected secured operation, or planning
 fails. Changing the app's choice does not modify its bucket credentials.
 
@@ -32,6 +41,13 @@ The same `auth` block works in `kind: sdk` and `kind: mcp` service entries.
 For an existing app, deploy a new immutable version after changing authentication.
 
 ## Missing credentials during creation
+
+New Unified App, SDK, MCP, and REST creation forms include **Generate execution
+token**, enabled by default. Uncheck it to publish without issuing the initial
+execution token; one can be created later. This sends `skip_token: true` on apply,
+separate from the immutable YAML and compiled source. Existing app versions keep
+their current family tokens. CLI initialization offers the same choice through
+`fused-cli init --no-token`.
 
 Unified App, SDK and MCP builders use Engine's `credential_readiness` plan result
 to warn before publishing when selected credentials are missing. The warning
@@ -74,3 +90,33 @@ use `bundle_digest`. These source modes are mutually exclusive. Optional hosted
 MCP metadata uses `mcp.description`; Engine enforces its permission and explicit
 event-selection requirements. `language`, when supplied, must be `typescript`,
 and Unified Apps cannot request SDK package generation.
+
+## Editing with Fused AI
+
+In the app editor, open **Edit with Fused AI**, describe the change, and optionally
+paste an error. Fused sends the current TypeScript and exact selected operation
+versions to the same Registry drafting API used by describe. Provider request and
+response contracts ground the proposal; service selections, auth and buckets stay
+unchanged. Review the current and suggested code, then choose **Apply to editor**
+or **Discard**. Applying invalidates any previous compile plan. Validate and
+compile, then deploy a new version separately.
+
+Validation and compilation do not execute provider operations or verify that
+customer/price IDs exist. Provider array/object schemas remain application data;
+Engine handles wire serialization, including indexed nested form fields such as
+`line_items[0][price]`. An Engine transport defect should be fixed in Engine, not
+worked around by changing the app to send an incorrect provider data shape.
+
+## Execution errors
+
+Failed service calls preserve their error explanation in the Unified App result
+and receipt. For JSON provider failures, Engine extracts the error message
+(including Stripe's `error.message`) with the HTTP status. Input-validation
+failures also identify the invalid or missing input before dispatch. Authored
+code can catch these failures using `error.message` or let the app fail with the
+same explanation. Replay preserves the message seen during the original run.
+
+Full request/response bodies and stack traces still require
+`app.unified_app.diagnostics.read`. Unknown provider response formats retain the
+HTTP failure explanation; their raw body is available in diagnostics. Existing
+receipts retain the message captured when they ran.
