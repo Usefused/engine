@@ -27,6 +27,8 @@ func TestOTLPTraceExportUsesStandardSignalPaths(t *testing.T) {
 	defer server.Close()
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", server.URL)
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+	// Disabling log export must not disable the independent trace exporter.
+	t.Setenv("OTEL_LOGS_EXPORTER", "none")
 	t.Setenv("THREADIFY_API_KEY", "")
 	previousProvider := otel.GetTracerProvider()
 	Init(context.Background())
@@ -64,6 +66,8 @@ func TestOTLPLogExportUsesStandardSignalPaths(t *testing.T) {
 	defer server.Close()
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", server.URL)
 	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
+	// Isolate the enabled export contract from the developer's local log opt-out.
+	t.Setenv("OTEL_LOGS_EXPORTER", "otlp")
 	previousLogger := slog.Default()
 	previousProvider := global.GetLoggerProvider()
 	InitLogs(context.Background())

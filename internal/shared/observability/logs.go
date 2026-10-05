@@ -31,11 +31,12 @@ var (
 
 // InitLogs installs a process-wide stderr/OTLP tee whose exported attributes
 // follow a fixed, bounded contract and exclude raw errors and identifiers.
+// OTEL_LOGS_EXPORTER=none keeps logging local regardless of configured endpoints.
 func InitLogs(ctx context.Context, configuredEndpoint ...string) {
 	endpoint, endpointFromEnvironment := signalEndpoint("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", configuredEndpoint)
 	console := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
-	// Local stderr remains the only destination when log export is unconfigured.
-	if endpoint == "" {
+	// An explicit log opt-out overrides every endpoint without affecting other telemetry signals.
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("OTEL_LOGS_EXPORTER")), "none") || endpoint == "" {
 		slog.SetDefault(slog.New(console))
 		return
 	}

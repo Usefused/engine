@@ -13,6 +13,10 @@ Common variables:
   and logs.
 - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`: optional traces-specific HTTP endpoint.
 - `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`: optional logs-specific HTTP endpoint.
+- `OTEL_LOGS_EXPORTER=none`: disables OTLP log export, including the startup
+  delivery check, even when a shared or logs-specific endpoint is configured.
+  Console logs still go to stderr; traces and metrics keep their own configuration.
+  Leave unset or set to `otlp` to retain endpoint-based log export.
 - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`: optional metrics-specific endpoint. It
   takes precedence over the shared endpoint for metrics.
 - `FUSED_ENGINE_ENVIRONMENT`: deployment label attached to telemetry, default
@@ -22,7 +26,7 @@ Examples:
 
 ```bash
 OTEL_SERVICE_NAME=engine
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 # Works perfectly with Threadify
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 # OpenTelemetry Collector
 FUSED_ENGINE_ENVIRONMENT=staging
 ```
 
@@ -31,6 +35,11 @@ which takes precedence over `observability.otel_target` in `engine.yaml`. The
 YAML fallback must be an OTLP/HTTP target, normally `http://localhost:4318`.
 
 Leave the OTLP endpoint variables unset to disable export.
+
+To keep an existing OTLP destination but stop draining logs to it, set
+`OTEL_LOGS_EXPORTER=none` in the Engine process environment and restart the Engine.
+This also overrides an endpoint supplied by `engine.yaml`. Threadify is not a
+log receiver; use its tracing integration without sending OTLP logs to it.
 
 The repository's local Compose stack sends all three signals to an OpenTelemetry
 Collector. The collector forwards traces to Jaeger and accepts bounded logs and
