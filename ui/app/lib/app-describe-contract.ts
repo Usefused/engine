@@ -6,6 +6,19 @@ export type DescribeProgress = (message: string, stage?: DescribeStage) => void;
 export type DescribeSelectionReady = (proposal: AppDescription) => void;
 export type DescribeSchedule = <T>(work: () => Promise<T>) => Promise<T>;
 
+export interface DescribeAnswer { question: string; answer: string }
+
+/** Keeps the original goal and explicit answers together across intent parsing and source drafting. */
+export function describeGoalWithAnswers(goal: string, answers: DescribeAnswer[]): string {
+  // Ordinary descriptions retain their existing wire representation when no clarification was needed.
+  const combined = answers.length
+    ? `${goal.trim()}\n\nAnswers to follow-up questions:\n${JSON.stringify(answers)}`
+    : goal.trim();
+  // Match the Registry's byte bound before spending another model request, including non-ASCII answers.
+  if (new TextEncoder().encode(combined).length > 16384) throw new Error("Your description and answers are too long. Shorten the description and try again.");
+  return combined;
+}
+
 /** Shares four network slots across services and operations, stopping queued work after a failure. */
 export function createDescribeScheduler(): DescribeSchedule {
   let active = 0;

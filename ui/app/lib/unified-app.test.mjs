@@ -138,9 +138,10 @@ test("plan stops after one repair and never refreshes unrelated errors", async (
 });
 
 // Ambiguous goals stop before discovery or compilation and remain actionable in the form.
+// The creation form must receive a typed question before any service discovery or source request.
 test("clarification stops before service discovery", async () => {
   const mock = transport({ ParsePromptIntent: { parseSDKIntent: { clarification: "Which customer?" } } });
-  await assert.rejects(client(mock.api).describeUnifiedApp("Get customer", () => {}), /Which customer/);
+  await assert.rejects(client(mock.api).describeUnifiedApp("Get customer", () => {}), { name: "AppDescriptionClarificationError", message: "Which customer?" });
   assert.equal(mock.calls.length, 1);
 });
 
@@ -396,9 +397,23 @@ test("describe scheduler stops queued work on failure", async () => {
 });
 
 // Clarification must request a revised selection rather than endlessly retrying the same incomplete pins.
+// Both stages share question handling while retaining the source-specific retry behavior.
 test("source clarification is distinguishable from a retryable transport failure", () => {
   assert.throws(() => contract.decodeUnifiedSource('{"clarification":"Which lookup should be used?"}'), contract.UnifiedSourceClarificationError);
+  assert.throws(() => contract.decodeUnifiedSource('{"clarification":"Which lookup should be used?"}'), contract.AppDescriptionClarificationError);
   assert.throws(() => contract.decodeUnifiedSource('{"source":""}'), (error) => !(error instanceof contract.UnifiedSourceClarificationError));
+});
+
+// A plain-language answer supplements the user's original goal without inventing endpoint names or losing earlier decisions.
+test("description follow-ups preserve the original goal and ordered answers", () => {
+  const goal = "Create a payment link for the subscription they picked using their email and name.";
+  const answers = [{ question: "Is this a new subscription or an existing one?", answer: "A new subscription" }];
+  const continued = describeContract.describeGoalWithAnswers(goal, answers);
+  assert.ok(continued.startsWith(goal));
+  assert.ok(continued.endsWith(JSON.stringify(answers)));
+  assert.equal(describeContract.describeGoalWithAnswers(goal, []), goal);
+  assert.deepEqual(answers, [{ question: "Is this a new subscription or an existing one?", answer: "A new subscription" }]);
+  assert.throws(() => describeContract.describeGoalWithAnswers("界".repeat(6000), []), /too long/);
 });
 
 // Editing an existing team-owned app must carry its immutable owner into the shared plan endpoint.

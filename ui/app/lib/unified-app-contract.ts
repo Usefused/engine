@@ -28,8 +28,14 @@ export interface UnifiedRelease {
   template: UnifiedTemplate;
 }
 
-/** Distinguishes revisable intent from transient drafting failures that can reuse the same pins. */
-export class UnifiedSourceClarificationError extends Error {
+/** Carries a user-answerable question independently of network and generation failures. */
+export class AppDescriptionClarificationError extends Error {
+  /** Keeps a plain-language question available to every creation form. */
+  constructor(message: string) { super(message); this.name = "AppDescriptionClarificationError"; }
+}
+
+/** Distinguishes revisable source intent while sharing the creation form's question handling. */
+export class UnifiedSourceClarificationError extends AppDescriptionClarificationError {
   /** Retains the model's bounded clarification without treating it as a transport retry. */
   constructor(message: string) { super(message); this.name = "UnifiedSourceClarificationError"; }
 }

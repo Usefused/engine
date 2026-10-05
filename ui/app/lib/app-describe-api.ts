@@ -1,5 +1,5 @@
 import { api } from "./api";
-import { decodeUnifiedSource } from "./unified-app-contract";
+import { AppDescriptionClarificationError, decodeUnifiedSource } from "./unified-app-contract";
 import { createDescribeScheduler, settleDescribe, matchDescribeEvents, mergeDescribePin, type DescribeProgress, type DescribeSelectionReady, type DescribeSchedule, type AppServicePin, type AppDescription, type DescribeKind, type DescribeServiceCandidate, type ChooseDescribeService } from "./app-describe-contract";
 
 interface IntentService { name: string; endpoint_query: string; endpoint_queries: string[]; select_all_operations: boolean; event_queries: string[] }
@@ -140,7 +140,7 @@ function operationQueries(intent: IntentService, kind: DescribeKind, includeEven
 /** Rejects unsupported authoring intent before discovery or model classification. */
 function validateIntent(intent: Intent, kind: DescribeKind): void {
   // Clarifications take precedence over a partially filled proposal.
-  if (intent.clarification?.trim()) throw new Error(intent.clarification);
+  if (intent.clarification?.trim()) throw new AppDescriptionClarificationError(intent.clarification);
   // The creation form cannot reinterpret updates as new apps.
   if (intent.action === "update") throw new Error("Describe a new app. Use the existing app's editor to create a new version.");
   validateAdapterIntent(intent, kind);

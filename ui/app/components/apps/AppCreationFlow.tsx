@@ -2,7 +2,8 @@ import { FieldLabel } from "~/components/forms/FieldLabel";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Check, AlertCircle, Loader2, Sparkles } from "lucide-react";
 import { Select } from "~/components/forms/Select";
-import type { ChooseDescribeService, DescribeServiceCandidate, DescribeProgress, DescribeStage } from "~/lib/app-describe-contract";
+import { describeGoalWithAnswers, type DescribeAnswer, type ChooseDescribeService, type DescribeServiceCandidate, type DescribeProgress, type DescribeStage } from "~/lib/app-describe-contract";
+import { AppDescriptionClarificationError } from "~/lib/unified-app-contract";
 
 interface AppCreationFlowProps {
   onDescribe: (goal: string, progress: DescribeProgress, chooseService: ChooseDescribeService) => Promise<void>;
@@ -24,6 +25,9 @@ export function AppCreationFlow({ onDescribe, children, generatesSource, disable
   const [steps, setSteps] = useState<Partial<Record<DescribeStage, string>>>({});
   const [finished, setFinished] = useState(false);
   const [error, setError] = useState("");
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [answers, setAnswers] = useState<DescribeAnswer[]>([]);
 
   const [choice, setChoice] = useState<{ reference: string; candidates: DescribeServiceCandidate[] } | null>(null);
   const mounted = useRef(true);
@@ -65,25 +69,52 @@ export function AppCreationFlow({ onDescribe, children, generatesSource, disable
     if (nextStage) { setStage(nextStage); setSteps((previous) => ({ ...previous, [nextStage]: message })); }
   };
 
-  /** Replaces the proposal only after discovery succeeds, retaining prior work on clarification or failure. */
-  async function describe(event: FormEvent) {
-    event.preventDefault();
+  /** Replaces the proposal only after discovery succeeds, preserving the original goal and explicit answers. */
+  async function runDescription(nextAnswers: DescribeAnswer[]) {
     setBusy(true); onBusyChange?.(true); setError(""); setSteps({}); setStage("intent"); setFinished(false);
-    try { await onDescribe(goal, reportProgress, chooseService); setReviewing(true); setStage("review"); setFinished(true); }
+    setQuestion(""); setAnswer(""); setAnswers(nextAnswers);
+    try { await onDescribe(describeGoalWithAnswers(goal, nextAnswers), reportProgress, chooseService); setReviewing(true); setStage("review"); setFinished(true); }
     catch (cause) {
-      // User cancellation is an ordinary return to editing; other failures remain visible.
-      if (!(cause instanceof DOMException && cause.name === "AbortError")) setError(String(cause));
-      else setSteps({}); // A cancelled flow has no active stage to announce.
+      // A question is an expected authoring step, not a failed app or an invitation to rewrite the whole goal.
+      if (cause instanceof AppDescriptionClarificationError) setQuestion(cause.message);
+      // User cancellation is an ordinary return to editing; actual failures remain visible as errors.
+      else if (!(cause instanceof DOMException && cause.name === "AbortError")) setError(String(cause));
+      else setSteps({});
     }
     finally { setBusy(false); onBusyChange?.(false); }
   }
+
+  /** Starts or retries discovery using all answers already supplied for this goal. */
+  function describe(event: FormEvent) { event.preventDefault(); void runDescription(answers); }
+
+  /** Continues only after the user explicitly answers the pending business question. */
+  function answerQuestion(event: FormEvent) {
+    event.preventDefault();
+    // Empty submissions cannot silently choose an interpretation on the user's behalf.
+    if (!question || !answer.trim() || busy) return;
+    void runDescription([...answers, { question, answer: answer.trim() }]);
+  }
+
+  /** Editing the original request invalidates answers that belonged to its previous intent. */
+  function changeGoal(value: string) { setGoal(value); setQuestion(""); setAnswer(""); setAnswers([]); setError(""); }
 
   const locked = busy || Boolean(disabled);
   const showReview = [hasSelection, reviewing, mode === "manual"].some(Boolean);
   return <div className="space-y-6">
     <CreationModes mode={mode} setMode={setMode} disabled={locked} />
     {/* Switching modes preserves the description and the single parent-owned selection. */}
-    {mode === "describe" && <DescribeForm goal={goal} setGoal={setGoal} disabled={locked} onSubmit={describe} />}
+    {mode === "describe" && <DescribeForm goal={goal} setGoal={changeGoal} disabled={locked} onSubmit={describe} />}
+    {/* Prior answers remain visible so later questions never hide what the user already decided. */}
+    {mode === "describe" && answers.length > 0 && <dl className="space-y-3 rounded-lg bg-slate-50 p-4 text-sm">
+      {answers.map((item, index) => <div key={index}><dt className="font-medium text-slate-700">{item.question}</dt><dd className="mt-1 whitespace-pre-wrap text-slate-600">{item.answer}</dd></div>)}
+    </dl>}
+    {/* Ask inline at either intent or source stage, preserving both the goal and any earlier valid draft. */}
+    {mode === "describe" && question && <form onSubmit={answerQuestion} className="space-y-3 rounded-xl border border-blue-200 bg-blue-50 p-5">
+      <h2 className="font-semibold text-slate-900">One detail before we continue</h2>
+      <label htmlFor="app-description-answer" className="block text-sm text-slate-800">{question}</label>
+      <textarea id="app-description-answer" required autoFocus maxLength={2048} disabled={locked} value={answer} onChange={(event) => setAnswer(event.target.value)} className="min-h-20 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm" />
+      <button type="submit" disabled={locked || !answer.trim()} className="rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">Continue</button>
+    </form>}
     {/* Progress and clarification stay beside the editable goal, without replacing an earlier valid draft. */}
     {mode === "describe" && Object.keys(steps).length > 0 && <DescribeSteps stage={stage} steps={steps} finished={finished} failed={Boolean(error)} busy={busy && !choice} generatesSource={Boolean(generatesSource)} />}
     {/* Provider ambiguity is resolved within the same shared flow for every app type. */}
@@ -108,7 +139,7 @@ function CreationModes({ mode, setMode, disabled }: { mode: string; setMode: (mo
 function DescribeForm({ goal, setGoal, disabled, onSubmit }: { goal: string; setGoal: (goal: string) => void; disabled: boolean; onSubmit: (event: FormEvent) => void }) {
   return <form onSubmit={onSubmit} className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 sm:p-6">
     <label htmlFor="app-goal" className="block font-semibold text-slate-900"><FieldLabel required>What would you like to build?</FieldLabel></label>
-    <textarea id="app-goal" required maxLength={16384} value={goal} disabled={disabled} onChange={(event) => setGoal(event.target.value)} className="min-h-36 w-full resize-y rounded-lg border border-slate-300 px-3 py-2 text-sm focus:ring-2 focus:ring-[var(--brand-violet)]" placeholder="Describe the services and capabilities you need…" />
+    <textarea id="app-goal" required maxLength={16384} value={goal} disabled={disabled} onChange={(event) => setGoal(event.target.value)} className="min-h-36 w-full resize-y rounded-lg border border-slate-300 px-3 py-2 text-sm focus:ring-2 focus:ring-[var(--brand-violet)]" placeholder="Describe what you want the app to do. We'll ask if anything needs clarifying." />
     <p className="text-xs leading-relaxed text-slate-500">Your description is sent to Fused Registry’s configured model. Operation discovery uses Jev. Unified App drafting also sends selected operation contracts. Provider credentials and execution data are not included.</p>
     <button type="submit" disabled={disabled || !goal.trim()} className="inline-flex items-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"><Sparkles className="h-4 w-4" />Describe app</button>
   </form>;
