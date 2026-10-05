@@ -24,7 +24,7 @@ export function TeamMembersControls(props: TeamMembersControlsProps): ReactEleme
     createElement("div", { className: "bg-slate-50 px-4 py-3 border-b border-slate-200" },
       createElement("h3", { className: "text-sm font-semibold text-slate-900" }, "People"),
       createElement("p", { className: "text-xs text-slate-500 mt-0.5" }, "Add by email. If they are new, a person record is created without sending an email. They need a personal key to sign in.")),
-    createElement("form", { onSubmit: submit, className: "grid items-end gap-2 p-4 sm:grid-cols-[1fr_130px_auto] border-b border-slate-100" },
+    createElement("form", { onSubmit: submit, className: "grid grid-cols-[repeat(auto-fit,minmax(min(100%,12rem),1fr))] items-end gap-2 p-4 border-b border-slate-100" },
       createElement("label", { className: "flex min-w-0 flex-col gap-1 text-xs font-medium text-slate-700" },
         createElement(FieldLabel, { required: true }, "Member email"),
         createElement("input", { type: "email", value: email, onChange: (event) => setEmail(event.target.value), disabled: props.disabled, required: true, placeholder: "person@example.com", "aria-label": "Member email", className: "rounded-lg border border-slate-300 px-3 py-2 text-sm" })),

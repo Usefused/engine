@@ -12,7 +12,7 @@ export async function createReferencedSecret(input: SecretCreation, writer: Secr
   const keyName = input.keyName.trim();
   // Dots split reference segments; secret names must also match Engine's whitespace and escape restrictions.
   if (!input.bucket.id || !input.bucket.name.trim() || /[.{}]/.test(input.bucket.name) || !keyName || /[.{}$\s]/.test(keyName)) {
-    throw new Error("Choose a credential set without dots or braces, and a secret name without spaces, dots, dollar signs, or braces.");
+    throw new Error("Choose a bucket without dots or braces, and a secret name without spaces, dots, dollar signs, or braces.");
   }
   // Preserve the exact secret bytes, including meaningful leading or trailing whitespace.
   if (!input.value) throw new Error("Enter a secret value.");

@@ -54,7 +54,7 @@ export function BucketOverview({
       {showApps && <OverviewList
         title="Apps using this set"
         total={sdkTotal}
-        empty="No apps use this credential set yet."
+        empty="No apps use this bucket yet."
         page={sdkPage}
         pageSize={pageSize}
         onPageChange={onSDKPageChange}
@@ -237,10 +237,11 @@ function ServiceMetric({
   );
 }
 
+/** Distinguishes a filtered search miss from a bucket without service usage. */
 function serviceEmptyText(search: string): string {
   return search.trim()
     ? "No services match this search."
-    : "No services use this credential set yet.";
+    : "No services use this bucket yet.";
 }
 
 /** Gives the service selector the same readable identities as its rows. */

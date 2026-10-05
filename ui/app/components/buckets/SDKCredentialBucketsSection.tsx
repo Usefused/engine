@@ -12,6 +12,7 @@ type BucketRow = {
   isAttached: boolean;
 };
 
+/** Shows the buckets that supply this app with runtime credentials. */
 export function SDKCredentialBucketsSection({ appFamilyId }: { appFamilyId: string }) {
   const toast = useToast();
   const [buckets, setBuckets] = useState<Bucket[]>([]);
@@ -19,6 +20,7 @@ export function SDKCredentialBucketsSection({ appFamilyId }: { appFamilyId: stri
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
 
+  /** Refreshes effective runtime buckets without changing the app binding. */
   const loadBuckets = () => {
     setLoading(true);
     readBucketsForSDK(appFamilyId)
@@ -26,7 +28,7 @@ export function SDKCredentialBucketsSection({ appFamilyId }: { appFamilyId: stri
         setBuckets(state.buckets);
         setSdkBuckets(state.sdkBuckets);
       })
-      .catch((err) => toast.error(errorMessage(err, "Failed to load credential sets")))
+      .catch((err) => toast.error(errorMessage(err, "Failed to load buckets")))
       .finally(() => setLoading(false));
   };
 
@@ -36,9 +38,10 @@ export function SDKCredentialBucketsSection({ appFamilyId }: { appFamilyId: stri
 
   const visibleBuckets = useMemo(() => visibleCredentialBuckets(buckets, sdkBuckets), [buckets, sdkBuckets]);
 
+  /** Refreshes bucket availability after creation without silently attaching it. */
   const onBucketCreated = (name: string) => {
     loadBuckets();
-    toast.success(`Credential set ${name} created`);
+    toast.success(`Bucket ${name} created`);
   };
 
   return (
@@ -71,9 +74,9 @@ function SectionHeader({ hasAttachedBucket, loading, onRefresh, onCreate }: { ha
   return (
     <div className="flex items-center justify-between gap-3 mb-3">
       <div>
-        <h4 className="text-sm font-semibold text-slate-700 uppercase tracking-wider">Credential sets</h4>
+        <h4 className="text-sm font-semibold text-slate-700 uppercase tracking-wider">Buckets</h4>
         <p className="text-xs text-slate-500 mt-1">
-          {hasAttachedBucket ? "This app uses the attached credential set at runtime." : "No credential set is linked to this app yet."}
+          {hasAttachedBucket ? "This app uses the attached bucket at runtime." : "No bucket is linked to this app yet."}
         </p>
       </div>
       <div className="flex items-center gap-2">
@@ -81,7 +84,7 @@ function SectionHeader({ hasAttachedBucket, loading, onRefresh, onCreate }: { ha
           type="button"
           onClick={onRefresh}
           className="p-2 rounded-lg border border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50 cursor-pointer"
-          aria-label="Refresh credential sets"
+          aria-label="Refresh buckets"
           title="Refresh"
         >
           <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
@@ -92,16 +95,19 @@ function SectionHeader({ hasAttachedBucket, loading, onRefresh, onCreate }: { ha
   );
 }
 
+/** Keeps bucket loading feedback distinct from an empty result. */
 function BucketRows({ rows, loading }: { rows: BucketRow[]; loading: boolean }) {
   return (
     <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100 overflow-hidden">
-      {loading ? <EmptyBucketRows label="Loading credential sets..." /> : <LoadedBucketRows rows={rows} />}
+      {loading ? <EmptyBucketRows label="Loading buckets..." /> : <LoadedBucketRows rows={rows} />}
     </div>
   );
 }
 
+/** Links each effective runtime bucket to its management page. */
 function LoadedBucketRows({ rows }: { rows: BucketRow[] }) {
-  if (rows.length === 0) return <EmptyBucketRows label="No linked credential set." />;
+  // Empty effective bindings must not imply that every workspace bucket is attached.
+  if (rows.length === 0) return <EmptyBucketRows label="No linked bucket." />;
   return rows.map(({ bucket, isAttached }) => (
     <Link
       key={bucket.id}

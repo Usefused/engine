@@ -71,7 +71,7 @@ export function BucketConnectedUsersTable({
         </div>
       ) : connections.length === 0 ? (
         <div className="px-5 py-10 text-center text-sm text-slate-400">
-          No connected users in this credential set.
+          No connected users in this bucket.
         </div>
       ) : (
         <div className="flex flex-col gap-3 p-5">

@@ -45,13 +45,14 @@ const appLevels: Array<[TeamAppAccessLevel | "NONE", string]> = [
   ["MANAGER", "Manage"],
 ];
 
+/** Presents team resource grants using the same bucket terminology as app setup. */
 export function TeamAccessControls(props: TeamAccessControlsProps): ReactElement {
   return createElement(
     "div",
     { className: "space-y-6", "data-component": "team-access-controls" },
     workspaceRoleControl(props),
     resourceSection("Service access", "Choose which services this team can use or manage.", "service", props.services, props),
-    resourceSection("Credential access", "Choose which credential sets this team can use or manage.", "bucket", props.buckets, props),
+    resourceSection("Credential access", "Choose which buckets this team can use or manage.", "bucket", props.buckets, props),
     appSection(props)
   );
 }
@@ -195,7 +196,7 @@ function appGrantForm(props: TeamAccessControlsProps): ReactElement {
   return createElement(
     "form",
     {
-      className: "grid items-end gap-2 py-3 sm:grid-cols-[1fr_110px_auto]",
+      className: "grid grid-cols-[repeat(auto-fit,minmax(min(100%,12rem),1fr))] items-end gap-2 py-3",
       onSubmit: (event: FormEvent<HTMLFormElement>) => submitAppGrant(event, props),
     },
     createElement("label", { className: "flex min-w-0 flex-col gap-1 text-xs font-medium text-slate-700" },

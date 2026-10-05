@@ -179,7 +179,7 @@ function OAuthClientCreateForm(props: {
           <input value={props.name} onChange={(event) => props.onName(event.target.value)} required maxLength={100} placeholder="Third-party app name" className="min-h-11 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-base sm:text-sm" />
         </label>
         <label className="flex min-w-0 flex-col gap-1">
-          <span className="text-xs font-medium text-slate-700">Client type</span>
+          <span className="text-xs font-medium text-slate-700"><FieldLabel>Client type</FieldLabel></span>
           <Select aria-describedby="oauth-client-type-help" value={props.clientType} onChange={(event) => props.onClientType(event.target.value as OAuthClientType)} className="min-h-11 w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-base sm:text-sm">
             <option value="CONFIDENTIAL">Confidential</option>
             <option value="PUBLIC">Public</option>

@@ -55,7 +55,7 @@ export function decodeUnifiedSource(raw: string): string {
 /** Includes reviewed source and event scope in the desired state consumed by Unified App planning. */
 export function unifiedConfig(draft: UnifiedDraft, name: string, version: string, bucket: string): Record<string, unknown> {
   // User-reviewed identity is required before compilation or service activation.
-  if (!name.trim() || !version.trim() || !bucket.trim()) throw new Error("Name, version, and a credential bucket are required.");
+  if (!name.trim() || !version.trim() || !bucket.trim()) throw new Error("Name, version, and a bucket are required.");
   const services = Object.fromEntries(Object.entries(draft.services).map(([key, pin]) => [key, { version: pin.version, operations: pin.operations, ...(pin.webhooks?.length ? { webhooks: pin.webhooks } : {}) }]));
   const hasEvents = Object.values(draft.services).some((pin) => pin.webhooks?.length);
   // A selected event without an applied registration would never reach the hosted worker.

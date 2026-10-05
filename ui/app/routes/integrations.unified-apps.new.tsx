@@ -200,7 +200,7 @@ export default function CreateUnifiedApp() {
     try {
       const selectedBucket = buckets.find((item) => item.resource_id === bucket);
       // Selectors use IDs for UI identity, while portable app configuration resolves buckets by name.
-      if (!editSource && !selectedBucket) throw new Error("Choose an available credential bucket before compiling.");
+      if (!editSource && !selectedBucket) throw new Error("Choose an available bucket before compiling.");
       const config = editSource ? unifiedEditConfig(editSource, draft, version) : unifiedConfig(draft, name, version, selectedBucket!.display_name);
       setPlan(await planUnifiedApp(config, draft.services, setProgress, editSource?.owner_team));
     }
@@ -245,21 +245,22 @@ export default function CreateUnifiedApp() {
         <FieldLabel>Description</FieldLabel>
         <textarea className={fieldClass} maxLength={1024} value={draft.description} onChange={(event) => updateDescription(event.target.value)} />
       </label>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <label className="space-y-2 text-sm font-medium">
+      {/* Stack complete fields before the bucket action can wrap and offset the neighboring input. */}
+      <div className="flex flex-wrap gap-4">
+        <label className="min-w-0 flex-[1_1_16rem] space-y-2 text-sm font-medium">
           {/* Existing apps require a successor version rather than an overwrite of their saved source. */}
           <FieldLabel required>{editID ? "New version" : "Version"}</FieldLabel>
           <input required className={fieldClass} value={version} onChange={(event) => { setVersion(event.target.value); invalidatePlan(); }} />
         </label>
-        <div className="space-y-2 text-sm font-medium">
+        <div className="min-w-0 flex-[1_1_16rem] space-y-2 text-sm font-medium">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <label htmlFor="unified-credential-bucket"><FieldLabel required>Credential set</FieldLabel></label>
+            <label htmlFor="unified-credential-bucket"><FieldLabel required>Bucket</FieldLabel></label>
             {/* Immutable successors cannot change the family's credential binding. */}
             {!editID && credentialCreation.create && <CreateCredentialButton onClick={credentialCreation.create} />}
           </div>
           <Select id="unified-credential-bucket" required className={fieldClass} disabled={Boolean(editID)} value={bucket} onChange={(event) => { setBucket(event.target.value); invalidatePlan(); }}>
             {/* Existing families retain their bucket; new apps choose an authorized selector. */}
-            {editSource ? <option value={editSource.config.bucket}>{editSource.config.bucket}</option> : <option value="">Choose a credential set</option>}
+            {editSource ? <option value={editSource.config.bucket}>{editSource.config.bucket}</option> : <option value="">Choose a bucket</option>}
             {!editSource && buckets.map((item) => <option key={item.resource_id} value={item.resource_id}>{item.display_name}</option>)}
           </Select>
         </div>

@@ -208,7 +208,7 @@ function PeopleList(props: { users: UserSummary[]; total: number; search: string
     </div>
     <form onSubmit={(event) => { event.preventDefault(); props.onApplySearch(); }} className="flex gap-2 border-b border-slate-100 p-4"><input type="search" value={props.search} onChange={(event) => props.onSearch(event.target.value)} placeholder="Search people" aria-label="Search people" className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm" /><button type="submit" className="rounded-lg border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700">Search</button></form>
     {!props.loading && props.total > props.users.length && <p className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900" role="status">Showing {props.users.length} of {props.total} people. Search by name or email to find someone outside this list.</p>}
-    <div className="hidden grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] gap-4 border-b border-slate-100 bg-slate-50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500 sm:grid"><span>Name</span><span><FieldLabel required>Email</FieldLabel></span><span>Status</span></div>
+    <div className="hidden grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] gap-4 border-b border-slate-100 bg-slate-50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500 sm:grid"><span>Name</span><span>Email</span><span>Status</span></div>
     <div className="divide-y divide-slate-100">
       {props.loading && <p className="p-4 text-sm text-slate-500">Loading people…</p>}
       {!props.loading && props.users.length === 0 && <p className="p-4 text-sm text-slate-500">No people found.</p>}

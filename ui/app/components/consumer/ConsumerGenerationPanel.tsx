@@ -131,17 +131,16 @@ function WebhookBundleField({ totalSelectedWebhooks, webhookAttachment, setWebho
   );
 }
 
-/** Captures immutable version identity and previews collisions for SDK-kind deliveries. */
+/** Gives the required version label enough room and keeps collision feedback below the aligned controls. */
 function VersionField({ generationMode, appVersion, setAppVersion, setIsDuplicate, checkDuplicateSDK, checkingDuplicate, isDuplicate }: {
   generationMode: AppCreationMode; appVersion: string; setAppVersion: (v: string) => void; setIsDuplicate: (v: boolean) => void;
   checkDuplicateSDK: () => void; checkingDuplicate: boolean; isDuplicate: boolean;
 }) {
   const isSdkKind = generationMode !== "mcp";
   return (
-    <div>
-      <label htmlFor="app-version" className="mb-1 block text-sm font-medium text-slate-700">
+    <div className="min-w-0 flex-[1_1_10rem]">
+      <label htmlFor="app-version" className="mb-1 block min-h-6 text-sm font-medium text-slate-700">
         <FieldLabel required>Version</FieldLabel>
-        {isSdkKind && checkingDuplicate && <span className="text-xs text-slate-400">Checking...</span>}
       </label>
       <input
         id="app-version"
@@ -153,6 +152,8 @@ function VersionField({ generationMode, appVersion, setAppVersion, setIsDuplicat
         onBlur={isSdkKind ? checkDuplicateSDK : undefined}
         className="w-full rounded-lg border border-slate-300 bg-slate-50 px-2.5 py-1.5 text-sm transition-all focus:border-[var(--brand-violet)] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[var(--brand-violet)]/20"
       />
+      {/* Asynchronous feedback must not shift the version input away from its neighboring language control. */}
+      {isSdkKind && checkingDuplicate && <p role="status" className="mt-1 text-xs text-slate-400">Checking...</p>}
       {isSdkKind && isDuplicate && (
         <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded-lg flex items-start gap-2 animate-in fade-in slide-in-from-top-1">
           <div className="text-yellow-600 mt-0.5">
@@ -167,15 +168,15 @@ function VersionField({ generationMode, appVersion, setAppVersion, setIsDuplicat
   );
 }
 
-/** Offers package language only when app creation will generate an SDK artifact. */
+/** Aligns package language with version while allowing the fields to stack in narrow panels. */
 function LanguageSelector({ generationMode, language, setLanguage }: {
   generationMode: AppCreationMode; language: "typescript" | "python"; setLanguage: (v: "typescript" | "python") => void;
 }) {
   // Combined delivery generates the same typed package as an SDK-only App.
   if (generationMode !== "sdk" && generationMode !== "app") return null;
   return (
-    <div>
-      <label htmlFor="app-language" className="mb-1 block text-sm font-medium text-slate-700">Language</label>
+    <div className="min-w-0 flex-[2_1_12rem]">
+      <label htmlFor="app-language" className="mb-1 block min-h-6 text-sm font-medium text-slate-700"><FieldLabel>Language</FieldLabel></label>
       <Select
         id="app-language"
         data-track="select_app_language"
@@ -443,8 +444,8 @@ export function ConsumerGenerationPanel(props: ConsumerGenerationPanelProps) {
         >
           <GenerationIdentity props={props} />
           <WebhookBundleField totalSelectedWebhooks={totalSelectedWebhooks} webhookAttachment={webhookAttachment} setWebhookAttachment={setWebhookAttachment} />
-          {/* Let Language consume the remaining form width beside the compact Version field. */}
-          <div className={showsLanguage ? "grid w-full grid-cols-[7rem_minmax(0,1fr)] gap-3" : ""}>
+          {/* Reserve room for each label; narrow panels stack complete fields instead of wrapping the required badge. */}
+          <div className={showsLanguage ? "flex w-full flex-wrap items-start gap-3" : ""}>
             <VersionField
               generationMode={generationMode}
               appVersion={appVersion}

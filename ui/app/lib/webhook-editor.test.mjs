@@ -5,6 +5,7 @@ import test from "node:test";
 import ts from "typescript";
 import { createElement } from "react";
 import { Select } from "../components/forms/Select.ts";
+import { FieldLabel } from "../components/forms/FieldLabel.ts";
 import { renderToStaticMarkup } from "react-dom/server";
 import * as draftContract from "./webhook-editor-draft.ts";
 import * as importContract from "./webhook-editor-import.ts";
@@ -24,6 +25,8 @@ function loadModule(path, modules) {
   const dependency = (name) => {
     // Transpiled component imports resolve from their source directory, not this test directory.
     if (name === "../forms/Select.ts") return { Select };
+    // The production label uses a Vite alias that Node's fixture loader must resolve explicitly.
+    if (name === "~/components/forms/FieldLabel") return { FieldLabel };
     // Existing fixtures take precedence over installed dependencies.
     return modules[name] ?? require(name);
   };
@@ -146,7 +149,7 @@ test("event forms and advanced policy view contain no credential inputs", () => 
   const draft = draftContract.readWebhookDraft(JSON.stringify(sourceDocument()));
   const markup = renderToStaticMarkup(createElement(settings.WebhookSettingsEditor, { draft, onChange() {}, onInvalid() {} }));
   assert.match(markup, /Advanced signature policy \(preserved\)/);
-  assert.match(markup, /credential buckets/);
+  assert.match(markup, /buckets/);
   assert.doesNotMatch(markup, /type="password"|bucket_id|signing_secret|secret_value/);
   const eventMarkup = renderToStaticMarkup(createElement(events.WebhookEventEditor, { draft, onChange() {} }));
   assert.match(eventMarkup, /Issue:Created/);
@@ -590,4 +593,11 @@ test("numeric-containing drafts fail closed without native raw JSON", () => {
   JSON.rawJSON = undefined;
   try { assert.throws(() => parseWebhookEditorJSON('{"maximum":9007199254740993}'), /cannot preserve JSON numbers exactly/); }
   finally { JSON.rawJSON = original; }
+});
+
+// Editor banners must not reattach internal codes after the shared transport replaces developer-only instructions.
+test("webhook error banners keep document diagnostics out of product guidance", () => {
+  const error = new APIRequestError(400, { code: "invalid_graphql_request", error: "The GraphQL request is invalid.", remediation: "Correct the GraphQL document and retry." });
+  assert.equal(importContract.webhookEditorError(error), error.message);
+  assert.doesNotMatch(importContract.webhookEditorError(error), /GraphQL|document|invalid_graphql/);
 });

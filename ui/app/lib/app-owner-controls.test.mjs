@@ -16,7 +16,7 @@ test("renders owning team and intersection-only credential choices in product la
     onCreateCredential() {},
   }));
 
-  for (const label of ["Owning team", "Support", "Credential set", "Support production", "Create credential", "both your access and the owning team"] ) {
+  for (const label of ["Owning team", "Support", "Bucket", "Support production", "Create bucket", "both your access and the owning team"] ) {
     assert.match(html, new RegExp(label, "i"));
   }
   assert.doesNotMatch(html, /permission|binding|actor_allowed|team_allowed/i);
@@ -36,5 +36,5 @@ test("explains personal ownership and shared credential choices", () => {
   const noBuckets = renderToStaticMarkup(createElement(AppOwnerControls, {
     ownerTeams: [{ id: "team-1", name: "Support", slug: "support" }], ownerTeamId: "team-1", buckets: [], bucketId: "", onOwnerTeamChange() {}, onBucketChange() {},
   }));
-  assert.match(noBuckets, /do not share access to a credential set/i);
+  assert.match(noBuckets, /do not share access to a bucket/i);
 });

@@ -204,16 +204,16 @@ interface EditableAuthConfigProps {
   onRemove: () => void;
 }
 
-/** Uses the shared select while keeping selection state and actions owned by this page. */
+/** Wraps whole authentication fields when the panel narrows and aligns required and optional headers. */
 function EditableAuthConfig({ auth, onChange, onRemove }: EditableAuthConfigProps) {
   return (
     <div className="flex flex-col gap-3 p-4 border border-slate-100 bg-slate-50 rounded-lg relative">
       <button data-track="remove_auth_scheme" type="button" onClick={onRemove} className="absolute top-2 right-2 text-slate-400 hover:text-red-500 cursor-pointer" title="Remove scheme">
         <X className="w-4 h-4" />
       </button>
-      <div className="flex flex-col sm:flex-row gap-4">
-        <div className="flex-1">
-          <label className="block text-xs font-medium text-slate-600 mb-1">Type</label>
+      <div className="flex flex-wrap gap-4">
+        <div className="min-w-0 flex-[1_1_12rem]">
+          <label className="block text-xs font-medium text-slate-600 mb-1"><FieldLabel>Type</FieldLabel></label>
           <Select value={editorAuthType(auth.type)} onChange={(event) => onChange({ ...auth, type: event.target.value })} className="w-full text-sm border-slate-200 rounded-md focus:border-blue-500 focus:ring-blue-500">
             <option value="apiKey">API Key</option>
             <option value="http">HTTP</option>
@@ -223,22 +223,22 @@ function EditableAuthConfig({ auth, onChange, onRemove }: EditableAuthConfigProp
           </Select>
         </div>
         {isHTTPConfigType(auth.type) && (
-          <div className="flex-1">
+          <div className="min-w-0 flex-[1_1_12rem]">
             <label className="block text-xs font-medium text-slate-600 mb-1"><FieldLabel required>Scheme</FieldLabel></label>
             <input required type="text" value={auth.scheme || ""} onChange={(event) => onChange({ ...auth, scheme: event.target.value })} placeholder="e.g. bearer, basic" className="w-full text-sm border-slate-200 rounded-md focus:border-blue-500 focus:ring-blue-500" />
           </div>
         )}
         {isAPIKeyConfigType(auth.type) && (
           <>
-            <div className="flex-1">
-              <label className="block text-xs font-medium text-slate-600 mb-1">Location</label>
+            <div className="min-w-0 flex-[1_1_12rem]">
+              <label className="block text-xs font-medium text-slate-600 mb-1"><FieldLabel>Location</FieldLabel></label>
               <Select value={auth.location || "header"} onChange={(event) => onChange({ ...auth, location: event.target.value })} className="w-full text-sm border-slate-200 rounded-md focus:border-blue-500 focus:ring-blue-500">
                 <option value="header">Header</option>
                 <option value="query">Query</option>
                 <option value="cookie">Cookie</option>
               </Select>
             </div>
-            <div className="flex-1">
+            <div className="min-w-0 flex-[1_1_12rem]">
               <label className="block text-xs font-medium text-slate-600 mb-1"><FieldLabel required>Key Name</FieldLabel></label>
               <input required type="text" value={auth.key_name || ""} onChange={(event) => onChange({ ...auth, key_name: event.target.value })} placeholder="e.g. Authorization" className="w-full text-sm border-slate-200 rounded-md focus:border-blue-500 focus:ring-blue-500" />
             </div>
@@ -247,8 +247,8 @@ function EditableAuthConfig({ auth, onChange, onRemove }: EditableAuthConfigProp
       </div>
       {isOAuthConfigType(auth.type) && <OAuth2FlowEditor auth={auth} onChange={onChange} />}
       {isOIDCConfigType(auth.type) && (
-        <div className="flex flex-col sm:flex-row gap-4 mt-2">
-          <div className="flex-1">
+        <div className="flex flex-wrap gap-4 mt-2">
+          <div className="min-w-0 flex-[1_1_12rem]">
             <label className="block text-xs font-medium text-slate-600 mb-1"><FieldLabel required>OpenID Connect URL</FieldLabel></label>
             <input required type="text" value={auth.open_id_connect_url || ""} onChange={(event) => onChange({ ...auth, open_id_connect_url: event.target.value })} placeholder="https://example.com/.well-known/openid-configuration" className="w-full text-sm border-slate-200 rounded-md focus:border-blue-500 focus:ring-blue-500" />
           </div>

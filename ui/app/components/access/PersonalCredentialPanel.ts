@@ -12,7 +12,7 @@ interface PersonalCredentialPanelProps {
   onClearSecret: () => void;
 }
 
-/** Shows the required key name alongside existing credential controls. */
+/** Gives key names room beside their required badge and wraps the action in narrow drawers. */
 export function PersonalCredentialPanel(props: PersonalCredentialPanelProps): ReactElement {
   const [name, setName] = useState("personal");
   const submit = (event: FormEvent) => {
@@ -26,8 +26,8 @@ export function PersonalCredentialPanel(props: PersonalCredentialPanelProps): Re
       createElement("h3", { className: "text-sm font-semibold text-slate-900" }, "Personal keys"),
       createElement("p", { className: "text-xs text-slate-500 mt-0.5" }, "Keys let this person sign in to this Engine.")),
     props.issuedSecret ? issuedSecretNotice(props.issuedSecret, props.onClearSecret) : null,
-    createElement("form", { onSubmit: submit, className: "flex items-end gap-2 p-4 border-b border-slate-100" },
-      createElement("label", { className: "flex-1 flex flex-col gap-1" },
+    createElement("form", { onSubmit: submit, className: "flex flex-wrap items-end gap-2 p-4 border-b border-slate-100" },
+      createElement("label", { className: "min-w-0 flex-[1_1_12rem] flex flex-col gap-1" },
         createElement("span", { className: "text-xs font-medium text-slate-700" }, createElement(FieldLabel, { required: true }, "Key name")),
         createElement("input", { required: true, value: name, onChange: (event) => setName(event.target.value), disabled: props.disabled, className: "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" })),
       createElement("button", { type: "submit", disabled: props.disabled, className: "rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50" }, "Create key")),

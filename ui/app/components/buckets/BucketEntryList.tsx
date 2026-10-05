@@ -234,8 +234,9 @@ function copyEntryValue(value: string) {
   navigator.clipboard?.writeText(value);
 }
 
+/** Keeps empty-state wording specific to secrets or values in the selected bucket. */
 function emptyLabel(kind: BucketEntryListProps["kind"]): string {
   return kind === "secrets"
-    ? "No secrets in this credential set."
-    : "No values in this credential set.";
+    ? "No secrets in this bucket."
+    : "No values in this bucket.";
 }

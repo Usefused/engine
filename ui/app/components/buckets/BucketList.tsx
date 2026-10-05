@@ -36,18 +36,19 @@ export function BucketList(props: BucketListProps) {
   );
 }
 
+/** Labels the bucket catalogue and its refresh action consistently. */
 function BucketListHeader({ loading, total, onRefresh }: { loading: boolean; total: number; onRefresh: () => void }) {
   return (
     <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
       <div>
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-600">Credential sets</h2>
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-600">Buckets</h2>
         <p className="mt-1 text-xs text-slate-400">{total} total</p>
       </div>
       <button
         type="button"
         onClick={onRefresh}
         className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100"
-        aria-label="Refresh credential sets"
+        aria-label="Refresh buckets"
         title="Refresh"
       >
         <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
@@ -56,9 +57,12 @@ function BucketListHeader({ loading, total, onRefresh }: { loading: boolean; tot
   );
 }
 
+/** Distinguishes loading from a successfully loaded empty bucket catalogue. */
 function BucketRows({ buckets, selectedBucketId, loading, onSelect }: Pick<BucketListProps, "buckets" | "selectedBucketId" | "loading" | "onSelect">) {
-  if (loading) return <BucketEmptyState label="Loading credential sets..." />;
-  if (buckets.length === 0) return <BucketEmptyState label="No credential sets yet." />;
+  // Pending requests are not evidence of an empty catalogue.
+  if (loading) return <BucketEmptyState label="Loading buckets..." />;
+  // A successful empty page offers bucket creation rather than showing a stale row.
+  if (buckets.length === 0) return <BucketEmptyState label="No buckets yet." />;
 
   return (
     <div className="divide-y divide-slate-100">
@@ -121,7 +125,7 @@ function BucketPagination({ page, pageCount, pageSize, total, onPageChange }: Pi
           onClick={() => onPageChange(page - 1)}
           disabled={page === 0}
           className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-40 disabled:hover:bg-transparent"
-          aria-label="Previous credential set page"
+          aria-label="Previous bucket page"
           title="Previous"
         >
           <ChevronLeft className="w-4 h-4" />
@@ -142,7 +146,7 @@ function BucketPagination({ page, pageCount, pageSize, total, onPageChange }: Pi
           onClick={() => onPageChange(page + 1)}
           disabled={page + 1 >= pageCount}
           className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-40 disabled:hover:bg-transparent"
-          aria-label="Next credential set page"
+          aria-label="Next bucket page"
           title="Next"
         >
           <ChevronRight className="w-4 h-4" />

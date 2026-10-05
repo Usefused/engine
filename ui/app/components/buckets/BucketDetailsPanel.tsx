@@ -117,7 +117,7 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
           permissions={props.permissions}
         />
         {/* One bounded scroll owner keeps expanded forms and lower credential tabs reachable together. */}
-        <div role="region" aria-label="Credential set contents" tabIndex={0} className="min-h-0 flex-1 overflow-y-auto overscroll-contain focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-400">
+        <div role="region" aria-label="Bucket contents" tabIndex={0} className="min-h-0 flex-1 overflow-y-auto overscroll-contain focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-400">
         <div className="px-6"><ConnectReturnStatus result={params.get("fused_connect")} /></div>
         {props.permissions.readConnections && <BucketConnectUsage summary={props.connectSummary} />}
         {(props.permissions.readApps || props.permissions.readServices) && <BucketOverview
@@ -326,7 +326,7 @@ function BucketDetailsHeader({
           type="button"
           onClick={() => onRefresh(bucket.id)}
           className="p-2 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-700"
-          aria-label="Refresh credential set"
+          aria-label="Refresh bucket"
           title="Refresh"
         >
           <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
@@ -336,7 +336,7 @@ function BucketDetailsHeader({
           onClick={onDeleteBucket}
           disabled={!!deleteDisabledReason}
           className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:opacity-50 disabled:hover:border-slate-200 disabled:hover:bg-white disabled:hover:text-slate-600"
-          title={deleteDisabledReason || "Remove credential set"}
+          title={deleteDisabledReason || "Remove bucket"}
         >
           <Trash2 className="w-4 h-4" />
           Remove
@@ -368,6 +368,7 @@ function BucketDetailsHeader({
   );
 }
 
+/** Explains connected-user usage before a bucket can be removed. */
 function BucketConnectUsage({
   summary,
 }: {
@@ -394,7 +395,7 @@ function BucketConnectUsage({
       </div>
       {summary.connected_user_count > 0 && (
         <p className="mt-1 text-xs text-amber-800">
-          Deleting this credential set requires typing its name because connected users
+          Deleting this bucket requires typing its name because connected users
           will be removed too.
         </p>
       )}
@@ -407,11 +408,13 @@ function hasConnectUsage(summary: BucketConnectSummary): boolean {
   return summary.application_credential_count > 0 || summary.connected_user_count > 0;
 }
 
+/** Protects the default bucket and explains why removal is unavailable. */
 function bucketDeleteDisabledReason(
   bucket: BucketSummary,
   saving: boolean
 ): string {
   if (saving) return "Saving credential changes";
-  if (bucket.is_default) return "The default credential set cannot be removed";
+  // The runtime default must remain available to existing apps.
+  if (bucket.is_default) return "The default bucket cannot be removed";
   return "";
 }

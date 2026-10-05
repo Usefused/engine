@@ -1,5 +1,6 @@
 import type { Service, ServiceWebhookEditorSource, SpecificationImportApplyResult, SpecificationImportPlan, SpecificationImportStatus } from "./api";
 import { APIRequestError } from "./authorization-error.ts";
+import { isInternalRequestError } from "./request-errors.ts";
 
 // Both input modes bind to the exact baseline and use the ordinary OpenAPI import contract.
 export function webhookImportInput(service: Pick<Service, "name" | "slug">, version: string, baseline: ServiceWebhookEditorSource, source: string) {
@@ -65,10 +66,12 @@ export function assertWebhookRecoverySource(source: ServiceWebhookEditorSource, 
   }
 }
 
-// Keep meaningful server diagnostics while replacing duplicated CLI advice with the editor's explicit recovery controls.
+// Keep actionable import recovery while leaving internal request diagnostics off the editor's error banner.
 export function webhookEditorError(error: unknown): string {
   // Typed transport metadata provides the existing slim recovery contract.
   if (error instanceof APIRequestError) {
+    // The shared transport already supplied readable guidance; do not append the internal document error code again.
+    if (isInternalRequestError(error.code, error.serverMessage)) return error.message;
     const message = webhookFailureMessage(error.message, error.code, error.recovery, error.remediation);
     return [message, error.code, error.phase, error.commitState, error.operationId, error.requestId].filter(Boolean).join(" · ");
   }

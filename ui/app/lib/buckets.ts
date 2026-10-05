@@ -271,7 +271,7 @@ function readBucketConnectSummary(bucketId: string): Promise<BucketContentState>
     .then(({ connectSummary }) => ({ connectSummary }));
 }
 
-/** Loads SDKs associated with one credential set. */
+/** Loads SDKs associated with one bucket. */
 function readBucketApps(bucketId: string, page: BucketPageRequest): Promise<BucketContentState> {
   return api
     .mcpGraphql<{ bucketSDKPage: GraphQLPage<BucketSDKSummary> }>(
@@ -289,7 +289,7 @@ function readBucketApps(bucketId: string, page: BucketPageRequest): Promise<Buck
     }));
 }
 
-/** Loads services associated with one credential set. */
+/** Loads services associated with one bucket. */
 function readBucketServices(
   bucketId: string,
   pages: BucketContentPages
@@ -338,7 +338,7 @@ export function readWorkspaceServices(): Promise<ActivatedService[]> {
     .then(({ workspaceServices }) => workspaceServices);
 }
 
-/** Loads the visible credential sets and those already attached to an SDK. */
+/** Loads the visible buckets and those already attached to an SDK. */
 export function readBucketsForSDK(appFamilyId: string): Promise<SDKBucketState> {
   return api.mcpGraphql<SDKBucketState>(
     `query($appFamilyId: String!) {
@@ -371,7 +371,7 @@ export function preferredBucketID(
   );
 }
 
-/** Changes buckets without carrying an exact secret target into a different credential set. */
+/** Changes buckets without carrying an exact secret target into a different bucket. */
 export function bucketSearchParams(
   current: URLSearchParams,
   bucketId: string

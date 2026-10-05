@@ -23,7 +23,7 @@ export function AppOwnerControls(props: AppOwnerControlsProps): ReactElement {
     props.ownerTeamId ? createElement(
       "div",
       { className: "rounded-lg border border-blue-100 bg-blue-50/60 p-2 text-xs leading-4 text-blue-900" },
-      "Fused checks both your access and the owning team's access. Only services and credential sets available to both are shown."
+      "Fused checks both your access and the owning team's access. Only services and buckets available to both are shown."
     ) : null,
     ownerTeamControl(props),
     bucketControl(props)
@@ -58,8 +58,8 @@ function bucketControl(props: AppOwnerControlsProps): ReactElement {
     createElement(
       "div",
       { className: "mb-2 flex flex-wrap items-center justify-between gap-3" },
-      createElement("label", { htmlFor: "app-credential-bucket", className: "block text-sm font-medium text-slate-700" }, createElement(FieldLabel, { required: true }, "Credential set")),
-      // Only actors allowed to create credential sets receive the creation action.
+      createElement("label", { htmlFor: "app-credential-bucket", className: "block text-sm font-medium text-slate-700" }, createElement(FieldLabel, { required: true }, "Bucket")),
+      // Only actors allowed to create buckets receive the creation action.
       props.onCreateCredential
         ? createElement(CreateCredentialButton, { onClick: props.onCreateCredential })
         : null
@@ -75,12 +75,12 @@ function bucketControl(props: AppOwnerControlsProps): ReactElement {
         className: "w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm disabled:bg-slate-100",
         "data-track": "select_app_bucket",
       },
-      createElement("option", { value: "" }, "Choose a credential set"),
+      createElement("option", { value: "" }, "Choose a bucket"),
       ...props.buckets.map((bucket) => createElement("option", { key: bucket.resource_id, value: bucket.resource_id }, bucket.display_name))
     ),
     // Empty choices explain access without forcing users to abandon the form.
     props.buckets.length === 0
-      ? createElement("p", { className: "mt-1.5 text-xs text-amber-700" }, props.ownerTeamId ? "You and this team do not share access to a credential set." : "You do not have access to a credential set.")
+      ? createElement("p", { className: "mt-1.5 text-xs text-amber-700" }, props.ownerTeamId ? "You and this team do not share access to a bucket." : "You do not have access to a bucket.")
       : null,
     // Once a credential is available, the adjacent create link explains how to add another.
     props.onCreateCredential && props.buckets.length === 0
@@ -88,8 +88,8 @@ function bucketControl(props: AppOwnerControlsProps): ReactElement {
           "p",
           { className: "mt-1 text-xs text-slate-500" },
           props.ownerTeamId
-            ? "Create a set here. It must also be shared with the owning team before it can be selected."
-            : "Create a set here to select it without leaving this form."
+            ? "Create a bucket here. It must also be shared with the owning team before it can be selected."
+            : "Create a bucket here to select it without leaving this form."
         )
       : null
   );

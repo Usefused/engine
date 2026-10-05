@@ -11,7 +11,7 @@ export function WebhookSettingsEditor({ draft, onChange, onInvalid }: { draft: W
   function setConfig(value: WebhookDocument) { onChange(updateWebhookSetting(draft, "x-fused-webhook", value)); }
   return <section className="space-y-3 border-t border-slate-200 pt-5" aria-label="Webhook definition settings">
     <h3 className="font-semibold">Settings</h3>
-    <p className="text-sm text-slate-500">These are shared service rules, not workspace setup. Signing secrets and tokens remain in credential buckets.</p>
+    <p className="text-sm text-slate-500">These are shared service rules, not workspace setup. Signing secrets and tokens remain in buckets.</p>
     <DiscriminatorField draft={draft} onChange={onChange} onInvalid={onInvalid} />
     {advanced ? <AdvancedVerification document={draft.document} /> : <VerificationFields config={config} onChange={setConfig} />}
   </section>;

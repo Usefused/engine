@@ -10,7 +10,7 @@ type BucketCreateModalProps = {
   onCreated: (name: string, bucket: Bucket) => void | Promise<void>;
 };
 
-/** Creates a credential set in an app-styled dialog while preserving successful creation across selection retries. */
+/** Creates a bucket in an app-styled dialog while preserving successful creation across selection retries. */
 export function BucketCreateModal({ open, onClose, onCreated }: BucketCreateModalProps) {
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
@@ -31,7 +31,7 @@ export function BucketCreateModal({ open, onClose, onCreated }: BucketCreateModa
   // Portals avoid nesting this form inside the selector's parent form.
   if (!open) return null;
 
-  /** Retries selection after a successful create without creating the credential set twice. */
+  /** Retries selection after a successful create without creating the bucket twice. */
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     event.stopPropagation();
@@ -47,7 +47,7 @@ export function BucketCreateModal({ open, onClose, onCreated }: BucketCreateModa
       await onCreated(bucket.name, bucket);
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create credential set");
+      setError(err instanceof Error ? err.message : "Failed to create bucket");
     } finally {
       setSaving(false);
     }
@@ -64,7 +64,7 @@ export function BucketCreateModal({ open, onClose, onCreated }: BucketCreateModa
         className="relative w-full max-w-md rounded-xl border border-slate-200 bg-white shadow-xl"
       >
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-5 sm:px-6">
-          <h2 id="create-credential-set-title" className="text-lg font-semibold text-slate-900">Create credential set</h2>
+          <h2 id="create-credential-set-title" className="text-lg font-semibold text-slate-900">Create bucket</h2>
           <button
             type="button"
             onClick={onClose}

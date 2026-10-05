@@ -239,8 +239,8 @@ function validateGenerationInput(input: GenerationInput): GenerationValidation {
   const bucket = generationBucket(input);
   if (!bucket) {
     const message = input.ownerTeamId
-      ? "Choose a credential set available to both you and the owning team."
-      : "Choose a credential set you can use.";
+      ? "Choose a bucket available to both you and the owning team."
+      : "Choose a bucket you can use.";
     return { ok: false, severity: "warning", message };
   }
   const hasWebhookSelections = input.selections.some((selection) => selection.webhook_ids.length > 0);
@@ -1126,7 +1126,7 @@ function emptyServiceCopy(input: {
   }
   return {
     title: "No services are available with your access.",
-    detail: "Ask a workspace administrator for access to the services and credential sets you need.",
+    detail: "Ask a workspace administrator for access to the services and buckets you need.",
   };
 }
 
@@ -1801,7 +1801,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not load owning teams."));
   }, [workflowContext.appID]);
 
-  // loadAvailableBuckets refreshes credential sets usable by both actor and owner.
+  // loadAvailableBuckets refreshes buckets usable by both actor and owner.
   const loadAvailableBuckets = () => {
     // Successors retain their stored credential scope without loading new-app selectors.
     if (source || picker) return Promise.resolve();

@@ -53,7 +53,7 @@ const BUCKET_PAGE_SIZE = 12;
 const BUCKET_CONTENT_PAGE_SIZE = 10;
 const BUCKET_OVERVIEW_PAGE_SIZE = 5;
 
-/** Renders credential sets using only sections authorized for the current actor. */
+/** Renders buckets using only sections authorized for the current actor. */
 export default function BucketsPage() {
   const toast = useToast();
   const { access, loading: accessLoading } = useCurrentActorAccess();
@@ -244,6 +244,7 @@ export default function BucketsPage() {
     setSearchParams(bucketSearchParams(searchParams, ""), { replace: true });
   };
 
+  /** Refreshes the current bucket page while retaining pagination state. */
   const loadBucketList = () => {
     setLoadingBuckets(true);
     readBuckets(BUCKET_PAGE_SIZE, page * BUCKET_PAGE_SIZE)
@@ -264,7 +265,7 @@ export default function BucketsPage() {
           setBucketTotal
         );
       })
-      .catch((err) => toast.error(errorMessage(err, "Failed to load credential sets")))
+      .catch((err) => toast.error(errorMessage(err, "Failed to load buckets")))
       .finally(() => setLoadingBuckets(false));
   };
 
@@ -293,18 +294,19 @@ export default function BucketsPage() {
       })
       .catch((err) => {
         if (requestID === contentRequestID.current)
-          toast.error(errorMessage(err, "Failed to load credential set"));
+          toast.error(errorMessage(err, "Failed to load bucket"));
       })
       .finally(() => {
         if (requestID === contentRequestID.current) setLoadingContents(false);
       });
   };
 
+  /** Loads the exact selected bucket independently of the visible list page. */
   const loadSelectedBucket = (bucketId: string) => {
     readBucketSummary(bucketId)
       .then(setSelectedBucketOverride)
       .catch((err) =>
-        toast.error(errorMessage(err, "Failed to load selected credential set"))
+        toast.error(errorMessage(err, "Failed to load selected bucket"))
       );
   };
 
@@ -403,6 +405,7 @@ export default function BucketsPage() {
     [bucketServices, bucketServiceTotal, servicePage]
   );
 
+  /** Selects a created bucket and continues into credential entry. */
   const onBucketCreated = async (name: string) => {
     setPage(0);
     const state = await readBuckets(BUCKET_PAGE_SIZE, 0);
@@ -415,9 +418,10 @@ export default function BucketsPage() {
     // A new set is only useful once it contains a provider credential, so
     // continue directly into the existing secret composer.
     setEntryModalKind("secret");
-    toast.success("Credential set created");
+    toast.success("Bucket created");
   };
 
+  /** Requires the selected bucket name before removal and refreshes its former page. */
   const deleteSelectedBucket = async () => {
     if (!selectedBucket || selectedBucket.is_default) return;
     const typedName = await toast.prompt(
@@ -425,7 +429,8 @@ export default function BucketsPage() {
       { placeholder: selectedBucket.name }
     );
     if (typedName !== selectedBucket.name) {
-      if (typedName !== null) toast.error("Credential set name did not match");
+      // Cancellation is silent; a mismatched name leaves the bucket untouched.
+      if (typedName !== null) toast.error("Bucket name did not match");
       return;
     }
     await withSaving(
@@ -448,9 +453,9 @@ export default function BucketsPage() {
         setBuckets(state.bucketSummaries);
         setBucketTotal(state.total || 0);
         clearSelectedBucket();
-        toast.success("Credential set removed");
+        toast.success("Bucket removed");
       },
-      (err) => toast.error(errorMessage(err, "Failed to remove credential set"))
+      (err) => toast.error(errorMessage(err, "Failed to remove bucket"))
     );
   };
 
@@ -732,6 +737,7 @@ function resetBucketDetailPaging(
   setConnectedServiceFilter("");
 }
 
+/** Includes connected-user impact in the explicit bucket removal confirmation. */
 function deleteBucketPrompt(
   bucket: BucketSummary,
   summary: BucketConnectSummary | null
@@ -743,7 +749,7 @@ function deleteBucketPrompt(
           connectedUsers === 1 ? "" : "s"
         }.`
       : "";
-  return `Type "${bucket.name}" to delete this credential set.${usage}`;
+  return `Type "${bucket.name}" to delete this bucket.${usage}`;
 }
 
 async function saveBucketSecret(

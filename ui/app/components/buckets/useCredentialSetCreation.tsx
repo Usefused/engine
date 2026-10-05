@@ -7,7 +7,7 @@ import { readAllBoundedPages } from "~/lib/bounded-pages";
 import type { Bucket } from "~/lib/api";
 import type { AppBuildSelector } from "~/lib/app-builder-contract";
 
-/** Creates in place, then selects only a credential set authorized for the app's current owner. */
+/** Creates in place, then selects only a bucket authorized for the app's current owner. */
 export function useCredentialSetCreation(ownerTeamId: string, onSelected: (item: AppBuildSelector) => void) {
   const { access } = useCurrentActorAccess();
   const [open, setOpen] = useState(false);
@@ -17,7 +17,7 @@ export function useCredentialSetCreation(ownerTeamId: string, onSelected: (item:
     const items = await readAllBoundedPages((limit, offset) => listAppBuildSelectors(ownerTeamId, "BUCKET", bucket.name, limit, offset), 100, 100);
     const selected = items.find((item) => item.resource_id === bucket.id);
     // Never select an inaccessible bucket or silently fall back to a different one.
-    if (!selected) throw new Error("Credential set created, but it is not available to this app owner. Share it with the owning team in Credentials, then retry selection.");
+    if (!selected) throw new Error("Bucket created, but it is not available to this app owner. Share it with the owning team in Credentials, then retry selection.");
     onSelected(selected);
   }
   return {

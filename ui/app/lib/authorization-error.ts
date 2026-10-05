@@ -1,3 +1,5 @@
+import { isInternalRequestError, REQUEST_ERROR_MESSAGE } from "./request-errors.ts";
+
 export interface PermissionRequirement {
   permission: string;
   resource_type: string;
@@ -23,6 +25,7 @@ export interface APIErrorPayload {
 }
 
 export class APIRequestError extends Error {
+  readonly serverMessage?: string;
   readonly status: number;
   readonly code?: string;
   readonly category?: string;
@@ -41,6 +44,7 @@ export class APIRequestError extends Error {
   constructor(status: number, payload: APIErrorPayload) {
     super(apiErrorMessage(status, payload));
     this.name = "APIRequestError";
+    this.serverMessage = payload.error || payload.message;
     this.status = status;
     this.code = payload.code || payload.error;
     this.category = payload.category;
@@ -96,10 +100,13 @@ export function normalizeAPIErrorPayload(input: unknown): APIErrorPayload {
   };
 }
 
+/** Separates user-facing recovery from developer diagnostics while retaining specific business guidance. */
 export function apiErrorMessage(
   status: number,
   payload: APIErrorPayload
 ): string {
+  // Users cannot repair the UI's GraphQL document; keep the server's original text on APIRequestError instead.
+  if (isInternalRequestError(payload.code, payload.error || payload.message)) return REQUEST_ERROR_MESSAGE;
   const specific = specificApiErrorMessage(status, payload);
   if (specific) return specific;
   const coded = codedErrorMessage(payload);
@@ -238,6 +245,7 @@ function appOwnerErrorMessage(code: string | undefined): string | null {
   }
 }
 
+/** Translates stable API error codes into the bucket terminology shown in the UI. */
 function workspaceConfigErrorMessage(payload: APIErrorPayload): string | null {
   const code = payload.code || payload.error;
   if (!code) return null;
@@ -245,23 +253,27 @@ function workspaceConfigErrorMessage(payload: APIErrorPayload): string | null {
   if (code === "bucket_credentials_missing") {
     return bucketCredentialsMissingMessage(payload);
   }
+  // The API code remains stable while the product label is Bucket.
   if (code === "credential_set_required") {
-    return "Choose one credential set before creating this consumer.";
+    return "Choose one bucket before creating this consumer.";
   }
+  // A removed bucket requires an explicit new selection.
   if (code === "credential_set_not_found") {
-    return "The selected credential set no longer exists. Choose another credential set.";
+    return "The selected bucket no longer exists. Choose another bucket.";
   }
   return null;
 }
 
+/** Names missing credential material within the selected bucket without exposing values. */
 function bucketCredentialsMissingMessage(payload: APIErrorPayload): string {
   const missing = Array.isArray(payload.details?.missing)
     ? payload.details.missing.filter((value): value is string => typeof value === "string")
     : [];
   const requirements = uniqueBucketMaterialLabels(missing);
+  // Prefer concrete missing material when the server supplied it.
   const message = requirements.length > 0
-    ? `The selected credential set is missing ${requirements.join(", ")}.`
-    : payload.error || "The selected credential set is missing required authentication.";
+    ? `The selected bucket is missing ${requirements.join(", ")}.`
+    : payload.error || "The selected bucket is missing required authentication.";
   return payload.remediation ? `${message} ${payload.remediation}` : message;
 }
 

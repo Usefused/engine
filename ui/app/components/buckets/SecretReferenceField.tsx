@@ -50,7 +50,7 @@ function CreateSecretDialog({ onClose, onCreated }: { onClose: () => void; onCre
   const [createBucket, setCreateBucket] = useState(false);
   // Opening loads choices automatically; the retry button is reserved for lookup failures.
   useEffect(() => { void load(); }, []);
-  /** Fresh grants include creator access after making a credential set from this dialog. */
+  /** Fresh grants include creator access after making a bucket from this dialog. */
   async function load(preferredId = "") {
     setBusy(true); setError("");
     try {
@@ -64,13 +64,13 @@ function CreateSecretDialog({ onClose, onCreated }: { onClose: () => void; onCre
       const writable = all.filter((bucket) => hasResourcePermission(freshAccess, "credentials.manage", "BUCKET", bucket.id));
       setAccess(freshAccess); setBuckets(writable); setLoaded(true);
       // Creating a set does not bypass a missing secret-write grant.
-      if (preferredId && !writable.some((bucket) => bucket.id === preferredId)) throw new Error("The new credential set is not available for storing secrets.");
+      if (preferredId && !writable.some((bucket) => bucket.id === preferredId)) throw new Error("The new bucket is not available for storing secrets.");
       // Refresh never substitutes another bucket for an explicit existing choice.
       setBucketId((current) => preferredId || current || writable[0]?.id || "");
     } catch {
-      setError("Could not load credential sets. Try again.");
+      setError("Could not load buckets. Try again.");
       // Keep the create receipt open so a failed selection can be retried without a duplicate set.
-      if (preferredId) throw new Error("Credential set created, but it could not be selected. Check your access, then retry selection.");
+      if (preferredId) throw new Error("Bucket created, but it could not be selected. Check your access, then retry selection.");
     }
     finally { setBusy(false); }
   }
@@ -95,22 +95,22 @@ function CreateSecretDialog({ onClose, onCreated }: { onClose: () => void; onCre
       setValue(""); onCreated(reference);
     } catch (cause) {
       // Known validation errors contain no values; transport errors might echo request data.
-      setError(cause instanceof Error && /^(Choose a credential|Enter a secret|A secret with)/.test(cause.message) ? cause.message : "Could not save the secret. Check Credentials before retrying.");
+      setError(cause instanceof Error && /^(Choose a bucket|Enter a secret|A secret with)/.test(cause.message) ? cause.message : "Could not save the secret. Check Credentials before retrying.");
     } finally { setBusy(false); }
   }
   return createPortal(<div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">
     <form onSubmit={save} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} className="w-full max-w-lg space-y-5 rounded-xl border border-slate-200 bg-white p-5 shadow-xl sm:p-6">
       <h2 id={`${id}-title`} className="text-lg font-semibold text-slate-900">Create secret</h2>
       {/* Loading is explicit and retryable without discarding the user's input. */}
-      {!loaded && <button type="button" disabled={busy} onClick={() => void load()} className={actionClass}>{busy ? "Loading…" : "Load credential sets"}</button>}
+      {!loaded && <button type="button" disabled={busy} onClick={() => void load()} className={actionClass}>{busy ? "Loading…" : "Load buckets"}</button>}
       {loaded && <div className="space-y-2">
-        <div className="flex flex-wrap items-center justify-between gap-3"><label htmlFor={`${id}-bucket`}><FieldLabel required>Credential set</FieldLabel></label>
+        <div className="flex flex-wrap items-center justify-between gap-3"><label htmlFor={`${id}-bucket`}><FieldLabel required>Bucket</FieldLabel></label>
           {/* New sets require workspace management rather than only scoped secret write access. */}
           {hasWorkspacePermission(access, "bucket.manage") && <CreateCredentialButton disabled={busy} onClick={() => setCreateBucket(true)} />}
         </div>
-        <Select id={`${id}-bucket`} required disabled={busy} className={fieldClass} value={bucketId} onChange={(event) => setBucketId(event.target.value)}><option value="">Choose a credential set</option>{buckets.map((bucket) => <option key={bucket.id} value={bucket.id}>{bucket.name}</option>)}</Select>
+        <Select id={`${id}-bucket`} required disabled={busy} className={fieldClass} value={bucketId} onChange={(event) => setBucketId(event.target.value)}><option value="">Choose a bucket</option>{buckets.map((bucket) => <option key={bucket.id} value={bucket.id}>{bucket.name}</option>)}</Select>
         {/* Empty results distinguish a lack of write access from a failed request. */}
-        {buckets.length === 0 && <p className="text-sm text-slate-500">No credential sets are available for storing secrets.</p>}
+        {buckets.length === 0 && <p className="text-sm text-slate-500">No buckets are available for storing secrets.</p>}
       </div>}
       <label className="block space-y-2"><FieldLabel required>Secret name</FieldLabel><input required autoFocus disabled={busy} className={fieldClass} value={keyName} onChange={(event) => setKeyName(event.target.value)} placeholder="stripe_signing_key" /></label>
       <label className="block space-y-2"><FieldLabel required>Secret value</FieldLabel><input required disabled={busy} type="password" autoComplete="new-password" className={fieldClass} value={value} onChange={(event) => setValue(event.target.value)} /></label>

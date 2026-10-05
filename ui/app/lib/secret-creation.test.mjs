@@ -40,7 +40,7 @@ test("invalid names and empty values fail before network access", async () => {
       async read() { assert.fail("must not read"); },
       // Validation should precede persistence.
       async save() { assert.fail("must not write"); },
-    }), /Choose a credential|Enter a secret/);
+    }), /Choose a bucket|Enter a secret/);
   }
 });
 

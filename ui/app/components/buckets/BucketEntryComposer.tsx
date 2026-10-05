@@ -65,6 +65,7 @@ const emptyBucketSecret: BucketSecretEntryForm = {
   expiresAt: "",
 };
 
+/** Wraps complete credential fields within the bucket panel while preserving explicit save actions. */
 export function BucketEntryComposer({
   kind,
   saving,
@@ -152,8 +153,9 @@ export function BucketEntryComposer({
 
   return (
     <form onSubmit={submit} className="border-b border-slate-100 px-6 py-4">
+      {/* Size columns from the panel so required labels and paired secrets remain readable beside the bucket sidebar. */}
       <div
-        className={composerGridClass(kind, selectedAuthOption?.auth_type || "")}
+        className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,14rem),1fr))] items-end gap-2"
       >
         {kind !== "bucket_secret" && (
           <ComposerServiceSelect
@@ -241,28 +243,6 @@ function composerKindLabel(kind: BucketEntryKind): string {
   if (kind === "secret") return "service auth";
   if (kind === "bucket_secret") return "secret";
   return "env value";
-}
-
-function composerGridClass(
-  kind: BucketEntryKind,
-  credentialType: string
-): string {
-  // Bucket secrets have no service or qualifier column, but do carry an
-  // optional expiry, so they use a shorter grid than service-scoped kinds.
-  // The trailing "auto" is a single column because Save/Cancel are now one
-  // grid cell (see the button group above), not two.
-  if (kind === "bucket_secret") {
-    return "grid grid-cols-1 items-end gap-2 lg:grid-cols-[minmax(220px,0.9fr)_minmax(220px,0.9fr)_180px_auto]";
-  }
-  // Env values have no expiry column, so their grid stays one column narrower
-  // than the equivalent paired-secret layout.
-  if (kind === "value") {
-    return "grid grid-cols-1 items-end gap-2 lg:grid-cols-[minmax(220px,0.9fr)_150px_minmax(180px,0.8fr)_minmax(180px,0.8fr)_auto]";
-  }
-  if (secretHasTwoFields(credentialType)) {
-    return "grid grid-cols-1 items-end gap-2 lg:grid-cols-[minmax(200px,0.8fr)_140px_minmax(150px,0.6fr)_minmax(150px,0.6fr)_170px_auto]";
-  }
-  return "grid grid-cols-1 items-end gap-2 lg:grid-cols-[minmax(220px,0.9fr)_150px_minmax(220px,0.9fr)_170px_auto]";
 }
 
 /** A credential or stored value always targets one selected service. */

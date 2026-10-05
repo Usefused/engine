@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { REQUEST_ERROR_MESSAGE } from "./request-errors.ts";
 
 import {
   APIRequestError,
@@ -9,6 +10,30 @@ import {
   isImportVersionRequired,
   normalizeAPIErrorPayload,
 } from "./authorization-error.ts";
+
+// The browser receives developer recovery instructions but must never ask users to rewrite GraphQL.
+test("replaces internal request instructions while retaining server diagnostics", () => {
+  for (const code of ["invalid_graphql_request", "invalid_graphql_request_body", "invalid_graphql_operation"]) {
+    const error = new APIRequestError(400, normalizeAPIErrorPayload({ error: {
+      code, message: "The GraphQL request is invalid.", remediation: "Correct the GraphQL document and retry.",
+      trace_id: "trace-for-support", details: { source: "validator" }, retryable: false,
+    } }));
+    assert.equal(error.message, REQUEST_ERROR_MESSAGE);
+    assert.doesNotMatch(String(error), /GraphQL|document|validator/);
+    assert.equal(error.serverMessage, "The GraphQL request is invalid.");
+    assert.equal(error.remediation, "Correct the GraphQL document and retry.");
+    assert.equal(error.code, code);
+    assert.equal(error.traceId, "trace-for-support");
+    assert.deepEqual(error.details, { source: "validator" });
+    assert.equal(error.retryable, false);
+  }
+});
+
+// Older flat envelopes must receive the same product copy rather than blaming user input.
+test("maps legacy GraphQL request messages", () => {
+  const payload = normalizeAPIErrorPayload({ error: "The GraphQL request is invalid. Correct the GraphQL document and retry." });
+  assert.equal(apiErrorMessage(400, payload), REQUEST_ERROR_MESSAGE);
+});
 
 // A committed import may fail activation; every UI entrypoint must retain its actionable recovery.
 test("preserves committed import recovery and correlation through the displayed error", () => {
@@ -160,7 +185,7 @@ test("malformed missing entries fall back to generic permission guidance", () =>
 
 test("keeps Engine-authored bucket readiness errors actionable", () => {
   const message = apiErrorMessage(400, {
-    error: "The selected credential set is missing required authentication material.",
+    error: "The selected bucket is missing required authentication material.",
     code: "bucket_credentials_missing",
     category: "validation",
     retryable: false,
@@ -173,7 +198,7 @@ test("keeps Engine-authored bucket readiness errors actionable", () => {
     remediation: "Add the required credentials and create the plan again.",
   });
 
-  assert.match(message, /selected credential set is missing/i);
+  assert.match(message, /selected bucket is missing/i);
   assert.match(message, /Basic auth credential jira_username/);
   assert.match(message, /Basic auth credential jira_password/);
   assert.doesNotMatch(message, /11111111|bucket_readiness/);
