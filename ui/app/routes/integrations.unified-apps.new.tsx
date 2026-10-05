@@ -4,6 +4,7 @@ import { TypeScriptEditor } from "~/components/code/TypeScriptEditor";
 import { Select } from "../components/forms/Select.ts";
 import { AppCreationFlow } from "~/components/apps/AppCreationFlow";
 import { AppOperationPicker } from "~/components/apps/AppServiceBuilder";
+import { UnifiedAppCompileAction } from "~/components/apps/UnifiedAppCompileAction";
 import { describeSelectionKey, type AppServicePin } from "~/lib/app-describe-contract";
 import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "@remix-run/react";
@@ -63,6 +64,7 @@ export default function CreateUnifiedApp() {
   const [buckets, setBuckets] = useState<AppBuildSelector[]>([]);
   const [plan, setPlan] = useState<AppPlanResponse | null>(null);
   const [busy, setBusy] = useState(false);
+  const [compiling, setCompiling] = useState(false);
   const [progress, setProgress] = useState("");
   const [error, setError] = useState("");
   const [result, setResult] = useState<{ app_id: string; app_family_id: string; execution_token?: string } | null>(null);
@@ -183,11 +185,11 @@ export default function CreateUnifiedApp() {
     setDraft({ ...draft, webhookAttachment }); invalidatePlan();
   }
 
-  /** Resolves the selected credential name before compiling the reviewed source and dependencies. */
+  /** Shows immediate local feedback while resolving credentials and compiling the reviewed draft. */
   async function compile() {
-    // No partially loaded template or failed description may enter the mutation boundary.
-    if (!draft || selecting || describing || (editID && !editSource)) return;
-    setBusy(true); setError("");
+    // Pending work and incomplete drafts cannot start a second compilation request.
+    if (busy || !draft || selecting || describing || (editID && !editSource)) return;
+    setCompiling(true); setBusy(true); setError(""); setProgress("Checking selected services…");
     try {
       const selectedBucket = buckets.find((item) => item.resource_id === bucket);
       // Selectors use IDs for UI identity, while portable app configuration resolves buckets by name.
@@ -196,7 +198,8 @@ export default function CreateUnifiedApp() {
       setPlan(await planUnifiedApp(config, draft.services, setProgress, editSource?.owner_team));
     }
     catch (cause) { setError(String(cause)); }
-    finally { setBusy(false); setProgress(""); }
+    // Success and failure both restore the action so errors can be corrected and retried.
+    finally { setCompiling(false); setBusy(false); setProgress(""); }
   }
 
   /** Applies only the exact reviewed receipt and keeps the one-time execution token in memory. */
@@ -220,8 +223,8 @@ export default function CreateUnifiedApp() {
     <header className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="text-2xl font-bold text-slate-900">{editID ? "Edit Unified App" : "Create a Unified App"}</h1><p className="mt-1 text-slate-500">{editSource ? `Editing version ${editSource.config.version}. Deploy your changes as a new version; your app URL and tokens stay the same.` : "Describe what you want to build. Review it, then run it on Engine."}</p></div>{/* Templates start a separate app rather than replacing a saved editor baseline. */}{!editID && <Link to="/integrations/unified-apps/templates" className="text-sm font-medium text-[var(--brand-violet)] hover:underline">Browse templates</Link>}</header>
     <AppCreationFlow generatesSource onDescribe={describe} onBusyChange={setDescribing} disabled={busy} initialManual={Boolean(editID) || Boolean(templateID) || params.get("mode") === "manual"} hasSelection={Boolean(draft)}>
     <AppOperationPicker seed={pickerSeed} onChange={selectOperations} onPendingChange={setSelecting} allowWebhooks />
-    {/* Async stages are announced without replacing the user's editable description. */}
-    {busy && <p role="status" className="flex items-center gap-2 text-sm text-slate-600"><Loader2 className="h-4 w-4 animate-spin" />{progress || "Loading template…"}</p>}
+    {/* Compilation reports progress by its button; other loading stages remain above the form. */}
+    {busy && !compiling && <p role="status" className="flex items-center gap-2 text-sm text-slate-600"><Loader2 className="h-4 w-4 animate-spin" />{progress || "Loading template…"}</p>}
     {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</p>}
     {/* A grounded draft is the only entry to credential selection and deployment. */}
     {draft && <fieldset aria-labelledby="unified-app-setup-heading" disabled={busy || describing || selecting} className="space-y-6 rounded-xl border border-slate-200 bg-white p-5 sm:p-6">
@@ -260,7 +263,7 @@ export default function CreateUnifiedApp() {
       <p className="text-xs text-slate-500">Validate and compile checks TypeScript and selected operation bindings without running provider calls. It enables missing pinned service versions. Deploying is a separate step.</p>
       {/* The plan is invalidated on every edit, so deployment cannot apply stale reviewed content. */}
       {editSource && <p className="text-sm text-slate-600">Deploying switches new traffic to this version. Earlier versions remain available in version history.</p>}
-      {plan ? <section className="space-y-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4"><h2 className="font-semibold text-emerald-900">Ready to deploy</h2><p className="text-sm text-emerald-800">TypeScript validation and compilation passed. Provider operations have not been run.</p><pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-700">{JSON.stringify(plan.summary, null, 2)}</pre><button type="button" className={buttonClass} onClick={deploy}>{editID ? "Deploy new version" : "Deploy Unified App"} <ArrowRight className="h-4 w-4" /></button></section> : <button type="button" className={buttonClass} disabled={!canValidateUnifiedDraft(draft, name, version, bucket, editSource?.config.version)} onClick={compile}>Validate and compile <ArrowRight className="h-4 w-4" /></button>}
+      {plan ? <section className="space-y-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4"><h2 className="font-semibold text-emerald-900">Ready to deploy</h2><p className="text-sm text-emerald-800">TypeScript validation and compilation passed. Provider operations have not been run.</p><pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-700">{JSON.stringify(plan.summary, null, 2)}</pre><button type="button" className={buttonClass} onClick={deploy}>{editID ? "Deploy new version" : "Deploy Unified App"} <ArrowRight className="h-4 w-4" /></button></section> : <UnifiedAppCompileAction className={buttonClass} compiling={compiling} progress={progress} disabled={!canValidateUnifiedDraft(draft, name, version, bucket, editSource?.config.version)} onCompile={compile} />}
     </fieldset>}
     </AppCreationFlow>
   </div>;
