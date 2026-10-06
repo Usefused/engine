@@ -1,5 +1,5 @@
 import { api } from "./api";
-import { AppDescriptionClarificationError, decodeUnifiedSource } from "./unified-app-contract";
+import { AppDescriptionClarificationError, decodeUnifiedSource, decodeUnifiedSourceRevision, type UnifiedSourceRevision } from "./unified-app-contract";
 import { createDescribeScheduler, settleDescribe, matchDescribeEvents, mergeDescribePin, type DescribeProgress, type DescribeSelectionReady, type DescribeSchedule, type AppServicePin, type AppDescription, type DescribeKind, type DescribeServiceCandidate, type ChooseDescribeService } from "./app-describe-contract";
 
 interface IntentService { name: string; endpoint_query: string; endpoint_queries: string[]; select_all_operations: boolean; event_queries: string[] }
@@ -101,6 +101,16 @@ export async function describeApp(goal: string, kind: DescribeKind, progress: De
 
 /** Drafts or revises source using only the reviewed immutable operation contracts. */
 export async function draftAppSource(goal: string, services: Record<string, AppServicePin>, progress: DescribeProgress, source?: string): Promise<string> {
+  return decodeUnifiedSource(await requestAppSource(goal, services, progress, source));
+}
+
+/** Allows a reviewed app to remain unchanged when the reported problem has no supported source fix. */
+export async function reviseAppSource(goal: string, services: Record<string, AppServicePin>, progress: DescribeProgress, source: string): Promise<UnifiedSourceRevision> {
+  return decodeUnifiedSourceRevision(await requestAppSource(goal, services, progress, source));
+}
+
+/** Shares exact contract selection and request bounds across initial drafting and source review. */
+async function requestAppSource(goal: string, services: Record<string, AppServicePin>, progress: DescribeProgress, source?: string): Promise<string> {
   // Bound change requests and source independently before sending either to the drafting service.
   if (!goal.trim() || new TextEncoder().encode(goal).length > 16384) throw new Error("Describe your change in 1 to 16,384 bytes.");
   if (source !== undefined && (!source.trim() || new TextEncoder().encode(source).length > 128 * 1024)) throw new Error("App source must contain 1 to 128 KiB of TypeScript.");
@@ -120,7 +130,7 @@ export async function draftAppSource(goal: string, services: Record<string, AppS
     : await api.graphql<{ draftPromptUnifiedApp: string }>(`query RevisePromptUnifiedApp($q: String!, $selections: String!, $source: String!) {
       draftPromptUnifiedApp(q: $q, selections: $selections, source: $source)
     }`, { q: goal.trim(), selections: JSON.stringify(selections), source });
-  return decodeUnifiedSource(result.draftPromptUnifiedApp);
+  return result.draftPromptUnifiedApp;
 }
 
 /** Resolves inbound event names against an immutable catalogue using the CLI's deterministic matching policy. */

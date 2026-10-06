@@ -54,6 +54,28 @@ export function decodeUnifiedSource(raw: string): string {
   return draft.source;
 }
 
+export interface UnifiedSourceRevision { source: string; explanation: string }
+
+/** Keeps a completed code review separate from both failed generation and source changes requiring approval. */
+export function decodeUnifiedSourceRevision(raw: string): UnifiedSourceRevision {
+  // A diagnosis shares the source envelope limit and cannot carry unbounded prose.
+  if (new TextEncoder().encode(raw).length > 128 * 1024) throw new Error("Unified App review exceeds the size limit.");
+  const result = JSON.parse(raw);
+  // Reject malformed review envelopes before reading model-controlled properties.
+  if (!result || typeof result !== "object" || Array.isArray(result) || typeof result.source !== "string") throw new Error("The review must contain source or an explanation.");
+  // Older Registry versions can return source without a review summary.
+  const explanation = result.explanation ?? "";
+  // Explanations are plain text, not another source or tool protocol.
+  if (typeof explanation !== "string" || new TextEncoder().encode(explanation).length > 8 * 1024) throw new Error("The review explanation must contain at most 8 KiB of text.");
+  // A genuine question remains actionable rather than being shown as a completed review.
+  if (typeof result.clarification === "string" && result.clarification.trim()) throw new UnifiedSourceClarificationError(result.clarification);
+  // Every proposed edit must pass the same source checks as an initial draft.
+  if (result.source.trim()) return { source: decodeUnifiedSource(raw), explanation: explanation.trim() };
+  // An empty response is not a successful review; unchanged source needs an actual finding.
+  if (!explanation.trim()) throw new Error("The review must contain source or an explanation.");
+  return { source: "", explanation: explanation.trim() };
+}
+
 /** Includes reviewed source and event scope in the desired state consumed by Unified App planning. */
 export function unifiedConfig(draft: UnifiedDraft, name: string, version: string, bucket: string): Record<string, unknown> {
   // User-reviewed identity is required before compilation or service activation.

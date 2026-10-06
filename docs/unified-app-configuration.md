@@ -93,13 +93,18 @@ and Unified Apps cannot request SDK package generation.
 
 ## Editing with Fused AI
 
-In the app editor, open **Edit with Fused AI**, describe the change, and optionally
-paste an error. Fused sends the current TypeScript and exact selected operation
+In the app editor, open **Edit with Fused AI** and describe a change or paste an
+error in the prompt box. Fused sends the current TypeScript and exact selected operation
 versions to the same Registry drafting API used by describe. Provider request and
 response contracts ground the proposal; service selections, auth and buckets stay
 unchanged. Review the current and suggested code, then choose **Apply to editor**
 or **Discard**. Applying invalidates any previous compile plan. Validate and
 compile, then deploy a new version separately.
+
+If the code already matches the selected contract, Fused can return **No code
+changes** with an explanation and next check instead of a code change. Pasted
+errors are investigation context; the AI does not inspect your running Engine or
+execute provider requests. A review without changes leaves your source intact.
 
 Validation and compilation do not execute provider operations or verify that
 customer/price IDs exist. Provider array/object schemas remain application data;

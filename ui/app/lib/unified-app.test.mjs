@@ -50,6 +50,28 @@ test("AI source revision rejects oversized context and preserves clarification",
   await assert.rejects(drafter.draftAppSource("Fix", { stripe: service }, () => {}, source), /Select the price lookup/);
 });
 
+// Runtime diagnoses must not become red generation errors or empty replacements for valid app code.
+test("AI review accepts findings without changing valid Stripe array input", async () => {
+  const explanation = "line_items matches the selected array contract. The pasted serialization error occurs before dispatch. Check the deployed Engine version and retry with its form-array fix.";
+  const mock = transport({ RevisePromptUnifiedApp: { draftPromptUnifiedApp: JSON.stringify({ source: "", clarification: "", explanation }) } });
+  const result = await client(mock.api, "app-describe-api").reviseAppSource("Investigate: deepObject parameter requires an object", { stripe: service }, () => {}, source);
+  assert.deepEqual(result, { source: "", explanation });
+  assert.equal(mock.calls.length, 1);
+  assert.equal(mock.calls[0].variables.source, source);
+  assert.match(mock.calls[0].variables.q, /deepObject/);
+});
+
+// Creation still needs executable source; optional review prose cannot weaken the source or response bounds.
+test("AI review distinguishes changes, questions, malformed replies, and initial creation", () => {
+  assert.deepEqual(contract.decodeUnifiedSourceRevision(JSON.stringify({ source, explanation: "Validated provider response fields." })), { source, explanation: "Validated provider response fields." });
+  assert.deepEqual(contract.decodeUnifiedSourceRevision(JSON.stringify({ source })), { source, explanation: "" });
+  assert.throws(() => contract.decodeUnifiedSource(JSON.stringify({ source: "", explanation: "No change needed" })), /buildUnifiedApp/);
+  assert.throws(() => contract.decodeUnifiedSourceRevision(JSON.stringify({ source: "", clarification: "Which price?" })), contract.UnifiedSourceClarificationError);
+  for (const result of [null, [], {}, { source: 3 }, { source: "" }, { source: " ", explanation: " " }, { source: "", explanation: 3 }, { source, explanation: "x".repeat(8193) }, { source: "not TypeScript", explanation: "Changed" }]) {
+    assert.throws(() => contract.decodeUnifiedSourceRevision(JSON.stringify(result)));
+  }
+});
+
 // Each fixture simulates the exact CLI response envelopes and records the selected transport.
 function transport(overrides = {}) {
   const calls = [];
