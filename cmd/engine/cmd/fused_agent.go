@@ -93,7 +93,9 @@ func mountFusedAgent(r chi.Router, deps engineRouterDeps) {
 // fusedAgentOptions selects one provider without forwarding Engine database or encryption credentials.
 func fusedAgentOptions(engine config.EngineConfig, identity string) (agentbundle.Options, error) {
 	ai := engine.AI
-	options := agentbundle.Options{EngineURL: "http://127.0.0.1", Version: Version, CacheDir: ai.CacheDir, ArchivePath: ai.RuntimeArchive, IdentityKey: identity, Model: "fused-agent", RegistryGateway: "true", GatewayURL: strings.TrimRight(engine.RegistryEndpoint, "/") + "/agent/v1", GatewayKey: engine.LicenseKey}
+	// Registry configuration points to GraphQL; REST routes share its base path, not the /graphql suffix.
+	registryBase := strings.TrimSuffix(strings.TrimRight(engine.RegistryEndpoint, "/"), "/graphql")
+	options := agentbundle.Options{EngineURL: "http://127.0.0.1", Version: Version, CacheDir: ai.CacheDir, ArchivePath: ai.RuntimeArchive, IdentityKey: identity, Model: "fused-agent", RegistryGateway: "true", GatewayURL: registryBase + "/agent/v1", GatewayKey: engine.LicenseKey}
 	// A custom gateway never receives the Engine license, even when its credential setting is incomplete.
 	if ai.Gateway.BaseURL != "" {
 		options.GatewayURL = ai.Gateway.BaseURL
