@@ -10,6 +10,8 @@ import { readAllBoundedPages } from "~/lib/bounded-pages";
 import { createReferencedSecret } from "~/lib/secret-creation";
 import { CreateCredentialButton } from "./CreateCredentialButton";
 import { BucketCreateModal } from "./BucketCreateModal";
+import { workspaceDialogHost } from "~/lib/workspace-dialog-host";
+import { useFusedAgent } from "~/components/agent/FusedAgentContext";
 
 const fieldClass = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-normal text-slate-900 focus:outline-none focus:ring-2 focus:ring-[var(--brand-violet)] disabled:bg-slate-50";
 const actionClass = "text-xs font-semibold text-blue-600 hover:underline disabled:opacity-50";
@@ -36,8 +38,9 @@ export function SecretReferenceField({ value, onChange, required = false, disabl
   </div>;
 }
 
-/** Loads writable sets on demand and stores a write-only value through the existing credentials endpoint. */
+/** Exposes the reference draft to assistance while its secret value remains private and user-submitted. */
 function CreateSecretDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (reference: string) => void }) {
+  const agent = useFusedAgent();
   const id = useId();
   const [access, setAccess] = useState<CurrentActorAccess | null>(null);
   const [buckets, setBuckets] = useState<Bucket[]>([]);
@@ -99,7 +102,8 @@ function CreateSecretDialog({ onClose, onCreated }: { onClose: () => void; onCre
     } finally { setBusy(false); }
   }
   return createPortal(<div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">
-    <form onSubmit={save} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} className="w-full max-w-lg space-y-5 rounded-xl border border-slate-200 bg-white p-5 shadow-xl sm:p-6">
+    {/* Draft assistance remains available beside the dialog; secret values never enter its context. */}
+    <form onSubmit={save} role="dialog" aria-modal={!agent?.isOpen} aria-labelledby={`${id}-title`} className="w-full max-w-lg space-y-5 rounded-xl border border-slate-200 bg-white p-5 shadow-xl sm:p-6">
       <h2 id={`${id}-title`} className="text-lg font-semibold text-slate-900">Create secret</h2>
       {/* Loading is explicit and retryable without discarding the user's input. */}
       {!loaded && <button type="button" disabled={busy} onClick={() => void load()} className={actionClass}>{busy ? "Loading…" : "Load buckets"}</button>}
@@ -113,12 +117,12 @@ function CreateSecretDialog({ onClose, onCreated }: { onClose: () => void; onCre
         {buckets.length === 0 && <p className="text-sm text-slate-500">No buckets are available for storing secrets.</p>}
       </div>}
       <label className="block space-y-2"><FieldLabel required>Secret name</FieldLabel><input required autoFocus disabled={busy} className={fieldClass} value={keyName} onChange={(event) => setKeyName(event.target.value)} placeholder="stripe_signing_key" /></label>
-      <label className="block space-y-2"><FieldLabel required>Secret value</FieldLabel><input required disabled={busy} type="password" autoComplete="new-password" className={fieldClass} value={value} onChange={(event) => setValue(event.target.value)} /></label>
+      <label className="block space-y-2"><FieldLabel required>Secret value</FieldLabel><input required disabled={busy} type="password" data-fused-visible="false" autoComplete="new-password" className={fieldClass} value={value} onChange={(event) => setValue(event.target.value)} /></label>
       {/* Only the reference is passed back to webhook planning, never this value. */}
       <p className="text-xs text-slate-500">Paste the secret supplied by your provider. Saving fills in the reference on your form.</p>
       {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
       <div className="flex justify-end gap-3 border-t border-slate-100 pt-4"><button type="button" disabled={busy} onClick={onClose} className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel</button><button type="submit" disabled={busy || !bucketId || !value || !keyName.trim()} className="rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-slate-800 disabled:opacity-50">{busy ? "Saving…" : "Save secret"}</button></div>
     </form>
     <BucketCreateModal open={createBucket} onClose={() => setCreateBucket(false)} onCreated={async (_name, bucket) => { await load(bucket.id); }} />
-  </div>, document.body);
+  </div>, workspaceDialogHost());
 }

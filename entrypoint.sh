@@ -15,4 +15,4 @@ mkdir -p /app/data/sandboxes
 # Fix permissions on the mounted volume
 chown -R "$runtime_user:$runtime_user" /app/data
 
-exec su-exec "$runtime_user" "$@"
+exec gosu "$runtime_user" "$@"

@@ -70,7 +70,7 @@ function AuthorizedDiagnostics({ event }: { event: EngineExecutionEventEntry }) 
   }, [event.app_id, event.id, open]);
   // Collapsing releases the private payload immediately rather than retaining it in a hidden view.
   const toggle = () => { setDetail(null); setOpen((value) => !value); };
-  return <section className="mt-6 min-w-0 border-t border-slate-200 pt-5">
+  return <section data-fused-visible="false" className="mt-6 min-w-0 border-t border-slate-200 pt-5">
     <button type="button" onClick={toggle} aria-expanded={open} className="flex w-full items-center gap-2 text-left text-sm font-semibold text-slate-800">
       <LockKeyhole size={15} className="text-slate-400" /> Private diagnostics
       {open ? <ChevronUp size={15} className="ml-auto" /> : <ChevronDown size={15} className="ml-auto" />}

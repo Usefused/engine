@@ -92,19 +92,22 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w -X github.com/Usefused/engine/cmd/engine/cmd.Version=${VERSION} -X github.com/Usefused/engine/cmd/engine/cmd.BuildHash=${COMMIT}" \
     -o /out/fused-engine ./cmd/engine
 
-FROM node:24-alpine AS engine-runtime-base
+# The optional pinned Python agent runtime requires glibc.
+FROM node:24-bookworm-slim AS engine-runtime-base
 
 WORKDIR /app
 
 # Node remains part of the slim runtime because MCP sessions execute in
 # isolated processes. Their JavaScript dependencies are already bundled into
 # the Go binary, so containers never run npm against tenant storage.
-RUN apk upgrade --no-cache && \
-    apk add --no-cache bash ca-certificates su-exec nats-server tini
+RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates gosu nats-server tini && rm -rf /var/lib/apt/lists/*
 
-RUN addgroup -S fused && adduser -S -G fused fused && \
+RUN groupadd --system fused && useradd --system --create-home --gid fused fused && \
     mkdir -p /app/data/sandboxes && \
     chown -R fused:fused /app
+
+# The unprivileged process needs a writable home and persistent optional-agent cache.
+ENV HOME=/home/fused XDG_CACHE_HOME=/app/data/cache
 
 EXPOSE 8081 50051
 
@@ -119,7 +122,7 @@ FROM engine-runtime AS headless
 
 COPY --from=execution-worker-builder /out/fused-execution-worker /app/fused-execution-worker
 
-ENTRYPOINT ["/sbin/tini", "--", "/app/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
 CMD ["/app/fused-engine", "start"]
 
 FROM engine-runtime-base AS embedded
@@ -130,7 +133,7 @@ COPY --from=execution-compiler-builder /app/runtime/execution /app/runtime/execu
 COPY engine.yaml /app/engine.yaml
 COPY entrypoint.sh /app/entrypoint.sh
 
-ENTRYPOINT ["/sbin/tini", "--", "/app/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
 CMD ["/app/fused-engine", "start"]
 
 FROM headless AS slim

@@ -367,7 +367,7 @@ function DiscoveryWizardShell({ children, reviewOnly, onClose, onCancel, submitt
   return (
     <>
       <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-40" onClick={() => !submitting && onClose()} />
-      <div className="fixed inset-y-0 right-0 w-full md:w-[650px] lg:w-[760px] bg-slate-50 shadow-2xl z-50 overflow-y-auto border-l border-slate-200 flex flex-col">
+      <div data-fused-detail-sidebar className="fixed inset-y-0 right-0 w-full md:w-[650px] lg:w-[760px] bg-slate-50 shadow-2xl z-50 overflow-y-auto border-l border-slate-200 flex flex-col">
         <div className="p-6 border-b border-slate-200 flex items-center justify-between sticky top-0 bg-slate-50/90 backdrop-blur z-10">
           <div>
             <h1 className="text-xl font-bold text-slate-900">Review discovered service</h1>

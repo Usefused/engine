@@ -323,6 +323,7 @@ function ScopeMultiSelect({
   );
 }
 
+/** Allows copying a new client credential without exposing it to automatic agent context. */
 function CreatedSecretNotice({ secret, onClear }: { secret: string | null; onClear: () => void }) {
   return (
     <div className="rounded-lg border border-amber-300 bg-amber-50 p-4" role="alert">
@@ -332,7 +333,7 @@ function CreatedSecretNotice({ secret, onClear }: { secret: string | null; onCle
       {secret && (
         <>
           <p className="text-xs text-amber-800 mt-1">Keep it secret. Anyone with this secret can request tokens as this client.</p>
-          <code className="block mt-3 break-all rounded bg-white p-2 text-xs text-slate-900">{secret}</code>
+          <code data-fused-visible="false" className="block mt-3 break-all rounded bg-white p-2 text-xs text-slate-900">{secret}</code>
         </>
       )}
       <div className="mt-3 flex gap-2">

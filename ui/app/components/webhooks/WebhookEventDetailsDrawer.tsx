@@ -1,10 +1,12 @@
+import { useFusedAgent } from "~/components/agent/FusedAgentContext";
 import { useEffect, type ReactNode } from "react";
 import { X } from "lucide-react";
 import type { WebhookEventEntry } from "~/lib/api";
 
 // WebhookEventDetailsDrawer exposes only the reduced webhook receipt fields
-// already returned by Engine and never renders the inbound payload or secrets.
+// already returned by Engine, within the workspace pane beside the assistant.
 export function WebhookEventDetailsDrawer({ event, onClose }: { event: WebhookEventEntry; onClose: () => void }) {
+  const agent = useFusedAgent();
   useEffect(() => {
     // Escape mirrors the overlay and header close actions for keyboard users.
     const closeOnEscape = (keyboardEvent: KeyboardEvent) => {
@@ -16,7 +18,8 @@ export function WebhookEventDetailsDrawer({ event, onClose }: { event: WebhookEv
 
   return <>
     <button type="button" aria-label="Close webhook receipt details" className="fixed inset-0 z-40 cursor-default bg-slate-900/20" onClick={onClose} />
-    <aside role="dialog" aria-modal="true" aria-labelledby="webhook-receipt-title" className="fixed inset-y-0 right-0 z-50 flex w-full flex-col overflow-y-auto overflow-x-hidden border-l border-slate-200 bg-white shadow-2xl md:w-[calc(100vw-4rem)] md:max-w-[940px] xl:max-w-[1080px]">
+    {/* An open assistant remains an accessible sibling of this workspace-scoped drawer. */}
+    <aside data-fused-detail-sidebar role="dialog" aria-modal={!agent?.isOpen} aria-labelledby="webhook-receipt-title" className="fixed inset-y-0 right-0 z-50 flex w-full flex-col overflow-y-auto overflow-x-hidden border-l border-slate-200 bg-white shadow-2xl md:w-[calc(100%-4rem)] md:max-w-[940px] xl:max-w-[1080px]">
       <div className="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-slate-100 bg-white/90 px-5 py-4 backdrop-blur sm:px-6">
         <div className="min-w-0"><h2 id="webhook-receipt-title" className="text-lg font-semibold text-slate-900">Webhook receipt details</h2><p className="mt-0.5 truncate text-xs text-slate-500">{event.event_name || "Unnamed event"}</p></div>
         <button type="button" onClick={onClose} aria-label="Close webhook receipt details" className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"><X className="h-5 w-5" /></button>

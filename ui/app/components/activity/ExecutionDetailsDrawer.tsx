@@ -1,3 +1,4 @@
+import { useFusedAgent } from "~/components/agent/FusedAgentContext";
 import { useEffect, useLayoutEffect, useRef, type ReactNode, type RefObject } from "react";
 import { ArrowLeft, X } from "lucide-react";
 import type { EngineExecutionEventEntry } from "~/lib/api";
@@ -13,8 +14,9 @@ interface ExecutionDetailsDrawerProps {
 }
 
 // ExecutionDetailsDrawer gives every scoped Activity surface one consistent,
-// wide receipt inspector without adding another execution-detail projection.
+// receipt inspector sized to its workspace, with the assistant accessible beside it.
 export function ExecutionDetailsDrawer({ event, onClose, children, onBack, scrollRef, restoreScrollTop = 0, navigationDirection = "forward" }: ExecutionDetailsDrawerProps) {
+  const agent = useFusedAgent();
   const titleRef = useRef<HTMLHeadingElement>(null);
   // Restore keyboard focus to the invoking row when the entire inspector closes.
   useLayoutEffect(() => {
@@ -45,7 +47,8 @@ export function ExecutionDetailsDrawer({ event, onClose, children, onBack, scrol
   const service = event.execution_kind === "unified" ? "Unified App" : event.service_name || event.service_slug || "Service metadata unavailable";
   return <>
     <button type="button" aria-label="Close execution details" className="fixed inset-0 z-40 cursor-default bg-slate-900/20" onClick={onClose} />
-    <aside role="dialog" aria-modal="true" aria-labelledby="execution-details-title" className="receipt-drawer-enter fixed inset-y-0 right-0 z-50 flex h-dvh max-h-dvh w-full max-w-full flex-col overflow-hidden border-l border-slate-200 bg-white shadow-2xl md:w-[calc(100vw-4rem)] md:max-w-[940px] xl:max-w-[1080px]">
+    {/* An open assistant remains an accessible sibling of this workspace-scoped drawer. */}
+    <aside data-fused-detail-sidebar role="dialog" aria-modal={!agent?.isOpen} aria-labelledby="execution-details-title" className="receipt-drawer-enter fixed inset-y-0 right-0 z-50 flex h-dvh max-h-dvh w-full max-w-full flex-col overflow-hidden border-l border-slate-200 bg-white shadow-2xl md:w-[calc(100%-4rem)] md:max-w-[940px] xl:max-w-[1080px]">
       <div className="z-10 flex shrink-0 items-center justify-between gap-4 border-b border-slate-100 bg-white/90 px-4 py-4 backdrop-blur sm:px-6">
         <div className="min-w-0">
           {/* Back replaces content in this drawer; it never stacks a second dialog over the first. */}

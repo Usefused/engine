@@ -1590,7 +1590,8 @@ function DriftWatchControl({ srv }: { srv: Service }) {
   return (
     <div className="group relative flex flex-col items-start">
       <label className={`flex items-center gap-2 text-sm ${uploaded ? "cursor-not-allowed text-slate-400" : "cursor-pointer text-slate-700"}`}>
-        <input type="checkbox" checked={Boolean(srv.watch_for_drift)} onChange={detail.handleToggleDriftWatch} disabled={detail.savingDrift || uploaded} className="h-4 w-4 rounded border-slate-300 text-blue-600" />
+        {/* Drift changes persist immediately, so the assistant can read this setting but the user owns its toggle. */}
+        <input data-fused-editable="false" type="checkbox" checked={Boolean(srv.watch_for_drift)} onChange={detail.handleToggleDriftWatch} disabled={detail.savingDrift || uploaded} className="h-4 w-4 rounded border-slate-300 text-blue-600" />
         Watch for Drift
       </label>
       {uploaded && <div className="absolute top-full z-10 mt-1 hidden w-48 rounded bg-slate-800 p-2 text-xs text-white group-hover:block">We can't monitor this for changes. To enable drift detection, provide a URL.</div>}

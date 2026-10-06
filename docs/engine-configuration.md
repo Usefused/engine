@@ -130,3 +130,82 @@ any reference or corresponding YAML entry.
 
 Container CPU, memory, and process/PID limits remain deployment settings in
 Docker or Kubernetes, outside `engine.yaml`.
+
+
+## Fused workspace agent
+
+The bundled workspace agent is enabled by default and uses the same Harnest session
+and frontend-tool runtime as Threadify. No `engine.ai` section is required. To opt
+out, set `engine.ai.enabled: false` or `FUSED_AGENT_ENABLED=false`; an explicit
+environment value overrides YAML. Optional settings can be configured as follows:
+
+```yaml
+engine:
+  ai:
+    enabled: true # Default; set false to disable the agent.
+    # Optional offline archive; its checksum must match this Engine release.
+    # runtime_archive: /opt/fused/runtime-linux-amd64.tar.gz
+    # cache_dir: /var/lib/fused/agent
+```
+
+The default model is the Registry's configured LLM. Fused sends its license only
+to Registry's licensed `/agent/v1/chat/completions` route; model credentials never
+enter the browser. Both streaming replies and non-streaming tool continuations use
+this gateway. Registry must be upgraded alongside Fused for this route and
+the authorized `agentOperationContracts` query.
+
+The first enabled startup downloads the pinned native runtime from the matching
+Fused release. Startup runs independently of Fused readiness. `/agent/status`
+reports its state to authenticated users. Linux amd64/arm64, macOS arm64 and
+Windows amd64 archives are built by release CI. Source/development builds require
+a matching locally built archive. Agent memory is isolated from Fused's execution
+workers; conversations currently live in memory and reset when the runtime restarts.
+
+The sidebar uses the shared chat renderer with Markdown/code blocks, tool activity
+and a conversation chooser. Opening a workspace detail drawer turns it into a
+corner popup on desktop; closing the drawer restores the docked panel. Mobile
+uses full-screen chat. Layout changes preserve the conversation and unsent draft.
+Conversation history can be reopened while the runtime remains running.
+
+Project skills load on demand for workspace drafts, Unified App editing,
+credentials/access and SDK/MCP guidance. Skills provide instructions, not extra
+permissions. The Harnest project and adaptations are documented in
+[`fused-agent/README.md`](../fused-agent/README.md).
+
+Environment-only deployments remain supported: `FUSED_AGENT_ENABLED`,
+`FUSED_AGENT_CACHE_DIR`, `FUSED_AGENT_RUNTIME_ARCHIVE`. An optional custom
+OpenAI-compatible model gateway uses `engine.ai.gateway.base_url`, `model`, and
+`api_key_env` (the **name** of an existing environment variable), or respectively
+`FUSED_AGENT_GATEWAY_URL`, `FUSED_AGENT_MODEL`, `FUSED_AGENT_API_KEY_ENV`.
+Remote gateways require HTTPS; loopback HTTP is allowed for local tests.
+Custom gateways receive their configured credential, never Fused license.
+
+### Page context and form privacy
+
+The assistant reads the rendered workspace page and normal form values. It edits
+through the form's existing controls and does not have an arbitrary JavaScript,
+HTTP, submit, deploy, delete or permission-changing tool. The Unified App editor
+also offers validation/compilation against its current draft and selected contracts.
+Existing API permissions still apply to every contract and compile request.
+
+Use `data-fused-visible="false"` on a field **or container** to exclude values and
+nested text from automatic agent context:
+
+```tsx
+<input data-fused-visible="false" value={sensitiveValue} />
+<section data-fused-visible="false">{privateDiagnosticPayload}</section>
+```
+
+Descendants cannot override a private ancestor. Password inputs, hidden inputs and
+recognizable credential-value fields are private by default. Token copy fields
+and private execution diagnostics also opt out. Ordinary textareas, including the
+app's TypeScript source, remain visible unless marked private. Labels may still
+identify a private field, but its value and options are not sent or editable.
+This attribute controls agent access, not whether the human can view the field.
+
+For controls whose `onChange` immediately persists a server mutation, add
+`data-fused-editable="false"` to the control or its container. The agent may read
+its non-sensitive state but cannot toggle it. Do not put actual secrets in source
+or ordinary descriptive fields: use the private-field marker for custom sensitive
+content. Turning off **Current page** blocks further page tools; previously
+shared context remains in that conversation, so start a new conversation to clear it.

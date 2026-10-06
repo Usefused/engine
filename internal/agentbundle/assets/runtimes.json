@@ -1,0 +1,7 @@
+{
+  "darwin/arm64": {
+    "sha256": "518693f95f3c4d84cb18297d596bd56e7904ca7d31863d8d42fccab37ac59519",
+    "archive": "runtime-darwin-arm64.tar.gz",
+    "python": "python/bin/python3.12"
+  }
+}

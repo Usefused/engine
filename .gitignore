@@ -18,3 +18,12 @@ data/
 .DS_Store
 runtime/mcp/dist/**
 runtime/execution/dist/**
+
+# Locally built agent archives are release artifacts, not source inputs.
+/agent-release/
+/agent-artifacts/
+/.agent-compiler/
+/fused-agent/.harnest/
+# Interpreter caches are local build byproducts, not agent source.
+/fused-agent/**/__pycache__/
+/fused-agent/**/*.pyc

@@ -12,6 +12,12 @@ import (
 // yamlEnvironmentBindings is the single startup bridge into existing os.Getenv consumers.
 // Credentials remain in environment variables or referenced files; license precedence is unchanged.
 var yamlEnvironmentBindings = map[string]string{
+	"engine.ai.enabled":                         "FUSED_AGENT_ENABLED",
+	"engine.ai.cache_dir":                       "FUSED_AGENT_CACHE_DIR",
+	"engine.ai.runtime_archive":                 "FUSED_AGENT_RUNTIME_ARCHIVE",
+	"engine.ai.gateway.base_url":                "FUSED_AGENT_GATEWAY_URL",
+	"engine.ai.gateway.model":                   "FUSED_AGENT_MODEL",
+	"engine.ai.gateway.api_key_env":             "FUSED_AGENT_API_KEY_ENV",
 	"database.url":                              "FUSED_DATABASE_URL",
 	"database.max_conns":                        "FUSED_DATABASE_MAX_CONNS",
 	"database.max_conn_idle_time":               "FUSED_DATABASE_MAX_CONN_IDLE_TIME",

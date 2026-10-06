@@ -93,7 +93,7 @@ type BucketDetailsPermissions = {
   manageConnections: boolean;
 };
 
-/** Keeps bucket content in one scroll region beneath a fixed header, including expanded consent and credential forms. */
+/** Sizes the bucket drawer to its workspace pane so an open assistant cannot clip its left edge. */
 export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
   const [params, setParams] = useSearchParams();
   // A selected bucket is required before any credential or connection control can target it.
@@ -105,7 +105,7 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
         className="fixed inset-0 z-40 bg-slate-900/20 transition-opacity"
         onClick={props.onClose}
       />
-      <aside className="fixed inset-y-0 right-0 z-50 flex w-full flex-col overflow-hidden border-l border-slate-200 bg-white shadow-2xl transition-transform md:w-[calc(100vw-4rem)] md:max-w-[940px] xl:max-w-[1080px]">
+      <aside data-fused-detail-sidebar className="fixed inset-y-0 right-0 z-50 flex w-full flex-col overflow-hidden border-l border-slate-200 bg-white shadow-2xl transition-transform md:w-[calc(100%-4rem)] md:max-w-[940px] xl:max-w-[1080px]">
         <BucketDetailsHeader
           bucket={props.bucket}
           loading={props.loading}

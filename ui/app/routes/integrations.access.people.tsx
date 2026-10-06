@@ -1,3 +1,4 @@
+import { useFusedAgent } from "~/components/agent/FusedAgentContext";
 import { FieldLabel } from "~/components/forms/FieldLabel";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import type { MetaFunction } from "@remix-run/react";
@@ -217,12 +218,13 @@ function PeopleList(props: { users: UserSummary[]; total: number; search: string
   </section>;
 }
 
-// PersonDetailsDrawer keeps the list available at full width and reveals one
-// person's controls only after an explicit row selection.
+// PersonDetailsDrawer stays within the workspace pane while the assistant remains available beside it.
 function PersonDetailsDrawer(props: PersonDetailsDrawerProps) {
+  const agent = useFusedAgent();
   return <>
     <div className="fixed inset-0 z-40 bg-slate-900/20 transition-opacity" onClick={props.onClose} />
-    <aside role="dialog" aria-modal="true" aria-labelledby="person-details-title" className="fixed inset-y-0 right-0 z-50 flex w-full flex-col overflow-y-auto overflow-x-hidden border-l border-slate-200 bg-white shadow-2xl md:w-[calc(100vw-4rem)] md:max-w-[940px] xl:max-w-[1080px]">
+    {/* An open assistant remains an accessible sibling of this workspace-scoped drawer. */}
+    <aside data-fused-detail-sidebar role="dialog" aria-modal={!agent?.isOpen} aria-labelledby="person-details-title" className="fixed inset-y-0 right-0 z-50 flex w-full flex-col overflow-y-auto overflow-x-hidden border-l border-slate-200 bg-white shadow-2xl md:w-[calc(100%-4rem)] md:max-w-[940px] xl:max-w-[1080px]">
       <div className="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-slate-100 bg-white/90 px-5 py-4 backdrop-blur sm:px-6">
         <div><h2 id="person-details-title" className="text-lg font-semibold text-slate-900">Person details</h2><p className="mt-0.5 text-xs text-slate-500">Manage profile, teams, and personal keys.</p></div>
         <button type="button" onClick={props.onClose} aria-label="Close person details" className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"><X className="h-5 w-5" /></button>

@@ -30,7 +30,7 @@ function displayEndpoint(value: string, emptyLabel: string) {
   return value || emptyLabel;
 }
 
-// SettingsPage manages account details, Engine addresses, and API-key rotation.
+// SettingsPage manages account details and key rotation while keeping generated credentials out of agent context.
 export default function SettingsPage() {
   const toast = useToast();
   const [account, setAccount] = useState<Account | null>(null);
@@ -296,7 +296,8 @@ export default function SettingsPage() {
                 can continue working.
               </p>
               <div className="flex items-center gap-2">
-                <code className="flex-1 block px-3 py-2 bg-white border border-green-300 rounded-md text-sm text-slate-800 break-all">
+                {/* One-time credentials remain private even while the user can see and copy them. */}
+                <code data-fused-visible="false" className="flex-1 block px-3 py-2 bg-white border border-green-300 rounded-md text-sm text-slate-800 break-all">
                   {newKey}
                 </code>
                 <button

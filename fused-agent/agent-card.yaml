@@ -1,0 +1,18 @@
+name: Fused Agent
+description: Helps teams inspect their Fused workspace and edit forms and Unified App code.
+version: 0.1.0
+supportedInterfaces:
+  - url: http://127.0.0.1:8090
+    protocolBinding: HTTP+JSON
+    protocolVersion: "1.0"
+capabilities:
+  streaming: true
+defaultInputModes: [text/plain]
+defaultOutputModes: [text/plain]
+skills:
+  - id: workspace-support
+    name: Fused workspace support
+    description: Explains visible workspace data and updates non-sensitive fields through the current page.
+    tags: [fused, services, sdk, mcp, unified-app, debugging]
+    examples:
+      - Help me correct the selected operations in this app.

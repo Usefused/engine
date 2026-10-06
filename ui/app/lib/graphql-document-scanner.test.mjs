@@ -60,17 +60,17 @@ test("keeps the Registry repo-boundary manifest synchronized when present", (t) 
   }
 });
 
-// Exact UI totals include the shared auth picker and current app catalogue queries.
+// Exact totals include source revision and agent contract reads alongside the shared catalogue.
 test("accounts for every current UI GraphQL call and document variant", () => {
   const scan = scanCurrentUI();
   // Exact totals ensure every static query remains represented in schema validation.
-  assert.equal(scan.call_count, 108);
-  assert.equal(scan.calls.length, 108);
-  assert.equal(scan.document_count, 126);
-  assert.equal(scan.documents.length, 126);
-  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 29);
+  assert.equal(scan.call_count, 110);
+  assert.equal(scan.calls.length, 110);
+  assert.equal(scan.document_count, 128);
+  assert.equal(scan.documents.length, 128);
+  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 31);
   assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 97);
-  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 126);
+  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 128);
 });
 
 test("resolves imported fragments and expands conditional and map variants", () => {
@@ -101,11 +101,13 @@ test("keeps bucket connection roots independent across permission boundaries", (
   assert.doesNotMatch(summary.document, /authConnectionPage|bucketServicePage/);
 });
 
+// Real catalogue variables and deliberately invalid fixtures keep scalar values separate from GraphQL structure.
 test("models runtime scalar interpolation without accepting structural interpolation", (t) => {
   const scan = scanCurrentUI();
   assert.ok(scan.documents.every(({ document }) => !document.includes("UI_DYNAMIC_VALUE")));
   assert.ok(scan.documents.some(({ file, document }) => (
-    file === "app/routes/integrations.sdks._index.tsx" && document.includes("query Applications($search: String!, $archived: Boolean!, $limit: Int!, $offset: Int!)")
+    // App-kind filtering must remain a declared variable alongside the other catalogue filters.
+    file === "app/routes/integrations.sdks._index.tsx" && document.includes("query Applications($kind: String!, $search: String!, $archived: Boolean!, $limit: Int!, $offset: Int!)")
   )));
   assert.ok(scan.documents.some(({ file, document }) => (
     file === "app/routes/integrations.sdks._index.tsx" && document.includes("deprecateApp(app_id: $appId")

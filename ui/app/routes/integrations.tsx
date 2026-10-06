@@ -1,3 +1,4 @@
+import { FusedAgentProvider } from "~/components/agent/FusedAgentProvider";
 import { useEffect, useState } from "react";
 import { Outlet, useNavigate, useLocation, useRouteLoaderData } from "@remix-run/react";
 import { NotificationBell } from "~/components/notifications/NotificationBell";
@@ -6,7 +7,7 @@ import { IntegrationsSidebar } from "~/components/layout/IntegrationsSidebar";
 import { CurrentActorAccessProvider } from "~/components/access/CurrentActorAccess";
 import { loginPathForLocation } from "~/lib/safe-navigation";
 
-// IntegrationsLayout protects private integration routes while retaining their complete post-login destination.
+// IntegrationsLayout protects private routes and keeps page dialogs inside the workspace beside the assistant.
 export default function IntegrationsLayout() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -73,7 +74,8 @@ export default function IntegrationsLayout() {
 
   return (
     <CurrentActorAccessProvider isAuth={isAuth}>
-      <div className="min-h-screen flex flex-col lg:flex-row bg-[var(--brand-paper)]">
+      <FusedAgentProvider authenticated={isAuth}>
+      <div data-fused-workspace className="min-h-screen flex flex-col lg:flex-row bg-[var(--brand-paper)]">
         <IntegrationsSidebar isAuth={isAuth} handleSignOut={handleSignOut} />
 
         {/* Main content */}
@@ -88,7 +90,10 @@ export default function IntegrationsLayout() {
             <Outlet />
           </div>
         </main>
+        {/* Portaled forms stay outside parent forms while remaining available to workspace page tools. */}
+        <div id="fused-workspace-dialogs" className="contents" />
       </div>
+    </FusedAgentProvider>
     </CurrentActorAccessProvider>
   );
 }

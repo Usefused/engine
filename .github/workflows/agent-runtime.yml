@@ -1,0 +1,70 @@
+name: Agent runtime
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  agent-runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, target: linux-amd64}
+          - {os: ubuntu-24.04-arm, target: linux-arm64}
+          - {os: macos-14, target: darwin-arm64}
+          - {os: windows-latest, target: windows-amd64}
+    env:
+      FUSED_AGENT_GATEWAY_URL: https://registry.invalid/agent/v1
+      FUSED_AGENT_GATEWAY_KEY: compile-placeholder
+      FUSED_AGENT_IDENTITY_KEY: compile-placeholder
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Usefused/harnest
+          ref: 553638d5a12770c0bc9f777b4d10e18a73a19c05
+          path: .agent-compiler
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: .agent-compiler/go.mod
+          cache-dependency-path: .agent-compiler/go.sum
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.7'
+          enable-cache: true
+          cache-dependency-glob: |
+            fused-agent/harnest-runtime.lock
+            fused-agent/runtime/vendor/*.whl
+      - name: Build pinned agent compiler
+        run: |
+          cp fused-agent/runtime/vendor/*.whl .agent-compiler/internal/runtimewheel/assets/
+          python .agent-compiler/scripts/prepare_uv_assets.py --target '${{ matrix.target }}'
+          launcher_target='${{ matrix.target }}'
+          launcher_target=${launcher_target//-/_}
+          mkdir -p .agent-compiler/internal/agentlauncher/assets
+          (cd .agent-compiler && go build -trimpath -ldflags='-s -w' -o "internal/agentlauncher/assets/agent_$launcher_target" ./cmd/harnest-agent)
+          mkdir -p "$RUNNER_TEMP/agent-tools"
+          executable=harnest
+          if [[ "$RUNNER_OS" == Windows ]]; then executable=harnest.exe; fi
+          compiler_version=$(python -c "from pathlib import Path; print(next(Path('fused-agent/runtime/vendor').glob('*.whl')).name.split('-')[1])")
+          (cd .agent-compiler && go build -tags harnest_release -ldflags="-X main.version=$compiler_version" -o "$RUNNER_TEMP/agent-tools/$executable" ./cmd/harnest)
+          echo "$RUNNER_TEMP/agent-tools" >> "$GITHUB_PATH"
+      - name: Build portable runtime and compiled agent
+        run: |
+          python fused-agent/runtime/test_prune.py
+          python fused-agent/runtime/build.py --output agent-output
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-runtime-${{ matrix.target }}
+          path: agent-output
+          if-no-files-found: error
+          compression-level: 0

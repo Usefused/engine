@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useBeforeUnload, useBlocker } from "@remix-run/react";
 import type { Service, SpecificationImportPlan } from "~/lib/api";
+import { useFusedAgent } from "~/components/agent/FusedAgentContext";
 import { useWebhookEditor } from "./useWebhookEditor";
 import { WebhookEventEditor } from "./WebhookEventEditor";
 import { WebhookSettingsEditor } from "./WebhookSettingsEditor";
@@ -8,8 +9,9 @@ import { WebhookSettingsEditor } from "./WebhookSettingsEditor";
 type Editor = ReturnType<typeof useWebhookEditor>;
 interface Props { service: Service; version: string; onClose: () => void; onSaved: () => void }
 
-// Mounting is the explicit owner click boundary; no source or credentials are loaded by the normal view.
+// Mounting loads the owner-selected editor and yields assistant space without trapping focus away from chat.
 export function WebhookDefinitionEditor({ service, version, onClose, onSaved }: Props) {
+  const agent = useFusedAgent();
   const editor = useWebhookEditor(service, version, onSaved);
   const [invalid, setInvalid] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
@@ -35,7 +37,8 @@ export function WebhookDefinitionEditor({ service, version, onClose, onSaved }: 
   }
   return <>
     <div className="fixed inset-0 z-40 bg-slate-900/30" aria-hidden="true" onClick={close} />
-    <div ref={panel} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="webhook-editor-title" className="fixed inset-y-0 right-0 z-50 flex w-full max-w-3xl flex-col bg-white shadow-2xl outline-none" onKeyDown={(event) => handleEditorKeyboard(event, panel.current, close)}>
+    {/* An open assistant remains keyboard-accessible beside this detail editor. */}
+    <div data-fused-detail-sidebar ref={panel} tabIndex={-1} role="dialog" aria-modal={!agent?.isOpen} aria-labelledby="webhook-editor-title" className="fixed inset-y-0 right-0 z-50 flex w-full max-w-3xl flex-col bg-white shadow-2xl outline-none" onKeyDown={(event) => handleEditorKeyboard(event, panel.current, close, !agent?.isOpen)}>
       <header className="flex items-start justify-between gap-4 border-b border-slate-200 p-4 sm:p-6"><div><h2 id="webhook-editor-title" className="text-lg font-semibold">Edit webhook</h2><p className="mt-1 break-all text-sm text-slate-500">{service.name} · {version}</p></div><button type="button" aria-label="Close webhook editor" disabled={editor.busy} onClick={close} className="p-2 text-slate-600 disabled:opacity-40">✕</button></header>
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4 sm:p-6">
         {confirmClose && <DiscardNotice busy={editor.busy} onKeep={() => setConfirmClose(false)} onDiscard={onClose} />}
@@ -101,12 +104,12 @@ function DiscardNotice({ busy, onKeep, onDiscard }: { busy: boolean; onKeep: () 
   return <section role="alert" className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-4"><p className="text-sm">Leaving or switching versions discards unsaved webhook changes and any retained reference copy.</p><div className="flex gap-4"><button type="button" onClick={onKeep} className="text-sm font-semibold">Keep editing</button><button type="button" disabled={busy} onClick={onDiscard} className="text-sm text-red-700">Discard and continue</button></div></section>;
 }
 
-// Keep keyboard navigation inside the active modal while allowing a deliberate Escape close.
-function handleEditorKeyboard(event: React.KeyboardEvent, panel: HTMLDivElement | null, close: () => void) {
+// Retain Escape handling while allowing keyboard access to a concurrently open assistant.
+function handleEditorKeyboard(event: React.KeyboardEvent, panel: HTMLDivElement | null, close: () => void, trapFocus: boolean) {
   // Escape follows the same dirty/busy guard as every other close gesture.
   if (event.key === "Escape") { event.stopPropagation(); close(); return; }
-  // Only Tab needs a focus boundary; other editing keys retain native behaviour.
-  if (event.key !== "Tab" || !panel) return;
+  // Only modal editors trap Tab; shared assistant sessions need access to both panels.
+  if (!trapFocus || event.key !== "Tab" || !panel) return;
   const controls = Array.from(panel.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex="0"]')).filter((node) => node.getClientRects().length > 0);
   const first = controls[0];
   const last = controls[controls.length - 1];

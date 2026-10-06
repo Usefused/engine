@@ -5,3 +5,7 @@ declare module 'react-syntax-highlighter/dist/esm/prism-light.js' {
 }
 declare module 'react-syntax-highlighter/dist/esm/languages/prism/typescript.js';
 declare module 'react-syntax-highlighter/dist/esm/languages/prism/yaml.js';
+declare module 'react-syntax-highlighter/dist/esm/languages/prism/javascript.js';
+declare module 'react-syntax-highlighter/dist/esm/languages/prism/json.js';
+declare module 'react-syntax-highlighter/dist/esm/languages/prism/bash.js';
+declare module 'react-syntax-highlighter/dist/esm/languages/prism/python.js';

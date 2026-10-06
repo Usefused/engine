@@ -476,3 +476,21 @@ test("successor planning retains the saved owner team", async () => {
   assert.equal(submitted.request.owner_team, "payments");
   assert.equal(submitted.request.config_key, "unified_app:Customer:1.0.1");
 });
+
+// Conversational compilation must not enable services or rewrite persisted contract metadata behind the form.
+test('agent compilation leaves dependency activation and repair to the user', async () => {
+  let mutations = 0;
+  const mock = {
+    workspace: {
+      // Missing selections need an explicit user compile action before conversational validation.
+      getServices: async () => [],
+      addService: async () => { mutations++; },
+      refreshServiceContract: async () => { mutations++; },
+    },
+    appConfig: { plan: async () => { throw new authorization.APIRequestError(409, { code: 'service_provider_identity_unavailable' }); } },
+  };
+  await assert.rejects(client(mock).planUnifiedApp({ name: 'Customer', version: '1' }, { stripe: service }, () => {}, '', false), /Validate and compile/);
+  mock.workspace.getServices = async () => [{ service_id: service.service_id, enabled_versions: [{ service_version_id: service.service_version_id, status: 'active' }] }];
+  await assert.rejects(client(mock).planUnifiedApp({ name: 'Customer', version: '1' }, { stripe: service }, () => {}, '', false));
+  assert.equal(mutations, 0);
+});

@@ -78,7 +78,7 @@ export function DefineServiceDrawer({
         className="fixed inset-0 bg-slate-900/20 z-40 transition-opacity"
         onClick={onClose}
       />
-      <div className="fixed inset-y-0 right-0 w-full md:w-[600px] bg-white shadow-2xl z-50 overflow-y-auto transform transition-transform border-l border-slate-200 flex flex-col">
+      <div data-fused-detail-sidebar className="fixed inset-y-0 right-0 w-full md:w-[600px] bg-white shadow-2xl z-50 overflow-y-auto transform transition-transform border-l border-slate-200 flex flex-col">
         <div className="p-6 border-b border-slate-100 sticky top-0 bg-white/90 backdrop-blur z-10">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold text-slate-900">Define a service</h2>

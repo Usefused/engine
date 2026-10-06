@@ -51,6 +51,7 @@ const DefaultInitialCreditBalance = 10_000_000.0
 var GlobalEncryptionKey []byte
 
 type EngineConfig struct {
+	AI                     AgentConfig               `yaml:"ai"`
 	UnifiedApps            UnifiedAppAdmissionConfig `yaml:"unified_apps"`
 	RegistryEndpoint       string                    `yaml:"registry_endpoint"`
 	PublicURL              string                    `yaml:"public_url"`
@@ -153,6 +154,12 @@ func Load(path string, options ...LoadOption) (*Config, error) {
 		return nil, err
 	}
 	cfg.Engine.UnifiedApps = admission
+	// Resolve agent setup once; request handling must not read changing process configuration.
+	cfg.Engine.AI, err = ResolveAgentConfig(cfg.Engine.AI)
+	// Reject malformed agent endpoints before model credentials can be used.
+	if err != nil {
+		return nil, err
+	}
 	// Resolve pool policy before any dependency opens a connection.
 	cfg.Database, err = ResolveDatabaseConfig(cfg.Database)
 	// Bad pool limits are startup errors, not deferred runtime failures.
@@ -175,6 +182,7 @@ func Load(path string, options ...LoadOption) (*Config, error) {
 
 // defaultConfig supplies non-secret development defaults while leaving
 // deployment identity and credentials to explicit Engine configuration.
+// The bundled agent is available by default; YAML or environment can opt out.
 func defaultConfig() *Config {
 	return &Config{
 		EncryptionKey: "fused-default-encrypt-key-32b",
@@ -215,6 +223,7 @@ func defaultConfig() *Config {
 			},
 		},
 		Engine: EngineConfig{
+			AI:                          AgentConfig{Enabled: true},
 			UnifiedApps:                 DefaultUnifiedAppAdmissionConfig(),
 			RegistryEndpoint:            "https://registry.usefused.com/graphql",
 			ExecutionRetentionDays:      30,

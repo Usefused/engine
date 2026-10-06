@@ -366,7 +366,7 @@ function BucketSecretFields({
       />
       <ComposerInput
         label="Value"
-        type="password"
+        type="password" data-fused-visible="false"
         value={bucketSecret.value}
         placeholder="Secret value"
         onChange={(nextValue) =>
@@ -406,7 +406,7 @@ function SecretValueFields({
   return (
     <ComposerInput
       label={authOption.auth_type === "api_key" ? "Secret value" : "Token"}
-      type="password"
+      type="password" data-fused-visible="false"
       value={secret.value}
       placeholder={tokenPlaceholder(authOption.auth_type)}
       onChange={(next) => setSecret((prev) => ({ ...prev, value: next }))}
@@ -433,7 +433,7 @@ function BasicSecretFields({
       />
       <ComposerInput
         label="Password"
-        type="password"
+        type="password" data-fused-visible="false"
         value={secret.password}
         placeholder="Password"
         onChange={(password) => setSecret((prev) => ({ ...prev, password }))}
@@ -463,7 +463,7 @@ function MTLSSecretFields({
       />
       <ComposerInput
         label="Private key"
-        type="password"
+        type="password" data-fused-visible="false"
         value={secret.privateKey}
         placeholder="Client private key PEM"
         onChange={(privateKey) =>
@@ -549,7 +549,7 @@ function ClientCredentialFields({
       />
       <ComposerInput
         label="Client secret"
-        type="password"
+        type="password" data-fused-visible="false"
         value={secret.clientSecret}
         placeholder="Client secret"
         onChange={(clientSecret) =>

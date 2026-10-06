@@ -216,6 +216,8 @@ archives:
           - zip
 
 release:
+  extra_files:
+    - glob: agent-release/runtime-*.tar.gz
   # Retrying a release on the same tag (e.g. a CI re-run after a partial
   # failure) re-uploads every asset -- without this, GitHub's API rejects
   # each one with 422 "already_exists" since the previous attempt already

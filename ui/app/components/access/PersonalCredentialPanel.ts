@@ -36,11 +36,12 @@ export function PersonalCredentialPanel(props: PersonalCredentialPanelProps): Re
   );
 }
 
+/** Keeps the one-time personal key copyable by its owner but absent from automatic page context. */
 function issuedSecretNotice(secret: string, onClear: () => void): ReactElement {
   return createElement("div", { className: "m-4 rounded-lg border border-amber-300 bg-amber-50 p-4", role: "alert" },
     createElement("p", { className: "text-sm font-semibold text-amber-900" }, "Copy this key now. It will not be shown again."),
     createElement("p", { className: "text-xs text-amber-800 mt-1" }, "Keep it secret. Anyone with this key can act as this person."),
-    createElement("code", { className: "block mt-3 break-all rounded bg-white p-2 text-xs text-slate-900" }, secret),
+    createElement("code", { "data-fused-visible": "false", className: "block mt-3 break-all rounded bg-white p-2 text-xs text-slate-900" }, secret),
     createElement("div", { className: "mt-3 flex gap-2" },
       createElement("button", { type: "button", onClick: () => navigator.clipboard.writeText(secret), className: "rounded bg-amber-700 px-3 py-1.5 text-xs font-semibold text-white" }, "Copy key"),
       createElement("button", { type: "button", onClick: onClear, className: "rounded border border-amber-400 px-3 py-1.5 text-xs font-semibold text-amber-900" }, "I've saved it")));

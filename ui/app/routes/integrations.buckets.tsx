@@ -53,7 +53,7 @@ const BUCKET_PAGE_SIZE = 12;
 const BUCKET_CONTENT_PAGE_SIZE = 10;
 const BUCKET_OVERVIEW_PAGE_SIZE = 5;
 
-/** Renders buckets using only sections authorized for the current actor. */
+/** Renders authorized buckets with a creation popover anchored to the page action. */
 export default function BucketsPage() {
   const toast = useToast();
   const { access, loading: accessLoading } = useCurrentActorAccess();
@@ -97,6 +97,7 @@ export default function BucketsPage() {
     string | null
   >(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const createAnchor = useRef<HTMLDivElement>(null);
   const [entryModalKind, setEntryModalKind] = useState<BucketEntryKind | null>(
     null
   );
@@ -513,7 +514,7 @@ export default function BucketsPage() {
 
   return (
     <div className="space-y-6">
-      <BucketPageHeader canCreate={canCreateBucket} onCreateClick={() => setModalOpen(true)} />
+      <BucketPageHeader canCreate={canCreateBucket} createAnchor={createAnchor} createOpen={modalOpen} onCreateClick={() => setModalOpen(true)} />
       <BucketList
         buckets={buckets}
         selectedBucketId={selectedBucket?.id || ""}
@@ -597,6 +598,7 @@ export default function BucketsPage() {
       />
       {canCreateBucket && <BucketCreateModal
         open={modalOpen}
+        anchor={createAnchor}
         onClose={() => setModalOpen(false)}
         onCreated={onBucketCreated}
       />}

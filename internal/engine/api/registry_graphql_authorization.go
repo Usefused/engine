@@ -30,7 +30,7 @@ var registryGraphQLQueryPolicies = registryGraphQLPolicies(
 		"serviceVersionImportIdentities", "service", "resourceIntegrations", "getServiceComponent",
 		"integration", "endpointByName", "endpointsByNames", "serviceOperations", "validateSDKSelections",
 		// Batched service candidates are catalogue discovery before a service has workspace execution authority.
-		"searchEndpoints", "searchServices", "serviceCandidatesByRefs", "parseSDKIntent", "draftPromptUnifiedApp", "driftSnapshots", "driftSnapshotsForServices",
+		"searchEndpoints", "searchServices", "serviceCandidatesByRefs", "parseSDKIntent", "draftPromptUnifiedApp", "agentOperationContracts", "driftSnapshots", "driftSnapshotsForServices",
 		"serviceChangelogSince",
 		// Published workflow definitions are catalogue discovery, not workspace execution authority.
 		"unifiedAppTemplates",

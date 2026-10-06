@@ -12,6 +12,9 @@ permissions:
   packages: write
 
 jobs:
+  agent-runtime:
+    uses: ./.github/workflows/agent-runtime.yml
+
   tag:
     # A main push owns version selection, while the dependent release job publishes the resulting immutable tag in this run.
     if: github.ref == 'refs/heads/main'
@@ -75,9 +78,9 @@ jobs:
           git push origin "$NEW_TAG"
 
   goreleaser:
-    needs: tag
+    needs: [tag, agent-runtime]
     # Main runs publish their newly created tag directly because GITHUB_TOKEN tag pushes intentionally do not start another workflow.
-    if: ${{ always() && (startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && needs.tag.result == 'success')) }}
+    if: ${{ always() && needs.agent-runtime.result == 'success' && (startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && needs.tag.result == 'success')) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -111,6 +114,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download verified agent runtime inputs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: agent-runtime-*
+          path: agent-artifacts
+      - name: Stage agent and native runtime checksums
+        run: python3 .github/scripts/stage-engine-agent.py --input agent-artifacts
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v5

@@ -10,15 +10,15 @@ COPY runtime/execution/tsconfig.json ./
 COPY runtime/execution/src ./src
 RUN npm run build && npm prune --omit=dev
 
-FROM node:24-alpine AS engine-runtime
+# The optional pinned Python agent runtime requires glibc.
+FROM node:24-bookworm-slim AS engine-runtime
 
 WORKDIR /app
 
 # Node remains part of the runtime because MCP sessions execute in isolated
 # processes. GoReleaser builds the bundled MCP runtime before compiling the Go
 # binary, so containers never install dependencies into tenant storage.
-RUN apk upgrade --no-cache && \
-    apk add --no-cache bash su-exec nats-server tini
+RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates gosu nats-server tini && rm -rf /var/lib/apt/lists/*
 
 # GoReleaser copies the selected binary to the root context. Headless release
 # images pass ENGINE_BINARY=fused-engine-headless but keep /app/fused-engine as
@@ -32,11 +32,14 @@ COPY --from=execution-compiler-builder /app/runtime/execution /app/runtime/execu
 COPY engine.yaml /app/engine.yaml
 COPY entrypoint.sh /app/entrypoint.sh
 
-RUN addgroup -S fused && adduser -S -G fused fused && \
+RUN groupadd --system fused && useradd --system --create-home --gid fused fused && \
     mkdir -p /app/data/sandboxes && \
     chown -R fused:fused /app
 
+# The unprivileged process needs a writable home and persistent optional-agent cache.
+ENV HOME=/home/fused XDG_CACHE_HOME=/app/data/cache
+
 EXPOSE 8081 50051
 
-ENTRYPOINT ["/sbin/tini", "--", "/app/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
 CMD ["/app/fused-engine", "start"]

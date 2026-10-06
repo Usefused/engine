@@ -1,6 +1,6 @@
 {
-  "call_count": 109,
-  "document_count": 127,
+  "call_count": 110,
+  "document_count": 128,
   "calls": [
     {
       "endpoint": "registry",
@@ -395,6 +395,12 @@
     {
       "endpoint": "engine",
       "file": "app/lib/current-actor-access.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/fused-agent-contracts.ts",
       "call": 1,
       "document_count": 1
     },
@@ -1119,6 +1125,13 @@
       "call": 1,
       "variant": 1,
       "document": "query CurrentActorAccess {\n  currentActorAccess {\n    subject_id\n    workspace_id\n    kind\n    authorization_revision\n    grants { permission resource_type resource_id }\n  }\n}"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/fused-agent-contracts.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "query FusedAgentContracts($selections: String!, $path: String!, $offset: Int!) {\n    agentOperationContracts(selections: $selections, path: $path, offset: $offset)\n  }"
     },
     {
       "endpoint": "engine",

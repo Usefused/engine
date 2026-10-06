@@ -14,8 +14,8 @@ export async function describeUnifiedApp(goal: string, progress: DescribeProgres
   return { ...proposal, source: proposal.source! };
 }
 
-/** Retains the app owner while activating reviewed dependencies and compiling a fresh immutable plan. */
-export async function planUnifiedApp(config: Record<string, unknown>, services: UnifiedDraft["services"], progress: (message: string) => void, ownerTeam = ""): Promise<AppPlanResponse> {
+/** Compiles a fresh plan; agent callers can prohibit dependency activation and persisted metadata repair. */
+export async function planUnifiedApp(config: Record<string, unknown>, services: UnifiedDraft["services"], progress: (message: string) => void, ownerTeam = "", allowDependencyChanges = true): Promise<AppPlanResponse> {
   const activated: string[] = [];
   try {
     const workspace = await api.workspace.getServices();
@@ -23,6 +23,8 @@ export async function planUnifiedApp(config: Record<string, unknown>, services: 
       const enabled = workspace.find((service) => service.service_id === pin.service_id)?.enabled_versions?.some((version) => version.service_version_id === pin.service_version_id && version.status !== "deprecated");
       // Reviewed, already-active dependencies remain untouched.
       if (enabled) continue;
+      // Agent compilation cannot silently activate workspace capabilities; the user's compile action owns setup.
+      if (!allowDependencyChanges) throw new Error(`Enable ${key} ${pin.version} using Validate and compile before agent validation.`);
       progress(`Enabling ${key} ${pin.version}…`);
       await api.workspace.addService(pin.service_id, key, pin.version, pin.service_version_id);
       activated.push(key);
@@ -36,6 +38,8 @@ export async function planUnifiedApp(config: Record<string, unknown>, services: 
     } catch (cause) {
       // Only a typed legacy-identity failure permits refreshing exact reviewed pins; other failures remain untouched.
       if (!(cause instanceof APIRequestError) || cause.code !== "service_provider_identity_unavailable") throw cause;
+      // Repairing persisted service metadata remains an explicit user action in the form.
+      if (!allowDependencyChanges) throw cause;
       await refreshUnifiedServiceContracts(services, progress);
       progress("Service metadata refreshed. Compiling and validating your app…");
       // A single fresh plan binds the refreshed contract; a repeated failure must surface instead of looping.

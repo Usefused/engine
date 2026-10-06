@@ -22,6 +22,8 @@ var controlPlanePrefixes = []string{
 	"/credits",
 	"/leads",
 	"/workspace",
+	// Agent sessions carry user identity; they are never public runtime endpoints.
+	"/agent",
 	"/config",
 	"/sdk-config",
 	// Unified App plan/apply uses the same control credential boundary as SDK plans.

@@ -106,6 +106,18 @@ var dynamicControlRequirements = map[string]dynamicRequirementKind{
 // requirement: users must be able to inspect and revoke their own credential
 // even after their workspace grants have been removed.
 var authenticatedOnlyControlRoutes = map[string]struct{}{
+	// Agent session ownership is enforced by the runtime; actual tools retain resource-specific API authorization.
+	http.MethodGet + " /agent/status":                 {},
+	http.MethodGet + " /agent/sessions":               {},
+	http.MethodPost + " /agent/sessions":              {},
+	http.MethodGet + " /agent/sessions/{id}":          {},
+	http.MethodDelete + " /agent/sessions/{id}":       {},
+	http.MethodGet + " /agent/sessions/{id}/messages": {},
+	http.MethodPost + " /agent/responses":             {},
+	http.MethodPost + " /agent/client-tools/{id}":     {},
+	// Runtime ownership checks protect each single-use approval decision.
+	http.MethodPost + " /agent/approvals/{id}": {},
+
 	http.MethodGet + " /auth/whoami":      {},
 	http.MethodPost + " /auth/cli/logout": {},
 	// A user manages only their own OAuth consents; no workspace RBAC grant
@@ -127,6 +139,17 @@ func pathRequirement(permission accesscontrol.Permission, resourceType accesscon
 // even though their transport is mounted by prefix, so newly added Registry
 // endpoints remain denied until this local policy is deliberately extended.
 var controlRESTPolicies = []controlRoutePolicy{
+	{http.MethodGet, "/agent/status", false, nil},
+	{http.MethodGet, "/agent/sessions", false, nil},
+	{http.MethodPost, "/agent/sessions", false, nil},
+	{http.MethodGet, "/agent/sessions/{id}", false, nil},
+	{http.MethodDelete, "/agent/sessions/{id}", false, nil},
+	{http.MethodGet, "/agent/sessions/{id}/messages", false, nil},
+	{http.MethodPost, "/agent/responses", false, nil},
+	{http.MethodPost, "/agent/client-tools/{id}", false, nil},
+	// Approval grants are conversation-scoped; they do not bypass tool permissions.
+	{http.MethodPost, "/agent/approvals/{id}", false, nil},
+
 	{http.MethodGet, "/auth/whoami", false, nil},
 	{http.MethodPost, "/auth/cli/logout", false, nil},
 	{http.MethodGet, "/oauth/connected-apps", false, nil},

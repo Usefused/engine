@@ -21,16 +21,17 @@ test("opening details requires a person selection", () => {
   assert.doesNotMatch(peopleRoute, /return users\[0\]/);
 });
 
-// Preserves the accessible dialog contract used by keyboard and screen-reader users.
+// Keeps dialog semantics without hiding the assistant when it is an available sibling.
 test("person details drawer exposes dialog and close semantics", () => {
-  assert.match(peopleRoute, /role="dialog" aria-modal="true"/);
+  assert.match(peopleRoute, /role="dialog" aria-modal=\{!agent\?\.isOpen\}/);
   assert.match(peopleRoute, /aria-labelledby="person-details-title"/);
   assert.match(peopleRoute, /aria-label="Close person details"/);
   assert.match(peopleRoute, /onClose=\{\(\) => setSelectedId\(""\)\}/);
 });
 
-// Keeps dense person controls wide while preventing a horizontal scrollbar.
+// Keeps dense controls inside the available workspace when the assistant takes part of the viewport.
 test("person details use a wide drawer with vertical scrolling only", () => {
+  assert.match(peopleRoute, /md:w-\[calc\(100%-4rem\)\]/);
   assert.match(peopleRoute, /md:max-w-\[940px\] xl:max-w-\[1080px\]/);
   assert.match(peopleRoute, /overflow-y-auto overflow-x-hidden/);
   assert.doesNotMatch(peopleRoute, /role="tablist"/);

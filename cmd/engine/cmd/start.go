@@ -1028,6 +1028,8 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	r.Use(controlActorMiddlewareWithAudit(deps.controlAuth, auditRecorder, deps.browserCookies))
 	r.Use(controlGraphQLAuditMiddleware(auditRecorder))
 	r.Use(controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, newControlRequirementResolver(deps.engineStore, deps.configStore), auditRecorder))
+	// Workspace-wide agent transport shares the authenticated control origin.
+	mountFusedAgent(r, deps)
 	api.MountBrowserSessionRoutes(r, deps.browserSession)
 	api.MountManagedIdentityRoutes(r, deps.managedLogin, deps.browserCookies)
 	api.MountCLILoginRoutes(r, deps.cliLogin, deps.browserSession)
