@@ -121,7 +121,8 @@ jobs:
           pattern: agent-runtime-*
           path: agent-artifacts
       - name: Stage agent and native runtime checksums
-        run: python3 .github/scripts/stage-engine-agent.py --input agent-artifacts
+        # Keep tracked development inputs unchanged so GoReleaser can validate the tagged checkout.
+        run: python3 .github/scripts/stage-engine-agent.py --input agent-artifacts --assets internal/agentbundle/release-assets
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v5

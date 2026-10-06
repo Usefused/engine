@@ -7,7 +7,6 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
-	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,12 +19,6 @@ import (
 	"strings"
 	"time"
 )
-
-//go:embed assets/agent.tar.gz
-var artifact []byte
-
-//go:embed assets/runtimes.json
-var runtimeManifest []byte
 
 type runtimeEntry struct {
 	SHA256  string `json:"sha256"`

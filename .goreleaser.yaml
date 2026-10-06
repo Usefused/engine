@@ -10,6 +10,9 @@ builds:
   - id: fused-engine
     main: ./cmd/engine
     binary: fused-engine
+    # Release builds consume verified generated assets, never the local-build fallback.
+    tags:
+      - fused_agent_release
     env:
       - CGO_ENABLED=0
     goos:
@@ -36,6 +39,7 @@ builds:
       - arm64
     tags:
       - headless
+      - fused_agent_release
     ldflags:
       - -s -w -X github.com/Usefused/engine/cmd/engine/cmd.Version={{.Version}} -X github.com/Usefused/engine/cmd/engine/cmd.BuildHash={{.FullCommit}}
 

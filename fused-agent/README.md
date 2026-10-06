@@ -55,3 +55,9 @@ Compile with `runtime/build.py --compile-only --python <python3.12> --output <di
 Compilation uses inert gateway placeholders; runtime settings are supplied by
 Engine at launch. The portable-runtime integration test exercises skill discovery,
 loading, frontend reads/edits, continuation, follow-ups and cross-actor isolation.
+
+Release CI stages verified agent inputs into the ignored
+`internal/agentbundle/release-assets/` directory. GoReleaser builds both Engine
+variants with `fused_agent_release` to embed those inputs; missing staging fails
+compilation. Ordinary local builds use the checked-in `assets/` bundle. This keeps
+release generation from modifying tracked files before GoReleaser's Git checks.

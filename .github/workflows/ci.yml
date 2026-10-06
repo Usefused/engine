@@ -63,7 +63,10 @@ jobs:
           pattern: agent-runtime-*
           path: agent-artifacts
       - name: Stage and test the real agent runtime
-        run: python3 .github/scripts/stage-engine-agent.py --input agent-artifacts
+        run: |
+          python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+          python3 .github/scripts/stage-engine-agent.py --input agent-artifacts
+          python3 .github/scripts/stage-engine-agent.py --input agent-artifacts --assets internal/agentbundle/release-assets
 
       - name: Authenticate shared OAuth core
         uses: ./.github/actions/setup-private-core
@@ -110,6 +113,8 @@ jobs:
       - name: Build headless
         run: |
           go build -tags headless -o /tmp/fused-engine-headless ./cmd/engine
+          # Exercise release-only embedding before publication, including the generated runtime manifest.
+          go test -tags fused_agent_release ./internal/agentbundle
           # Build the separate sandbox executable before exercising either image variant.
           CGO_ENABLED=0 go build -tags headless -o /tmp/fused-execution-worker ./cmd/execution-worker
 

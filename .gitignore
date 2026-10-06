@@ -22,6 +22,8 @@ runtime/execution/dist/**
 # Locally built agent archives are release artifacts, not source inputs.
 /agent-release/
 /agent-artifacts/
+# Release inputs are generated without overwriting the tracked local-build bundle.
+/internal/agentbundle/release-assets/
 /.agent-compiler/
 /fused-agent/.harnest/
 # Interpreter caches are local build byproducts, not agent source.
