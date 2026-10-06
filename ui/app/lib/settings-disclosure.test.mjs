@@ -16,11 +16,11 @@ const branding = readFileSync(
   "utf8",
 );
 
-// This contract leaves the first Engine Endpoints card visible while every
+// This contract leaves the first Fused Endpoints card visible while every
 // following disclosure starts collapsed and remains keyboard-native.
 test("settings disclosures start collapsed after the first card", () => {
   assert.match(disclosure, /useState\(false\)/);
-  assert.ok(settings.indexOf("Engine Endpoints") < settings.indexOf("<ConnectBrandingCard"));
+  assert.ok(settings.indexOf("Fused Endpoints") < settings.indexOf("<ConnectBrandingCard"));
   assert.match(disclosure, /<button[\s\S]*type="button"/);
   assert.match(disclosure, /aria-expanded=\{expanded\}/);
   assert.match(disclosure, /aria-controls=\{contentID\}/);

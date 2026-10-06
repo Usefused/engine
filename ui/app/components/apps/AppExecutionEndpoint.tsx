@@ -10,6 +10,6 @@ export function AppExecutionEndpoint({ appID }: { appID: string }) {
   const isPath = endpoint.startsWith("/");
   return <div className="mt-3 space-y-2"><CopyValue value={endpoint} label={isPath ? "execution path" : "execution URL"} prefix="POST" />
     {/* A missing public origin is explicit rather than silently using the website's host. */}
-    {isPath && <p className="text-xs text-slate-500">Use this path with your Engine URL.</p>}
+    {isPath && <p className="text-xs text-slate-500">Use this path with your Fused URL.</p>}
   </div>;
 }

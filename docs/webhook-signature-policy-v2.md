@@ -23,19 +23,19 @@ key remains a bucket reference. The complete credential-free example is in
 [the shared fixture](../../contract-fixtures/signature/v2_authenticated_challenge.json).
 Its bucket and key names are test placeholders, not production configuration.
 
-Both Registry admission and Engine validation reject v2 fields in a v1 policy.
+Both Registry admission and Fused validation reject v2 fields in a v1 policy.
 Registry derives `webhook.signature.recipes.v2` in addition to the base recipe
-capability when a version has webhooks using a v2 policy. Engines advertise support
-explicitly. The GraphQL schema, both Engine metadata queries, and CLI JSON/YAML
+capability when a version has webhooks using a v2 policy. Fused deployments advertise support
+explicitly. The GraphQL schema, both Fused metadata queries, and CLI JSON/YAML
 transport retain these fields. Existing v1 standalone challenges remain explicit
-legacy behavior; they do not gain authentication merely by upgrading the Engine.
+legacy behavior; they do not gain authentication merely by upgrading Fused.
 Signature credentials now require a matching declared prefix and a single value.
 
 Timestamp validation bounds replay age; it is not event deduplication. The existing
 publisher assigns message IDs independently of a provider's event identity.
-Cross-Engine recipient authorization, provider event deduplication and remote
+Cross-Fused recipient authorization, provider event deduplication and remote
 acknowledgements are separate work. This policy does not authorize forwarding to
-another Engine or prove ownership of a provider workspace.
+another Fused deployment or prove ownership of a provider workspace.
 
 Coverage includes verifier tampering and freshness tests, signed versus unsigned
 challenge HTTP ingress, no publication on rejection or challenge, GraphQL field

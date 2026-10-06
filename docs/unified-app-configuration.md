@@ -21,7 +21,7 @@ services:
 ```
 
 Use the service reference and version from your workspace. Both the type and
-scheme name identify the credential. When auth is omitted, Engine checks credential
+scheme name identify the credential. When auth is omitted, Fused checks credential
 metadata in the service's selected bucket (including a per-service override).
 If exactly one compatible scheme has all required credentials, planning selects
 it. Multiple ready schemes require an explicit choice; no ready scheme retains
@@ -49,7 +49,7 @@ separate from the immutable YAML and compiled source. Existing app versions keep
 their current family tokens. CLI initialization offers the same choice through
 `fused-cli init --no-token`.
 
-Unified App, SDK and MCP builders use Engine's `credential_readiness` plan result
+Unified App, SDK and MCP builders use Fused's `credential_readiness` plan result
 to warn before publishing when selected credentials are missing. The warning
 names each service, auth scheme and its resolved bucket, including per-service
 overrides. **Add credentials** opens the bucket in a new tab so the app draft
@@ -80,14 +80,14 @@ OAuth/OIDC can use the existing `auth.ref` syntax to reuse an eligible credentia
 Credential values stay in buckets.
 
 The UI keeps `source_path: app.ts` and sends the current TypeScript inline when
-compiling through the same Engine plan/apply API as the CLI. Use the service
+compiling through the same Fused plan/apply API as the CLI. Use the service
 picker to change providers or versions; the YAML editor preserves their exact
 reviewed identities. Invalid YAML blocks compilation until corrected. Existing
 apps keep their family name and default bucket when creating a successor.
 
 The CLI can load a local `source_path`; advanced compiled deployments may instead
 use `bundle_digest`. These source modes are mutually exclusive. Optional hosted
-MCP metadata uses `mcp.description`; Engine enforces its permission and explicit
+MCP metadata uses `mcp.description`; Fused enforces its permission and explicit
 event-selection requirements. `language`, when supplied, must be `typescript`,
 and Unified Apps cannot request SDK package generation.
 
@@ -103,19 +103,19 @@ compile, then deploy a new version separately.
 
 If the code already matches the selected contract, Fused can return **No code
 changes** with an explanation and next check instead of a code change. Pasted
-errors are investigation context; the AI does not inspect your running Engine or
+errors are investigation context; the AI does not inspect your running Fused or
 execute provider requests. A review without changes leaves your source intact.
 
 Validation and compilation do not execute provider operations or verify that
 customer/price IDs exist. Provider array/object schemas remain application data;
-Engine handles wire serialization, including indexed nested form fields such as
-`line_items[0][price]`. An Engine transport defect should be fixed in Engine, not
+Fused handles wire serialization, including indexed nested form fields such as
+`line_items[0][price]`. A Fused transport defect should be fixed in Fused, not
 worked around by changing the app to send an incorrect provider data shape.
 
 ## Execution errors
 
 Failed service calls preserve their error explanation in the Unified App result
-and receipt. For JSON provider failures, Engine extracts the error message
+and receipt. For JSON provider failures, Fused extracts the error message
 (including Stripe's `error.message`) with the HTTP status. Input-validation
 failures also identify the invalid or missing input before dispatch. Authored
 code can catch these failures using `error.message` or let the app fail with the

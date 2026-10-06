@@ -32,7 +32,7 @@ Only non-empty `search_docs.query` calls use the classifier. An exact
 `operationId`, section lookup, or empty-query browse remains local. Jev chooses
 one best matching physical operation, or no match. The result retains
 query-mode schema packing and pagination guidance; it never authorizes execution
-or upgrades to exact-lookup pagination controls. The Engine checks the returned
+or upgrades to exact-lookup pagination controls. Fused checks the returned
 name against the token-authorized catalogue before returning any documentation.
 
 Classifier failures produce an explicit tool error without silently switching to
@@ -46,14 +46,14 @@ batch winners, keeping every authorized candidate in consideration.
 
 ## Registry operation
 
-Set `FUSED_CLASSIFIER_JEV_API_KEY` on the Registry process. Never place it in an
-Engine config, MCP config, bucket, generated artifact, or browser. The Registry
+Set `FUSED_CLASSIFIER_JEV_API_KEY` on the Registry process. Never place it in a
+Fused config, MCP config, bucket, generated artifact, or browser. The Registry
 calls the fixed TypeSafe endpoint with the pinned `jev-1.13.0` model, following
 [TypeSafe's Choice contract](https://docs.typesafe.ai/primitives/choice).
 
-Engine calls `POST /api/engine/fused-intelligent-classifier` with its existing
+Fused calls `POST /api/engine/fused-intelligent-classifier` with its existing
 Fused license through the shared Registry transport. Suspended or unauthorized
-accounts are rejected by the existing Engine authentication middleware. No new
+accounts are rejected by the existing Fused authentication middleware. No new
 customer key or unrestricted Jev proxy is introduced. This endpoint currently
 supports operation selection only:
 
@@ -81,8 +81,8 @@ Registry's configured chat model; operation selection uses Jev. The CLI displays
 the Jev disclosure before resolution and requires interactive proposal review
 before applying anything.
 
-CLI calls Engine's `classifyPromptOperation` query with service ID, exact version,
-and one operation intent. Engine requires `catalogue.read`, obtains the complete
+CLI calls Fused's `classifyPromptOperation` query with service ID, exact version,
+and one operation intent. Fused requires `catalogue.read`, obtains the complete
 visible version's operation names and descriptions from Registry, and sends the
 bounded catalogue to the existing classifier endpoint. Customers provide neither
 candidate catalogues nor a Jev key. Exact operation IDs bypass inference; no-match,

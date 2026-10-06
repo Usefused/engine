@@ -1,8 +1,10 @@
-# Fused Engine
+<a id="fused-engine"></a>
+
+# Fused
 
 Fused is an integration gateway for applications and AI agents. Connect to
 internal and external services through typed SDKs, a direct API, or MCP servers,
-with credentials, access policies, retries, and execution records handled by the Engine.
+with credentials, access policies, retries, and execution records handled by Fused.
 
 **[Documentation](https://usefused.com/docs)** ·
 [Quickstart](https://usefused.com/docs/quickstart) ·
@@ -11,13 +13,13 @@ with credentials, access policies, retries, and execution records handled by the
 ## How it works
 
 - **Registry** turns API descriptions into versioned service contracts.
-- **Engine** runs approved operations in your workspace and manages provider credentials.
+- **Fused** runs approved operations in your workspace and manages provider credentials.
 - **CLI** configures workspaces, SDKs, and MCP servers through a reviewed `plan` → `apply` workflow.
 
 ## Install and start
 
 You need **PostgreSQL 16+** and a **[Fused license key](https://usefused.com/signup)**.
-Install the Engine and CLI on macOS or Linux:
+Install Fused and the CLI on macOS or Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Usefused/engine/main/install.sh | bash
@@ -25,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/Usefused/cli/main/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Set your database connection, license key, and encryption key, then start the Engine.
+Set your database connection, license key, and encryption key, then start Fused.
 Generate an encryption key once with `openssl rand -base64 32` and keep it for
 subsequent starts so stored credentials remain readable.
 
@@ -36,12 +38,12 @@ export FUSED_ENCRYPTION_KEY='<your-generated-encryption-key>'
 fused-engine start
 ```
 
-The Engine creates its database tables and starts embedded NATS automatically.
+Fused creates its database tables and starts embedded NATS automatically.
 Open the Admin UI at [localhost:8081](http://localhost:8081); SDK gRPC listens on `:50051`.
 
 For file-based configuration, see **[engine.yaml](https://github.com/Usefused/engine/blob/main/engine.yaml)**
 and start with `fused-engine start --config /path/to/engine.yaml`.
-See [Engine configuration](docs/engine-configuration.md) for supported YAML fields
+See [Fused configuration](docs/engine-configuration.md) for supported YAML fields
 and their environment-variable equivalents. Startup copies declared YAML settings
 into unset environment settings before consumers initialize; existing environment
 configuration remains supported.
@@ -57,13 +59,13 @@ fused-cli whoami
 ```
 
 See the [deployment guide](https://usefused.com/docs/deploy-an-engine) for Docker
-and hosted Engine setup.
+and hosted Fused setup.
 
 ## Create an integration interface
 
-With the Engine running, give your application or agent a way to call the
+With Fused running, give your application or agent a way to call the
 services it needs. `fused-cli init` creates an integration interface exposing
-the operations you select, while the Engine handles credentials, access
+the operations you select, while Fused handles credentials, access
 policies, and execution.
 
 Choose a typed SDK to call services from your code, an MCP server to make tools

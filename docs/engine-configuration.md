@@ -1,4 +1,6 @@
-# Engine configuration
+<a id="engine-configuration"></a>
+
+# Fused configuration
 
 Start Fused with `fused-engine start --config /path/to/engine.yaml`.
 A missing or empty file retains the existing environment-only startup behavior.
@@ -17,7 +19,7 @@ For the settings below, precedence is:
 4. Existing subsystem defaults.
 
 Omitted YAML keys do not export their defaults or clear environment variables.
-Restart the Engine to apply changes. The existing license-key source resolution
+Restart Fused to apply changes. The existing license-key source resolution
 is unchanged and is separate from this operator-settings bridge.
 
 ```yaml
@@ -57,7 +59,7 @@ engine:
 | `server.webhook_port` | `FUSED_ENGINE_WEBHOOK_PORT` | Empty shares HTTP; `--webhook-port` |
 
 Listener environment variables are also supported when there is no YAML file.
-Pool minimum connections remain zero so idle Engines can release database slots.
+Pool minimum connections remain zero so idle Fused deployments can release database slots.
 
 ## NATS
 

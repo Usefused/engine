@@ -1,6 +1,6 @@
 # REST app execution
 
-The Engine exposes one data-plane REST route for an immutable SDK version or a
+Fused exposes one data-plane REST route for an immutable SDK version or a
 stable Unified App family. SDK apps invoke a selected provider operation; Unified Apps invoke
 their authored `execute`. The route is shared, but the response shapes differ.
 
@@ -11,7 +11,7 @@ Content-Type: application/json
 Idempotency-Key: issue-from-search-42
 ```
 
-The bearer credential is an app-family execution token, not a workspace API key, control-plane credential, provider token, or MCP session token. SDK callers supply the exact version `app_id`. Unified App callers supply `app_family_id`; Engine resolves the persisted traffic target on each request and validates the family token against that version. Unified App version IDs are rejected with `400 app_family_id_required`. Responses use `Cache-Control: no-store`.
+The bearer credential is an app-family execution token, not a workspace API key, control-plane credential, provider token, or MCP session token. SDK callers supply the exact version `app_id`. Unified App callers supply `app_family_id`; Fused resolves the persisted traffic target on each request and validates the family token against that version. Unified App version IDs are rejected with `400 app_family_id_required`. Responses use `Cache-Control: no-store`.
 
 ## Request
 
@@ -37,9 +37,9 @@ The body is a strict JSON document. Unknown and duplicate fields are rejected.
 }
 ```
 
-`operation` names one selected physical operation. The Engine returns `409 operation_ambiguous` if multiple physical operations share that name. `input` must be a non-null JSON object; `selector` may contain only the five routing fields shown above. Graph fields such as `targets` and `selectors` are rejected.
+`operation` names one selected physical operation. Fused returns `409 operation_ambiguous` if multiple physical operations share that name. `input` must be a non-null JSON object; `selector` may contain only the five routing fields shown above. Graph fields such as `targets` and `selectors` are rejected.
 
-The Engine accepts at most 1 MiB of request JSON. Provider credentials and arbitrary secret-shaped selector fields cannot be supplied through this route.
+Fused accepts at most 1 MiB of request JSON. Provider credentials and arbitrary secret-shaped selector fields cannot be supplied through this route.
 
 ## Idempotency
 
@@ -69,7 +69,7 @@ This initial REST surface accepts only a single JSON provider response up to
 `502 response_too_large`. Generated SDK and MCP transports retain their existing
 media capabilities.
 
-Errors are bounded Engine-owned envelopes. Provider bodies and tokens are never returned:
+Errors are bounded Fused-owned envelopes. Provider bodies and tokens are never returned:
 
 ```json
 {
@@ -101,7 +101,7 @@ Zod-validated input to `POST /v1/apps/{app_family_id}/executions`:
 The REST request cannot supply `selector`, `selectors`, `targets`, or
 `pagination`; authored code selects its workspace operations and may pass a
 page bound to `fused.fetch`. The family URL and execution token stay unchanged
-when traffic switches. New requests resolve the promoted version; Engine never
+when traffic switches. New requests resolve the promoted version; Fused never
 guesses a latest version when the traffic target is absent. Exact version IDs
 remain internal execution and control-plane identities.
 
@@ -137,7 +137,7 @@ version and its declared searchable paths.
 
 ## Export an OpenAPI document
 
-Export the callable schema for one immutable SDK Version ID from the Engine
+Export the callable schema for one immutable SDK Version ID from Fused
 control plane:
 
 ```http
@@ -148,7 +148,7 @@ X-API-Key: <control-plane-credential>
 The path accepts the exact SDK `app_id` UUID (shown as **Version ID** by
 `fused-cli`), not an SDK name, SDK ID, or a request for the latest version.
 The caller needs `app.read` on that SDK. This GET uses the ordinary
-Engine control credential; an SDK execution token cannot authorize it.
+Fused control credential; an SDK execution token cannot authorize it.
 
 The response is an OpenAPI 3.1 JSON document for that pinned version's selected
 physical operations. It documents only the real
@@ -172,9 +172,9 @@ on a generic checked-in example that could drift from the selected schemas.
 
 ### Unified App compilation and host isolation
 
-Inline-source planning type-checks and bundles TypeScript in Node without evaluating authored code. Engine inspects declarations and runs Unified Apps in its OS-confined Goja worker. Local manifest/client generation invokes `fused-engine inspect-unified-app-bundle`. There is no fallback to Node VM or unconfined in-process evaluation.
+Inline-source planning type-checks and bundles TypeScript in Node without evaluating authored code. Fused inspects declarations and runs Unified Apps in its OS-confined Goja worker. Local manifest/client generation invokes `fused-engine inspect-unified-app-bundle`. There is no fallback to Node VM or unconfined in-process evaluation.
 
-One persistent worker process serves each app family on each Engine instance. The confined worker compiles its immutable JavaScript bundle once at load time and reuses that program until the version retires. Each invocation receives a fresh Goja runtime, including fresh module state and globals; no runtime objects or host callbacks are cached. Cached executions report zero compilation duration in the existing phase metadata. Up to four invocations run concurrently per family, further limited by the account's `MaxUnifiedAppConcurrency`. A bounded 32-entry admission gate includes running and waiting requests; saturation rejects new requests. Different families run concurrently. Provider/database calls within each invocation are limited to four active calls and 32 total calls. Engine retains authorization and credentials outside the child. Promotion drains the old version before replacing its process. No Docker container is launched per app or per request.
+One persistent worker process serves each app family on each Fused instance. The confined worker compiles its immutable JavaScript bundle once at load time and reuses that program until the version retires. Each invocation receives a fresh Goja runtime, including fresh module state and globals; no runtime objects or host callbacks are cached. Cached executions report zero compilation duration in the existing phase metadata. Up to four invocations run concurrently per family, further limited by the account's `MaxUnifiedAppConcurrency`. A bounded 32-entry admission gate includes running and waiting requests; saturation rejects new requests. Different families run concurrently. Provider/database calls within each invocation are limited to four active calls and 32 total calls. Fused retains authorization and credentials outside the child. Promotion drains the old version before replacing its process. No Docker container is launched per app or per request.
 
 Resident family admission follows the live `MaxUnifiedAppFamilies` account entitlement. Explicit zero denies new families; negative/missing limits remain unlimited. Family startup occurs outside the manager's global mutex so an unrelated family can continue executing. Two compiler pipelines and four transient inspection/direct-execution workers are admitted concurrently. Compiler diagnostics are bounded to 64 KiB. Account limits are not memory reservations; deployment-level memory, CPU, and process limits remain necessary.
 
@@ -184,12 +184,14 @@ macOS has a parent-applied deny-default `sandbox-exec` profile and Unix resource
 
 `/health` reports `unified_app_worker_ready` from a real isolated worker probe. `FUSED_UNIFIED_APP_WORKER_REQUIRED=true` returns HTTP 503 when that probe fails. Packaged worker presence alone does not prove readiness: namespace restrictions, seccomp, and AppArmor can reject startup. Source compilation also requires Node. MCP continues to use its existing Node/session runtime.
 
-### Engine-wide execution admission
+<a id="engine-wide-execution-admission"></a>
+
+### Fused-wide execution admission
 
 All Unified App invocations (direct, attached SDK/MCP, replay, and rerun) share
-one execution budget per Engine server, in addition to existing plan and
+one execution budget per Fused server, in addition to existing plan and
 per-family limits. The default is `max(1, GOMAXPROCS - 1)` concurrent invocations,
-computed when Engine configuration loads. On a two-CPU Engine this normally admits
+computed when Fused configuration loads. On a two-CPU Fused this normally admits
 one invocation at a time, leaving scheduling headroom for control requests.
 This limits concurrent work; it is not a dedicated CPU reservation. An invocation
 holds its slot while awaiting provider calls too, so I/O-heavy deployments may
@@ -206,8 +208,8 @@ engine:
 ```
 
 Omitted fields use the defaults below. Explicit environment overrides take
-precedence over YAML; YAML takes precedence over defaults. These are Engine
-operator settings, not per-app source configuration. Restart the Engine after
+precedence over YAML; YAML takes precedence over defaults. These are Fused
+operator settings, not per-app source configuration. Restart Fused after
 changing them. The worker Compose example passes through only explicitly set
 admission environment variables, preserving mounted YAML settings.
 
@@ -219,10 +221,10 @@ Equivalent environment overrides:
 | `FUSED_UNIFIED_APP_QUEUE_CAPACITY` | 256 waiting requests | 1–65536 |
 | `FUSED_UNIFIED_APP_QUEUE_TIMEOUT_SECONDS` | 5 seconds | 1–300 |
 
-Invalid overrides fail startup. Changes require restarting the Engine. Queued
+Invalid overrides fail startup. Changes require restarting Fused. Queued
 families receive turns in round-robin order; requests within a family remain FIFO.
 Each family retains its existing 32-request running-plus-waiting bound. Queue
-waits respect caller cancellation and Engine shutdown. A disconnected caller's
+waits respect caller cancellation and Fused shutdown. A disconnected caller's
 running slot is retained until its worker completes or is terminated, preventing
 abandoned work from bypassing the budget. Cold worker startup for an invocation
 uses the same budget.
@@ -231,14 +233,14 @@ Admission failures are retained as terminal execution results with public error
 codes `execution_capacity_exceeded` (queue full) or `execution_queue_timeout`
 (wait expired). No authored code or provider operation starts for these failures.
 Read the execution envelope's status and error code, not HTTP status alone.
-Engine does not automatically retry executions. Existing execution receipts and
+Fused does not automatically retry executions. Existing execution receipts and
 permission-gated private diagnostics remain the history source.
 
-The Engine-owned OTEL provider exports `engine.unified_app.admission.wait`
+Fused-owned OTEL provider exports `engine.unified_app.admission.wait`
 (seconds) and `engine.unified_app.admission.requests`, with bounded `outcome`
 values `admitted`, `full`, `timeout`, and `cancelled`. The runtime span also carries
 `admission.wait_ms` and `admission.outcome`. These measurements exclude payloads,
-credentials, and error text. Budgets are per Engine instance, not a distributed
+credentials, and error text. Budgets are per Fused instance, not a distributed
 quota across replicas.
 
 ### Unified App failure messages

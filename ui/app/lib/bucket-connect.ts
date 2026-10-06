@@ -49,7 +49,7 @@ export function bucketConnectVariables(input: BucketConnectInput, origin: string
 export function bucketAuthorizeURL(value: string): string {
   const url = new URL(value);
   // OAuth consent and Engine's hosted input page both require ordinary web navigation.
-  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Engine returned an invalid connection URL.");
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Fused returned an invalid connection URL.");
   return url.href;
 }
 

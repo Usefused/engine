@@ -199,7 +199,7 @@ export function ConnectBrandingCard() {
     <SettingsDisclosureCard
       id="connect-branding-settings"
       title="Connect branding"
-      description="Customize the Engine-hosted pages customers see before and after an OAuth provider handoff."
+      description="Customize Fused-hosted pages customers see before and after an OAuth provider handoff."
     >
       {content}
     </SettingsDisclosureCard>
@@ -299,7 +299,7 @@ function BrandingConfirmation({
         Confirm branding changes
       </h3>
       <p id="connect-branding-confirm-description" className="mt-1 text-sm text-slate-600">
-        Review which fields will change and whether external assets or links are configured before updating Engine-hosted connection pages.
+        Review which fields will change and whether external assets or links are configured before updating Fused-hosted connection pages.
       </p>
       <dl className="mt-4 grid gap-2 text-sm sm:grid-cols-2">
         <SummaryFact label="App name" value={changeLabel(summary.displayNameChanged)} />

@@ -2,11 +2,11 @@
 
 An import has two owners:
 
-1. Registry builds the reviewed import in a rollback-only transaction. Engine
+1. Registry builds the reviewed import in a rollback-only transaction. Fused
    validates that exact runtime candidate, and Registry binds apply to its hash.
 2. Registry validates and commits the service/version, operations, webhooks,
    source metadata, and import-plan state in its publication transaction.
-3. Engine fetches and independently validates the published runtime snapshot,
+3. Fused fetches and independently validates the published runtime snapshot,
    then activates that exact version in the workspace.
 
 A failure with `phase: engine_preflight` and `commit_state: not_committed`
@@ -14,30 +14,30 @@ occurs before publication. Correct the reviewed contract and retry the exact
 receipt command only when the response marks it retryable.
 
 A Registry pre-commit write failure rolls back its transaction. A lost commit
-acknowledgement is ambiguous, not proof of rollback. An Engine activation
+acknowledgement is ambiguous, not proof of rollback. A Fused deployment activation
 failure after publication does **not** undo the committed Registry data.
 
 ## If apply returns HTTP 424
 
 Check the structured error for `import_workspace_activation_failed`,
 `phase: workspace_activation`, and `commit_state: committed`. Retain the
-operation/request IDs and run the exact `recovery` command returned by Engine
+operation/request IDs and run the exact `recovery` command returned by Fused
 after fixing the reported contract or access issue. It targets workspace
 activation, not a second publication. Neither the CLI nor the UI should report
 this result as complete success.
 
 The import operation-status endpoint describes Registry publication. An
-`applied` publication alone does not prove Engine workspace activation. Verify
+`applied` publication alone does not prove Fused workspace activation. Verify
 the exact service version in the workspace after recovery.
 
 ## If startup reports deferred recovery
 
 `Owned service recovery deferred` means an owned version was deliberately left
 unactivated. The log includes the requested service/version IDs and the
-`blocking_service_version_id`. The Engine can start without that version; its
+`blocking_service_version_id`. Fused can start without that version; its
 existing pins are not updated or deleted.
 
-An Engine-side validation rejection can be isolated from valid peers in the
+A validation rejection from Fused can be isolated from valid peers in the
 same response. A Registry-side typed rejection fails the entire batch, so all
 missing versions in that batch remain deferred until its blocking version is
 repaired. Startup does not make one fallback request per service. An older
@@ -50,7 +50,7 @@ Startup retry alone cannot repair malformed source data.
 
 ## Verification for maintainers
 
-From the Engine repository:
+From Fused repository:
 
 ```bash
 env -u DATABASE_URL go test ./internal/engine/sandbox ./internal/engine/api ./internal/engine/store

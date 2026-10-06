@@ -309,15 +309,17 @@ function CrossEngineInsights({ serviceId, isPublic }: { serviceId: string; isPub
     const endDate = new Date();
     const startDate = new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
     api.workspace.getPublicServiceInsights({ serviceId, startDate: startDate.toISOString(), endDate: endDate.toISOString(), granularity: "day" })
-      .then(setInsights).catch(() => setError("Cross-engine insights are temporarily unavailable. Activity from this Engine is unaffected."))
+      .then(setInsights).catch(() => setError("Aggregate insights are temporarily unavailable. Activity from this Fused workspace is unaffected."))
       .finally(() => setLoading(false));
   }, [isPublic, serviceId]);
-  if (!isPublic) return <ActivityNotice>Cross-engine insights are available after this service is public.</ActivityNotice>;
-  if (loading) return <div className="flex items-center gap-2 py-12 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin text-blue-600" />Loading cross-engine insights...</div>;
+  // Public aggregation is available only after the service is shared.
+  if (!isPublic) return <ActivityNotice>Aggregate insights are available after this service is public.</ActivityNotice>;
+  // Keep the aggregate loading state separate from local activity.
+  if (loading) return <div className="flex items-center gap-2 py-12 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin text-blue-600" />Loading aggregate insights...</div>;
   if (error) return <ActivityNotice>{error}</ActivityNotice>;
   if (!insights || insights.total_calls === 0) return <ActivityNotice>No other Fused users have used this service in the last 30 days.</ActivityNotice>;
   return (
-    <section className="space-y-6" aria-label="Cross-engine service activity">
+    <section className="space-y-6" aria-label="Aggregate service activity">
       <div className="grid grid-cols-1 gap-2 min-[360px]:grid-cols-2 sm:gap-3 lg:grid-cols-4">
         <Metric label="Calls" value={insights.total_calls} icon={Code2} />
         <Metric label="Failed" value={insights.failed_calls} icon={XCircle} />
@@ -525,12 +527,13 @@ export function ExecutionDetails({ event, appNames }: { event: EngineExecutionEv
   );
 }
 
+/** Separates provider time from work performed by Fused using recorded timing evidence. */
 function executionTimingRows(event: EngineExecutionEventEntry) {
   const providerLatency = event.provider_latency_ms;
   const engineLatency = providerLatency == null ? null : Math.max(0, event.latency_ms - providerLatency);
   return [
     { label: "Total", value: event.latency_ms }, { label: "Provider round trip", value: providerLatency },
-    { label: "Engine work", value: engineLatency }, { label: "Time to provider headers", value: timingValue(event, "provider_time_to_headers") },
+    { label: "Fused work", value: engineLatency }, { label: "Time to provider headers", value: timingValue(event, "provider_time_to_headers") },
     { label: "Credentials", value: timingValue(event, "credentials_resolution") },
   ];
 }

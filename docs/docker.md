@@ -1,9 +1,9 @@
 # Docker
 
-Engine publishes two image variants:
+Fused publishes two image variants:
 
-- `ghcr.io/usefused/engine:<version>`: Engine with embedded Admin UI.
-- `ghcr.io/usefused/engine:<version>-headless`: Engine API/runtime without the
+- `ghcr.io/usefused/engine:<version>`: Fused with embedded Admin UI.
+- `ghcr.io/usefused/engine:<version>-headless`: Fused API/runtime without the
   embedded UI.
 
 The moving tags `latest` and `headless` are convenient for testing. Production
@@ -30,7 +30,7 @@ through a small Node process without installing `node_modules` at container
 startup or writing shared dependencies into `/app/data`.
 
 Both images also contain the pinned Unified App TypeScript compiler at
-`/app/runtime/execution/dist/src/cli.js`. Engine invokes it while planning a
+`/app/runtime/execution/dist/src/cli.js`. Fused invokes it while planning a
 reviewed app cart, before the app receives traffic. The compiler's `src`,
 `dist`, and production npm dependencies are built into the image; tenant
 workers receive only the compiled JavaScript bundle. Operators do not need to
@@ -45,7 +45,7 @@ Containers need:
 - `FUSED_DATABASE_MAX_CONNS` when the operator needs a ceiling lower than the
   standalone default of `10`
 - `FUSED_DATABASE_MAX_CONN_IDLE_TIME` to release unused pool connections;
-  standalone defaults to `30m`, while Fused-hosted starter Engines use `2m`
+  standalone defaults to `30m`, while hosted Fused deployments on the starter plan use `2m`
 - `FUSED_ENCRYPTION_KEY`
 - `FUSED_ENGINE_PUBLIC_URL` and `FUSED_ENGINE_PUBLIC_GRPC_URL` when the
   embedded UI should show copy-ready external HTTP and gRPC addresses; these
@@ -53,12 +53,12 @@ Containers need:
 - `FUSED_REGISTRY_ENDPOINT` only when Fused support directs you away from the
   production Fused Cloud Registry default
 
-Engine accepts one standard PostgreSQL DSN and has no provider-specific
+Fused accepts one standard PostgreSQL DSN and has no provider-specific
 database branching. It creates or upgrades its own tables through that
 connection during startup. Moving an existing database between providers is a
 separate operator-run data migration.
 
-External NATS is required when horizontally replicating Engine. Set `NATS_URL`
+External NATS is required when horizontally replicating Fused. Set `NATS_URL`
 without embedded credentials, then configure exactly one of
 `NATS_CREDS_FILE`, `NATS_NKEY_SEED_FILE`, `NATS_TOKEN`, or the paired
 `NATS_USERNAME`/`NATS_PASSWORD`. TLS uses `NATS_TLS_CA_FILE`, optional paired

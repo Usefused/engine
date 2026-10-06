@@ -24,7 +24,7 @@ export function PersonalCredentialPanel(props: PersonalCredentialPanelProps): Re
     { className: "rounded-lg border border-slate-200 overflow-hidden" },
     createElement("div", { className: "bg-slate-50 px-4 py-3 border-b border-slate-200" },
       createElement("h3", { className: "text-sm font-semibold text-slate-900" }, "Personal keys"),
-      createElement("p", { className: "text-xs text-slate-500 mt-0.5" }, "Keys let this person sign in to this Engine.")),
+      createElement("p", { className: "text-xs text-slate-500 mt-0.5" }, "Keys let this person sign in to this Fused workspace.")),
     props.issuedSecret ? issuedSecretNotice(props.issuedSecret, props.onClearSecret) : null,
     createElement("form", { onSubmit: submit, className: "flex flex-wrap items-end gap-2 p-4 border-b border-slate-100" },
       createElement("label", { className: "min-w-0 flex-[1_1_12rem] flex flex-col gap-1" },

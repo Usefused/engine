@@ -79,7 +79,7 @@ function GenerationModeHeader({ generationMode }: { generationMode: AppCreationM
     : generationMode === "mcp"
     ? "Configure the MCP server your agent connects to."
     : generationMode === "api"
-      ? "Configure the Engine REST API your app calls."
+      ? "Configure the Fused REST API your app calls."
       : "Configure the generated package your app imports.";
   return (
     <div className="border-b border-slate-200 bg-slate-50 px-4 py-4">
@@ -164,7 +164,7 @@ function VersionField({ generationMode, appVersion, setAppVersion, setIsDuplicat
             <AlertTriangle className="w-4 h-4" />
           </div>
           <p className="text-xs text-yellow-800 leading-tight">
-            An app with this name and version already exists. Engine will preserve its immutable delivery mode and scope.
+            An app with this name and version already exists. Fused will preserve its immutable delivery mode and scope.
           </p>
         </div>
       )}
@@ -357,7 +357,7 @@ function SdkDeploymentResult({ generationMode, sdkDeployment, sdkTokenCopied, se
       <div className="flex items-center gap-2 font-semibold text-slate-900">
         <Check className="h-4 w-4 text-emerald-600" /> {generationMode === "app" ? "App ready: SDK, MCP, and REST" : isAPI ? "REST API ready" : "SDK ready"}
       </div>
-      <p className="mt-2 text-xs text-slate-500">{generationMode === "app" ? "The package is downloaded, and the same App ID and token work for REST and MCP." : isAPI ? "The API is published on this Engine." : "The package has been downloaded."}</p>
+      <p className="mt-2 text-xs text-slate-500">{generationMode === "app" ? "The package is downloaded, and the same App ID and token work for REST and MCP." : isAPI ? "The API is published in this Fused workspace." : "The package has been downloaded."}</p>
       {sdkDeployment.token && (
         <ExecutionTokenField token={sdkDeployment.token} copied={sdkTokenCopied} onCopy={() => setSdkTokenCopied(true)} />
       )}

@@ -1,13 +1,13 @@
 # OAuth authorization server browser test
 
 This test verifies the complete third-party OAuth2 authorization-code + PKCE
-flow through Engine's own authorization server: client registration, the
+flow through Fused's own authorization server: client registration, the
 server-rendered consent screen, code/token exchange, refresh rotation, the
 end-user "Connected Apps" self-service page, and the security-relevant denial
 and revocation paths. Use a disposable workspace or clean up created OAuth
 clients afterward.
 
-Engine uses `github.com/Usefused/fused-open-core/oauthserver` at
+Fused uses `github.com/Usefused/fused-open-core/oauthserver` at
 `v0.0.0-20260925151058-b91e769354ae`, the same version used by Threadify.
 The Fused adapter supplies browser identity, live permission checks, credential
 prefixes, and PostgreSQL storage. It also preserves explicit-scope consent,
@@ -19,16 +19,16 @@ The former in-tree protocol implementation has been removed. `oauthprovider/serv
 is now the host adapter, and `core_store.go` bridges the shared storage contract.
 Fused-only temporary registration lives in `dynamic_registration.go` because the
 pinned core does not expose that policy. HTTP handlers, consent UI, PostgreSQL
-transactions, and live permission checks remain Engine responsibilities. OAuth
+transactions, and live permission checks remain Fused responsibilities. OAuth
 connections to third-party services are a separate feature and still require
 the `connectauth` implementation. The shared core is a Go dependency embedded in
-Engine, not a remote authorization service.
+Fused, not a remote authorization service.
 
 The local browser smoke test on 2026-10-04 verified denial and successful callback
 state, code exchange, incorrect PKCE rejection, code replay rejection, authenticated
 access, refresh rotation, refresh replay rejection, and Connected Apps disconnection.
 After disconnection, access returned `401` and refresh returned `400 invalid_grant`.
-This used the actual Engine and PostgreSQL with a disposable API-key login and a
+This used the actual Fused and PostgreSQL with a disposable API-key login and a
 test Registry fixture; external SSO and production deployment were not exercised.
 The diagnostic callback page belonged only to the test client, not the product UI.
 
@@ -58,7 +58,7 @@ verify access with an empty temporary `GOMODCACHE` when changing CI authenticati
 
 For automated validation, set `DATABASE_URL` to a disposable PostgreSQL instance
 and run `go test -race ./internal/engine/oauthprovider` and
-`go test ./internal/engine/store -run OAuth` from the Engine repository. The
+`go test ./internal/engine/store -run OAuth` from Fused repository. The
 provider lifecycle test creates and removes an isolated schema and exercises
 the shared server against Fused's real persistence layer. Without `DATABASE_URL`,
 database tests skip; a unit-only pass does not verify those paths.
@@ -69,14 +69,14 @@ telemetry evidence. Redact them in any pasted output.
 
 ## Prerequisites
 
-- Engine HTTP and its embedded UI are running, with an admin browser session
+- Fused HTTP and its embedded UI are running, with an admin browser session
   that holds `access.manage` (for registering clients) and a second, distinct
   end-user browser session that holds at least `service.read` (for the
   consent/grant walkthrough).
 - A terminal HTTP client (`curl`) for the token/refresh/revoke exchanges,
   which are not browser UI surfaces.
 - A reachable HTTPS (or `http://localhost`) redirect URI you control enough to
-  read the `code`/`state`/`error` query parameters Engine appends to it (a
+  read the `code`/`state`/`error` query parameters Fused appends to it (a
   local static page or a request-inspection tool is sufficient).
 - `openssl` or an equivalent to compute a PKCE `S256` code_challenge from a
   code_verifier: `printf '%s' "$VERIFIER" | openssl dgst -sha256 -binary | \
@@ -95,7 +95,7 @@ registration key, or browser session. Send JSON with `name`, `redirect_uri`
 The `201` response contains `client_id`, `client_secret`, and
 `client_id_expires_at` (RFC 3339). Both credentials expire one hour after
 registration; keep the secret in the local application's memory. The response
-is non-cacheable and Engine stores only the secret hash. Registering a client
+is non-cacheable and Fused stores only the secret hash. Registering a client
 does not grant access to any user or workspace.
 
 Each user may consent to at most **10 active dynamic clients** at a time.
@@ -107,7 +107,7 @@ remain protected by the registration endpoint's rate limits.
 
 Access and refresh tokens cannot outlive their client, including after refresh.
 The token response reports the remaining lifetime. Expiry blocks consent, token
-exchange, refresh, and Engine access immediately, without waiting for cleanup.
+exchange, refresh, and Fused access immediately, without waiting for cleanup.
 
 Use that pair for the browser login, consent, and Authorization Code + S256
 PKCE walkthrough below. Send the secret at the token endpoint using HTTP Basic
@@ -151,7 +151,7 @@ client from above.
    `client_id=<client_id>`, `redirect_uri=<your redirect URI>`,
    `scope=service.read`, a random `state`, your `code_challenge`, and
    `code_challenge_method=S256`.
-3. If not already signed in, confirm Engine redirects to the login page first,
+3. If not already signed in, confirm Fused redirects to the login page first,
    then returns to the same authorize request after sign-in.
 4. Confirm the consent screen renders using the workspace's hosted-connect
    branding (name/logo/color), the heading "`<Client name>` wants to access
@@ -163,7 +163,7 @@ client from above.
 6. Repeat from step 2 and this time select **Allow**. Confirm the browser
    lands on your redirect URI with a `code` and the same `state` you sent.
 7. Repeat the authorize request a third time (same client, same scope).
-   Confirm Engine now skips the consent screen entirely and redirects straight
+   Confirm Fused now skips the consent screen entirely and redirects straight
    to a fresh `code`, since consent for this exact scope was already granted.
 
 ## Exchange the code and rotate the refresh token
@@ -192,7 +192,7 @@ above (all one-time-use — capture fresh values if you re-run a step).
    refresh token revokes the entire rotation family, not just the reused
    token.
 6. Confirm the access token from step 1 no longer authenticates any
-   authenticated Engine endpoint once its family has been revoked (e.g. call
+   authenticated Fused endpoint once its family has been revoked (e.g. call
    `/oauth/connected-apps` with it as a Bearer token and expect `401`).
 
 ## Connected Apps (end-user self-service)
@@ -220,7 +220,7 @@ Still as the end-user session from above:
    that `client_id` now renders the generic error page instead of a redirect.
 2. Request `/oauth/authorize` with an unknown or mistyped `client_id`, and
    separately with a valid `client_id` but a `redirect_uri` that was never
-   registered. Confirm both render Engine's own error page ("Connection
+   registered. Confirm both render Fused's own error page ("Connection
    request could not be completed") rather than redirecting anywhere — an
    unverified redirect target must never be used, per RFC 6749 §4.1.2.1.
 3. Request `/oauth/authorize` with a `scope` value the client's registration
@@ -248,7 +248,7 @@ Still as the end-user session from above:
 - A denied consent, an unregistered client/redirect_uri, a client-disallowed
   scope, and a user-permission-exceeding scope are all rejected before any
   code is issued; only scope/access-denied errors ever redirect back to the
-  client, everything else renders Engine's own error page.
+  client, everything else renders Fused's own error page.
 - Authorization codes are single-use and reject wrong redirect_uri/PKCE
   verifier without being consumed by the failed attempt.
 - A reused (replayed) refresh token denies the request AND revokes every

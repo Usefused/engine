@@ -109,17 +109,17 @@ export default function SettingsPage() {
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="p-6">
           <h2 className="text-lg font-semibold text-slate-900">
-            Engine Endpoints
+            Fused Endpoints
           </h2>
           <p className="text-sm text-slate-500 mb-6">
-            Use the Engine URL for the dashboard and HTTP API. Generated SDKs
+            Use the Fused URL for the dashboard and HTTP API. Generated SDKs
             connect to the separate gRPC URL.
           </p>
 
           <div className="space-y-5">
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">
-                Engine Admin URL
+                Fused Admin URL
               </label>
               <div className="flex items-center gap-2">
                 <code className="flex-1 block px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-sm text-slate-800 break-all">
@@ -130,7 +130,7 @@ export default function SettingsPage() {
                   data-track="copy_engine_url"
                   disabled={!engineEndpoints.http}
                   onClick={() =>
-                    copyEndpoint(engineEndpoints.http, "Engine URL")
+                    copyEndpoint(engineEndpoints.http, "Fused URL")
                   }
                   className="px-3 py-2 bg-white border border-slate-300 text-slate-700 text-sm font-medium rounded-md hover:bg-slate-50 disabled:opacity-50 transition-colors"
                 >
@@ -141,13 +141,13 @@ export default function SettingsPage() {
 
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">
-                Engine gRPC URL
+                Fused gRPC URL
               </label>
               <div className="flex items-center gap-2">
                 <code className="flex-1 block px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-sm text-slate-800 break-all">
                   {displayEndpoint(
                     engineEndpoints.grpc,
-                    "Not configured by this Engine operator",
+                    "Not configured by your workspace administrator",
                   )}
                 </code>
                 <button

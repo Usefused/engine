@@ -30,14 +30,14 @@ account suspension, deleted licenses, failed local saves and lost responses.
 
 ## Repeating the live check
 
-Create two disposable local Engine databases named `fused_google_broker_test` and
+Create two disposable local Fused databases named `fused_google_broker_test` and
 `fused_google_consumer_test`. Supply their PostgreSQL URLs through
 `FUSED_GOOGLE_BROKER_DATABASE_URL` and `FUSED_GOOGLE_CONSUMER_DATABASE_URL`.
 Provide `FUSED_GOOGLE_OAUTH_ID` and `FUSED_GOOGLE_OAUTH_SECRET` through a private
 local environment file or secret manager; do not place them on the command line,
 in committed configuration or in test output.
 
-From the Engine module, run:
+From Fused module, run:
 
 ```sh
 FUSED_GOOGLE_LIVE_TEST=1 go test -tags headless ./internal/engine/api \
@@ -56,23 +56,25 @@ remain separate production acceptance work. The test preserves the Google app's
 existing account authorization; it does not globally revoke other grants for the
 same application.
 
-## Separate Engine process acceptance
+<a id="separate-engine-process-acceptance"></a>
+
+## Separate Fused process acceptance
 
 A second live Google run passed on 2026-09-20 using the normal headless
 `cmd/engine` executable in two independent OS processes:
 
 | Component | HTTP port | PostgreSQL database |
 | --- | --- | --- |
-| Broker Engine | 18082 | `fused_process_broker_test` |
-| Consumer Engine | 8081 | `fused_process_consumer_test` |
+| Fused broker | 18082 | `fused_process_broker_test` |
+| Fused consumer | 8081 | `fused_process_consumer_test` |
 | Local Registry harness | 18080 | `fused_process_registry_test` |
 
-The Engines also used separate NATS listeners and JetStream directories. The
+Fused deployments also used separate NATS listeners and JetStream directories. The
 Registry harness used production handshake, heartbeat and enrollment handlers,
 including PostgreSQL ticket issuance/redemption and installation ownership checks.
 It seeded two disposable licensed accounts. Google service metadata and initial
 workspace service enablement were fixtures; external identity provisioning and
-the Registry import/GraphQL implementation were outside this check. Engine
+the Registry import/GraphQL implementation were outside this check. Fused
 control-plane authentication, bucket admission and connect handling were real.
 
 Observed results:
@@ -99,16 +101,16 @@ Observed results:
 
 Fixture support is in `testutil/managedauthprocess/main.go` and the root repository's
 `backend/cmd/registry-demo/main.go`. The helper prepares ordinary encrypted bucket
-records and contract snapshots; it does not run an alternative Engine runtime.
+records and contract snapshots; it does not run an alternative Fused runtime.
 Its `FIXTURE_MODE=nats` starts the isolated buses, `broker`/`consumer` prepare the
-named disposable databases after Engine startup, and `verify` checks the saved
+named disposable databases after Fused startup, and `verify` checks the saved
 consumer token against Google without printing identity data. Setup takes
-`DATABASE_URL`, `METADATA_FILE`, `BUCKET_OUTPUT_FILE`, and the Engine's base64
+`DATABASE_URL`, `METADATA_FILE`, `BUCKET_OUTPUT_FILE`, and Fused's base64
 `FUSED_ENCRYPTION_KEY`; only broker setup receives the Google client pair. The
 Registry harness takes `LICENSE_OUTPUT_FILE` for mode-0600 license output and
 `SERVICE_FIXTURE_FILE` for credential-free GraphQL provider metadata.
 
-This proves local communication between independently running Engines. It does
+This proves local communication between independently running Fused deployments. It does
 not establish production deployment readiness: authenticated broker audience
 binding, deployed infrastructure, central callback handoff and webhook delivery
-remain separate work. No production Engine or saved CLI configuration was changed.
+remain separate work. No production Fused or saved CLI configuration was changed.

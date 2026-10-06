@@ -45,7 +45,7 @@ function DeliveryMethod({ event, onChange }: { event: WebhookDraftEvent; onChang
         {!supported && <option value={event.method} disabled>{event.method.toUpperCase()} (imported; unsupported)</option>}
       </Select></label>
       {/* Non-default imports must not silently acquire POST semantics or appear executable by this receiver. */}
-      {!supported && <p role="note" className="text-sm text-amber-800">{event.method.toUpperCase()} is preserved from the imported spec but unsupported by Engine ingress (POST/GET only).</p>}
+      {!supported && <p role="note" className="text-sm text-amber-800">{event.method.toUpperCase()} is preserved from the imported spec but unsupported by Fused ingress (POST/GET only).</p>}
       {/* Undo restores only this row's original transport, without offering unsupported verbs for unrelated events. */}
       {event.method !== event.originalMethod && <button type="button" className="text-sm font-medium text-indigo-700" onClick={() => onChange({ method: event.originalMethod })}>Restore original {event.originalMethod.toUpperCase()} method</button>}
     </div>

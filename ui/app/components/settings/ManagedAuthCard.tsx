@@ -139,7 +139,7 @@ function ManagedAuthControls({ status, enabling, disabling, revocationPending, o
     </div>
     {/* Pending cleanup does not reverse the Engine's saved opt-out. */}
     {status === "disabled" && revocationPending && <p className="mt-3 text-sm text-slate-500">
-      Disabled on this Engine. Broker revocation is pending and will retry automatically.
+      Disabled in this Fused workspace. Broker revocation is pending and will retry automatically.
     </p>}
   </>;
 }

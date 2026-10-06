@@ -127,7 +127,7 @@ export function useWebhookEditor(service: Service, version: string, onSaved: () 
       if (file.size > webhookEditorMaxBytes) throw new Error("OpenAPI uploads in this editor are limited to 4 MiB.");
       const reviewed = await requestPlan(await file.text());
       // An older server cannot provide a lossless builder preview; do not infer from its diff.
-      if (!reviewed.webhook_draft) throw new Error("This Engine cannot preview imported webhook definitions yet. Update it before importing here.");
+      if (!reviewed.webhook_draft) throw new Error("This version of Fused cannot preview imported webhook definitions yet. Update it before importing here.");
       setPendingFile({ draft: readWebhookDraft(reviewed.webhook_draft.source_content), plan: reviewed });
     } catch (failure) { recordFailure(failure); }
     finally { setBusy(false); }

@@ -1,6 +1,6 @@
 # Authorization performance evidence
 
-The authorization acceptance benchmarks cover the production PostgreSQL principal-loading query and the Engine GraphQL authorization boundary.
+The authorization acceptance benchmarks cover the production PostgreSQL principal-loading query and Fused GraphQL authorization boundary.
 
 ## Scenarios
 

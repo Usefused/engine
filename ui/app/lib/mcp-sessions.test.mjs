@@ -219,7 +219,7 @@ test("stale responses are discarded and failed cursor reads can be retried safel
   assert.deepEqual(check.requests[2].variables, check.requests[1].variables);
   check.requests[2].reject(new Error("app not found"));
   await check.settle();
-  assert.match(check.view().error, /This MCP server is not active on this Engine/);
+  assert.match(check.view().error, /This MCP server is not active in this Fused workspace/);
   assert.doesNotMatch(check.view().error, /app not found/);
 });
 

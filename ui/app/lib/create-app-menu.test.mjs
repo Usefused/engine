@@ -25,7 +25,7 @@ test("offers every supported app delivery adapter from one accessible create men
   assert.ok(menu.indexOf('mode: "unified_app"') < menu.indexOf('mode: "sdk"'));
   assert.ok(menu.indexOf('mode: "sdk"') < menu.indexOf('mode: "api"'));
   assert.match(menu, /Generate a typed package/);
-  assert.match(menu, /Call operations through the Engine/);
+  assert.match(menu, /Call operations through Fused/);
   assert.match(menu, /Connect agents to selected operations/);
 });
 

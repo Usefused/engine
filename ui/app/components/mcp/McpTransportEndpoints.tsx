@@ -59,7 +59,7 @@ function RecommendedEndpoint({ url, isDefault, isStable, stableVersionID, onCopy
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs font-semibold text-slate-800">Streamable HTTP · Stable</span>
         <TransportBadge>Recommended</TransportBadge>
-        {isDefault && <span className="text-[11px] text-slate-500">Engine default</span>}
+        {isDefault && <span className="text-[11px] text-slate-500">Fused default</span>}
         {isStable && <span className="text-[11px] font-medium text-emerald-700">This version is promoted</span>}
       </div>
       {url && !isStable && stableVersionID ? <p className="mt-2 text-xs text-amber-700">This URL currently routes to Version ID <code>{stableVersionID}</code>.</p> : null}

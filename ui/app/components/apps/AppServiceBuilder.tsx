@@ -448,7 +448,7 @@ async function publishRESTApp(context: BuilderCreationContext): Promise<void> {
   if (!result) return;
   // A direct REST apply must terminate as a package-free publication, never as an unexpected Registry job.
   if (result.generation_status !== "skipped") {
-    throw new Error("Engine returned an unexpected REST publication state");
+    throw new Error("Fused returned an unexpected REST publication state");
   }
   await context.syncWorkspacePins(context.selections);
   context.setSdkDeployment({
@@ -478,7 +478,8 @@ async function generateSDKApp(context: BuilderCreationContext): Promise<void> {
   });
   // The package stream completed before exposing the hosted MCP endpoint, which uses the same identity and token.
   if (context.mode === "app") {
-    if (!result.hosted_mcp || !result.mcp_transport_urls) throw new Error("Engine did not return hosted MCP delivery");
+    // Combined delivery requires usable MCP endpoints before reporting success.
+    if (!result.hosted_mcp || !result.mcp_transport_urls) throw new Error("Fused did not return hosted MCP delivery");
     context.setMcpDeployment({ id: result.app_id, token: "", default_transport: "streamable_http", stable: true, stable_version_id: result.app_id, transport_urls: result.mcp_transport_urls });
   }
   await context.syncWorkspacePins(context.selections);
@@ -1314,7 +1315,7 @@ function BuilderPageHeader({ generationMode }: { generationMode: GenerationMode 
           {isMCP
             ? "Choose the services and operations to make available through MCP."
             : isAPI
-              ? "Choose the services and operations to expose through the Engine REST API."
+              ? "Choose the services and operations to expose through the Fused REST API."
               : "Choose the services and operations to include in the generated SDK."}
         </p>
       </div>

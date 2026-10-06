@@ -25,7 +25,7 @@ CLI plan requirements and permission errors retain the exact identifiers. UI cre
 
 ## Upgrade behavior
 
-1. Deploy the Engine, CLI, and UI changes together. Normal bootstrap reconciliation updates built-in role permissions and authorization revision. Owner, Admin, and Builder retain their intended capabilities through explicit typed grants. App sharing roles remain bounded to the selected family.
+1. Deploy Fused, CLI, and UI changes together. Normal bootstrap reconciliation updates built-in role permissions and authorization revision. Owner, Admin, and Builder retain their intended capabilities through explicit typed grants. App sharing roles remain bounded to the selected family.
 2. Recreate OAuth client registrations that used generic app scopes with the specific types and actions they need. Update authorization requests to send an explicit `scope`, then obtain fresh consent.
 3. Access tokens containing retired `app.read`, `app.use`, `app.create`, `app.manage`, or `app.tokens.manage` fail authentication. Authorization-code and refresh exchanges cannot reissue those scopes. They are never silently expanded into the new namespaces.
 4. Re-plan pending configurations created before the upgrade. Old generic creation requirements fail closed, and team-owner preflight rejects retired requirements. New plans record concrete permissions and remain subject to revision and ownership validation.
@@ -36,6 +36,6 @@ The local implementation does not modify production permissions or deploy these 
 
 Regression coverage exercises all 16 grant/target combinations for creation through plan and saved-plan apply, explicit OAuth consent, both credential-cache ordering directions, and narrow reads of empty catalogues. PostgreSQL integration coverage authenticates a real MCP-scoped OAuth token, warms the Owner credential, and verifies the narrow token's family reads, management, token management, creation, mixed catalogue rows, and totals. Known foreign family IDs and retired token scopes are rejected.
 
-Local validation: access-control, OAuth provider, Engine API, command middleware, full PostgreSQL store suite, CLI API/command tests, 287 UI tests, and the UI production build passed. Standalone UI TypeScript checking remains blocked by eight unrelated errors in existing extraction, integration selection, connected-app, and app-list code.
+Local validation: access-control, OAuth provider, Fused API, command middleware, full PostgreSQL store suite, CLI API/command tests, 287 UI tests, and the UI production build passed. Standalone UI TypeScript checking remains blocked by eight unrelated errors in existing extraction, integration selection, connected-app, and app-list code.
 
 Live browser and CLI verification also exercised the scope picker, MCP-only consent and token exchange, typed creation menus, direct-link denials, filtered catalogues, and structured CLI plan denials in a disposable local control-plane fixture. The builder uses the shared workspace permission gate for loading, failure and access-denied states. See `work/permission-browser-20260919/README.md` in the parent workspace for the sanitized evidence and test limitations.

@@ -31,7 +31,7 @@ export const CREATE_APP_OPTIONS: CreateAppOption[] = [
   {
     mode: "api",
     label: "REST",
-    description: "Call operations through the Engine",
+    description: "Call operations through Fused",
     to: "/integrations/builder?tab=api",
     icon: Globe2,
   },

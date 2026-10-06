@@ -24,7 +24,7 @@ export function assertWebhookPlanTarget(plan: SpecificationImportPlan, baseline:
   const expected = plan.expected_target;
   // A matching destination alone does not prove an older server enforced optimistic concurrency.
   if (!expected || expected.service_id !== baseline.service_id || expected.service_version_id !== baseline.service_version_id || expected.revision !== baseline.revision) {
-    throw new Error("The server did not confirm this exact service version and baseline revision. Update the Engine and reload before editing.");
+    throw new Error("The server did not confirm this exact service version and baseline revision. Update Fused and reload before editing.");
   }
 }
 

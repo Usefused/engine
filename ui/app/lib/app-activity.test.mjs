@@ -18,13 +18,14 @@ const appBuilderPath = fileURLToPath(import.meta.resolve("../components/apps/App
 const appOverviewPath = fileURLToPath(import.meta.resolve("../components/activity/AppActivityOverview.tsx"));
 const appRequestsPath = fileURLToPath(import.meta.resolve("../components/activity/AppRequestsPanel.tsx"));
 
+// Missing local apps use workspace language while preserving the neutral availability state.
 test("translates a missing local app without exposing an internal store error", () => {
   assert.deepEqual(appActivityIssue(new Error("app not found"), "sdk"), {
-    message: "This app is not active on this Engine, so local execution activity is unavailable.",
+    message: "This app is not active in this Fused workspace, so local execution activity is unavailable.",
     tone: "neutral",
   });
   assert.deepEqual(appActivityIssue(new Error("app not found"), "mcp"), {
-    message: "This MCP server is not active on this Engine, so local execution activity is unavailable.",
+    message: "This MCP server is not active in this Fused workspace, so local execution activity is unavailable.",
     tone: "neutral",
   });
   assert.equal(appActivityIssue(new Error("database unavailable"), "sdk").tone, "error");

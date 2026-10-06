@@ -1,10 +1,12 @@
-# Publishing an Engine-owned OAuth registration
+<a id="publishing-an-engine-owned-oauth-registration"></a>
+
+# Publishing a Fused-owned OAuth registration
 
 The broker uses ordinary bucket credentials and an exact locally stored service
 auth contract. It no longer stores a second client pair or accepts a separate
 `token_policy` in its publication API.
 
-1. Enable the reviewed provider service/version on the broker Engine through
+1. Enable the reviewed provider service/version on the broker Fused through
    the existing workspace flow. Confirm its OAuth authorization-code contract,
    HTTPS token endpoint, client authentication method, media type and PKCE policy.
 2. Store the provider client pair in an operator-owned bucket through the normal
@@ -53,13 +55,13 @@ data-retention/migration procedure after cutover and recovery verification.
 
 ## Installation enrollment cutover
 
-Registry ticket issuance now requires the Engine's existing
-`X-Fused-Installation-ID` header and validates ownership using the shared Engine
+Registry ticket issuance now requires Fused's existing
+`X-Fused-Installation-ID` header and validates ownership using the shared Fused
 identity repository. Ticket redemption returns both `account_id` and
 `installation_id`. Broker credentials are unique per account/installation pair;
-renewing one Engine does not revoke another Engine under the same account.
+renewing one Fused deployment does not revoke another Fused deployment under the same account.
 
-Upgrade Registry first, then all broker replicas, then consumer Engines. Do not
+Upgrade Registry first, then all broker replicas, then consumer Fused deployments. Do not
 run old account-scoped broker binaries alongside the new schema. The broker
 migration revokes legacy grants without an installation ID; it does not guess an
 identity. Old tickets without that identity cannot be redeemed. Consumers recover
@@ -98,8 +100,8 @@ Update Registry, broker and consumer binaries in a coordinated maintenance windo
 old consumers omit the required renewal ticket, and old tickets lack issuing-license
 identity or the approval deadline. Neither is silently upgraded.
 
-The broker publishes one Fused-owned OAuth application per `(service_id, auth_name)`. Multiple enrolled consumer Engines use that same application through separate end-user connections. Companies keeping their own provider applications use ordinary local bucket references; created bots do not need separate broker publications.
+The broker publishes one Fused-owned OAuth application per `(service_id, auth_name)`. Multiple enrolled consumer Fused deployments use that same application through separate end-user connections. Companies keeping their own provider applications use ordinary local bucket references; created bots do not need separate broker publications.
 
-Authenticated broker installation binding and verified cross-Engine webhook delivery remain in place. Consumer Engines own encrypted provider access/refresh tokens and the existing connection/refresh lifecycle. Provider-neutral consent scope and token-response mappings support providers with different OAuth response shapes. Central callback hosting and provider-specific app creation or webhook subscription orchestration belong to separate workflows.
+Authenticated broker installation binding and verified webhook delivery between Fused deployments remain in place. Consumer Fused deployments own encrypted provider access/refresh tokens and the existing connection/refresh lifecycle. Provider-neutral consent scope and token-response mappings support providers with different OAuth response shapes. Central callback hosting and provider-specific app creation or webhook subscription orchestration belong to separate workflows.
 
 Named managed-application selection and publication-specific audience grants were removed before production rollout. Do not run this simpler binary against the experimental named-publication test database: that experiment changed the publication primary key and saved named selectors. Preserve that fixture for evidence and use a fresh database with a default publication when resuming the test. No automatic database downgrade or reassignment of existing connections is performed.

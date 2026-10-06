@@ -56,7 +56,7 @@ function InboundOverview({ analytics }: { analytics: WorkspaceExecutionAnalytics
     <div className="grid gap-4 p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-6 sm:p-5">
       <div>
         <div className="flex items-center gap-2 text-sm font-semibold text-slate-900"><ArrowDownToLine className="h-4 w-4 text-blue-600" />Inbound traffic overview</div>
-        <p className="mt-1 max-w-2xl text-sm leading-5 text-slate-500">Requests received by Engine, including incoming webhook traffic, within the selected reporting window.</p>
+        <p className="mt-1 max-w-2xl text-sm leading-5 text-slate-500">Requests received by Fused, including incoming webhook traffic, within the selected reporting window.</p>
         <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-blue-500" style={{ width: `${Math.min(100, share)}%` }} /></div>
         <p className="mt-2 text-xs text-slate-500">{formatPercent(share)} of workspace traffic was inbound.</p>
       </div>

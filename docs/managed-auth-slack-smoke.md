@@ -1,7 +1,7 @@
 # Slack managed OAuth and signed-event acceptance
 
 Status: live managed Slack OAuth and signed webhook delivery passed on 2026-09-20
-between two independently running Engines. A real user-authored `app_mention`
+between two independently running Fused deployments. A real user-authored `app_mention`
 passed broker verification, reached the consumer's existing WEBHOOKS stream, and
 was durably acknowledged. A generated TypeScript SDK handler and a live MCP
 resource listener both subsequently received the same fresh Slack event.
@@ -10,9 +10,9 @@ the run unless the user asks for cleanup.
 
 ## Current local setup
 
-Two independent headless Engine processes are running on ports 18082 (broker) and
+Two independent headless Fused processes are running on ports 18082 (broker) and
 8081 (consumer), with separate PostgreSQL databases and separate NATS listeners.
-The local Registry harness is on port 18080. Both Engines report managed auth
+The local Registry harness is on port 18080. Both Fused deployments report managed auth
 `ready`. The broker has two encrypted OAuth application rows and one encrypted
 `slack_signing` bucket secret; the consumer has zero application-secret rows.
 The user confirmed PKCE and token rotation are both disabled for the test app.
@@ -53,7 +53,7 @@ installation tokens and uses the existing broker-assisted exchange/refresh path.
 The signing secret is not exposed through a consumer-readable Fused reference.
 
 Slack sends Events API requests to an app-level public HTTPS endpoint on the
-Fused Engine. Its existing webhook ingress verifies the request before replying
+Fused. Its existing webhook ingress verifies the request before replying
 to a challenge or admitting an event. Authorized delivery then reaches the
 consumer's existing webhook stream and subscribers. Consumer authorization must
 be established from verified provider installation/resource identity, not an
@@ -63,11 +63,11 @@ establish the correct consumer.
 
 ## Provider evidence and contract mapping
 
-| Official evidence | Required behavior | Intended Engine representation |
+| Official evidence | Required behavior | Intended Fused representation |
 | --- | --- | --- |
 | [Request verification](https://docs.slack.dev/authentication/verifying-requests-from-slack/) | HMAC-SHA256 over literal `v0`, request timestamp and untouched body, separated by colons; signature has `v0=` prefix; check timestamp freshness | Generic signature recipe with constant input and timestamp validation; app secret remains a bucket reference |
 | [URL verification](https://docs.slack.dev/reference/events/url_verification/) | Verify authenticity before returning the challenge | Authenticated challenge response in the same verification policy |
-| [HTTP Events API](https://docs.slack.dev/apis/events-api/using-http-request-urls/) | Public app-level request endpoint, prompt acknowledgment and retries | Existing ingress and durable webhook delivery; authenticated remote Engine recipient binding |
+| [HTTP Events API](https://docs.slack.dev/apis/events-api/using-http-request-urls/) | Public app-level request endpoint, prompt acknowledgment and retries | Existing ingress and durable webhook delivery; authenticated remote Fused recipient binding |
 | [OAuth installation](https://docs.slack.dev/authentication/installing-with-oauth/) | HTTPS redirect, comma-separated scopes, `oauth.v2.access` exchange, distinct bot/user grants | Reviewed OAuth contract; start with a bot grant and one event scope |
 | [Token rotation](https://docs.slack.dev/authentication/using-token-rotation/) | Rotation depends on app configuration | Verify the test app's setting before requiring refresh tokens; do not change production app settings |
 
@@ -76,7 +76,7 @@ establish the correct consumer.
 The shared [signature policy v2](webhook-signature-policy-v2.md) implements constant
 message components, signed timestamp freshness, strict signature prefixes and
 single-value credentials, and signature verification before a challenge response.
-Registry capability negotiation, GraphQL projections, both Engine metadata reads,
+Registry capability negotiation, GraphQL projections, both Fused metadata reads,
 and CLI JSON/YAML transport preserve these semantics. Regression tests prove
 rejected requests and authenticated challenges do not publish events, while valid
 events use the existing publication path. The checked execution schema and
@@ -85,7 +85,7 @@ extension catalogue are updated.
 The broker now runs the compiled v2 verifier. The Registry test harness was
 restarted with its original validated license hashes, and serves the same
 credential-free metadata through the batch webhook query. Consumer, NATS and
-tunnel processes were preserved. Both Engines still report managed auth `ready`,
+tunnel processes were preserved. Both Fused deployments still report managed auth `ready`,
 and the preserved consumer token passed Slack `auth.test` again after the restart. Registration used the normal authenticated
 `/webhook-config/plan` and `/webhook-config/apply` routes with the existing private
 `slack_signing` bucket reference. No production configuration was changed.
@@ -117,17 +117,17 @@ was switched off and the app joined the test channel, a fresh user-authored
 `verification_status=verified` and `delivery_status=ingested`, with no failure
 reason. The durable broker stream advanced to sequence 2, containing one real
 Slack mention in addition to the synthetic event. The consumer remained at
-sequence 0, as expected until cross-Engine forwarding exists. Private
+sequence 0, as expected until cross-Fused forwarding exists. Private
 `slack-event-evidence.json` records these counters without message content.
 
-[Remote Engine receivers](webhook-remote-receivers.md) now implement explicit
+[Remote Fused receivers](webhook-remote-receivers.md) now implement explicit
 provider-response proof, installation-bound pull subscriptions, and transfer into
-the consumer's existing WEBHOOKS stream. The two-Engine PostgreSQL/JetStream
+the consumer's existing WEBHOOKS stream. The two-Fused PostgreSQL/JetStream
 integration tests pass, including isolation, restart, duplicate suppression,
 disconnect, revocation and policy-change rejection. The initial transport is
 outbound pull, so a self-hosted consumer needs no public webhook endpoint.
 
-Both preserved local Engine processes have been upgraded. Broker and consumer
+Both preserved local Fused processes have been upgraded. Broker and consumer
 relay configurations were applied through the normal plan/apply routes. Fresh
 narrow-scope consent recorded the provider's app/workspace proof. The user's new
 mention then reached the consumer: broker sequence 4 and consumer sequence 1
@@ -138,14 +138,14 @@ broker still stores zero provider connections. Private `relay-live-evidence.json
 records these assertions without tokens or message content. Separate automated
 tests cover proof updates after refresh and the subscription limit; Slack token
 rotation remains disabled, so live Slack refresh has not been tested.
-After upgrading and gracefully restarting both Engines again, the same event and
+After upgrading and gracefully restarting both Fused deployments again, the same event and
 receipt counts remained unchanged, the broker still had zero pending
 acknowledgements, and the consumer token again passed Slack `auth.test`.
 The live environment, tunnel, database records and credentials remain preserved.
 
 ## SDK and MCP runtime acceptance
 
-On 2026-09-20, normal consumer Engine plan/apply published
+On 2026-09-20, normal consumer Fused plan/apply published
 `slack-managed-sdk-test@1.0.0` and `slack-managed-mcp-test@1.0.0`. Both select only
 Slack `auth.test` and `app_mention`, use the existing `slack-process` bucket and
 managed connection, and attach to `slack-managed-events`. The disposable local
@@ -158,7 +158,7 @@ snapshot store; no application credentials or provider connections were reseeded
   acknowledging both. The SDK durable has zero pending acknowledgements.
 - MCP discovery and `search_docs` exposed the exact selected scope. An `execute`
   call to `auth.test` passed using the same consumer-owned connection.
-- The Engine's current `2026-07-28` MCP surface exposed the selected event through
+- Fused's current `2026-07-28` MCP surface exposed the selected event through
   `resources/list` and `resources/read`. A `subscriptions/listen` SSE listener
   acknowledged that exact URI, received `notifications/resources/updated`, and
   read the fresh occurrence. This support is newer than the installed skill text
@@ -171,7 +171,7 @@ snapshot store; no application credentials or provider connections were reseeded
 The SDK app was published with `generate: false`, then its matching package was
 generated and compiled locally with the repository's deterministic TypeScript
 generator. This verifies generated-client runtime behavior, not Registry package
-generation, cache, or download. MCP used the actual running Engine protocol and
+generation, cache, or download. MCP used the actual running Fused protocol and
 tool runtime. Slack `auth.test` is a read-only identity check with no additional
 scope requirement ([provider documentation](https://docs.slack.dev/reference/methods/auth.test/)).
 
@@ -189,7 +189,7 @@ existing private test directory. No provider secrets were supplied to either cli
    timestamp, and authenticated versus unauthenticated challenge. Invalid requests
    must not publish events. Legitimate provider retries need deliberate delivery
    deduplication; timestamp freshness alone does not reject every replay.
-3. Launch separate broker and consumer Engine processes with separate databases
+3. Launch separate broker and consumer Fused processes with separate databases
    and normal Registry enrollment. Install the Slack app through managed OAuth;
    confirm client/signing secrets remain broker-only and provider tokens remain
    consumer-owned. Call a read-only identity endpoint with the resulting token.

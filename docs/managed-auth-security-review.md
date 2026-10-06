@@ -16,20 +16,20 @@ verification, and applies bounded timeouts without mutating caller clients.
 Regression tests cover every redirect class, same-origin redirects, cleartext
 destinations, and the actual broker/connect/Registry client constructors.
 
-Dependency scanning found affected imported packages in Engine, Registry and
-CLI. Builds now require Go 1.26.6. Engine and Registry use gRPC 1.83.2,
+Dependency scanning found affected imported packages in Fused, Registry and
+CLI. Builds now require Go 1.26.6. Fused and Registry use gRPC 1.83.2,
 klauspost/compress 1.18.7, and the networking dependencies required by gRPC;
-Registry also updates chi to 5.3.0. Engine's container builder uses Go 1.26.6.
+Registry also updates chi to 5.3.0. Fused's container builder uses Go 1.26.6.
 The gRPC updates address the reported [HTTP/2 memory-exhaustion issue](https://pkg.go.dev/vuln/GO-2026-6348)
 and [missing-authority panic](https://pkg.go.dev/vuln/GO-2026-6443).
 
 ## Verification
 
-- Package-level govulncheck: no affected imported packages in Engine's headless
+- Package-level govulncheck: no affected imported packages in Fused's headless
   command, Registry's command, or CLI.
-- Engine regression packages passed: connectauth, managedauthtransport,
+- Fused regression packages passed: connectauth, managedauthtransport,
   managedauthbroker, managedauthclient, webhookrelay, API, store, sandbox,
-  webhookverify, signaturepolicy and Engine command.
+  webhookverify, signaturepolicy and Fused command.
 - Race-enabled PostgreSQL broker/client/relay tests passed in a new disposable
   database. Tests cover installation isolation, unauthorized token possession,
   subscription quotas, policy changes, disconnect, refresh proof continuity,
@@ -43,7 +43,7 @@ and [missing-authority panic](https://pkg.go.dev/vuln/GO-2026-6443).
 ## Limits
 
 Symbol-level govulncheck crashed inside its SSA/type-parameter analysis; the
-completed dependency scans use package reachability. Engine and Registry still
+completed dependency scans use package reachability. Fused and Registry still
 have seven module-only advisories in unimported SSH/OpenPGP and kin-openapi filter
 packages. Those are not reported as affected packages in the scanned commands;
 reassess them before introducing those package imports.
@@ -63,6 +63,6 @@ this high-severity review. The raw npm audit is therefore not a zero-findings
 report.
 
 Existing live Google/Slack acceptance evidence is recorded separately. The live
-Engines, provider credentials, databases and tunnel were preserved; running
+Fused deployments, provider credentials, databases and tunnel were preserved; running
 processes were not rebuilt or restarted for this review. Security updates take
 effect when the reviewed code is rebuilt and deployed.

@@ -148,6 +148,7 @@ export default function Login() {
     }
   }
 
+  /** Exchanges an existing sign-in key for the workspace browser session. */
   async function handleAPIKeyLogin(event: FormEvent) {
     event.preventDefault();
     const value = apiKey.trim();
@@ -159,7 +160,7 @@ export default function Login() {
       setAPIKey("");
       window.location.replace(loginDestination(next));
     } catch {
-      setError("The API Key was not accepted for Engine access.");
+      setError("The API Key was not accepted for Fused access.");
       setAPIKeyLoading(false);
     }
   }
@@ -170,7 +171,7 @@ export default function Login() {
         <div className="w-full max-w-sm">
           <div className="mb-8 text-center flex flex-col items-center">
             <Logo size="lg" logoClassName="w-10 h-10" textClassName="text-3xl font-extrabold tracking-tight" />
-            <p className="mt-2 text-sm text-slate-500">Sign in to your team&apos;s Engine</p>
+            <p className="mt-2 text-sm text-slate-500">Sign in to your team&apos;s Fused workspace</p>
           </div>
 
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8">
@@ -193,7 +194,7 @@ export default function Login() {
               <span className="h-px flex-1 bg-slate-200" />
             </div>
 
-            <form onSubmit={handleAPIKeyLogin} className="space-y-3" toolname="login_with_api_key" tooldescription="Use an Engine administrator API Key to sign in.">
+            <form onSubmit={handleAPIKeyLogin} className="space-y-3" toolname="login_with_api_key" tooldescription="Use a Fused administrator API Key to sign in.">
               <label htmlFor="api-key" className="block text-sm font-medium text-slate-700"><FieldLabel required>API Key</FieldLabel></label>
               <input
                 id="api-key"

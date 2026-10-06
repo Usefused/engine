@@ -184,7 +184,7 @@ test("imported delivery methods remain exact and unsupported methods show an exp
     if (!["post", "get"].includes(method)) {
       assert.match(markup, new RegExp(`<option value="${method}" disabled="" selected="">`));
       assert.match(markup, /role="note"/);
-      assert.match(markup, /unsupported by Engine ingress \(POST\/GET only\)/);
+      assert.match(markup, /unsupported by Fused ingress \(POST\/GET only\)/);
     } else {
       assert.doesNotMatch(markup, /imported; unsupported/);
     }

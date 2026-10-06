@@ -1,7 +1,9 @@
-# Remote Engine webhook receivers
+<a id="remote-engine-webhook-receivers"></a>
 
-An app-level provider webhook can terminate at the broker Engine while a
-consumer Engine owns the connected user's OAuth tokens. The broker verifies the
+# Remote Fused webhook receivers
+
+An app-level provider webhook can terminate at the broker Fused while a
+consumer Fused owns the connected user's OAuth tokens. The broker verifies the
 provider signature through ordinary webhook ingress. The consumer pulls only
 its authorized events over HTTPS and publishes them into its own existing
 `WEBHOOKS` stream. SDK webhook attachments and acknowledgements remain unchanged.
@@ -41,10 +43,10 @@ accepts literal object paths and string identities; ambiguous arrays and provide
 installations without sufficient proof are unsupported.
 
 During a subsequent successful code exchange, the broker extracts those claims
-from its own HTTPS provider response and binds them to the authenticated Engine
+from its own HTTPS provider response and binds them to the authenticated Fused
 installation. It retains opaque grant identity, token hashes, and resource/app
 identities. Provider tokens still return to and remain encrypted in the consumer
-Engine; raw provider responses and client secrets are never returned as proof.
+Fused; raw provider responses and client secrets are never returned as proof.
 Existing connections established before export configuration require fresh
 consent. [Slack's OAuth response](https://docs.slack.dev/reference/methods/oauth.v2.access/)
 provides the `team.id` and `app_id` used in this example.
@@ -107,7 +109,7 @@ and uses the existing installation revocation flow. Re-enrollment under a new
 broker installation identity requires new provider proof for webhook delivery.
 
 Delegated messages preserve the ordinary payload envelope and set explicit
-`broker-verified` provenance in Engine-owned stream metadata. Original provider
+`broker-verified` provenance in Fused-owned stream metadata. Original provider
 headers, query parameters and the broker's ingress slug are withheld. They are
 not represented as a provider signature verified by the consumer itself.
 
@@ -128,4 +130,4 @@ DATABASE_URL='postgres://user@127.0.0.1:5432/test?sslmode=disable' \
 ```
 
 The tests create and remove only their own UUID-named schemas. They never reset
-a live Engine database or its credentials.
+a live Fused database or its credentials.
