@@ -65,6 +65,7 @@ export interface AppDescription {
   description: string;
   language?: string;
   source?: string;
+  explanation?: string;
   services: Record<string, AppServicePin>;
 }
 

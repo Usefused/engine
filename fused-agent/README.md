@@ -61,3 +61,30 @@ Release CI stages verified agent inputs into the ignored
 variants with `fused_agent_release` to embed those inputs; missing staging fails
 compilation. Ordinary local builds use the checked-in `assets/` bundle. This keeps
 release generation from modifying tracked files before GoReleaser's Git checks.
+
+The agent can progressively discover catalogue services (`search_services`), browse
+versions and endpoints (`search_service_operations`), and inspect exact request and
+response contracts (`read_service_contract`). These reads use the signed-in user's
+existing Registry authorization; they never read bucket secrets or invoke providers.
+
+For an existing Unified App, `revise_unified_app` reuses Describe's intent,
+operation-selection and source-revision APIs. It adds missing capabilities and
+updates TypeScript together in the unsaved editor, preserving existing version pins,
+auth selection and app settings. Failed, cancelled or stale revisions leave the
+draft unchanged. Saving and deployment remain manual.
+
+For a deterministic browser check, build the UI and run
+`node ui/scripts/fused-agent-revision-fixture.mjs`, then open
+`http://127.0.0.1:18210/integrations/unified-apps/new?edit=fixture-checkout`.
+The real editor/sidebar run against synthetic catalogue, model and compile responses;
+no app is deployed. Ask to find a customer by email to exercise discovery and revision.
+Requests containing `fail`, `slow` or `stale` exercise failure, cancellation or stale
+context respectively. `/fixture/report` records the synthetic call sequence.
+
+`set_unified_app_view` lets the agent open the TypeScript or YAML tab with a fresh
+page revision. YAML configuration and credential references are readable and editable
+through the existing visible-form tools. Syntax/config errors are returned as failed
+edits, remain visible for correction, and block compilation. Actual credential values
+stay in buckets. Both editor views share one unsaved draft; neither tool saves or
+publishes it. In the browser fixture, messages beginning with `config` exercise YAML
+editing; add `invalid` to check validation feedback.

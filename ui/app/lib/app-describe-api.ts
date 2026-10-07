@@ -7,7 +7,7 @@ interface Intent { clarification: string; action: string; name: string; descript
 type Candidate = DescribeServiceCandidate;
 
 /** Resolves every described provider through the same bounded discovery query used by CLI. */
-async function resolveServices(services: IntentService[], chooseService?: ChooseDescribeService): Promise<Map<string, Candidate>> {
+async function resolveServices(services: IntentService[], chooseService?: ChooseDescribeService, baseline?: AppDescription): Promise<Map<string, Candidate>> {
   const result = await api.graphql<{ serviceCandidatesByRefs: Array<{ ref: string; candidates: Candidate[] }> }>(`query UnifiedAppCandidates($refs: [String!]!, $limitPerRef: Int!) {
     serviceCandidatesByRefs(refs: $refs, limitPerRef: $limitPerRef) { ref candidates { id name slug provider { handle } } }
   }`, { refs: services.map((service) => service.name), limitPerRef: 20 });
@@ -18,9 +18,11 @@ async function resolveServices(services: IntentService[], chooseService?: Choose
     const matches = exact.length ? exact : group.candidates;
     // A discovery miss needs a different service name, not a provider selection.
     if (!matches.length) throw new Error(`No service found for “${group.ref}”. Check the name or import the service into Registry.`);
-    let candidate = matches[0];
+    // A unique previously reviewed identity wins without switching publishers during a revision.
+    const retained = matches.filter((match) => Object.values(baseline?.services ?? {}).some((pin) => pin.service_id === match.id));
+    let candidate = retained.length === 1 ? retained[0] : matches[0];
     // Pause the same parsed request until the user resolves the publisher ambiguity.
-    if (matches.length > 1) {
+    if (matches.length > 1 && retained.length !== 1) {
       // Non-interactive callers still receive concrete canonical references to disambiguate their goal.
       if (!chooseService) throw new Error(`Choose a service for “${group.ref}”: ${matches.map((match) => `@${match.provider?.handle}/${match.slug}`).join(", ")}.`);
       const selectedID = await chooseService(group.ref, matches);
@@ -35,11 +37,12 @@ async function resolveServices(services: IntentService[], chooseService?: Choose
 }
 
 /** Grounds operations and inbound events in one immutable provider version. */
-async function resolveOperations(intent: IntentService, candidate: Candidate, kind: DescribeKind, includeEvents: boolean, schedule: DescribeSchedule, operationDone: (name: string) => void): Promise<[string, AppServicePin]> {
-  const result = await schedule(() => api.graphql<{ service: { service_versions: Array<{ id: string; name: string; status: string }> } | null }>(`query UnifiedAppServiceVersion($id: String!) {
+async function resolveOperations(intent: IntentService, candidate: Candidate, kind: DescribeKind, includeEvents: boolean, schedule: DescribeSchedule, operationDone: (name: string) => void, retained?: [string, AppServicePin]): Promise<[string, AppServicePin]> {
+  // Existing drafts classify against their pinned version; only new services select a catalogue version.
+  const result = retained ? null : await schedule(() => api.graphql<{ service: { service_versions: Array<{ id: string; name: string; status: string }> } | null }>(`query UnifiedAppServiceVersion($id: String!) {
     service(id: $id) { service_versions(limit: 1) { id name status } }
   }`, { id: candidate.id }));
-  const version = result.service?.service_versions[0];
+  const version = retained ? { id: retained[1].service_version_id, name: retained[1].version, status: "active" } : result?.service?.service_versions[0];
   // A missing or retired version cannot be guessed from the model's memory.
   if (!version || version.status === "deprecated") throw new Error(`No active version is available for ${intent.name}.`);
   const queries = operationQueries(intent, kind, includeEvents);
@@ -60,21 +63,27 @@ async function resolveOperations(intent: IntentService, candidate: Candidate, ki
   if (!candidate.provider?.handle) throw new Error(`The service ${intent.name} has no canonical provider identity.`);
   const pin: AppServicePin = { service_id: candidate.id, service_version_id: version.id, version: version.name, operations: [...new Set(operations)] };
   await schedule(() => resolveAdditionalCapabilities(pin, intent, includeEvents));
-  return [`@${candidate.provider.handle}/${candidate.slug}`, pin];
+  return [retained?.[0] ?? `@${candidate.provider.handle}/${candidate.slug}`, pin];
 }
 
 /** Resolves the same read-only proposal as CLI describe for the explicitly chosen output. */
-export async function describeApp(goal: string, kind: DescribeKind, progress: DescribeProgress, chooseService?: ChooseDescribeService, selectionReady?: DescribeSelectionReady): Promise<AppDescription> {
+export async function describeApp(goal: string, kind: DescribeKind, progress: DescribeProgress, chooseService?: ChooseDescribeService, selectionReady?: DescribeSelectionReady, baseline?: AppDescription): Promise<AppDescription> {
   // Bounds protect paid parsing without discarding the user's editable text.
   if (!goal.trim() || new TextEncoder().encode(goal).length > 16384) throw new Error("Describe your app in 1 to 16,384 bytes.");
+  // Revision context contains capability hints only, never auth configuration or secret values.
+  const appContext = baseline ? JSON.stringify({ kind, name: baseline.name, description: baseline.description, services: baseline.services }) : "";
+  // Match Registry bounds before discovery or paid inference begins.
+  if (new TextEncoder().encode(appContext).length > 16384) throw new Error("The app selection is too large to describe. Narrow the selected capabilities first.");
+  // Existing source is required for a revision; never regenerate an empty replacement around user code.
+  if (baseline && (!baseline.source?.trim() || new TextEncoder().encode(baseline.source).length > 128 * 1024)) throw new Error("App source must contain 1 to 128 KiB of TypeScript.");
   progress("Understanding your app…", "intent");
   const { parseSDKIntent: intent } = await api.graphql<{ parseSDKIntent: Intent }>(`query ParsePromptIntent($q: String!, $appContext: String!) {
     parseSDKIntent(q: $q, appContext: $appContext) { clarification action name description language sequential webhook_requested services { name endpoint_query endpoint_queries select_all_operations event_queries } }
-  }`, { q: goal.trim(), appContext: "" });
-  validateIntent(intent, kind);
+  }`, { q: goal.trim(), appContext });
+  validateIntent(intent, kind, Boolean(baseline));
   progress("Finding matching services…", "services");
-  const candidates = await resolveServices(intent.services, chooseService);
-  const services: Record<string, AppServicePin> = {};
+  const candidates = await resolveServices(intent.services, chooseService, baseline);
+  const services: Record<string, AppServicePin> = { ...baseline?.services };
   const explicitEvents = intent.services.some((service) => service.event_queries?.length);
   const schedule = createDescribeScheduler();
   let completed = 0;
@@ -88,13 +97,25 @@ export async function describeApp(goal: string, kind: DescribeKind, progress: De
     if (!candidate) throw new Error(`Service ${service.name} was not found.`);
     // General inbound goals cover all named services only when none has narrower event intent, matching CLI.
     const includeEvents = Boolean(service.event_queries?.length || (intent.webhook_requested && !explicitEvents));
-    return resolveOperations(service, candidate, kind, includeEvents, schedule, operationDone);
+    const retained = Object.entries(baseline?.services ?? {}).filter(([, pin]) => pin.service_id === candidate.id);
+    // A shared provider under multiple aliases needs an explicit choice before scopes can be combined.
+    if (retained.length > 1) throw new Error(`Choose one alias for ${service.name} before revising its capabilities.`);
+    return resolveOperations(service, candidate, kind, includeEvents, schedule, operationDone, retained[0]);
   }));
+  // Revision grants are additive so unrelated reviewed capabilities survive a focused change.
   for (const [key, pin] of resolved) services[key] = mergeDescribePin(services[key], pin);
-  const proposal: AppDescription = { name: intent.name, description: intent.description || goal.trim(), services, language: intent.language };
+  const proposal: AppDescription = { name: baseline?.name ?? intent.name, description: baseline?.description ?? (intent.description || goal.trim()), services, language: baseline?.language ?? intent.language };
   selectionReady?.(proposal);
   // Only hosted orchestration needs source generation; SDK and MCP expose the reviewed capabilities directly.
-  if (kind === "unified_app") proposal.source = await draftAppSource(goal, services, progress);
+  if (kind === "unified_app") {
+    // Revisions use the same contract-grounded source endpoint with the complete current source as baseline.
+    if (baseline?.source) {
+      const revision = await reviseAppSource(goal, services, progress, baseline.source);
+      // A diagnosis without a source change must not silently expand the selected capabilities.
+      if (!revision.source) return { ...baseline, explanation: revision.explanation };
+      proposal.source = revision.source; proposal.explanation = revision.explanation;
+    } else proposal.source = await draftAppSource(goal, services, progress);
+  }
   progress("Preparing your app for review…", "review");
   return proposal;
 }
@@ -157,11 +178,11 @@ function operationQueries(intent: IntentService, kind: DescribeKind, includeEven
 }
 
 /** Rejects unsupported authoring intent before discovery or model classification. */
-function validateIntent(intent: Intent, kind: DescribeKind): void {
+function validateIntent(intent: Intent, kind: DescribeKind, revising = false): void {
   // Clarifications take precedence over a partially filled proposal.
   if (intent.clarification?.trim()) throw new AppDescriptionClarificationError(intent.clarification);
   // The creation form cannot reinterpret updates as new apps.
-  if (intent.action === "update") throw new Error("Describe a new app. Use the existing app's editor to create a new version.");
+  if (intent.action === "update" && !revising) throw new Error("Describe a new app. Use the existing app's editor to create a new version.");
   validateAdapterIntent(intent, kind);
   // Bound discovery before issuing any classification requests.
   if (!intent.services?.length || intent.services.length > 16) throw new Error("Name 1 to 16 services in your description.");

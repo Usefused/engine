@@ -30,6 +30,81 @@ function client(mock, module = "unified-app-api") {
 const source = 'export default buildUnifiedApp({ input: z.object({}), output: z.object({}), async execute() { return {}; } });';
 const service = { service_id: "service-id", service_version_id: "version-id", version: "v1", operations: ["getCustomer"] };
 
+// Capability revisions must reuse Describe's APIs without replacing authored aliases, versions or unrelated configuration.
+test("agent revision adds Stripe lookup and revises source on the pinned contract", async () => {
+  const baseline = { name: "stripe-checkout", description: "Existing checkout", source, services: { Stripe: { ...service, operations: ["PostCustomers", "PostCheckoutSessions"] } }, serviceSettings: { Stripe: { service_id: service.service_id, config: { auth: { type: "bearer", name: "bearerAuth" }, bucket: "billing" } } }, configSettings: { mcp: { enabled: true } }, webhookAttachment: "existing-events" };
+  const original = structuredClone(baseline);
+  const mock = transport({
+    ParsePromptIntent: { parseSDKIntent: { action: "update", name: "ignored-new-name", services: [{ name: "Stripe", endpoint_queries: ["Find customer by email"] }] } },
+    ClassifyPromptOperation: { classifyPromptOperation: "GetCustomers" },
+    RevisePromptUnifiedApp: { draftPromptUnifiedApp: JSON.stringify({ source: source + "\n// lookup then reuse or create", explanation: "Added customer lookup." }) },
+  });
+  const revised = await client(mock.api).reviseUnifiedApp("Reuse the customer by email, or create one", baseline, () => {});
+  assert.deepEqual(baseline, original);
+  assert.equal(revised.name, baseline.name);
+  assert.equal(revised.description, baseline.description);
+  assert.deepEqual(revised.services.Stripe.operations, ["PostCustomers", "PostCheckoutSessions", "GetCustomers"]);
+  assert.equal(revised.services.Stripe.service_version_id, service.service_version_id);
+  assert.deepEqual(revised.serviceSettings, baseline.serviceSettings);
+  assert.deepEqual(revised.configSettings, baseline.configSettings);
+  assert.equal(revised.webhookAttachment, baseline.webhookAttachment);
+  assert.match(revised.source, /lookup then reuse/);
+  assert.deepEqual(mock.calls.map(call => call.operation), ["ParsePromptIntent", "UnifiedAppCandidates", "ClassifyPromptOperation", "RevisePromptUnifiedApp"]);
+  const context = JSON.parse(mock.calls[0].variables.appContext);
+  assert.equal(context.name, baseline.name);
+  assert.doesNotMatch(mock.calls[0].variables.appContext, /bearerAuth|billing/);
+  const request = mock.calls.at(-1).variables;
+  assert.equal(request.source, baseline.source);
+  assert.deepEqual(JSON.parse(request.selections).map(item => [item.service, item.version, item.operation]), [["Stripe", "v1", "PostCustomers"], ["Stripe", "v1", "PostCheckoutSessions"], ["Stripe", "v1", "GetCustomers"]]);
+});
+
+// An already reviewed provider resolves discovery ambiguity without authorizing a different publisher.
+test("revision keeps the existing provider when discovery has several matches", async () => {
+  const mock = transport({
+    ParsePromptIntent: { parseSDKIntent: { action: "update", services: [{ name: "Stripe", endpoint_query: "Find customer" }] } },
+    UnifiedAppCandidates: { serviceCandidatesByRefs: [{ ref: "Stripe", candidates: [{ id: "other", name: "Stripe", slug: "stripe", provider: { handle: "other" } }, { id: service.service_id, name: "Stripe", slug: "stripe", provider: { handle: "stripe" } }] }] },
+    RevisePromptUnifiedApp: { draftPromptUnifiedApp: JSON.stringify({ source }) },
+  });
+  const revised = await client(mock.api).reviseUnifiedApp("Find customer", { name: "checkout", description: "", source, services: { billing: service } }, () => {}, async () => assert.fail("Existing publisher is already selected"));
+  assert.equal(revised.services.billing.service_id, service.service_id);
+  assert.equal(mock.calls.find(call => call.operation === "ClassifyPromptOperation").variables.version, "v1");
+});
+
+// Failures and diagnosis-only replies must never install expanded service scope around unchanged code.
+test("revision leaves the baseline intact when source generation fails or only diagnoses", async () => {
+  const baseline = { name: "checkout", description: "", source, services: { Stripe: service } };
+  const original = structuredClone(baseline);
+  const mock = transport({
+    ParsePromptIntent: { parseSDKIntent: { action: "update", services: [{ name: "Stripe", endpoint_query: "Find customer" }] } },
+    ClassifyPromptOperation: { classifyPromptOperation: "newOperation" },
+    RevisePromptUnifiedApp: { draftPromptUnifiedApp: JSON.stringify({ source: "", explanation: "Engine serialization requires a fix; source is valid." }) },
+  });
+  const revised = await client(mock.api).reviseUnifiedApp("Fix serializer error", baseline, () => {});
+  assert.deepEqual(revised.services, baseline.services);
+  assert.equal(revised.source, baseline.source);
+  assert.match(revised.explanation, /Engine serialization/);
+  mock.api.graphql = async (query) => { throw new Error("offline"); }; // A failed first stage cannot mutate baseline objects.
+  await assert.rejects(client(mock.api).reviseUnifiedApp("Add lookup", baseline, () => {}), /offline/);
+  assert.deepEqual(baseline, original);
+});
+
+// Adding a different service keeps the existing reviewed provider while grounding the new provider independently.
+test("revision can add a service without replacing existing pins", async () => {
+  const baseline = { name: "checkout", description: "Checkout", source, services: { Stripe: service } };
+  const mock = transport({
+    ParsePromptIntent: { parseSDKIntent: { action: "update", services: [{ name: "Slack", endpoint_query: "Send a message" }] } },
+    UnifiedAppCandidates: { serviceCandidatesByRefs: [{ ref: "Slack", candidates: [{ id: "slack-id", name: "Slack", slug: "slack", provider: { handle: "slack" } }] }] },
+    UnifiedAppServiceVersion: { service: { service_versions: [{ id: "slack-version", name: "v2", status: "active" }] } },
+    ClassifyPromptOperation: { classifyPromptOperation: "sendMessage" },
+    RevisePromptUnifiedApp: { draftPromptUnifiedApp: JSON.stringify({ source: source + "\n// send notification" }) },
+  });
+  const revised = await client(mock.api).reviseUnifiedApp("Send a Slack notification too", baseline, () => {});
+  assert.deepEqual(revised.services.Stripe, service);
+  assert.deepEqual(revised.services["@slack/slack"], { service_id: "slack-id", service_version_id: "slack-version", version: "v2", operations: ["sendMessage"] });
+  assert.deepEqual(Object.keys(baseline.services), ["Stripe"]);
+  assert.equal(mock.calls.find(call => call.operation === "UnifiedAppServiceVersion").variables.id, "slack-id");
+});
+
 // Editing uses the existing source and exact reviewed pins without rediscovering services or deploying anything.
 test("AI source revision preserves the baseline and selected provider contracts", async () => {
   const mock = transport({ RevisePromptUnifiedApp: { draftPromptUnifiedApp: JSON.stringify({ source: source + "\n// revised" }) } });

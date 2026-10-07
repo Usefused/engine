@@ -1,6 +1,6 @@
 {
-  "call_count": 110,
-  "document_count": 128,
+  "call_count": 113,
+  "document_count": 131,
   "calls": [
     {
       "endpoint": "registry",
@@ -402,6 +402,24 @@
       "endpoint": "registry",
       "file": "app/lib/fused-agent-contracts.ts",
       "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/fused-agent-discovery.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/fused-agent-discovery.ts",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/fused-agent-discovery.ts",
+      "call": 3,
       "document_count": 1
     },
     {
@@ -1132,6 +1150,27 @@
       "call": 1,
       "variant": 1,
       "document": "query FusedAgentContracts($selections: String!, $path: String!, $offset: Int!) {\n    agentOperationContracts(selections: $selections, path: $path, offset: $offset)\n  }"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/fused-agent-discovery.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "query FusedAgentSearchServices($q: String!) {\n    searchServices(q: $q) { id name slug canonical_ref provider { name handle } }\n  }"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/fused-agent-discovery.ts",
+      "call": 2,
+      "variant": 1,
+      "document": "query FusedAgentServiceVersions($id: String!) {\n    serviceVersions(serviceId: $id) { id name status }\n  }"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/fused-agent-discovery.ts",
+      "call": 3,
+      "variant": 1,
+      "document": "query FusedAgentSearchOperations($id: String!, $version: String!, $q: String!, $offset: Int!) {\n    searchEndpoints(serviceId: $id, version: $version, q: $q, limit: 20, offset: $offset) { name description method path deprecated }\n  }"
     },
     {
       "endpoint": "engine",

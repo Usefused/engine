@@ -117,7 +117,8 @@ export default function FusedAgentChat({ popup, pageTitle, status, messages, com
               <p className="mt-5 text-[11px] leading-relaxed text-slate-400">Choose a task or describe what you need.</p>
             </div>
           ) : (
-            <div role="log" aria-label="Agent conversation" aria-live="polite" aria-relevant="additions" className="min-w-0 max-w-full space-y-7 px-5 py-6">
+            // A consistent text cursor advertises selectable messages without switching at inline-code edges; links and buttons keep their pointer rules.
+            <div role="log" aria-label="Agent conversation" aria-live="polite" aria-relevant="additions" style={{ cursor: 'text' }} className="min-w-0 max-w-full space-y-7 px-5 py-6">
               {messages.map(message => message.role === 'user' ? (
                 <div key={message.id} className="ml-8 rounded-2xl rounded-br-sm border border-slate-200/70 bg-slate-100 px-4 py-3">
 

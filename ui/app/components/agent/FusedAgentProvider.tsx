@@ -4,6 +4,7 @@ import { Sparkles } from "lucide-react";
 import { FusedAgentContext, type FusedDraftBuilderBridge, type FusedEditorBridge } from "./FusedAgentContext";
 import { FusedAgentPage, fusedValueHidden, fusedPagePath } from "~/lib/fused-agent-page";
 import { harnest, messageText, type HarnestApproval, type HarnestClientTool, type HarnestStreamEvent } from "~/lib/fused-agent-transport";
+import { searchAgentServices, searchAgentOperations, readAgentServiceContract } from "~/lib/fused-agent-discovery";
 import { readAgentContracts } from "~/lib/fused-agent-contracts";
 
 import { agentInput, visibleUserRequest } from "./agent-input";
@@ -162,9 +163,33 @@ export function FusedAgentProvider({ children, authenticated }: { children: Reac
     try {
       const { root, context } = snapshot();
       const args = call.arguments;
-      const source = editor.current && document.getElementById(editor.current.sourceFieldID);
+      // Catalogue discovery uses the caller's existing Registry permissions and never mutates workspace state.
+      if (call.name === "search_services") return await searchAgentServices(String(args.query ?? ""), Number(args.offset ?? 0));
+      // Explicit version resolution prevents endpoint discovery from widening an existing app's contract.
+      if (call.name === "search_service_operations") return await searchAgentOperations(String(args.service_id ?? ""), String(args.version ?? ""), String(args.query ?? ""), Number(args.offset ?? 0));
+      // Reading a discovered contract is independent of selecting or running it.
+      if (call.name === "read_service_contract") return await readAgentServiceContract(String(args.service_id ?? ""), String(args.version ?? ""), String(args.operation ?? ""), String(args.path ?? ""), Number(args.offset ?? 0));
+      const source = editor.current && document.getElementById(editor.current.fieldID);
       const bridge = source && !fusedValueHidden(source) && source.getClientRects().length > 0 ? editor.current : null;
-      if (call.name === "get_page_context") return { ...context, canDescribeUnifiedApp: Boolean(draftBuilder.current?.available), unifiedApp: bridge ? { services: bridge.services, canCompile: bridge.available } : undefined };
+      if (call.name === "get_page_context") return { ...context, canDescribeUnifiedApp: Boolean(draftBuilder.current?.available), unifiedApp: bridge ? { services: bridge.services, view: bridge.view, configError: bridge.configError, canCompile: bridge.available, canRevise: bridge.available && bridge.view === "typescript" } : undefined };
+      // The agent switches ordinary non-secret editor tabs instead of reading hidden fields through another channel.
+      if (call.name === "set_unified_app_view") {
+        // Only the connected authorized editor can switch; stale context must not target a different draft.
+        if (!bridge || Number(args.expected_revision) !== context.revision || !["typescript", "yaml"].includes(String(args.view))) throw new Error("Read the connected app editor and choose typescript or yaml.");
+        // Re-selecting the current tab is harmless, including while repairing invalid YAML.
+        if (args.view !== bridge.view) bridge.setView(args.view as "typescript" | "yaml");
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        return { view: editor.current?.view, page: snapshot().context, saved: false };
+      }
+      // Revisions use Describe's discovery and source APIs within the current authorized editor.
+      if (call.name === "revise_unified_app") {
+        // Stale context and incomplete forms cannot replace source or selected capabilities.
+        if (!bridge?.available || bridge.view !== "typescript" || Number(args.expected_revision) !== context.revision || typeof args.goal !== "string" || !args.goal.trim() || new TextEncoder().encode(args.goal).length > 16384) throw new Error("Read the current ready TypeScript draft and provide a change of 1 to 16,384 bytes.");
+        const result = await bridge.revise(args.goal, signal);
+        // The next context read must observe both React updates, not the previous selection.
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        return result;
+      }
       // Description uses the current form's existing API flow and produces only an unsaved draft.
       if (call.name === "describe_unified_app") {
         // Reject detached, busy, or oversized requests before invoking the authorized page workflow.
@@ -178,7 +203,9 @@ export function FusedAgentProvider({ children, authenticated }: { children: Reac
         const updated = page.current.snapshot(root, window.location);
         // Controlled fields may reject an edit; report the committed value rather than claiming a change.
         if (updated.fields.find((field) => field.id === args.field_id)?.value !== args.value) throw new Error("The form did not accept that value.");
-        return { updated: true, page: updated };
+        // YAML syntax and config validation can reject a raw edit even though the text field accepted it.
+        if (editor.current?.view === "yaml" && editor.current.configError) return { ok: false, error: editor.current.configError, page: updated, saved: false };
+        return { updated: true, page: updated, saved: false };
       }
       if (call.name === "navigate_ui") {
         if (typeof args.path !== "string" || !context.links.some((link) => link.path === args.path)) throw new Error("Choose a path from the current page's links.");

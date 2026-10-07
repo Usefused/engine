@@ -20,7 +20,7 @@ import { hasWorkspacePermission } from "~/lib/current-actor-access";
 import { ExecutionTokenField } from "~/components/apps/ExecutionTokenField";
 import { ExecutionTokenOption } from "~/components/apps/ExecutionTokenOption";
 import { AppDetailBackLink } from "~/components/apps/AppDetailChrome";
-import { describeUnifiedApp, listUnifiedTemplates, planUnifiedApp } from "~/lib/unified-app-api";
+import { describeUnifiedApp, reviseUnifiedApp, listUnifiedTemplates, planUnifiedApp } from "~/lib/unified-app-api";
 import { UnifiedSourceClarificationError, unifiedConfig, unifiedDraftHasEvents, unifiedServiceSettings, type UnifiedDraft } from "~/lib/unified-app-contract";
 import { draftAppSource } from "~/lib/app-describe-api";
 import { api } from "~/lib/api";
@@ -75,6 +75,8 @@ export default function CreateUnifiedApp() {
   const [draftingSource, setDraftingSource] = useState(false);
   const pendingDescription = useRef<{ goal: string; proposal: AppDescription } | null>(null);
   const [draft, setDraft] = useState<UnifiedDraft | null>(null);
+  const currentDraft = useRef(draft);
+  currentDraft.current = draft;
   const [name, setName] = useState("");
   const [version, setVersion] = useState("1.0.0");
   const [bucket, setBucket] = useState("");
@@ -142,6 +144,37 @@ export default function CreateUnifiedApp() {
 
   /** Keeps edited inputs from reusing a plan that described different source or credentials. */
   function invalidatePlan() { compiledInput.current = null; setPlan(null); setError(""); }
+
+  /** Installs discovered capabilities and revised source atomically, preserving the original draft on failure. */
+  async function revise(goal: string, signal: AbortSignal) {
+    // Saved-source authorization and form readiness apply equally to conversation-driven edits.
+    if (!draft?.source || busy || describing || selecting || yamlActive || yamlError || (editID && editSource?.app_id !== editID)) throw new Error("Open a ready TypeScript draft before revising the app.");
+    // A synchronous ownership guard closes the gap before React renders the disabled form.
+    if (draftRequest.current) throw new Error("A Unified App draft is already being generated.");
+    const baseline = draft, route = draftRoute.current;
+    const controller = new AbortController();
+    const combined = AbortSignal.any([signal, controller.signal]);
+    draftRequest.current = controller; setDescribing(true);
+    try {
+      combined.throwIfAborted();
+      /** Report progress only while this request still owns the current editor. */
+      const report: DescribeProgress = (message) => { combined.throwIfAborted(); setProgress(message); };
+      /** Existing identities resolve automatically; new ambiguous publishers need an explicit user choice. */
+      const choosePublisher: ChooseDescribeService = async (reference, candidates) => {
+        throw new Error(`Choose the publisher for ${reference}: ${candidates.map(item => `@${item.provider?.handle}/${item.slug}`).join(", ")}`);
+      };
+      const revised = await reviseUnifiedApp(goal, { ...baseline, name }, report, choosePublisher);
+      combined.throwIfAborted();
+      // Navigation or intervening edits invalidate the proposal instead of overwriting newer user work.
+      if (route !== draftRoute.current || currentDraft.current !== baseline) throw new Error("The app changed while drafting. Read the current app and retry.");
+      setDraft(revised); setPickerSeed(revised.services); pendingDescription.current = null;
+      invalidatePlan();
+      return { revised: revised.source !== baseline.source || describeSelectionKey(revised.services) !== describeSelectionKey(baseline.services), saved: false, explanation: revised.explanation, next: "Read the updated source and selected capabilities, then validate/compile. Do not save or deploy." };
+    } finally {
+      // Route cleanup can already have handed ownership to another draft request.
+      if (draftRequest.current === controller) { draftRequest.current = null; setDescribing(false); setProgress(""); }
+    }
+  }
 
   /** Shares grounded drafting with the form and agent, rejecting cancelled results before they change the draft. */
   async function describe(goal: string, progress: DescribeProgress, chooseService: ChooseDescribeService, signal?: AbortSignal) {
@@ -238,6 +271,8 @@ export default function CreateUnifiedApp() {
 
   /** Keeps the original pins available for YAML undo and hydrates the picker only after editing finishes. */
   function changeEditorView(yaml: boolean) {
+    // Agent and manual switches share the same lock, including invalid YAML that still needs correction.
+    if (busy || describing || selecting || yamlError || yaml === yamlActive) throw new Error("Finish the current edit before switching editor views.");
     // YAML edits may remove and restore entries without needing to rediscover the same provider.
     if (yaml) yamlBaseline.current = draft;
     else if (draft) setPickerSeed(draft.services);
@@ -336,7 +371,7 @@ export default function CreateUnifiedApp() {
   useEffect(() => {
     // Incomplete selections cannot expose a compile action to the conversation.
     if (!agent || !draft) return;
-    return agent.registerEditor({ services: draft.services, sourceFieldID: "unified-app-source", compile: () => compile(false), available: !yamlActive && !busy && !yamlError && !selecting && !describing });
+    return agent.registerEditor({ services: draft.services, fieldID: yamlActive ? "unified-app-yaml" : "unified-app-source", view: yamlActive ? "yaml" : "typescript", configError: yamlError, setView: (view) => changeEditorView(view === "yaml"), compile: () => compile(false), revise, available: !busy && !yamlError && !selecting && !describing });
   });
 
   // Deep-linked editors stay locked until the private source endpoint has authorized and returned the baseline.
@@ -404,7 +439,7 @@ export default function CreateUnifiedApp() {
       </fieldset>
       {/* Source drafting keeps the service review visible until code generation finishes. */}
       {draftingSource && !draft.source && <p role="status" className="text-sm text-slate-500">Generating TypeScript from your selected operations and events…</p>}
-      <UnifiedAppCodeEditor source={draft.source} yaml={unifiedEditorYAML(draft, name, version, editSource?.config.bucket ?? buckets.find((item) => item.resource_id === bucket)?.display_name ?? "", editSource)} disabled={busy || describing || selecting} error={yamlError} onSource={updateSource} onYAML={updateYAML} onViewChange={changeEditorView} />
+      <UnifiedAppCodeEditor view={yamlActive ? "yaml" : "typescript"} source={draft.source} yaml={unifiedEditorYAML(draft, name, version, editSource?.config.bucket ?? buckets.find((item) => item.resource_id === bucket)?.display_name ?? "", editSource)} disabled={busy || describing || selecting} error={yamlError} onSource={updateSource} onYAML={updateYAML} onViewChange={changeEditorView} />
       {/* The shared conversation edits this draft while keeping deployment in the existing user-controlled flow. */}
       <button type="button" onClick={() => agent?.open("Help me review and improve this Unified App.")} className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700">Edit with Fused AI</button>
       <p className="text-xs text-slate-500">Validate and compile checks TypeScript and selected operation bindings without running provider calls. It enables missing pinned service versions. Deploying is a separate step.</p>

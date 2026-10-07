@@ -2,9 +2,13 @@ import { createContext, useContext } from "react";
 import type { AppServicePin } from "~/lib/app-describe-contract";
 
 export interface FusedEditorBridge {
-  sourceFieldID: string;
+  fieldID: string;
+  view: "typescript" | "yaml";
+  configError: string;
+  setView: (view: "typescript" | "yaml") => void;
   services: Record<string, AppServicePin>;
   compile: () => Promise<unknown>;
+  revise: (goal: string, signal: AbortSignal) => Promise<unknown>;
   available: boolean;
 }
 export interface FusedDraftBuilderBridge {

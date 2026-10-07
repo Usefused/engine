@@ -60,17 +60,17 @@ test("keeps the Registry repo-boundary manifest synchronized when present", (t) 
   }
 });
 
-// Exact totals include source revision and agent contract reads alongside the shared catalogue.
+// Exact totals include the three progressive agent discovery queries alongside source revision and contract reads.
 test("accounts for every current UI GraphQL call and document variant", () => {
   const scan = scanCurrentUI();
   // Exact totals ensure every static query remains represented in schema validation.
-  assert.equal(scan.call_count, 110);
-  assert.equal(scan.calls.length, 110);
-  assert.equal(scan.document_count, 128);
-  assert.equal(scan.documents.length, 128);
-  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 31);
+  assert.equal(scan.call_count, 113);
+  assert.equal(scan.calls.length, 113);
+  assert.equal(scan.document_count, 131);
+  assert.equal(scan.documents.length, 131);
+  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 34);
   assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 97);
-  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 128);
+  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 131);
 });
 
 test("resolves imported fragments and expands conditional and map variants", () => {

@@ -14,6 +14,12 @@ export async function describeUnifiedApp(goal: string, progress: DescribeProgres
   return { ...proposal, source: proposal.source! };
 }
 
+/** Discovers missing capabilities and revises code while preserving the current draft's identity and configuration. */
+export async function reviseUnifiedApp(goal: string, baseline: UnifiedDraft, progress: DescribeProgress, chooseService?: ChooseDescribeService): Promise<UnifiedDraft & { explanation?: string }> {
+  const proposal = await describeApp(goal, "unified_app", progress, chooseService, undefined, baseline);
+  return { ...baseline, ...proposal, source: proposal.source! };
+}
+
 /** Compiles a fresh plan; agent callers can prohibit dependency activation and persisted metadata repair. */
 export async function planUnifiedApp(config: Record<string, unknown>, services: UnifiedDraft["services"], progress: (message: string) => void, ownerTeam = "", allowDependencyChanges = true): Promise<AppPlanResponse> {
   const activated: string[] = [];
