@@ -54,7 +54,7 @@ const AUTH_NAV_ITEMS: SidebarItem[] = [
   },
   {
     to: "/integrations/buckets",
-    label: "Credentials",
+    label: "Bucket",
     Icon: KeyRound,
     visible: (access) => hasAnyPermission(access, "bucket.read"),
   },

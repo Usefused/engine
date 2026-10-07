@@ -65,11 +65,16 @@ export function BucketServiceSelect(props: BucketServiceSelectProps) {
   const [open, setOpen] = useState(false);
   const [selectedOption, setSelectedOption] = useState<ServiceSelectOption>();
   const containerRef = useSelectDismissal(open, setOpen);
+  // Search-only consumers filter by the stable ID; retain its label locally for display.
+  const searchSelection = !onSelectedServiceChange && selectedOption?.id === search;
+  const selectionId = searchSelection ? selectedOption?.id : selectedServiceId;
+  // An applied ID is a filter, not user-entered text in the menu's search field.
+  const menuSearch = searchSelection ? "" : search;
   const state = useServiceSelectState(
     options,
-    selectedServiceId,
+    selectionId,
     selectedOption,
-    search,
+    menuSearch,
     placeholder
   );
   return (
@@ -104,8 +109,8 @@ export function BucketServiceSelect(props: BucketServiceSelectProps) {
       {open && (
         <ServiceSelectMenu
           id={id}
-          search={search}
-          selectedServiceId={selectedServiceId}
+          search={menuSearch}
+          selectedServiceId={selectionId}
           options={state.visibleOptions}
           allowAll={allowAll}
           allLabel={allLabel}
@@ -371,6 +376,7 @@ function handleSearchInput(
   if (onSelectedServiceChange) onSelectedServiceChange("");
 }
 
+/** Applies selections through either the explicit ID handler or a search-only consumer's filter. */
 function selectService(
   serviceId: string,
   label: string,
@@ -380,10 +386,10 @@ function selectService(
   onSelectedServiceChange?: (serviceId: string) => void
 ) {
   onSelectedServiceChange?.(serviceId);
+  // Clearing All services must also discard the cached display identity.
   setSelectedOption(serviceId ? { id: serviceId, label } : undefined);
-  // Selection and search are separate state: retaining the selected label as
-  // a query made reopening the menu hide every other service.
-  onSearchChange("");
+  // Dedicated selectors keep search separate; overview searches use IDs to distinguish duplicate or unavailable names.
+  onSearchChange(onSelectedServiceChange ? "" : serviceId);
   setOpen(false);
 }
 

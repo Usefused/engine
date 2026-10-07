@@ -14,7 +14,7 @@ test("titles every primary Engine route", () => {
     ["/integrations/mcp", "Apps - Fused"],
     ["/integrations/access/people", "People - Fused"],
     ["/integrations/access/teams", "Teams - Fused"],
-    ["/integrations/buckets", "Credentials - Fused"],
+    ["/integrations/buckets", "Bucket - Fused"],
     ["/integrations/webhooks", "Webhooks - Fused"],
     ["/integrations/webhooks/new", "Create webhook - Fused"],
 	["/integrations/activity", "Activity - Fused"],

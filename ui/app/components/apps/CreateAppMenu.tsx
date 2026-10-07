@@ -4,6 +4,7 @@ import { useEffect, useId, useRef, useState, type ComponentType } from "react";
 import { Link } from "@remix-run/react";
 import { ChevronDown, Code2, Globe2, Layers3, Plus, TerminalSquare, type LucideProps } from "lucide-react";
 import type { AppCreationMode } from "~/lib/app-builder-contract";
+import { serviceAppHref, type ServiceAppSource } from "~/lib/service-app-launch";
 
 export type CreateAppOption = {
   mode: Exclude<AppCreationMode, "app"> | "unified_app";
@@ -16,6 +17,7 @@ export type CreateAppOption = {
 type CreateAppMenuProps = {
   className?: string;
   align?: "end" | "center";
+  service?: ServiceAppSource;
 };
 
 export const CREATE_APP_OPTIONS: CreateAppOption[] = [
@@ -37,11 +39,14 @@ export const CREATE_APP_OPTIONS: CreateAppOption[] = [
   },
 ];
 
-/** Presents the four app types in catalogue order through one creation menu. */
-export function CreateAppMenu({ className = "", align = "end" }: CreateAppMenuProps) {
+/** Offers authorized creation paths with compact service actions and a menu contained by the mobile action row. */
+export function CreateAppMenu({ className = "", align = "end", service }: CreateAppMenuProps) {
   const { access } = useCurrentActorAccess();
   // Each choice appears only when its own creation permission is available.
-  const options = CREATE_APP_OPTIONS.filter((option) => hasWorkspacePermission(access, `app.${option.mode}.create`));
+  const options = CREATE_APP_OPTIONS.filter((option) => {
+    // Service shortcuts offer the three creation flows supported by this entry point.
+    return (!service || option.mode !== "api") && hasWorkspacePermission(access, `app.${option.mode}.create`);
+  });
   const [open, setOpen] = useState(false);
   const menuId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -89,9 +94,14 @@ export function CreateAppMenu({ className = "", align = "end" }: CreateAppMenuPr
 
   // Empty-state triggers are centered; header triggers anchor the popup to their trailing edge.
   const alignmentClass = align === "center" ? "left-1/2 -translate-x-1/2" : "right-0";
+  // Service menus use the whole action row on phones so a trailing action cannot push the popup off-screen.
+  const rootPosition = service ? "static shrink-0 sm:relative" : "relative min-w-0";
+  const menuPosition = service ? "inset-x-0 w-full sm:left-auto sm:right-0 sm:w-72" : `${alignmentClass} w-72`;
+  // A disclosure with no authorized destinations would leave readers at a dead end.
+  if (options.length === 0) return null;
 
   return (
-    <div ref={rootRef} className={`relative inline-flex min-w-0 ${className}`}>
+    <div ref={rootRef} className={`inline-flex ${rootPosition} ${className}`}>
       <button
         ref={triggerRef}
         type="button"
@@ -99,11 +109,13 @@ export function CreateAppMenu({ className = "", align = "end" }: CreateAppMenuPr
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={menuId}
-        className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-slate-800 sm:w-auto"
+        className="inline-flex h-11 w-full shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-slate-950 px-3 text-sm font-medium text-white shadow-sm transition-colors hover:bg-slate-800 sm:h-9 sm:w-auto sm:gap-2 sm:px-4"
       >
-        <Plus className="h-4 w-4" />
-        Create App
-        <ChevronDown className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`} />
+        {/* The label carries the mobile action; the decorative plus returns when space allows. */}
+        <Plus className={`h-4 w-4 shrink-0 ${service ? "hidden sm:block" : ""}`} aria-hidden="true" />
+        {/* Service details provide context; the catalogue retains its general creation label. */}
+        {service ? "Use in App" : "Create App"}
+        <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
       {/* The menu offers only authorized app types in their catalogue order. */}
@@ -112,7 +124,7 @@ export function CreateAppMenu({ className = "", align = "end" }: CreateAppMenuPr
           id={menuId}
           role="menu"
           aria-label="Choose app type"
-          className={`absolute ${alignmentClass} top-full z-50 mt-2 w-72 max-w-[calc(100vw-2rem)] max-h-[min(28rem,calc(100dvh-6rem))] overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 text-left shadow-xl`}
+          className={`absolute ${menuPosition} top-full z-50 mt-2 max-w-[calc(100vw-2rem)] max-h-[min(28rem,calc(100dvh-6rem))] overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 text-left shadow-xl`}
         >
           {options.map((option, index) => {
             const Icon = option.icon;
@@ -121,7 +133,7 @@ export function CreateAppMenu({ className = "", align = "end" }: CreateAppMenuPr
                 key={option.to}
                 ref={index === 0 ? firstItemRef : undefined}
                 role="menuitem"
-                to={option.to}
+                to={serviceAppHref(option.to, service)}
                 onClick={closeMenu}
                 className="flex items-start gap-3 rounded-lg px-3 py-2.5 text-slate-700 outline-none hover:bg-slate-50 focus:bg-slate-50"
               >

@@ -55,6 +55,7 @@ type capabilityHostFetchSelector struct {
 }
 
 type executionCapabilityHost struct {
+	apps        *EngineGRPCServer
 	runtime     *sandbox.EngineGRPCServer
 	identity    auth.RuntimeIdentity
 	executionID uuid.UUID
@@ -123,14 +124,22 @@ func unifiedAppBindings(manifest *unifiedAppManifest) (map[string]sandbox.ExactO
 	return bindings, nil
 }
 
-// Fetch accepts only a selected workspace operation and delegates provider work to the shared physical boundary.
+// Fetch routes recorded effects through either the selected app or physical operation boundary.
 func (host *executionCapabilityHost) Fetch(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	var request capabilityHostFetchRequest
-	// A worker cannot supply a URL, physical ID, or credential in place of one selected operation.
-	if err := decoder.Decode(&request); err != nil || request.Service == "" || request.Operation == "" || request.Input == nil {
-		return nil, errors.New("unified app workspace operation request is invalid")
+	// A dedicated discriminator keeps hosted inputs separate from provider selectors and credentials.
+	var kind map[string]json.RawMessage
+	if json.Unmarshal(raw, &kind) == nil && kind["unifiedApp"] != nil {
+		return host.callUnifiedApp(ctx, raw)
+	}
+	return host.fetchWorkspaceOperation(ctx, raw)
+}
+
+// fetchWorkspaceOperation preserves exact provider selection and per-execution idempotency.
+func (host *executionCapabilityHost) fetchWorkspaceOperation(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	request, err := decodeCapabilityWorkspaceRequest(raw)
+	// Malformed inputs cannot reach either binding lookup or physical dispatch.
+	if err != nil {
+		return nil, err
 	}
 	var pagination *engine.PaginationIntent
 	// Only a caller-owned page bound may cross the sandbox; operation policy remains Engine-owned.
@@ -179,6 +188,18 @@ func (host *executionCapabilityHost) Fetch(ctx context.Context, raw json.RawMess
 		Binding: binding, Input: request.Input, Selectors: selectors, Pagination: pagination,
 		IdempotencyKey: fmt.Sprintf("%s:%d", host.executionID, callNumber), RequestBodyHash: hex.EncodeToString(digest[:]),
 	})
+}
+
+// decodeCapabilityWorkspaceRequest admits named provider input without caller-controlled routing fields.
+func decodeCapabilityWorkspaceRequest(raw json.RawMessage) (capabilityHostFetchRequest, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var request capabilityHostFetchRequest
+	// Names and an object input are mandatory; physical IDs, URLs and credentials remain Engine-owned.
+	if err := decoder.Decode(&request); err != nil || request.Service == "" || request.Operation == "" || request.Input == nil {
+		return request, errors.New("unified app workspace operation request is invalid")
+	}
+	return request, nil
 }
 
 const maxCapabilityFetchCalls = 32

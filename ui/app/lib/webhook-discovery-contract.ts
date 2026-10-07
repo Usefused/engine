@@ -33,7 +33,7 @@ export function webhookConfiguration(draft: WebhookDraft): Record<string, unknow
   // Provider delivery requires an explicit safe base; do not infer it from the UI's development proxy.
   if ((parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname))) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("Use an HTTPS Fused URL without credentials, query parameters, or a fragment.");
   // Only references may enter desired configuration; never accept the provider's raw signing secret here.
-  if (secret && !/^\$\{bucket\.[^{}]+\.secret\.[^{}]+\}$/.test(secret) && !/^\$\{bucket\.secret\.[^{}]+\}$/.test(secret)) throw new Error("Choose a secret reference from Credentials, such as ${bucket.default.secret.signing_key}.");
+  if (secret && !/^\$\{bucket\.[^{}]+\.secret\.[^{}]+\}$/.test(secret) && !/^\$\{bucket\.secret\.[^{}]+\}$/.test(secret)) throw new Error("Choose a secret reference from the Bucket page, such as ${bucket.default.secret.signing_key}.");
   return { apiVersion: "fused/v1", kind: "webhook", name, callback_base_url: base.replace(/\/$/, ""), services: { [service]: secret ? { secret } : {} } };
 }
 

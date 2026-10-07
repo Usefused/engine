@@ -133,7 +133,7 @@ test("service removal is available only from service details", async () => {
   assert.match(detailSource, /data-track="remove_workspace_service"/);
   assert.match(detailSource, /aria-label="Service actions"/);
   assert.match(detailSource, /role="menuitem"/);
-  assert.match(detailSource, /createPortal\(<WorkspaceMembershipControl srv=\{srv\} \/>, host\)/);
+  assert.match(detailSource, /<WorkspaceMembershipControl srv=\{srv\} \/>/);
   assert.match(detailSource, /api\.workspace\.removeService\(serviceId\)/);
   assert.match(detailSource, /setWorkspaceServiceActive\(false\)/);
   assert.doesNotMatch(detailSource, /api\.integrations\.delete/);

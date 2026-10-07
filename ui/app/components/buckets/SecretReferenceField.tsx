@@ -98,7 +98,7 @@ function CreateSecretDialog({ onClose, onCreated }: { onClose: () => void; onCre
       setValue(""); onCreated(reference);
     } catch (cause) {
       // Known validation errors contain no values; transport errors might echo request data.
-      setError(cause instanceof Error && /^(Choose a bucket|Enter a secret|A secret with)/.test(cause.message) ? cause.message : "Could not save the secret. Check Credentials before retrying.");
+      setError(cause instanceof Error && /^(Choose a bucket|Enter a secret|A secret with)/.test(cause.message) ? cause.message : "Could not save the secret. Check the Bucket page before retrying.");
     } finally { setBusy(false); }
   }
   return createPortal(<div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">

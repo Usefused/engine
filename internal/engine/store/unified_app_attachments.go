@@ -88,7 +88,7 @@ func (s *postgresStore) ReadUnifiedAppBindings(ctx context.Context, accountID, a
    ORDER BY applied.applied_at DESC, applied.created_at DESC LIMIT 1
  ) plan ON true
  WHERE app.account_id=$1 AND app.app_id=$2 AND app.status IN ('active','deprecated')
-   AND family.kind IN ('sdk','mcp') AND family.archived_at IS NULL`, accountID, appID).Scan(&raw)
+   AND family.kind IN ('sdk','mcp','unified_app') AND family.archived_at IS NULL`, accountID, appID).Scan(&raw)
 	// Missing publication authority fails closed even if a version row remains.
 	if err != nil {
 		return nil, err

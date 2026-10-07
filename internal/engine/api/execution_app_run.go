@@ -57,6 +57,7 @@ func (s *EngineGRPCServer) executeCapabilityRun(ctx context.Context, spec capabi
 
 // runAdmittedCapability owns provider work only after the result reservation is durable.
 func (s *EngineGRPCServer) runAdmittedCapability(ctx context.Context, spec capabilityRunSpec, admitted admittedCapabilityRun) (capabilityExecutionEnvelope, *restExecutionError) {
+	ctx = withUnifiedAppCallRoot(ctx, spec.identity.AppFamilyID)
 	// Every terminal authored run shares the canonical Requests and Analytics event path.
 	var recorder *recordingCapabilityHost
 	defer func() { s.publishUnifiedAppReceipt(ctx, spec, admitted.id, recorder) }()
@@ -78,7 +79,7 @@ func (s *EngineGRPCServer) runAdmittedCapability(ctx context.Context, spec capab
 		return capabilityExecutionEnvelope{}, newRESTExecutionError(http.StatusServiceUnavailable, "result_unavailable", "execution result is unavailable")
 	}
 	host := &executionCapabilityHost{
-		runtime: s.runtime, identity: spec.identity,
+		apps: s, runtime: s.runtime, identity: spec.identity,
 		executionID: admitted.id, bindings: admitted.bindings,
 	}
 	// Buffering the JSON document keeps the final state and output in one terminal SQL update.

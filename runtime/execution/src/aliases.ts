@@ -1,5 +1,5 @@
 // These names belong to the runtime facade or JavaScript object machinery, never provider aliases.
-const RESERVED = new Set(["fetch", "db", "forUserRef", "forServiceUserRefs", "constructor", "prototype", "__proto__", "then", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable", "toLocaleString"]);
+const RESERVED = new Set(["fetch", "callApp", "db", "forUserRef", "forServiceUserRefs", "constructor", "prototype", "__proto__", "then", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable", "toLocaleString"]);
 
 // Normalize only presentation names; the generated method retains the exact dispatch identity.
 export function operationIdentifier(value: string, prefix: string): string {

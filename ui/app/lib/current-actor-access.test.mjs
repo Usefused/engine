@@ -96,12 +96,13 @@ test("access routes gate reads before mounting data loaders and gate management 
   assert.match(teams, /const disabled = !canEditTeam \|\| teamEditorDisabled/);
 });
 
+// Keep named navigation destinations discoverable only with the required access.
 test("restricted access navigation is permission-aware and direct denial is explicit", () => {
   const sidebar = source("../components/layout/IntegrationsSidebar.tsx");
   const apps = source("../routes/integrations.sdks._index.tsx");
   const gate = source("../components/access/CurrentActorAccess.tsx");
   assert.match(sidebar, /label: "Access"/);
-  assert.match(sidebar, /label: "Credentials"/);
+  assert.match(sidebar, /label: "Bucket"/);
   assert.doesNotMatch(sidebar, /label: "Create app"/);
   assert.match(apps, /<CreateAppMenu/);
   assert.doesNotMatch(apps, /createTo|createLabel/);

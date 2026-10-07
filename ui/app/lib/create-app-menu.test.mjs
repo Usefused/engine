@@ -14,7 +14,7 @@ test("offers every supported app delivery adapter from one accessible create men
 
   assert.match(menu, /aria-haspopup="menu"/);
   assert.match(menu, /role="menu"/);
-  assert.match(menu, />\s*Create App\s*<ChevronDown/);
+  assert.match(menu, /service \? "Use in App" : "Create App"/);
   assert.doesNotMatch(menu, />\s*Create app\s*</);
   assert.doesNotMatch(menu, /mode: "app", label: "App"/);
   assert.match(menu, /\/integrations\/unified-apps\/new/);

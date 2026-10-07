@@ -9,6 +9,7 @@ import { describeApp } from "~/lib/app-describe-api";
 import { loadDescribedSelection } from "~/lib/app-describe-selection";
 import { describeSelectionKey, type AppServicePin } from "~/lib/app-describe-contract";
 import { composeUnifiedAppConsumer, unifiedAppAlias, type HostedAppReference } from "~/lib/unified-app-consumer";
+import { findServiceAppSource } from "~/lib/service-app-launch";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
 import { hasAnyAppPermission } from "~/lib/current-actor-access";
 import { useState, useEffect, useRef, type FormEvent, type ReactNode } from "react";
@@ -1343,9 +1344,15 @@ function BuilderPage({ destination, generationMode, error, loading, selection, g
   </div>;
 }
 
-// initialBuilderServiceId resolves a route-selected service only when the loader is unambiguous.
+// initialBuilderServiceId carries exact deep links into the authorized selector load, never private source edits.
 function initialBuilderServiceId(searchParams: URLSearchParams, services: Service[]): string | undefined {
+  // Existing app and template baselines take precedence over unrelated service parameters.
+  if (searchParams.has("app") || searchParams.has("edit") || searchParams.has("template") || searchParams.has("unifiedApp")) return undefined;
+  const exactID = searchParams.get("serviceId");
+  // Exact IDs still require Engine selector authorization before any metadata is loaded.
+  if (exactID) return exactID;
   const selected = searchParams.get("serviceId") || searchParams.get("service") || searchParams.get("slug");
+  // Legacy slug links are safe only when the loader has already resolved a single service.
   if (!selected || services.length !== 1) return undefined;
   return services[0]?.id;
 }
@@ -1494,10 +1501,11 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   // Per-resource loading state keyed by resource name (for EndpointSelectionList)
   const [loadingResourceByName, setLoadingResourceByName] = useState<Record<string, boolean>>({});
   // Tracks which service IDs have had their integrations fetched
-  const [loadedServices, setLoadedServices] = useState<Record<string, boolean>>(() =>
-    initialSelectedServiceId ? { [initialSelectedServiceId]: true } : {}
-  );
+  const [loadedServices, setLoadedServices] = useState<Record<string, boolean>>({});
   const [loadingService, setLoadingService] = useState<Record<string, boolean>>({});
+  const focusedServiceAttempt = useRef("");
+  const [focusedServiceAdmission, setFocusedServiceAdmission] = useState("");
+  const catalogueRequest = useRef(0);
   // Per-service sub-section expand state
   const [expandedSections, setExpandedSections] = useState<Record<string, { endpoints: boolean; webhooks: boolean }>>({});
   // toggleSection expands one capability group without affecting sibling services.
@@ -1587,6 +1595,8 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   useEffect(() => {
     if (!picker) return;
     let current = true;
+    // A new seed replaces loaded row state, so its service shortcut must be eligible to reopen afterwards.
+    focusedServiceAttempt.current = "";
     setSeedBusy(true);
     loadDescribedSelection(picker.seed).then((proposal) => {
       // Navigation or a newer description supersedes pending hydration.
@@ -1730,23 +1740,38 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     });
   };
 
-  // loadData fetches catalogue pages only during explicit discovery, not selected-service review.
-  async function loadData(pageNum: number, search = "") {
+  // loadData resolves service shortcuts through the same owner-aware selectors as ordinary discovery.
+  async function loadData(pageNum: number, search = "", focusService = true) {
     // Existing app scope is already authorized by app.manage and needs no create-only selector.
     if (source || !browsingServices) return;
+    const request = ++catalogueRequest.current;
+    setFocusedServiceAdmission("");
     setLoading(true);
     setError("");
     try {
       const limit = 20;
-      const selectors = await listAppBuildSelectors(ownerTeamId, "SERVICE", search, limit, (pageNum - 1) * limit);
+      // A deep link is an identity request, never permission to bypass the Engine's usable-service scope.
+      const focusedID = focusService && !search ? initialSelectedServiceId : undefined;
+      const selectors = focusedID
+        ? { items: [await findServiceAppSource(focusedID, (pageLimit, offset) => {
+            // A display name narrows pagination; the helper still requires the exact service ID.
+            return listAppBuildSelectors(ownerTeamId, "SERVICE", searchParams.get("serviceName") || "", pageLimit, offset);
+          })], total: 1 }
+        : await listAppBuildSelectors(ownerTeamId, "SERVICE", search, limit, (pageNum - 1) * limit);
       const servicesData = await loadRegistryServicesByIDs(selectors.items.map((item) => item.resource_id));
+      // A late owner or search response must not replace a newer authorized catalogue.
+      if (request !== catalogueRequest.current) return;
       const total = selectors.total;
       processResponse(servicesData, total);
+      // Only this completed selector lookup admits a route-selected service for automatic expansion.
+      if (focusedID) setFocusedServiceAdmission(`${ownerTeamId}:${focusedID}`);
       setTotalPages(Math.ceil(total / limit) || 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load services");
+      // Stale request errors cannot obscure the active owner's result.
+      if (request === catalogueRequest.current) setError(err instanceof Error ? err.message : "Failed to load services");
     } finally {
-      setLoading(false);
+      // The newest request alone owns the catalogue loading indicator.
+      if (request === catalogueRequest.current) setLoading(false);
     }
   }
 
@@ -1764,7 +1789,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     setSearching(true);
     setError("");
     try {
-      await loadData(1, q.trim());
+      await loadData(1, q.trim(), false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to search services");
     } finally {
@@ -1802,7 +1827,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
       next.set("page", "1");
       return next;
     }, { replace: true });
-    loadData(1, "");
+    loadData(1, "", false);
   }
 
   // Load only teams the actor may choose as an owner. This query intentionally
@@ -1842,7 +1867,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     if (!browsingServices) return;
     setPage(1);
     void loadData(1, query.trim());
-  }, [ownerTeamId, workflowContext.appID, browsingServices]);
+  }, [ownerTeamId, workflowContext.appID, browsingServices, initialSelectedServiceId]);
 
   // Re-fetch authorized services when page changes for both personal and team ownership.
   useEffect(() => {
@@ -1989,6 +2014,18 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
       setLoadingService(prev => ({ ...prev, [serviceId]: false }));
     }
   };
+
+  // Open the authorized service's operation picker once; failures remain explicit and can be retried by expanding it.
+  useEffect(() => {
+    // Seed hydration owns edit/template scope and must settle before a new-service shortcut opens a row.
+    if (!initialSelectedServiceId || (picker && (seedBusy || hydratedSeed.current !== picker.seed))) return;
+    const attempt = `${ownerTeamId}:${initialSelectedServiceId}`;
+    // Metadata can only be loaded after this owner's selector has admitted the exact requested service.
+    if (focusedServiceAdmission !== attempt || focusedServiceAttempt.current === attempt || !data.some((row) => row.service.id === initialSelectedServiceId)) return;
+    focusedServiceAttempt.current = attempt;
+    setExpanded((previous) => ({ ...previous, [initialSelectedServiceId]: true }));
+    void loadServiceIntegrations(initialSelectedServiceId);
+  }, [initialSelectedServiceId, ownerTeamId, focusedServiceAdmission, data, seedBusy, picker?.seed]);
 
   // handleVersionSelection replaces all version-bound builder rows together.
   async function handleVersionSelection(serviceId: string, serviceVersionId: string) {

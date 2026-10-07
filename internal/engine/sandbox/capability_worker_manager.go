@@ -91,7 +91,7 @@ func (manager *CapabilityWorkerManager) Run(ctx context.Context, familyID, appID
 	if manager.admissionErr != nil {
 		return nil, manager.admissionErr
 	}
-	release, err := manager.admission.acquire(ctx, manager.ctx, familyID, limit)
+	release, err := manager.admission.acquireInvocation(ctx, manager.ctx, familyID, limit)
 	// Queue rejection must not create or acquire an app worker.
 	if err != nil {
 		return nil, err

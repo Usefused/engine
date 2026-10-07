@@ -125,3 +125,41 @@ Full request/response bodies and stack traces still require
 `app.unified_app.diagnostics.read`. Unknown provider response formats retain the
 HTTP failure explanation; their raw body is available in diagnostics. Existing
 receipts retain the message captured when they ran.
+
+## Call another Unified App
+
+Select an already deployed app by name and exact version:
+
+```yaml
+unified_apps:
+  child:
+    name: Customer lookup
+    version: "1.0.0"
+```
+
+Call its alias from your TypeScript:
+
+```ts
+import { fused } from "@fused/unified-app";
+
+const result = await fused.callApp("child", { customerId: "cus_123" });
+// A failed child must not be treated as a successful lookup.
+if (result.status !== "succeeded") throw new Error("Customer lookup failed");
+const customer = result.output;
+```
+
+An app with `unified_apps` can omit `services`. Actor and owner need
+`app.unified_app.use` on each dependency; restricted execution tokens must allow
+`unified_app:child`. Each child keeps its own credentials, schemas, data and
+execution record. Pass user references explicitly in the child input.
+
+References stay pinned and must still receive traffic after promotion. Calls
+are synchronous and do not retry automatically. Replay returns the recorded
+child response without running the child again. A child can also declare its
+own dependencies; calls back into an ancestor family are rejected.
+
+A root execution permits 32 nested calls and eight app levels including itself.
+Parent cancellation and deadlines bound the children. Each waiting parent keeps
+its worker slot, so set `engine.unified_apps.max_concurrency` high enough for the
+chain. A child fails immediately when capacity is full instead of waiting on an
+ancestor's slot.

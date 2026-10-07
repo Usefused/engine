@@ -67,16 +67,43 @@ func assertUnifiedAppConsumerRecovery(t *testing.T, ctx context.Context, pool *p
 	if err != nil || len(read) != 1 || read[0].AppID != bindings[0].AppID {
 		t.Fatalf("runtime bindings=%v error=%v", read, err)
 	}
-	request, err := repository.GetSDKPackageBuildRequest(ctx, accountID, consumerID)
-	if err != nil || len(request.UnifiedApps) != 1 || request.UnifiedApps[0].AppID != bindings[0].AppID {
-		t.Fatalf("package request=%v error=%v", request, err)
-	}
-	build, err := repository.GetSDKGenerationBuild(ctx, accountID, consumerID)
-	if err != nil || len(build.Request.UnifiedApps) != 1 || build.Request.UnifiedApps[0].AppID != bindings[0].AppID {
-		t.Fatalf("recovery build=%v error=%v", build, err)
-	}
+	assertAttachedSDKRecovery(t, ctx, repository, accountID, consumerID, bindings[0].AppID)
 	// A target name or applied-plan record never authorizes a different account's consumer.
 	if _, err := repository.ReadUnifiedAppBindings(ctx, uuid.New(), consumerID); err == nil {
 		t.Fatal("cross-account consumer readable")
+	}
+	assertHostedConsumerBindings(t, ctx, pool, repository, accountID, consumerFamily, consumerID, bindings[0].AppID)
+}
+
+// assertAttachedSDKRecovery keeps package regeneration and pending builds on the same immutable dependency pins.
+func assertAttachedSDKRecovery(t *testing.T, ctx context.Context, repository *postgresStore, accountID, consumerID, targetID uuid.UUID) {
+	t.Helper()
+	request, err := repository.GetSDKPackageBuildRequest(ctx, accountID, consumerID)
+	// Regenerated packages must retain the reviewed target instead of re-resolving its name.
+	if err != nil || len(request.UnifiedApps) != 1 || request.UnifiedApps[0].AppID != targetID {
+		t.Fatalf("package request=%v error=%v", request, err)
+	}
+	build, err := repository.GetSDKGenerationBuild(ctx, accountID, consumerID)
+	// Recovery after a pending build must preserve the same pinned dependency.
+	if err != nil || len(build.Request.UnifiedApps) != 1 || build.Request.UnifiedApps[0].AppID != targetID {
+		t.Fatalf("recovery build=%v error=%v", build, err)
+	}
+}
+
+// assertHostedConsumerBindings proves the same persisted plan can authorize a Unified App consumer.
+func assertHostedConsumerBindings(t *testing.T, ctx context.Context, pool *pgxpool.Pool, repository UnifiedAppAttachmentStore, accountID, familyID, appID, targetID uuid.UUID) {
+	t.Helper()
+	// This fixture-only family transition reuses the exact applied-plan rows after SDK recovery assertions.
+	if _, err := pool.Exec(ctx, `UPDATE fused_app_families SET kind='unified_app', delivery_mode=NULL WHERE app_family_id=$1`, familyID); err != nil {
+		t.Fatal(err)
+	}
+	bindings, err := repository.ReadUnifiedAppBindings(ctx, accountID, appID)
+	// Hosted consumers must recover their reviewed dependency even after process restart.
+	if err != nil || len(bindings) != 1 || bindings[0].AppID != targetID {
+		t.Fatalf("hosted bindings=%v error=%v", bindings, err)
+	}
+	// The extra adapter must not weaken account isolation at the SQL boundary.
+	if _, err := repository.ReadUnifiedAppBindings(ctx, uuid.New(), appID); err == nil {
+		t.Fatal("cross-account hosted bindings readable")
 	}
 }

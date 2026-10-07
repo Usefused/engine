@@ -39,12 +39,14 @@ function draftHasWebhookEvents(draft: UnifiedDraft): boolean {
   return unifiedDraftHasEvents(draft);
 }
 
-/** Gates validation on a complete event or operation scope and its required registration. */
+/** Gates validation on selected provider or hosted capabilities and any required ingress registration. */
 function canValidateUnifiedDraft(draft: UnifiedDraft, name: string, version: string, bucket: string, savedVersion?: string): boolean {
   // Immutable successors require a new version before source can be compiled.
   if (version.trim() === savedVersion || !canCompile(name, version, bucket, draft.source)) return false;
-  // An empty picker selection cannot create a callable or triggered app.
-  if (!Object.values(draft.services).some((pin) => Boolean(pin.operations.length)) && !draftHasWebhookEvents(draft)) return false;
+  // Named hosted dependencies can supply the app scope without a provider selection.
+  const attached = draft.configSettings?.unified_apps;
+  const hasAttachedApps = attached !== null && typeof attached === "object" && !Array.isArray(attached) && Object.keys(attached).length > 0;
+  if (!Object.values(draft.services).some((pin) => Boolean(pin.operations.length)) && !draftHasWebhookEvents(draft) && !hasAttachedApps) return false;
   // Event-only and mixed scopes both need an applied registration name.
   return !draftHasWebhookEvents(draft) || Boolean(draft.webhookAttachment?.trim());
 }

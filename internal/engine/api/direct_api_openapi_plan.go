@@ -12,8 +12,8 @@ import (
 
 // validateDirectAPIOpenAPIPlan runs the production export projection against the prospective immutable scope before any API plan is stored.
 func validateDirectAPIOpenAPIPlan(ctx context.Context, s store.Store, doc sdkConfigDocument, existingAppID uuid.UUID, selections []models.SDKSelection) error {
-	// Generated SDKs retain their package contract and do not promise a package-free REST API export during this plan path.
-	if sdkConfigGeneratesPackage(doc) {
+	// Unified Apps publish their authored manifest; only package-free SDKs need this physical OpenAPI projection.
+	if doc.Kind == store.AppKindUnifiedApp.String() || sdkConfigGeneratesPackage(doc) {
 		return nil
 	}
 	contracts, ok := s.(appOpenAPIContractStore)

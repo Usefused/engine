@@ -58,7 +58,7 @@ export function readUnifiedEditorYAML(raw: string, draft: UnifiedDraft, saved?: 
   if (new TextEncoder().encode(raw).length > 128 * 1024) throw new Error("YAML configuration exceeds 128 KiB.");
   const config = mapping(load(raw, { schema: JSON_SCHEMA }), "App configuration");
   validateConfigTree(config);
-  const allowed = new Set(["apiVersion", "kind", "name", "version", "description", "bucket", "source_path", "services", "webhook_attachment", "mcp", "language", "generate", ...Object.keys(saved?.config ?? {})]);
+  const allowed = new Set(["apiVersion", "kind", "name", "version", "description", "bucket", "source_path", "services", "unified_apps", "webhook_attachment", "mcp", "language", "generate", ...Object.keys(saved?.config ?? {})]);
   // Unknown fields should not look supported merely because a backend JSON decoder might ignore them.
   for (const key of Object.keys(config)) if (!allowed.has(key)) throw new Error(`Unsupported Unified App field: ${key}.`);
   if (config.apiVersion !== "fused/v1" || config.kind !== "unified_app") throw new Error("Use apiVersion: fused/v1 and kind: unified_app.");
@@ -69,7 +69,8 @@ export function readUnifiedEditorYAML(raw: string, draft: UnifiedDraft, saved?: 
   if (saved && (name !== saved.config.name || bucket !== saved.config.bucket)) throw new Error("An existing app keeps its name and default bucket.");
   const services: UnifiedDraft["services"] = {};
   const serviceSettings: NonNullable<UnifiedDraft["serviceSettings"]> = {};
-  for (const [key, value] of Object.entries(mapping(config.services, "services"))) {
+  // Dependency-only apps can omit providers while keeping the same YAML planning path.
+  for (const [key, value] of Object.entries(mapping(config.services ?? {}, "services"))) {
     const service = mapping(value, `services.${key}`), pin = draft.services[key];
     // Service resolution must not guess an ID or upgrade a version from YAML text.
     if (!pin || service.version !== pin.version) throw new Error(`Choose ${key} and its version using the service picker first.`);

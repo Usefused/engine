@@ -581,7 +581,7 @@ func validateUnifiedAppConfigDocument(doc sdkConfigDocument) error {
 	if err := validateAttachedAppServices(doc); err != nil {
 		return err
 	}
-	return validateExecutionOperationScope(doc.Services)
+	return validateExecutionOperationScope(doc.Services, len(doc.UnifiedApps))
 }
 
 // validateExecutionIdentityAndRuntime validates hosted source identity and rejects unsupported runtime declarations.
@@ -618,7 +618,7 @@ func validExecutionDocumentIdentity(doc sdkConfigDocument) bool {
 }
 
 // validateExecutionOperationScope bounds raw calls while admitting an explicitly selected inbound trigger.
-func validateExecutionOperationScope(services map[string]sdkConfigServiceDoc) error {
+func validateExecutionOperationScope(services map[string]sdkConfigServiceDoc, attachmentCount int) error {
 	operationCount := 0
 	eventCount := 0
 	for _, service := range services {
@@ -627,6 +627,7 @@ func validateExecutionOperationScope(services map[string]sdkConfigServiceDoc) er
 			return errors.New("Unified App config requires explicit operations")
 		}
 		for _, operation := range service.Operations {
+			// The entry point name cannot be shadowed by a provider operation.
 			if operation == "execute" {
 				return errors.New("Unified App config reserves raw operation execute")
 			}
@@ -638,9 +639,9 @@ func validateExecutionOperationScope(services map[string]sdkConfigServiceDoc) er
 			eventCount++
 		}
 	}
-	// Event-only apps still have a bounded, reviewed capability surface.
-	if operationCount > 64 || (operationCount == 0 && eventCount == 0) {
-		return errors.New("Unified App config requires an event or 1 to 64 selected operations")
+	// Hosted dependencies and inbound events can supply the entire app capability surface.
+	if operationCount > 64 || (operationCount == 0 && eventCount == 0 && attachmentCount == 0) {
+		return errors.New("Unified App config requires an attached app, an event, or 1 to 64 selected operations")
 	}
 	return nil
 }

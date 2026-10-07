@@ -56,11 +56,11 @@ func TestUnifiedAppSelectedOperationBound(t *testing.T) {
 // TestUnifiedAppEventOnlyConfigScope requires an explicit trigger when physical operation scope is empty.
 func TestUnifiedAppEventOnlyConfigScope(t *testing.T) {
 	// An event-only app has an inbound capability despite having no provider method binding.
-	if err := validateExecutionOperationScope(map[string]sdkConfigServiceDoc{"issues": {Webhooks: []string{"issue.created"}}}); err != nil {
+	if err := validateExecutionOperationScope(map[string]sdkConfigServiceDoc{"issues": {Webhooks: []string{"issue.created"}}}, 0); err != nil {
 		t.Fatalf("event-only scope rejected: %v", err)
 	}
 	// An empty service pin cannot create a callable or triggered hosted app.
-	if err := validateExecutionOperationScope(map[string]sdkConfigServiceDoc{"issues": {}}); err == nil {
+	if err := validateExecutionOperationScope(map[string]sdkConfigServiceDoc{"issues": {}}, 0); err == nil {
 		t.Fatal("empty scope accepted")
 	}
 }

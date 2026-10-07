@@ -1,4 +1,4 @@
 [
-  {"service":true,"values":["@beta/stripe","@alpha/stripe","@public/my-service","db","123-api"],"expected":{"@beta/stripe":"stripe_2","@alpha/stripe":"stripe","@public/my-service":"myService","db":"db_2","123-api":"service123Api"}},
+  {"service":true,"values":["@beta/stripe","@alpha/stripe","@public/my-service","db","callApp","123-api"],"expected":{"@beta/stripe":"stripe_2","@alpha/stripe":"stripe","@public/my-service":"myService","db":"db_2","callApp":"callApp_2","123-api":"service123Api"}},
   {"service":false,"values":["GetCustomers","create-customer","123-check","constructor","hello_world","hello-world","你好"],"expected":{"GetCustomers":"getCustomers","create-customer":"createCustomer","123-check":"operation123Check","constructor":"constructor_2","hello_world":"helloWorld_2","hello-world":"helloWorld","你好":"operation"}}
 ]

@@ -17,6 +17,15 @@ export interface WorkspaceOperationRequest {
   };
 }
 
+export interface UnifiedAppCallResult {
+  executionId: string;
+  appFamilyId: string;
+  version: string;
+  status: string;
+  output?: JsonObject;
+  error?: { code: string; message: string };
+}
+
 export interface ExecutionHost {
   fetch(requestJson: string): Promise<string>;
   dbGet(): Promise<string>;
@@ -164,6 +173,20 @@ async function fetchOperation(request: WorkspaceOperationRequest): Promise<JsonV
   return JSON.parse(response) as JsonValue;
 }
 
+// Call an explicitly attached app through the recorded host bridge without exposing its token.
+async function callApp(alias: string, input: JsonObject): Promise<UnifiedAppCallResult> {
+  // Aliases identify reviewed dependencies; URLs and runtime IDs cannot select another app.
+  if (typeof alias !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(alias)) {
+    throw new Error("fused.callApp requires a selected Unified App alias");
+  }
+  // Hosted app contracts have object roots, matching their normal execution API.
+  if (!input || typeof input !== "object" || Array.isArray(input) || !isPlainObject(input)) {
+    throw new Error("fused.callApp input must be a JSON object");
+  }
+  const response = await host().fetch(encodeJson({ unifiedApp: alias, input }, "fused.callApp request"));
+  return JSON.parse(response) as UnifiedAppCallResult;
+}
+
 // Check the author-owned page ceiling locally while leaving operation policy to the Engine.
 function validateFetchPagination(pagination: WorkspaceOperationRequest["pagination"]): void {
   // Omission retains automatic pagination exactly as configured for the selected provider operation.
@@ -246,6 +269,7 @@ async function dbSet(value: JsonValue): Promise<void> {
 
 export const fused = Object.freeze({
   fetch: fetchOperation,
+  callApp,
   forUserRef,
   forServiceUserRefs,
   db: Object.freeze({ get: dbGet, set: dbSet }),

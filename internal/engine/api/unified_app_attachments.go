@@ -19,21 +19,18 @@ var unifiedAppAlias = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 // validateAttachedAppServices accepts hosted capabilities alongside ordinary physical selections.
 func validateAttachedAppServices(doc sdkConfigDocument) error {
-	// Hosted apps cannot recursively delegate into other apps or create dependency cycles.
-	if len(doc.UnifiedApps) > 0 && doc.Kind != "sdk" && doc.Kind != "mcp" {
-		return errors.New("unified_apps is supported only by SDK and MCP configs")
+	// Hosted dependencies use the same explicit admission across execution adapters.
+	if len(doc.UnifiedApps) > 0 && doc.Kind != "sdk" && doc.Kind != "mcp" && doc.Kind != "unified_app" {
+		return errors.New("unified_apps requires an SDK, MCP, or Unified App config")
 	}
+	// Bound the dependency surface independently of provider selections.
 	if len(doc.UnifiedApps) > 16 {
 		return errors.New("at most 16 Unified Apps may be attached")
 	}
 	for alias, ref := range doc.UnifiedApps {
-		// Python exposes a synchronous companion, so aliases cannot shadow each other.
-		if _, collision := doc.UnifiedApps[alias+"_sync"]; collision {
-			return errors.New("Unified App aliases conflict with a synchronous companion method")
-		}
-		// Stable identifier aliases become callable API names in every delivery adapter.
-		if (!unifiedAppAlias.MatchString(alias) || strings.Contains(" false true null none self cls async await and as assert break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield constructor then execute __proto__ ", " "+alias+" ")) || strings.TrimSpace(ref.Name) == "" || !validAppVersion(ref.Version) {
-			return errors.New("unified_apps requires an identifier alias, app name, and exact SemVer version")
+		// Validate each portable alias separately so all adapters share one naming contract.
+		if err := validateUnifiedAppReference(alias, ref, doc.UnifiedApps); err != nil {
+			return err
 		}
 	}
 	// A reference-only consumer is valid; a completely empty app remains invalid.
@@ -41,6 +38,23 @@ func validateAttachedAppServices(doc sdkConfigDocument) error {
 		return nil
 	}
 	return validateAppServiceDocs(doc.Services)
+}
+
+// validateUnifiedAppReference prevents ambiguous generated names and implicit dependency upgrades.
+func validateUnifiedAppReference(alias string, ref models.UnifiedAppReference, refs map[string]models.UnifiedAppReference) error {
+	// Python exposes a synchronous companion, so aliases cannot shadow each other.
+	if _, collision := refs[alias+"_sync"]; collision {
+		return errors.New("Unified App aliases conflict with a synchronous companion method")
+	}
+	// Stable portable identifiers keep every delivery adapter on the same authored capability.
+	if !unifiedAppAlias.MatchString(alias) || strings.Contains(" false true null none self cls async await and as assert break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield constructor then execute __proto__ ", " "+alias+" ") {
+		return errors.New("Unified App alias must be a non-reserved identifier")
+	}
+	// Both name and exact SemVer are required before resolving runtime authority.
+	if strings.TrimSpace(ref.Name) == "" || !validAppVersion(ref.Version) {
+		return errors.New("unified_apps requires an app name and exact SemVer version")
+	}
+	return nil
 }
 
 // resolveUnifiedAppAttachments freezes exact source identity before a plan grants consumer execution authority.

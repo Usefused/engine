@@ -28,18 +28,21 @@ func (f *attachmentRuntimeFixture) ReadUnifiedAppBindings(context.Context, uuid.
 	return f.bindings, nil
 }
 
-// TestUnifiedAppAttachmentValidation accepts reference-only consumers while rejecting recursive or unversioned scope.
+// TestUnifiedAppAttachmentValidation accepts reference-only consumers while rejecting unversioned scope.
 func TestUnifiedAppAttachmentValidation(t *testing.T) {
 	doc := sdkConfigDocument{Kind: "sdk", UnifiedApps: map[string]models.UnifiedAppReference{"lookup": {Name: "Customer lookup", Version: "1.0.0"}}}
+	// SDK consumers retain their original reference-only capability surface.
 	if err := validateAttachedAppServices(doc); err != nil {
 		t.Fatal(err)
 	}
 	doc.Kind = "unified_app"
-	if validateAttachedAppServices(doc) == nil {
-		t.Fatal("recursive app accepted")
+	// Hosted consumers use the same admission path.
+	if err := validateAttachedAppServices(doc); err != nil {
+		t.Fatal(err)
 	}
 	doc.Kind = "mcp"
 	doc.UnifiedApps["lookup"] = models.UnifiedAppReference{Name: "Customer lookup", Version: "latest"}
+	// Mutable version aliases remain forbidden for every adapter.
 	if validateAttachedAppServices(doc) == nil {
 		t.Fatal("latest accepted")
 	}

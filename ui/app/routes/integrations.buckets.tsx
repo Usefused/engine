@@ -47,7 +47,8 @@ import {
   requestsCredentialCreation,
 } from "~/lib/credential-navigation";
 
-export const meta: MetaFunction = () => [{ title: "Credentials - Fused" }];
+/** Keeps the browser title aligned with the Bucket navigation and page heading. */
+export const meta: MetaFunction = () => [{ title: "Bucket - Fused" }];
 
 const BUCKET_PAGE_SIZE = 12;
 const BUCKET_CONTENT_PAGE_SIZE = 10;

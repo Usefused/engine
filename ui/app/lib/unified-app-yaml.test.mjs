@@ -6,6 +6,17 @@ import { unifiedEditConfig, unifiedEditDraft } from "./unified-app-edit.ts";
 import { applyAppAuthEdits } from "./app-service-auth.ts";
 import { unifiedAuthOptions } from "./unified-app-auth.ts";
 
+// Reference-only apps must preserve exact child versions from editable YAML through the plan request.
+test("YAML admits and preserves Unified App dependencies without provider selections", () => {
+  const draft = { ...unifiedEditDraft(fixture()), services: {}, serviceSettings: {} };
+  const yaml = unifiedEditorYAML(draft, "parent", "1.0.0", "default") + 'unified_apps:\n  child:\n    name: Child\n    version: "1.0.0"\n';
+  const parsed = readUnifiedEditorYAML(yaml, draft);
+  const config = unifiedConfig(parsed.draft, parsed.name, parsed.version, parsed.bucket);
+  assert.deepEqual(config.unified_apps, { child: { name: "Child", version: "1.0.0" } });
+  assert.deepEqual(config.services, {});
+  assert.match(unifiedEditorYAML(parsed.draft, parsed.name, parsed.version, parsed.bucket), /unified_apps:/);
+});
+
 // A saved app includes non-auth service settings that must survive changing only its authentication scheme.
 function fixture() {
   const config = { apiVersion: "fused/v1", kind: "unified_app", name: "checkout", version: "1.0.0", bucket: "default", source: "export default buildUnifiedApp({});", services: { stripe: { version: "v1", operations: ["postCustomers"], bucket: "billing", auth: { type: "basic", name: "basicAuth" }, connect: { scopes: ["read"] }, injections: [{ location: "header", name: "X-Region", value: "${bucket.env.REGION}" }] } } };

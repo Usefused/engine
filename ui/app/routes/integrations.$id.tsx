@@ -1,4 +1,5 @@
 import { CopyButton } from "~/components/CopyValue";
+import { CreateAppMenu } from "~/components/apps/CreateAppMenu";
 import { createContext, useContext, useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { AuthNameField } from "~/components/AuthNameField";
@@ -1494,8 +1495,9 @@ function ProviderIdentity({ srv }: { srv: Service }) {
   );
 }
 
-// HeaderActions reserves the far-right header edge for contextual service commands.
+// HeaderActions contains the mobile service popup within the action row beside notifications.
 function HeaderActions({ srv }: { srv: Service }) {
+  const detail = useDetail();
   const [host, setHost] = useState<HTMLElement | null>(null);
   // The shared authenticated utility row owns notification and route-specific controls on one line.
   useEffect(() => {
@@ -1503,7 +1505,11 @@ function HeaderActions({ srv }: { srv: Service }) {
   }, []);
   // Server rendering and the first hydration pass have no browser-owned portal target yet.
   if (!host) return null;
-  return createPortal(<WorkspaceMembershipControl srv={srv} />, host);
+  return createPortal(<div className="relative flex shrink-0 items-center gap-2">
+    {/* Only confirmed workspace members with readable service metadata can enter app creation here. */}
+    {detail.isAuth && detail.workspaceServiceActive === true && serviceReadAllowed(detail.access, srv.id) && <CreateAppMenu service={{ id: srv.id, name: srv.name }} />}
+    <WorkspaceMembershipControl srv={srv} />
+  </div>, host);
 }
 
 function VisibilityControl({ srv }: { srv: Service }) {
@@ -1599,7 +1605,7 @@ function DriftWatchControl({ srv }: { srv: Service }) {
   );
 }
 
-/** Keeps workspace membership mutations on the service detail page where their impact has context. */
+/** Keeps workspace membership changes contextual and provides a touch-sized action beside app creation. */
 function WorkspaceMembershipControl({ srv }: { srv: Service }) {
   const detail = useDetail();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -1662,7 +1668,7 @@ function WorkspaceMembershipControl({ srv }: { srv: Service }) {
         aria-label="Service actions"
         aria-haspopup="menu"
         aria-expanded={menuOpen}
-        className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50"
+        className="inline-flex h-11 shrink-0 items-center gap-2 whitespace-nowrap rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50 sm:h-9"
       >
         Actions
         <ChevronDown className={`h-3.5 w-3.5 text-slate-400 transition-transform ${menuOpen ? "rotate-180" : ""}`} />

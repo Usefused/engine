@@ -17,7 +17,7 @@ export function useCredentialSetCreation(ownerTeamId: string, onSelected: (item:
     const items = await readAllBoundedPages((limit, offset) => listAppBuildSelectors(ownerTeamId, "BUCKET", bucket.name, limit, offset), 100, 100);
     const selected = items.find((item) => item.resource_id === bucket.id);
     // Never select an inaccessible bucket or silently fall back to a different one.
-    if (!selected) throw new Error("Bucket created, but it is not available to this app owner. Share it with the owning team in Credentials, then retry selection.");
+    if (!selected) throw new Error("Bucket created, but it is not available to this app owner. Share it with the owning team on the Bucket page, then retry selection.");
     onSelected(selected);
   }
   return {
