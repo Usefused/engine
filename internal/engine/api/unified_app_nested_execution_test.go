@@ -12,9 +12,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// nestedAppArtifact exercises the production compiler and Zod boundary with no dummy physical selections.
+// nestedAppArtifact pins the built test compiler and exercises the production Zod boundary without dummy physical selections.
 func nestedAppArtifact(t *testing.T, body string) *executionPlanArtifact {
 	t.Helper()
+	// Go tests run from this package directory, not the repository root used by the development compiler fallback.
+	t.Setenv("FUSED_EXECUTION_COMPILER", "../../../runtime/execution/dist/src/cli.js")
 	source := `import * as z from "zod/mini";
 import {buildUnifiedApp, fused} from "@fused/unified-app";
 export default buildUnifiedApp({input:z.object({value:z.string()}),output:z.object({value:z.string()}),
