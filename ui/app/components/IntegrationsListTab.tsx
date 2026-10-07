@@ -322,7 +322,7 @@ function IntegrationCollection(props: IntegrationResultsProps) {
 
 type IntegrationCardProps = IntegrationResultsProps & { service: ListableService };
 
-// IntegrationCard presents identity, ownership, descriptive metadata, and actions without nesting buttons inside a link.
+// IntegrationCard keeps a stationary, linked card surface while independent actions remain above the stretched link.
 function IntegrationCard(props: IntegrationCardProps) {
   const { service, viewType } = props;
   const href = detailHref(service);
@@ -330,17 +330,18 @@ function IntegrationCard(props: IntegrationCardProps) {
   const providerName = service.is_owner === false ? service.provider?.name || service.provider?.handle : "";
   const apiURL = defaultAPIURL(service);
   return (
-    <article className="group flex flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition duration-200 hover:-translate-y-0.5 hover:border-black hover:shadow-lg hover:shadow-slate-200/70">
+    <article className="group relative flex flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition-[border-color,box-shadow] duration-200 hover:border-black hover:shadow-lg hover:shadow-slate-200/70">
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
           <ServiceIcon name={service.name} iconURL={service.icon_url} />
           <div className="min-w-0">
+            {/* Stretch the semantic link across the stationary card so all navigation areas share its pointer and keyboard behavior. */}
             <Link
               to={href}
               target="_blank"
               rel="noopener noreferrer"
               onClick={(event) => openServiceLink(event, href)}
-              className="block truncate text-sm font-semibold text-slate-900 hover:text-blue-700"
+              className="block truncate text-sm font-semibold cursor-pointer text-slate-900 after:absolute after:inset-0 after:rounded-2xl hover:text-blue-700 focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-blue-600"
             >
               {formatServiceName(service.name)}
             </Link>
@@ -367,11 +368,12 @@ function IntegrationCard(props: IntegrationCardProps) {
             target="_blank"
             rel="noopener noreferrer"
             onClick={(event) => openServiceLink(event, href)}
-            className="inline-flex items-center gap-1 text-xs font-semibold text-blue-700 transition-colors hover:text-blue-800"
+            className="relative z-10 inline-flex cursor-pointer items-center gap-1 text-xs font-semibold text-blue-700 transition-colors hover:text-blue-800"
           >
             View details <ArrowUpRight className="h-3.5 w-3.5" />
           </Link>
-          <IntegrationActions {...props} />
+          {/* Workspace controls must receive their own clicks instead of activating the card link. */}
+          <div className="relative z-10"><IntegrationActions {...props} /></div>
         </div>
       </div>
     </article>
@@ -431,8 +433,7 @@ function isProductionServer(description?: string): boolean {
   return normalized.includes("prod") || normalized.includes("production");
 }
 
-// IntegrationActions chooses the one action allowed by the current view and
-// service activation state.
+// IntegrationActions keeps activation distinct from card navigation, including its pending cursor state.
 function IntegrationActions(props: IntegrationCardProps) {
   // Workspace removal is intentionally reserved for the service detail page where impact is visible.
   if (props.viewType === "workspace") {
@@ -447,7 +448,7 @@ function IntegrationActions(props: IntegrationCardProps) {
         onClick={(event) => props.handleAddWorkspace?.(event, props.service.id, props.service.name)}
         disabled={pending}
         aria-busy={pending}
-        className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1 text-xs font-medium text-white shadow-sm transition-all hover:bg-slate-700 disabled:cursor-wait disabled:opacity-70"
+        className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1 text-xs font-medium text-white shadow-sm transition-all hover:bg-slate-700 disabled:cursor-wait disabled:opacity-70"
         title="Add to workspace"
       >
         {/* A visible spinner makes the single admitted activation request explicit and discourages retries. */}
