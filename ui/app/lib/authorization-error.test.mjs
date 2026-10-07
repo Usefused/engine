@@ -117,6 +117,38 @@ test("uses only a display name explicitly returned by the server", () => {
   assert.doesNotMatch(message, /service\.consume|22222222-2222-2222-2222-222222222222/);
 });
 
+// Engine authorization errors use nested details, unlike the older flat response shape.
+test("preserves canonical MCP deployment permission requirements", () => {
+  const missing = [{ permission: "app.mcp.create", resource_type: "workspace", resource_id: "11111111-1111-1111-1111-111111111111" },
+    { permission: "bucket.use", resource_type: "bucket", resource_id: "22222222-2222-2222-2222-222222222222", display_name: "production" }];
+  const error = new APIRequestError(403, normalizeAPIErrorPayload({ error: {
+    code: "permission_denied", message: "The authenticated identity is missing required permissions.",
+    category: "authorization", details: { missing }, request_id: "deployment-request",
+  } }));
+  assert.deepEqual(error.missing, [{ ...missing[0], display_name: undefined }, missing[1]]);
+  assert.match(error.message, /create MCP servers in this workspace/);
+  assert.match(error.message, /use bucket "production"/);
+  assert.doesNotMatch(error.message, /Ask a workspace administrator|11111111|22222222/);
+  assert.equal(error.requestId, "deployment-request");
+});
+
+// Malformed nested diagnostics must not invent permission requirements or accept unrelated flat metadata.
+test("filters malformed canonical permission details", () => {
+  const payload = normalizeAPIErrorPayload({ error: { code: "permission_denied", details: {
+    missing: [null, {}, { permission: "bucket.use" }, { permission: "service.consume", resource_type: "service", resource_id: "service-id", display_name: "Stripe" }],
+  } }, missing: [{ permission: "access.manage", resource_type: "workspace", resource_id: "workspace-id" }] });
+  assert.equal(payload.missing.length, 1);
+  assert.match(new APIRequestError(403, payload).message, /use service "Stripe"/);
+});
+
+// Dependency denials should name the hosted capability instead of exposing its internal family identifier.
+test("names the attached Unified App in canonical permission errors", () => {
+  const error = new APIRequestError(403, normalizeAPIErrorPayload({ error: {
+    code: "permission_denied", details: { missing: [{ permission: "app.unified_app.use", resource_type: "app", resource_id: "family-id", display_name: "Checkout" }] },
+  } }));
+  assert.equal(error.message, 'You or the owning team need access to use Unified App "Checkout".');
+});
+
 test("keeps a permission denial actionable when details are omitted", () => {
   assert.equal(
     apiErrorMessage(403, { error: "permission_denied" }),

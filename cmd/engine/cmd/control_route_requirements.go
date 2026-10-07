@@ -17,6 +17,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/api"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/secretref"
 )
 
@@ -414,7 +415,7 @@ func (r *storeBackedControlRequirementResolver) desiredConfigPlanRequestRequirem
 	if err != nil {
 		return nil, err
 	}
-	selections, err := r.desiredConfigDocumentRequirements(ctx, actor.WorkspaceID, envelope.Config, accesscontrol.PermissionServiceRead, accesscontrol.PermissionBucketRead)
+	selections, err := r.desiredConfigDocumentRequirements(ctx, actor, store.ConfigType(configType), envelope.Config, accesscontrol.PermissionServiceRead, accesscontrol.PermissionBucketRead)
 	return append(mutation, selections...), err
 }
 
@@ -696,7 +697,8 @@ func jsonValuesEqual(first, second json.RawMessage) bool {
 // canonical matcher and keeps validation separate from actual grant denials.
 func (r *storeBackedControlRequirementResolver) desiredConfigDocumentRequirements(
 	ctx context.Context,
-	workspaceID uuid.UUID,
+	actor accesscontrol.Actor,
+	configType store.ConfigType,
 	raw json.RawMessage,
 	servicePermission accesscontrol.Permission,
 	bucketPermission accesscontrol.Permission,
@@ -706,14 +708,24 @@ func (r *storeBackedControlRequirementResolver) desiredConfigDocumentRequirement
 		Services map[string]struct {
 			Secret string `json:"secret"`
 		} `json:"services"`
+		UnifiedApps map[string]models.UnifiedAppReference `json:"unified_apps"`
 	}
 	// Incomplete documents cannot safely establish service authorization targets.
 	if json.Unmarshal(raw, &doc) != nil || r.store == nil {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
-	// Every app must bind at least one reviewed workspace service before it can run.
-	if len(doc.Services) == 0 {
+	// Hosted-only consumers have real execution scope; completely empty apps remain invalid.
+	if len(doc.Services) == 0 && len(doc.UnifiedApps) == 0 {
 		return nil, accesscontrol.ErrPolicyDenied
+	}
+	attachments, err := r.desiredAttachmentRequirements(ctx, actor.AccountID, configType, doc.UnifiedApps)
+	// Unavailable or cross-account dependencies cannot establish authorization scope.
+	if err != nil {
+		return nil, err
+	}
+	// Hosted-only consumers need bucket and attached-family grants, not invented service scope.
+	if len(doc.Services) == 0 {
+		return r.appendDesiredConfigBucketRequirements(ctx, actor.WorkspaceID, attachments, doc.Bucket, doc.Services, bucketPermission)
 	}
 	serviceNames := mapKeys(doc.Services)
 	services, err := r.store.ResolveWorkspaceServiceIDsByKeys(ctx, serviceNames)
@@ -722,7 +734,8 @@ func (r *storeBackedControlRequirementResolver) desiredConfigDocumentRequirement
 		return nil, serviceResolutionUnavailable()
 	}
 	requirements, unresolved := desiredServiceRequirements(serviceNames, services, servicePermission)
-	requirements, err = r.appendDesiredConfigBucketRequirements(ctx, workspaceID, requirements, doc.Bucket, doc.Services, bucketPermission)
+	requirements = append(requirements, attachments...)
+	requirements, err = r.appendDesiredConfigBucketRequirements(ctx, actor.WorkspaceID, requirements, doc.Bucket, doc.Services, bucketPermission)
 	// Invalid bucket references still fail closed before any diagnostic is emitted.
 	if err != nil {
 		return nil, err
@@ -778,11 +791,13 @@ func desiredConfigBucketNames(topLevel string, services map[string]struct {
 	return mapKeys(names), nil
 }
 
+// storedDesiredConfigSelectionRequirements checks provider and hosted scope from the immutable plan at apply time.
 func storedDesiredConfigSelectionRequirements(
 	plan *store.ConfigPlan,
 	servicePermission accesscontrol.Permission,
 	bucketPermission accesscontrol.Permission,
 ) ([]accesscontrol.Requirement, error) {
+	// Webhook plans have their own ingress permission projection.
 	if plan.ConfigType == store.ConfigTypeWebhook {
 		return storedWebhookSelectionRequirements(plan, servicePermission, bucketPermission)
 	}
@@ -791,17 +806,23 @@ func storedDesiredConfigSelectionRequirements(
 		Selections []struct {
 			ServiceID uuid.UUID `json:"service_id"`
 		} `json:"selections"`
+		UnifiedApps []models.UnifiedAppBinding `json:"unified_apps"`
 	}
 	// The resolved bucket is required even when the authored app selects no provider services.
 	if json.Unmarshal(plan.ResolvedPayload, &payload) != nil || payload.BucketID == uuid.Nil {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
-	// A stored plan cannot authorize an app that lost its selected service scope.
-	if len(payload.Selections) == 0 {
+	// A stored plan must retain at least one provider or hosted capability.
+	if len(payload.Selections) == 0 && len(payload.UnifiedApps) == 0 {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
-	requirements := make([]accesscontrol.Requirement, 0, len(payload.Selections)+1)
+	requirements, err := attachedBindingRequirements(plan.ConfigType, payload.UnifiedApps)
+	// Invalid hosted identities cannot be skipped even when physical selections are also present.
+	if err != nil {
+		return nil, err
+	}
 	for _, selection := range payload.Selections {
+		// Every physical grant must target a real, already-resolved service identity.
 		if selection.ServiceID == uuid.Nil {
 			return nil, accesscontrol.ErrPolicyDenied
 		}

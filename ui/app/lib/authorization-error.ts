@@ -84,6 +84,8 @@ export function normalizeAPIErrorPayload(input: unknown): APIErrorPayload {
       retryable: asBoolean(engineError.retryable),
       // Reject scalar details rather than exposing them as trusted metadata.
       details: isRecord(engineError.details) ? engineError.details : undefined,
+      // Canonical authorization envelopes nest missing grants here; retain them for resource-specific recovery.
+      missing: normalizeMissingRequirements(isRecord(engineError.details) ? engineError.details.missing : undefined),
       remediation: asString(engineError.remediation),
       trace_id: asString(engineError.trace_id),
       phase: asString(engineError.phase),
@@ -174,7 +176,7 @@ function productPermissionRequirementLabel(
 ): string {
   const displayName = requirement.display_name?.trim();
   const rawType = requirement.resource_type.trim();
-  const appLabels: Record<string, string> = { sdk: "SDK", mcp: "MCP server", api: "REST API", webhook: "webhook" };
+  const appLabels: Record<string, string> = { sdk: "SDK", mcp: "MCP server", unified_app: "Unified App", api: "REST API", webhook: "webhook" };
   // The permission identifies delivery type; it does not change the resource ID boundary.
   const resourceType = rawType === "app" ? appLabels[requirement.permission.split(".")[1]] ?? rawType : rawType;
   const resource = displayName
@@ -209,6 +211,11 @@ function productPermissionAction(permission: string): string {
     "app.mcp.create": "create MCP servers in",
     "app.mcp.manage": "manage",
     "app.mcp.tokens.manage": "manage execution tokens for",
+    "app.unified_app.read": "view",
+    "app.unified_app.use": "use",
+    "app.unified_app.create": "create Unified Apps in",
+    "app.unified_app.manage": "manage",
+    "app.unified_app.tokens.manage": "manage execution tokens for",
     "app.api.read": "view",
     "app.api.use": "use",
     "app.api.create": "create REST APIs in",
