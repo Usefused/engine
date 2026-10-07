@@ -1379,6 +1379,9 @@ export const api = {
     }).then(unwrapGraphQLResponse),
 
   appTokens: {
+    // Revocation uses the same exact family/name identity as the CLI and leaves token history intact.
+    revoke: (familyID: string, name: string) =>
+      req<void>(`/workspace/app-tokens?app_family_id=${encodeURIComponent(familyID)}&name=${encodeURIComponent(name)}`, { method: "DELETE" }),
     // Runtime credentials belong to the stable app family and are returned only by this explicit issuance request.
     generate: (familyID: string, input: { name: string; allow: string[]; expires_in?: number }) =>
       req<{ token: string; name: string; expires_at: string | null }>(`/workspace/app-tokens?app_family_id=${encodeURIComponent(familyID)}`, { method: "POST", body: JSON.stringify(input) }),
