@@ -1,4 +1,5 @@
 import { AppExecutionEndpoint } from "~/components/apps/AppExecutionEndpoint";
+import { AppExecutionTokens } from "~/components/apps/AppExecutionTokens";
 import { CopyValue } from "~/components/CopyValue";
 import { useState, useEffect, isValidElement, type ReactNode } from "react";
 import { useParams, Link, useNavigate, useSearchParams, type MetaFunction } from "@remix-run/react";
@@ -580,6 +581,7 @@ function SdkLoadedContent({
             selections={sdk.detailed_selections ?? []}
             adapterDetails={<>
             <AppDetailSection title="Execution"><AppExecutionEndpoint appID={sdk.app_id} /></AppDetailSection>
+            <AppExecutionTokens familyID={sdk.app_family_id} kind={sdk.delivery_mode === "api" ? "api" : "sdk"} />
             {optionalNode(sdk.hosted_mcp === true, (
               <AppDetailSection title="MCP delivery">
                 {/* Engine projects the exact and stable routes for this shared App version. */}

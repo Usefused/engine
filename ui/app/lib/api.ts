@@ -1378,6 +1378,12 @@ export const api = {
       body: JSON.stringify({ query, variables }),
     }).then(unwrapGraphQLResponse),
 
+  appTokens: {
+    // Runtime credentials belong to the stable app family and are returned only by this explicit issuance request.
+    generate: (familyID: string, input: { name: string; allow: string[]; expires_in?: number }) =>
+      req<{ token: string; name: string; expires_at: string | null }>(`/workspace/app-tokens?app_family_id=${encodeURIComponent(familyID)}`, { method: "POST", body: JSON.stringify(input) }),
+  },
+
   appConfig: {
     // Engine preserves the complete webhook bundle while reviewing one signing-secret replacement.
     webhookSecretPlan: <T>(slug: string, secret: string) => req<T>("/webhook-config/signing-secret/plan", { method: "POST", body: JSON.stringify({ slug, secret }) }),

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams, useSearchParams, type MetaFunction } from "@remix-run/react";
 import { CopyButton } from "~/components/CopyValue";
 import { AppDetailBackLink, AppDetailHeader, AppDetailTabs, AppVersionSwitcher, type AppDetailTab } from "~/components/apps/AppDetailChrome";
+import { AppExecutionTokens } from "~/components/apps/AppExecutionTokens";
 import { AppChangesBody, AppDetailBody, AppDetailSection, AppOverviewBody } from "~/components/apps/AppDetailBody";
 import { type AppConnectedServiceSelection } from "~/components/apps/AppConnectedServices";
 import { type AppVersionHistoryItem } from "~/components/apps/AppVersionHistory";
@@ -117,9 +118,9 @@ function McpOverviewDetails({ server, onCopied }: { server: McpServerDetail; onC
   // Deprecated versions remain runnable until their scheduled hard deactivation.
   const enabled = server.status === "active" || server.status === "deprecated";
   return (
-    <AppDetailSection title="Connection endpoints">
+    <><AppDetailSection title="Connection endpoints">
       <McpTransportEndpoints endpoints={server} enabled={enabled} onCopied={onCopied} />
-    </AppDetailSection>
+    </AppDetailSection><AppExecutionTokens familyID={server.app_family_id} kind="mcp" /></>
   );
 }
 
