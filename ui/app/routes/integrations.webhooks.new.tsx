@@ -1,6 +1,7 @@
+import { PageBackLink } from "~/components/layout/PageBackLink";
 import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate, useSearchParams } from "@remix-run/react";
-import { ArrowLeft, ArrowRight, Check, Loader2 } from "lucide-react";
+import { ArrowRight, Check, Loader2 } from "lucide-react";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
 import { SecretReferenceField } from "~/components/buckets/SecretReferenceField";
@@ -78,9 +79,9 @@ export default function CreateWebhookPage() {
   // Permission checks precede the form rather than presenting a mutation that cannot be authorized.
   if (accessLoading) return <p role="status">Checking webhook access…</p>;
   // Reading URLs does not imply permission to provision another registration.
-  if (!allowed) return <section className="space-y-3"><Link to="/integrations/webhooks" className="text-sm text-[var(--brand-violet)]">Back to webhooks</Link><p>You need webhook creation access to provision a receiving URL.</p></section>;
+  if (!allowed) return <section className="space-y-3"><PageBackLink to="/integrations/webhooks">Back to webhooks</PageBackLink><p>You need webhook creation access to provision a receiving URL.</p></section>;
   return <div className="mx-auto max-w-2xl space-y-6">
-    <Link to="/integrations/webhooks" className="inline-flex items-center gap-2 text-sm text-slate-500"><ArrowLeft className="h-4 w-4" />Webhooks</Link>
+    <PageBackLink to="/integrations/webhooks">Back to webhooks</PageBackLink>
     <header><h1 className="text-2xl font-bold text-slate-900">Create webhook</h1><p className="mt-2 text-sm text-slate-500">Create a receiving URL for events from a service.</p></header>
     {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</p>}
     {ownerError && <p role="status" className="text-sm text-amber-800">{ownerError}</p>}

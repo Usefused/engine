@@ -61,6 +61,11 @@ func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte,
 	r := chi.NewRouter()
 	redirectURI := firstRedirectURI(redirectURIs)
 	r.Post("/services", addServiceHandler(s, verifier))
+	// Imported catalogs remain private; mutations additionally require authoritative service ownership.
+	ownership, _ := verifier.(ServiceVisibilityResolver)
+	r.Get("/services/{id}/versions/{version_id}/mcp-catalog", GetMCPCatalogHandler(s))
+	r.Post("/services/{id}/versions/{version_id}/mcp-catalog/discover", DiscoverMCPCatalogHandler(s, masterKey, ownership))
+	r.Post("/services/{id}/versions/{version_id}/mcp-catalog/apply", ApplyMCPCatalogHandler(s, ownership))
 	r.Post("/services/{id}/versions/{version_id}/refresh", RefreshServiceContractHandler(s, runtimeContractFetcher(verifier)))
 	r.Delete("/services/{id}", removeServiceHandler(s))
 

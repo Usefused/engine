@@ -812,6 +812,22 @@ func engineSchemaQueries() []string {
 		`CREATE INDEX IF NOT EXISTS idx_fused_workspace_service_versions_latest
 		ON fused_workspace_service_versions(service_id, enabled_at DESC, id DESC);`,
 
+		// Imported MCP catalogs are private actor-owned attachments; they never mutate Registry execution contracts.
+		`CREATE TABLE IF NOT EXISTS fused_service_mcp_catalogs (
+            service_id uuid NOT NULL, service_version_id uuid NOT NULL, subject_id uuid NOT NULL,
+            current_id uuid,
+            PRIMARY KEY(service_id,service_version_id,subject_id),
+            FOREIGN KEY(service_id,service_version_id) REFERENCES fused_workspace_service_versions(service_id,service_version_id) ON DELETE CASCADE
+        );`,
+		// A server-owned preview becomes an immutable approved revision; only approval metadata changes.
+		`CREATE TABLE IF NOT EXISTS fused_service_mcp_catalog_revisions (
+            id uuid PRIMARY KEY, service_id uuid NOT NULL, service_version_id uuid NOT NULL, subject_id uuid NOT NULL,
+            base_id uuid, bucket_id uuid, payload jsonb NOT NULL CHECK(jsonb_typeof(payload)='object'),
+            expires_at timestamptz NOT NULL, applied_at timestamptz,
+            FOREIGN KEY(service_id,service_version_id,subject_id) REFERENCES fused_service_mcp_catalogs(service_id,service_version_id,subject_id) ON DELETE CASCADE
+        );`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_service_mcp_catalog_revisions_scope ON fused_service_mcp_catalog_revisions(service_id,service_version_id,subject_id);`,
+
 		// Activated runtime contract snapshots are Engine-local copies of the
 		// Registry's GraphQL projection for one exact service version. They are
 		// deliberately keyed by service_version_id, not workspace/bucket/SDK, so

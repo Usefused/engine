@@ -1,6 +1,8 @@
+import { filterOperationMethods, operationMethods } from "~/lib/operation-filter";
+import { ServiceCatalogHeader, ServiceCatalogOptions } from "~/components/integration-details/ServiceCatalogHeader";
 import { Select } from "./forms/Select.ts";
 import { ChevronDown, ChevronRight, Loader2, Search } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { IntegrationObject, ServiceGenerationResult } from "~/lib/api";
 import { EndpointRow } from "~/components/EndpointRow";
 
@@ -26,6 +28,7 @@ const ObserverTarget = ({ onIntersect, disabled }: { onIntersect: () => void, di
 
 interface EndpointsTabProps {
   res: ServiceGenerationResult;
+  onImport?: () => void;
   searchQuery: string;
   setSearchQuery: (q: string) => void;
   searchResults: IntegrationObject[] | null;
@@ -46,9 +49,10 @@ interface EndpointsTabProps {
   setSelectedEndpoint: (ep: IntegrationObject | null) => void;
 }
 
-/** Uses the shared select while keeping selection state and actions owned by this page. */
+/** Combines method filtering with version-pinned resource browsing and owner imports. */
 export default function EndpointsTab({
   res,
+  onImport,
   searchQuery,
   setSearchQuery,
   searchResults,
@@ -67,23 +71,21 @@ export default function EndpointsTab({
   loadMoreSearchResults,
   setSelectedEndpoint,
 }: EndpointsTabProps) {
-  const renderedEps: IntegrationObject[] = [];
-  if (searchResults !== null) {
-    searchResults.forEach(ep => renderedEps.push(ep));
-  } else {
-    res.service.resources?.forEach(resource => {
-      const isCollapsed = !expandedResources[resource.name];
-      if (!isCollapsed) {
-        const eps = integrationsByResource[resource.id] || [];
-        eps.forEach(ep => renderedEps.push(ep));
-      }
-    });
-  }
+  const [method, setMethod] = useState("all");
+  // A method selected for one service version must not silently constrain another contract.
+  useEffect(() => setMethod("all"), [res.service.id, res.service.current_service_version]);
+  const loadedMethods = Object.values(integrationsByResource).flat().map((endpoint) => endpoint.method);
+  // Preserve uncommon protocol labels already present in the catalog alongside standard HTTP methods.
+  const methodOptions = Array.from(new Set([...operationMethods, ...loadedMethods, ...(searchResults ?? []).map((endpoint) => endpoint.method)].filter(Boolean).map((value) => value!.toUpperCase())));
 
   return (
     <div className="min-w-0 rounded-xl border border-slate-200 bg-white">
+      <ServiceCatalogHeader title="Explore operations" description="Browse API endpoints available for this service.">
+        {/* Only the owning service route can provide the endpoint import command. */}
+        {onImport && <ServiceCatalogOptions actions={[{ label: "Import endpoints", onSelect: onImport }]} />}
+      </ServiceCatalogHeader>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 sm:px-5">
-        <div className="relative w-full min-w-0 sm:w-auto sm:min-w-[250px] sm:max-w-md sm:flex-1">
+        <div className="relative w-full min-w-0 sm:w-auto sm:min-w-[250px] sm:flex-1">
             <button
               data-track="search_endpoints"
               onClick={handleSearch}
@@ -99,6 +101,7 @@ export default function EndpointsTab({
             </button>
             <input
               type="text"
+              aria-label="Search operations"
               placeholder="Search operations..."
               value={searchQuery}
               onChange={(e) => {
@@ -120,15 +123,18 @@ export default function EndpointsTab({
               </button>
             )}
           </div>
+        <Select aria-label="Operation type" density="compact" value={method} onChange={(event) => setMethod(event.target.value)} className="w-full text-xs text-slate-600 sm:w-auto"><option value="all">All types</option>{methodOptions.map((value) => <option key={value} value={value}>{value}</option>)}</Select>
       </div>
       <div className="divide-y divide-slate-100">
         {/* Resource and search views share controls while retaining their distinct loading states. */}
         {(() => {
           if (searchResults !== null) {
-            if (searchResults.length === 0) {
-              return <div className="p-8 text-center text-slate-500 text-sm">No endpoints found.</div>;
+            const matchingResults = filterOperationMethods(searchResults, method);
+            // An empty filtered page must still expose pagination so later matching operations can load.
+            if (matchingResults.length === 0) {
+              return <><div className="p-8 text-center text-slate-500 text-sm">No matching operations in the loaded results.</div><ObserverTarget disabled={!hasMoreSearch || isSearching} onIntersect={loadMoreSearchResults} /></>;
             }
-            const grouped = searchResults.reduce((acc, ep) => {
+            const grouped = matchingResults.reduce((acc, ep) => {
               const res = ep.resource || "General";
               if (!acc[res]) acc[res] = [];
               acc[res].push(ep);
@@ -139,7 +145,8 @@ export default function EndpointsTab({
             const elements = Object.entries(grouped).map(([resource, eps]) => {
               const availableVersions = Array.from(new Set(eps.map(ep => ep.version || "v1"))).sort().reverse();
               const currentVersion = resourceVersions[resource] || availableVersions[0];
-              const filteredEps = eps.filter(ep => (ep.version || "v1") === currentVersion);
+              // Method filtering preserves each resource's independently selected version.
+              const filteredEps = filterOperationMethods(eps.filter(ep => (ep.version || "v1") === currentVersion), method);
 
               return (
                 <div key={resource} className="mb-2">
@@ -195,7 +202,8 @@ export default function EndpointsTab({
 
               const availableVersions = Array.from(new Set(eps.map(ep => ep.version || "v1"))).sort().reverse();
               const currentVersion = resourceVersions[resource.name] || availableVersions[0];
-              const filteredEps = eps.filter(ep => (ep.version || "v1") === currentVersion);
+              // Method filtering preserves each resource's independently selected version.
+              const filteredEps = filterOperationMethods(eps.filter(ep => (ep.version || "v1") === currentVersion), method);
 
               return (
                 <div key={resource.id} className="mb-2">
@@ -209,7 +217,7 @@ export default function EndpointsTab({
                       {isLoading && <span className="text-xs text-blue-500 ml-2 animate-pulse">Fetching...</span>}
                       {!isLoading && (
                         <span className="text-xs text-slate-400 ml-2">
-                          ({!isCollapsed && availableVersions.length > 1 ? `${filteredEps.length} of ${resource.endpointCount || 0}` : (resource.endpointCount || 0)})
+                          ({resourceCountLabel(isCollapsed, availableVersions.length, filteredEps.length, resource.endpointCount, method)})
                         </span>
                       )}
                       
@@ -228,31 +236,7 @@ export default function EndpointsTab({
                     </div>
                     
                   </div>
-                  {!isCollapsed && (
-                    <div className="divide-y divide-slate-50">
-                      {filteredEps.map(ep => (
-                        <EndpointRow 
-                          key={ep.name} 
-                          ep={ep} 
-                          onClick={() => setSelectedEndpoint(ep)} 
-                          selectable={false}
-                        />
-                      ))}
-                      {isLoading && filteredEps.length === 0 && (
-                        <div className="px-5 py-8 text-center text-xs text-slate-400 flex items-center justify-center">
-                          <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                          Loading endpoints...
-                        </div>
-                      )}
-                      {!isLoading && filteredEps.length === 0 && <div className="px-5 py-4 text-xs text-slate-400">No endpoints found for this resource.</div>}
-                      {hasMoreResources[resource.id] && (
-                        <ObserverTarget 
-                          disabled={loadingResources[resource.id]} 
-                          onIntersect={() => loadMoreEndpoints(resource.id, resource.name)} 
-                        />
-                      )}
-                    </div>
-                  )}
+                  <ResourceEndpointRows expanded={!isCollapsed} endpoints={filteredEps} loading={isLoading} hasMore={hasMoreResources[resource.id]} onSelect={setSelectedEndpoint} onLoadMore={() => loadMoreEndpoints(resource.id, resource.name)} />
                 </div>
               );
             });
@@ -261,4 +245,29 @@ export default function EndpointsTab({
       </div>
     </div>
   );
+}
+
+/** Keeps filtered counts distinct from the provider's total without implying unloaded rows were inspected. */
+function resourceCountLabel(collapsed: boolean, versionCount: number, visibleCount: number, total: number | undefined, method: string) {
+  // A collapsed group has not necessarily loaded its first page, so its authoritative total remains useful.
+  if (collapsed) return total || 0;
+  // Method filtering reports only matching rows already available in this resource's current page set.
+  if (method !== "all") return `${visibleCount} shown`;
+  // Multiple endpoint versions retain the existing visible-versus-total explanation.
+  return versionCount > 1 ? `${visibleCount} of ${total || 0}` : (total || 0);
+}
+
+/** Preserves pagination even when a method filter hides every operation in the currently loaded pages. */
+function ResourceEndpointRows({ expanded, endpoints, loading, hasMore, onSelect, onLoadMore }: { expanded: boolean; endpoints: IntegrationObject[]; loading: boolean; hasMore: boolean; onSelect: (endpoint: IntegrationObject) => void; onLoadMore: () => void }) {
+  // Collapsed groups retain their loaded state without mounting row or pagination observers.
+  if (!expanded) return null;
+  return <div className="divide-y divide-slate-50">
+    {endpoints.map((endpoint) => <EndpointRow key={endpoint.id} ep={endpoint} onClick={() => onSelect(endpoint)} selectable={false} />)}
+    {/* A loading page must not temporarily claim the resource has no matches. */}
+    {loading && endpoints.length === 0 && <div className="flex items-center justify-center px-5 py-8 text-center text-xs text-slate-400"><Loader2 className="mr-2 h-4 w-4 animate-spin" />Loading endpoints...</div>}
+    {/* Empty copy describes loaded rows only; later pages remain reachable below. */}
+    {!loading && endpoints.length === 0 && <div className="px-5 py-4 text-xs text-slate-400">No matching operations loaded for this resource.</div>}
+    {/* Filtering must never stop the existing loader before unseen pages are exhausted. */}
+    {hasMore && <ObserverTarget disabled={loading} onIntersect={onLoadMore} />}
+  </div>;
 }

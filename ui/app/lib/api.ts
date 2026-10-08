@@ -1,3 +1,4 @@
+import { mcpCatalogPath, type McpCatalogSnapshot, type McpCatalogPreview, type McpDiscoveryInput } from "./mcp-catalog.ts";
 import { getCSRFToken, purgeLegacyBrowserCredential } from "./session";
 import { credentialedRequestInit, credentialedResponseLoginPath } from "./browser-request";
 import type { ServiceAuthOption } from "./service-auth";
@@ -1273,6 +1274,14 @@ export interface OAuthConnectedApp {
 }
 
 export const api = {
+  mcpCatalog: {
+    /** Reads the caller's saved snapshot without contacting the upstream server. */
+    get: (serviceID: string, versionID: string, signal?: AbortSignal) => req<{ catalog: McpCatalogSnapshot | null }>(mcpCatalogPath(serviceID, versionID), { signal }),
+    /** Produces a bounded, server-owned preview before the user imports a catalog. */
+    discover: (serviceID: string, versionID: string, input: McpDiscoveryInput, signal?: AbortSignal) => req<McpCatalogPreview>(`${mcpCatalogPath(serviceID, versionID)}/discover`, { method: "POST", body: JSON.stringify(input), signal }),
+    /** Applies only the reviewed draft; the browser never supplies catalog definitions. */
+    apply: (serviceID: string, versionID: string, draftID: string, signal?: AbortSignal) => req<McpCatalogSnapshot>(`${mcpCatalogPath(serviceID, versionID)}/apply`, { method: "POST", body: JSON.stringify({ draft_id: draftID }), signal }),
+  },
   connectedApps: {
     // The authenticated Engine actor determines whose consents are returned.
     list: () => req<{ connected_apps: OAuthConnectedApp[] }>("/oauth/connected-apps"),

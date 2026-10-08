@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
-import { Link } from "@remix-run/react";
-import { ArrowLeft } from "lucide-react";
+import { PageBackLink } from "~/components/layout/PageBackLink";
 import { AppRuntimeStatus } from "~/components/apps/AppRuntimeStatus";
 
 export interface AppDetailVersion {
@@ -76,9 +75,9 @@ export function AppDetailHeader({ name, summary, status, version, createdAt, lea
   );
 }
 
-/** Returns every app adapter to its owning catalogue with one consistent affordance. */
+/** Returns every app adapter to its owning catalogue from the shared row above page actions. */
 export function AppDetailBackLink({ to, className = "" }: AppDetailBackLinkProps) {
-  return <Link to={to} className={`inline-flex items-center text-sm text-slate-500 transition-colors hover:text-slate-800 ${className}`}><ArrowLeft className="mr-2 h-4 w-4" />Back to apps</Link>;
+  return <PageBackLink to={to} className={className}>Back to apps</PageBackLink>;
 }
 
 /** Applies one consistent primary-action treatment while allowing each adapter to own its behavior. */

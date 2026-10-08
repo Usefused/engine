@@ -157,6 +157,18 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodGet, "/audit/export", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionAuditRead),
 	}},
+	// Imported catalog reads and writes share service RBAC; handlers additionally enforce actor and bucket scope.
+	{http.MethodGet, "/workspace/services/{service_id}/versions/{version_id}/mcp-catalog", false, []routeRequirement{
+		pathRequirement(accesscontrol.PermissionServiceRead, accesscontrol.ResourceService, "service_id"),
+	}},
+	{http.MethodPost, "/workspace/services/{service_id}/versions/{version_id}/mcp-catalog/discover", false, []routeRequirement{
+		pathRequirement(accesscontrol.PermissionServiceManage, accesscontrol.ResourceService, "service_id"),
+		workspaceRequirement(accesscontrol.PermissionCatalogueImport),
+	}},
+	{http.MethodPost, "/workspace/services/{service_id}/versions/{version_id}/mcp-catalog/apply", false, []routeRequirement{
+		pathRequirement(accesscontrol.PermissionServiceManage, accesscontrol.ResourceService, "service_id"),
+		workspaceRequirement(accesscontrol.PermissionCatalogueImport),
+	}},
 	{http.MethodPost, "/workspace/services/{service_id}/versions/{version_id}/refresh", false, []routeRequirement{
 		pathRequirement(accesscontrol.PermissionServiceManage, accesscontrol.ResourceService, "service_id"),
 	}},

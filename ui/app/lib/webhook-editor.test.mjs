@@ -11,6 +11,7 @@ import * as draftContract from "./webhook-editor-draft.ts";
 import * as importContract from "./webhook-editor-import.ts";
 import { APIRequestError } from "./authorization-error.ts";
 import * as apiErrors from "./authorization-error.ts";
+import * as mcpCatalog from "./mcp-catalog.ts";
 import * as browserRequest from "./browser-request.ts";
 import { parseWebhookEditorJSON } from "./webhook-editor-json.ts";
 
@@ -27,6 +28,8 @@ function loadModule(path, modules) {
     if (name === "../forms/Select.ts") return { Select };
     // The production label uses a Vite alias that Node's fixture loader must resolve explicitly.
     if (name === "~/components/forms/FieldLabel") return { FieldLabel };
+    // The API client uses the real ESM catalog route helper inside this CommonJS test wrapper.
+    if (name === "./mcp-catalog.ts") return mcpCatalog;
     // Existing fixtures take precedence over installed dependencies.
     return modules[name] ?? require(name);
   };

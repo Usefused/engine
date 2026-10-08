@@ -131,7 +131,7 @@ test("service removal is available only from service details", async () => {
 
   assert.doesNotMatch(listSource, /data-track="remove_workspace_service"/);
   assert.match(detailSource, /data-track="remove_workspace_service"/);
-  assert.match(detailSource, /aria-label="Service actions"/);
+  assert.match(detailSource, /aria-label="More actions"/);
   assert.match(detailSource, /role="menuitem"/);
   assert.match(detailSource, /<WorkspaceMembershipControl srv=\{srv\} \/>/);
   assert.match(detailSource, /api\.workspace\.removeService\(serviceId\)/);

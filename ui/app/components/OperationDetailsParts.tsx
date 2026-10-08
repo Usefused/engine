@@ -1,10 +1,10 @@
 import { useState, type ReactNode } from "react";
 import { Check, ChevronDown, ChevronUp, Copy } from "lucide-react";
 
-/** Shares the endpoint inspector's compact identity strip with workflow operations. */
-export function OperationDetailsHeader({ badge, badgeClass, identity, copyLabel, kind, kindClass, deprecated, onClose, copyTrack, closeTrack }: {
+/** Shares the endpoint inspector identity strip with workflow and MCP definitions. */
+export function OperationDetailsHeader({ badge, badgeClass, identity, copyLabel, kind, kindClass, deprecated, onClose, copyTrack, closeTrack, closeLabel = "Close operation details" }: {
   badge: string; badgeClass: string; identity: string; copyLabel: string;
-  kind?: string; kindClass?: string; deprecated?: boolean; onClose: () => void; copyTrack?: string; closeTrack?: string;
+  kind?: string; kindClass?: string; deprecated?: boolean; onClose: () => void; copyTrack?: string; closeTrack?: string; closeLabel?: string;
 }) {
   const [copied, setCopied] = useState(false);
   // Copy stays local and only reports success after the clipboard accepts the value.
@@ -31,7 +31,7 @@ export function OperationDetailsHeader({ badge, badgeClass, identity, copyLabel,
       {/* Only an explicitly deprecated contract receives this warning. */}
       {deprecated && <span className="rounded border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-semibold uppercase text-red-700">Deprecated</span>}
     </div>
-    <button type="button" data-track={closeTrack} onClick={onClose} aria-label="Close operation details" className="rounded-full p-2 text-slate-400 hover:bg-slate-100">✕</button>
+    <button type="button" data-track={closeTrack} onClick={onClose} aria-label={closeLabel} className="rounded-full p-2 text-slate-400 hover:bg-slate-100">✕</button>
   </div>;
 }
 

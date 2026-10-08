@@ -1,7 +1,7 @@
+import { PageBackLink } from "~/components/layout/PageBackLink";
 import { CopyButton } from "~/components/CopyValue";
 import { CreateAppMenu } from "~/components/apps/CreateAppMenu";
 import { createContext, useContext, useState, useEffect, useRef } from "react";
-import { createPortal } from "react-dom";
 import { AuthNameField } from "~/components/AuthNameField";
 import {
   useParams,
@@ -87,6 +87,10 @@ import {
   type ServiceConsumerEntry,
   type AuthConfig,
 } from "~/lib/api";
+import { canEditWebhook } from "~/lib/webhook-editor-draft";
+import { WebhookDefinitionEditor } from "~/components/webhooks/WebhookDefinitionEditor";
+import { ServiceEndpointImport } from "~/components/integration-details/ServiceEndpointImport";
+import McpCatalogTab from "~/components/mcp/McpCatalogTab";
 import EndpointsTab from "~/components/EndpointsTab";
 import WebhooksTab from "~/components/WebhooksTab";
 import ActivityTab from "~/components/AnalyticsTab";
@@ -184,14 +188,16 @@ function canManageService(
   return !provider && !!routeId && !isUUID(routeId);
 }
 
-type DetailTab = "endpoints" | "webhooks" | "analytics";
+type DetailTab = "endpoints" | "webhooks" | "mcp" | "analytics";
 
 function resolvedRouteID(loaderID: string | null | undefined, routeID?: string) {
   return loaderID ?? routeID;
 }
 
+/** Admits only supported service tabs from the URL, including the private MCP catalog. */
 function resolvedDetailTab(value: string | null): DetailTab {
-  const tabs: DetailTab[] = ["endpoints", "webhooks", "analytics"];
+  const tabs: DetailTab[] = ["endpoints", "webhooks", "mcp", "analytics"];
+  // Unknown links retain the ordinary operations landing view.
   return tabs.includes(value as DetailTab) ? (value as DetailTab) : "endpoints";
 }
 
@@ -790,13 +796,19 @@ function useIntegrationDetailModel() {
     loadMoreEndpoints,
   } = useResourceLoader(serviceId, currentVersionEntry?.id);
 
+  const [serviceImport, setServiceImport] = useState<"endpoints" | "webhooks" | null>(null);
+  // Changing service or version cannot carry an owner action into another destination.
+  useEffect(() => { setServiceImport(null); }, [serviceId, version]);
   const activeTab = resolvedDetailTab(searchParams.get("tab"));
   const urlWPage = positivePage(searchParams.get("wPage"));
   const urlWStartDate = queryValue(searchParams, "wStartDate");
   const urlWEndDate = queryValue(searchParams, "wEndDate");
   const [isClientFetchingTab, setIsClientFetchingTab] = useState(false);
 
-  const handleTabChange = (tab: "endpoints" | "webhooks" | "analytics") => {
+  // Preserve the selected service version while navigating supported detail tabs.
+  const handleTabChange = (tab: DetailTab) => {
+    // Tab navigation closes an unfinished import entry point before switching context.
+    setServiceImport(null);
     setSearchParams(
       (prev) => {
         prev.set("tab", tab);
@@ -1310,7 +1322,7 @@ function useIntegrationDetailModel() {
     selectedEndpoint, setSelectedEndpoint, version, resourceVersions,
     setResourceVersions, expandedResources, integrationsByResource,
     loadingResources, hasMoreResources, toggleResource, loadMoreEndpoints,
-    activeTab, isClientFetchingTab, handleTabChange, syncWebhookParams,
+    activeTab, serviceImport, setServiceImport, isClientFetchingTab, handleTabChange, syncWebhookParams,
     webhookEvents, webhookPage, setWebhookPage, webhookTotal, webhookLimit,
     webhookFilterEvent, setWebhookFilterEvent, webhookStartDate,
     setWebhookStartDate, webhookEndDate, setWebhookEndDate, webhookAnalytics,
@@ -1361,6 +1373,7 @@ function DetailState() {
   return <LoadedDetail />;
 }
 
+/** Places parent navigation above service controls and keeps authoring panels scoped to owner actions. */
 function LoadedDetail() {
   const detail = useDetail();
   const srv = detail.res!.service;
@@ -1371,6 +1384,7 @@ function LoadedDetail() {
 
   return (
     <div className="min-w-0 space-y-5 sm:space-y-6">
+      <PageBackLink to="/integrations">Back to services</PageBackLink>
       <DetailHeader
         srv={srv}
         overallStatus={overallStatus}
@@ -1383,11 +1397,12 @@ function LoadedDetail() {
       <DetailTabs srv={srv} totalEndpoints={totalEndpoints} />
       <ServiceMetadata srv={srv} />
       <SelectedEndpointSidebar srv={srv} />
+      <ServiceImportPanels srv={srv} />
     </div>
   );
 }
 
-// DetailHeader separates identity from controls and aligns the publisher tag with the service title.
+// DetailHeader aligns service actions with the title beneath compact parent navigation; drift-watch configuration remains hidden.
 function DetailHeader({
   srv,
   overallStatus,
@@ -1399,13 +1414,8 @@ function DetailHeader({
 }) {
   const { serviceVersions } = useDetail();
   return (
-    <div className="flex min-w-0 items-start justify-between gap-4">
+    <div className="flex min-w-0 flex-col items-start justify-between gap-4 sm:flex-row">
       <div className="min-w-0 flex-1">
-        <div className="mb-1 flex items-center gap-3">
-          <Link to="/integrations" className="text-sm text-slate-400 hover:text-slate-600">
-            Back to services
-          </Link>
-        </div>
         <div className="flex min-w-0 items-start gap-3">
           <ServiceIcon name={srv.name} iconURL={srv.icon_url} />
           <div className="min-w-0 flex-1">
@@ -1419,7 +1429,7 @@ function DetailHeader({
           <VisibilityControl srv={srv} />
           <DriftStatusBadge status={overallStatus} />
           <ServiceHeaderWarningIcon warningCount={importWarnings.length} />
-          <DriftWatchControl srv={srv} />
+          {/* Drift-watch configuration is temporarily unavailable in the service UI. */}
           <ShareControl serviceName={srv.name} />
         </div>
       </div>
@@ -1495,21 +1505,14 @@ function ProviderIdentity({ srv }: { srv: Service }) {
   );
 }
 
-// HeaderActions contains the mobile service popup within the action row beside notifications.
+/** Keeps service-specific actions beside its title while the global notification control stays above. */
 function HeaderActions({ srv }: { srv: Service }) {
   const detail = useDetail();
-  const [host, setHost] = useState<HTMLElement | null>(null);
-  // The shared authenticated utility row owns notification and route-specific controls on one line.
-  useEffect(() => {
-    setHost(document.getElementById("integrations-header-actions"));
-  }, []);
-  // Server rendering and the first hydration pass have no browser-owned portal target yet.
-  if (!host) return null;
-  return createPortal(<div className="relative flex shrink-0 items-center gap-2">
+  return <div className="relative flex shrink-0 flex-wrap items-center gap-2">
     {/* Only confirmed workspace members with readable service metadata can enter app creation here. */}
     {detail.isAuth && detail.workspaceServiceActive === true && serviceReadAllowed(detail.access, srv.id) && <CreateAppMenu service={{ id: srv.id, name: srv.name }} />}
     <WorkspaceMembershipControl srv={srv} />
-  </div>, host);
+  </div>;
 }
 
 function VisibilityControl({ srv }: { srv: Service }) {
@@ -1588,24 +1591,7 @@ function VisibilityMenu({ srv }: { srv: Service }) {
   );
 }
 
-function DriftWatchControl({ srv }: { srv: Service }) {
-  const detail = useDetail();
-  const canManage = canManageService(detail.isAuth, srv.is_owner, detail.paramId, detail.provider);
-  if (!canManage) return null;
-  const uploaded = srv.source_url === "uploaded://spec";
-  return (
-    <div className="group relative flex flex-col items-start">
-      <label className={`flex items-center gap-2 text-sm ${uploaded ? "cursor-not-allowed text-slate-400" : "cursor-pointer text-slate-700"}`}>
-        {/* Drift changes persist immediately, so the assistant can read this setting but the user owns its toggle. */}
-        <input data-fused-editable="false" type="checkbox" checked={Boolean(srv.watch_for_drift)} onChange={detail.handleToggleDriftWatch} disabled={detail.savingDrift || uploaded} className="h-4 w-4 rounded border-slate-300 text-blue-600" />
-        Watch for Drift
-      </label>
-      {uploaded && <div className="absolute top-full z-10 mt-1 hidden w-48 rounded bg-slate-800 p-2 text-xs text-white group-hover:block">We can't monitor this for changes. To enable drift detection, provide a URL.</div>}
-    </div>
-  );
-}
-
-/** Keeps workspace membership changes contextual and provides a touch-sized action beside app creation. */
+/** Keeps service configuration and workspace membership separate from tab-local catalog imports. */
 function WorkspaceMembershipControl({ srv }: { srv: Service }) {
   const detail = useDetail();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -1644,7 +1630,8 @@ function WorkspaceMembershipControl({ srv }: { srv: Service }) {
   if (detail.workspaceServiceActive === false) {
     return <AddToWorkspaceButton serviceId={srv.id} serviceName={srv.name} versionTag={srv.current_service_version} onAdded={() => detail.setWorkspaceServiceActive(true)} />;
   }
-  const canRemove = Boolean(detail.serviceId) && hasResourcePermission(detail.access, "service.manage", "SERVICE", detail.serviceId);
+  // Narrow the resolved identity before checking its workspace-management grant.
+  const canRemove = !!detail.serviceId && hasResourcePermission(detail.access, "service.manage", "SERVICE", detail.serviceId);
   // Read-only users can see membership without being invited to attempt a forbidden removal.
   if (!canRemove) return <Badge label="IN WORKSPACE" color="bg-emerald-50 text-emerald-700" />;
 
@@ -1665,17 +1652,19 @@ function WorkspaceMembershipControl({ srv }: { srv: Service }) {
         ref={triggerRef}
         type="button"
         onClick={toggleActionsMenu}
-        aria-label="Service actions"
+        aria-label="More actions"
         aria-haspopup="menu"
         aria-expanded={menuOpen}
         className="inline-flex h-11 shrink-0 items-center gap-2 whitespace-nowrap rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50 sm:h-9"
       >
-        Actions
+        More actions
         <ChevronDown className={`h-3.5 w-3.5 text-slate-400 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
       </button>
       {/* Destructive workspace membership changes remain one explicit selection beyond opening the menu. */}
       {menuOpen && (
-        <div role="menu" aria-label="Service actions" className="absolute right-0 top-full z-40 mt-2 w-56 rounded-lg border border-slate-200 bg-white p-1.5 shadow-xl">
+        <div role="menu" aria-label="More actions" className="absolute right-0 top-full z-40 mt-2 w-56 rounded-lg border border-slate-200 bg-white p-1.5 shadow-xl">
+          <ServiceConfigurationMenuItems srv={srv} onClose={() => setMenuOpen(false)} />
+          <div className="my-1 border-t border-slate-100" />
           <button
             type="button"
             role="menuitem"
@@ -1692,6 +1681,23 @@ function WorkspaceMembershipControl({ srv }: { srv: Service }) {
       )}
     </div>
   );
+}
+
+/** Links service-wide settings only when the corresponding profile section is available. */
+function ServiceConfigurationMenuItems({ srv, onClose }: { srv: Service; onClose: () => void }) {
+  const detail = useDetail();
+  const versionName = selectedVersionName(detail.version, srv.current_service_version);
+  // Connection overrides need an exact workspace version and a supported auth family.
+  const hasVersion = detail.serviceVersions.some((version) => version.name === versionName);
+  const hasProfile = (srv.auth_configs ?? []).some((auth) => ["oauth", "oauth2", "oidc", "openIdConnect"].includes(auth.type));
+  // The shortcut must not invite access to a profile the actor cannot read.
+  const canReadProfile = hasVersion && hasProfile && serviceReadAllowed(detail.access, srv.id) && hasWorkspacePermission(detail.access, "credentials.metadata.read");
+  const className = "block rounded-md px-3 py-2 text-sm text-slate-700 hover:bg-slate-50";
+  return <>
+    <a role="menuitem" href="#service-configuration" onClick={onClose} className={className}>Service configuration</a>
+    {/* Services without supported connection profiles retain only their general configuration shortcut. */}
+    {canReadProfile && <a role="menuitem" href="#connection-profile" onClick={onClose} className={className}>Connection profiles</a>}
+  </>;
 }
 
 function DetailNotices({ srv, importWarnings }: { srv: Service; importWarnings: NonNullable<Service["import_warnings"]> }) {
@@ -1728,9 +1734,10 @@ function ServiceNotificationBanner() {
 
 const configCardClass = "group rounded-lg border border-slate-100 bg-slate-50 p-3";
 
+/** Provides a stable destination for the service-level configuration menu. */
 function ServiceConfiguration({ srv }: { srv: Service }) {
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4 sm:p-5">
+    <section id="service-configuration" tabIndex={-1} className="scroll-mt-24 rounded-lg border border-slate-200 bg-white p-4 sm:p-5">
       <h2 className="mb-4 text-sm font-semibold text-slate-900">Service configuration</h2>
       <dl className="grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
         <ServerConfigCard srv={srv} />
@@ -1947,18 +1954,19 @@ function WebhookConfiguration({ srv }: { srv: Service }) {
 
 /** Resolves read and manage grants for the selected service profile. */
 function ConnectionProfile({ srv }: { srv: Service }) {
-  const { serviceId, serviceVersions, version } = useDetail();
+  const detail = useDetail();
+  const { serviceId, serviceVersions, version } = detail;
+  // A profile belongs to a resolved service, never a public route slug.
   if (!serviceId) return null;
   const serviceVersion = selectedVersionName(version, srv.current_service_version);
   const versionID = serviceVersions.find((item) => item.name === serviceVersion)?.id;
-  const detail = useDetail();
   const canRead =
     hasResourcePermission(detail.access, "service.read", "SERVICE", serviceId) &&
     hasWorkspacePermission(detail.access, "credentials.metadata.read");
   const canManage =
     canRead &&
     hasResourcePermission(detail.access, "service.manage", "SERVICE", serviceId);
-  return <WorkspaceConnectionProfileSection serviceId={serviceId} serviceVersionId={versionID} serviceVersion={serviceVersion} authConfigs={srv.auth_configs ?? []} canRead={canRead} canManage={canManage} />;
+  return <div id="connection-profile" tabIndex={-1} className="scroll-mt-24"><WorkspaceConnectionProfileSection serviceId={serviceId} serviceVersionId={versionID} serviceVersion={serviceVersion} authConfigs={srv.auth_configs ?? []} canRead={canRead} canManage={canManage} /></div>;
 }
 
 function tabClass(active: boolean) {
@@ -1975,12 +1983,15 @@ function DetailTabs({ srv, totalEndpoints }: { srv: Service; totalEndpoints: num
   );
 }
 
+/** Keeps provider catalogs alongside operations and webhooks in service navigation. */
 function TabNavigation({ srv, totalEndpoints }: { srv: Service; totalEndpoints: number }) {
   const { activeTab, handleTabChange, isAuth, workspaceServiceActive, canReadActivity } = useDetail();
   return (
     <div className="mb-6 flex max-w-full overflow-x-auto whitespace-nowrap rounded-lg bg-slate-100/80 p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <button data-track="view_endpoints_tab" onClick={() => handleTabChange("endpoints")} className={tabClass(activeTab === "endpoints")}>Operations ({totalEndpoints})</button>
       <button data-track="view_webhooks_tab" onClick={() => handleTabChange("webhooks")} className={tabClass(activeTab === "webhooks")}>Webhooks ({srv.webhook_count ?? 0})</button>
+      <button data-track="view_mcp_catalog_tab" onClick={() => handleTabChange("mcp")} className={tabClass(activeTab === "mcp")}>MCP</button>
+      {/* Activity requires audit access to an enabled workspace service. */}
       {isAuth && workspaceServiceActive === true && canReadActivity && (
         <button data-track="view_activity_tab" onClick={() => handleTabChange("analytics")} className={tabClass(activeTab === "analytics")}>Activity</button>
       )}
@@ -1999,23 +2010,80 @@ function TabLoadingIndicator() {
   );
 }
 
-// Webhook authoring reuses the selected-version refresh without changing ordinary tab navigation.
+// Routes each selected service tab to its version-scoped catalog or permission-gated activity.
 function ActiveTabContent({ srv }: { srv: Service }) {
-  const { activeTab, setSelectedEndpoint, canReadActivity, version, loadData } = useDetail();
+  const { activeTab, canReadActivity } = useDetail();
   // Operation browsing remains the default read-only view.
   if (activeTab === "endpoints") return <EndpointTabContent />;
-  // Only the webhook tab exposes its click-gated owner editor; it never mounts from settings expansion.
-  if (activeTab === "webhooks") return <WebhooksTab srv={srv} version={selectedVersionName(version, srv.current_service_version)} onSaved={loadData} setSelectedEndpoint={setSelectedEndpoint} />;
+  // Webhook definitions and their owner import action share the tab-local header.
+  if (activeTab === "webhooks") return <ServiceWebhooks srv={srv} />;
+  // MCP catalog identity is resolved independently of the public Registry details.
+  if (activeTab === "mcp") return <ServiceMcpCatalog srv={srv} />;
   // A direct analytics URL must fall back to ordinary service content when
   // the Activity capability is absent; its data effects are also gated.
   return canReadActivity ? <ActivityTabContent /> : <EndpointTabContent />;
 }
 
+/** Supplies tab-local imports only for the confirmed owner of an enabled, versioned service. */
+function useServiceImportAction(srv: Service, kind: "endpoints" | "webhooks") {
+  const detail = useDetail();
+  // Public browsing, unresolved membership, and missing versions cannot open workspace import editors.
+  const allowed = detail.isAuth && detail.workspaceServiceActive === true && canEditWebhook(srv.is_owner, detail.access) && !!selectedVersionName(detail.version, srv.current_service_version);
+  /** Rechecks the current render's authorization before mounting the existing review flow. */
+  function openImport() {
+    // A stale or unavailable command must not mount an owner editor.
+    if (!allowed) return;
+    detail.setServiceImport(kind);
+  }
+  // Absence of a command also removes its Options entry for non-owners.
+  return allowed ? openImport : undefined;
+}
+
+/** Connects the webhook catalog's local Options menu to its existing owner editor. */
+function ServiceWebhooks({ srv }: { srv: Service }) {
+  const detail = useDetail();
+  const onImport = useServiceImportAction(srv, "webhooks");
+  return <WebhooksTab srv={srv} setSelectedEndpoint={detail.setSelectedEndpoint} onImport={onImport} />;
+}
+
+/** Binds the private catalog to the exact selected version and the actor's service permissions. */
+function ServiceMcpCatalog({ srv }: { srv: Service }) {
+  const detail = useDetail();
+  // The resolved service UUID owns catalog identity; public route slugs never become storage keys.
+  const serviceID = detail.serviceId ?? srv.id;
+  const versionName = selectedVersionName(detail.version, srv.current_service_version);
+  const versionID = detail.serviceVersions.find((item) => item.name === versionName)?.id;
+  // Public Registry browsing never implies access to a private Engine catalog.
+  const canRead = detail.isAuth && hasResourcePermission(detail.access, "service.read", "SERVICE", serviceID);
+  // A workspace management grant never substitutes for Registry-confirmed service ownership.
+  const canManage = canRead && canEditWebhook(srv.is_owner, detail.access) && hasResourcePermission(detail.access, "service.manage", "SERVICE", serviceID);
+  return <McpCatalogTab serviceID={serviceID} versionID={versionID} canRead={canRead} canManage={canManage} />;
+}
+
+/** Mounts import editors only after an explicit owner-menu action, including direct component access. */
+function ServiceImportPanels({ srv }: { srv: Service }) {
+  const detail = useDetail();
+  const version = selectedVersionName(detail.version, srv.current_service_version);
+  // Missing ownership, import permission, or version fails closed before private source is loaded.
+  if (!canEditWebhook(srv.is_owner, detail.access) || !version) return null;
+  /** A confirmed commit closes the panel and reloads the same service definition. */
+  function saved() { detail.setServiceImport(null); void detail.loadData(); }
+  /** Closing a panel leaves its service and selected version intact. */
+  function close() { detail.setServiceImport(null); }
+  // Each menu command mounts exactly one purpose-specific editor.
+  if (detail.serviceImport === "webhooks") return <WebhookDefinitionEditor key={`${srv.id}:${version}`} service={srv} version={version} onClose={close} onSaved={saved} />;
+  if (detail.serviceImport === "endpoints") return <ServiceEndpointImport key={`${srv.id}:${version}`} service={srv} version={version} onClose={close} onSaved={saved} />;
+  return null;
+}
+
+/** Connects the operation catalog to its owner-only import drawer without leaving the selected tab. */
 function EndpointTabContent() {
   const detail = useDetail();
+  const onImport = useServiceImportAction(detail.res!.service, "endpoints");
   return (
     <EndpointsTab
       res={detail.res!}
+      onImport={onImport}
       searchQuery={detail.searchQuery}
       setSearchQuery={detail.setSearchQuery}
       searchResults={detail.searchResults}

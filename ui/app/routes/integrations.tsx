@@ -7,7 +7,7 @@ import { IntegrationsSidebar } from "~/components/layout/IntegrationsSidebar";
 import { CurrentActorAccessProvider } from "~/components/access/CurrentActorAccess";
 import { loginPathForLocation } from "~/lib/safe-navigation";
 
-// IntegrationsLayout protects private routes and keeps page dialogs inside the workspace beside the assistant.
+// IntegrationsLayout keeps parent navigation and global utilities compact above each page's own title and actions.
 export default function IntegrationsLayout() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -82,11 +82,12 @@ export default function IntegrationsLayout() {
         <main className="flex-1 min-w-0 overflow-y-auto">
           {signOutError && <p role="alert" className="m-4 rounded-md bg-red-50 p-3 text-sm text-red-700">{signOutError}</p>}
           <div className="max-w-6xl mx-auto w-full px-4 py-5 sm:px-6 sm:py-8 lg:px-8">
-            {isAuth && (
-              <div id="integrations-header-actions" className="mb-3 flex min-h-8 items-center justify-end gap-2">
-                <NotificationBell />
-              </div>
-            )}
+            {/* Back navigation leads the page; global utilities share its row without displacing the title. */}
+            <div className="mb-5 flex min-h-8 items-center justify-between gap-4">
+              <div id="integrations-back-navigation" className="min-w-0 flex-1 empty:hidden" />
+              {/* Workspace utilities remain available on pages without parent navigation. */}
+              {isAuth && <div id="integrations-header-actions" className="ml-auto flex items-center justify-end gap-2"><NotificationBell /></div>}
+            </div>
             <Outlet />
           </div>
         </main>

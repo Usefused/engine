@@ -1,12 +1,10 @@
-import { Link } from "@remix-run/react";
+import { ServiceCatalogHeader, ServiceCatalogOptions } from "~/components/integration-details/ServiceCatalogHeader";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
 import { useState } from "react";
 import { Info, AlertTriangle, Search } from "lucide-react";
 import type { IntegrationObject, Service } from "~/lib/api";
 import { WebhookRow } from "~/components/EndpointRow";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
-import { canEditWebhook } from "~/lib/webhook-editor-draft";
-import { WebhookDefinitionEditor } from "~/components/webhooks/WebhookDefinitionEditor";
 
 interface Webhook {
   id: string;
@@ -18,27 +16,21 @@ interface Webhook {
 
 interface WebhooksTabProps {
   srv: Service;
+  onImport?: () => void;
   setSelectedEndpoint: (ep: IntegrationObject | null) => void;
-  version: string;
-  onSaved: () => void;
 }
 
-// The catalogue stays read-only until an explicitly authorized owner opens its separate editor.
+// Keeps provider definitions, receiver navigation, and owner imports together in their service tab.
 export default function WebhooksTab({
   srv,
   setSelectedEndpoint,
-  version,
-  onSaved,
+  onImport,
 }: WebhooksTabProps) {
 	const [showGuide, setShowGuide] = useState(false);
 	const [search, setSearch] = useState("");
-  const [editing, setEditing] = useState(false);
   const { access } = useCurrentActorAccess();
   const canCreate = hasWorkspacePermission(access, "app.webhook.create");
-  const canEdit = canEditWebhook(srv.is_owner, access);
 
-  // A confirmed commit refreshes the same selected version, never workspace registration or secrets.
-  function saved() { setEditing(false); onSaved(); }
 
   const renderedWebhooks = (srv.webhooks as Webhook[] || []).filter((wh) => {
     const q = search.toLowerCase();
@@ -47,20 +39,19 @@ export default function WebhooksTab({
 
   return (
     <div className="bg-white rounded-xl border border-slate-200">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-5">
-        <div><h2 className="font-semibold text-slate-900">Receive events</h2><p className="mt-1 text-sm text-slate-500">Find a receiving URL or create one for this service.</p></div>
-        <div className="flex flex-wrap gap-3"><Link to={`/integrations/webhooks?service=${encodeURIComponent(srv.id)}`} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium">View webhook URLs</Link>{/* Provisioning stays separate from editing provider event definitions. */}{canCreate && <Link to={`/integrations/webhooks/new?service=${encodeURIComponent(srv.id)}`} className="rounded-lg bg-[var(--brand-violet)] px-3 py-2 text-sm font-semibold text-white">Create webhook</Link>}</div>
-      </div>
+      <ServiceCatalogHeader title="Receive events" description="Find a receiving URL or create one for this service.">
+        <WebhookActions serviceID={srv.id} canCreate={canCreate} onImport={onImport} />
+      </ServiceCatalogHeader>
       <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-3">
-          <div className="relative">
+        <div className="flex w-full min-w-0 items-center gap-3">
+          <div className="relative min-w-0 flex-1">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
             <input
               type="text"
               placeholder="Search webhooks..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full sm:w-64 text-sm border border-slate-300 rounded-md pl-9 pr-8 py-1.5 focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-gray-500"
+              className="w-full text-sm border border-slate-300 rounded-md pl-9 pr-8 py-1.5 focus:outline-none focus:border-slate-500 focus:ring-1 focus:ring-gray-500"
             />
             {search && (
               <button
@@ -82,7 +73,6 @@ export default function WebhooksTab({
             Guide
           </button>
         </div>
-        {canEdit && <button type="button" onClick={() => setEditing(true)} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700">Edit webhook</button>}
       </div>
 
       {showGuide && (
@@ -130,7 +120,16 @@ export default function WebhooksTab({
           </div>
         )}
       </div>
-      {editing && canEdit && <WebhookDefinitionEditor key={`${srv.id}:${version}`} service={srv} version={version} onClose={() => setEditing(false)} onSaved={saved} />}
     </div>
   );
+}
+
+/** Separates receiver provisioning grants from the owner's provider-definition import action. */
+function WebhookActions({ serviceID, canCreate, onImport }: { serviceID: string; canCreate: boolean; onImport?: () => void }) {
+  const actions = [{ label: "View webhook URLs", href: `/integrations/webhooks?service=${encodeURIComponent(serviceID)}` }];
+  // Receiving events remains available to actors with the existing provisioning grant.
+  if (canCreate) actions.push({ label: "Create webhook", href: `/integrations/webhooks/new?service=${encodeURIComponent(serviceID)}` });
+  // Only the owning service route supplies an import command.
+  const imports = onImport ? [{ label: "Import webhooks", onSelect: onImport }] : [];
+  return <ServiceCatalogOptions actions={[...actions, ...imports]} />;
 }
