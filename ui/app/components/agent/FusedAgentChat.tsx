@@ -30,11 +30,12 @@ export default function FusedAgentChat({ popup, pageTitle, status, messages, com
   const scrollArea = useRef<HTMLDivElement>(null);
   const followResponse = useRef(true);
 
-  // Opening chat focuses its composer without remounting it when a drawer changes the layout.
-  useEffect(() => { input.current?.focus(); }, []);
+  // Focus the composer without panning the workspace when chat moves between fixed and docked layouts.
+  useEffect(() => { input.current?.focus({ preventScroll: true }); }, []);
   // Readers who scroll back keep their place instead of being pulled to every streamed token.
   useEffect(() => {
-    if (followResponse.current) scrollArea.current?.scrollTo({ top: scrollArea.current.scrollHeight, behavior: 'instant' });
+    // The empty welcome screen starts at its heading; only conversation content should follow the latest reply.
+    if (messages.length > 0 && followResponse.current) scrollArea.current?.scrollTo({ top: scrollArea.current.scrollHeight, behavior: 'instant' });
   }, [messages]);
 
   /** Escape closes only the focused chat, leaving the workspace drawer's own Escape handling independent. */
@@ -47,12 +48,12 @@ export default function FusedAgentChat({ popup, pageTitle, status, messages, com
     event?.preventDefault();
     // History restoration and active responses must settle before starting another turn.
     if (isReady && !isSending && !loadingHistory) sendMessage();
-    input.current?.focus();
+    input.current?.focus({ preventScroll: true });
   }
   /** Example prompts remain editable so the user chooses what page context to send. */
-  function startExample(prompt: string) { setComposer(prompt); input.current?.focus(); }
+  function startExample(prompt: string) { setComposer(prompt); input.current?.focus({ preventScroll: true }); }
   /** Starts a clean session while preserving the page's unsaved work. */
-  function startNew() { newConversation(); setHistoryOpen(false); input.current?.focus(); }
+  function startNew() { newConversation(); setHistoryOpen(false); input.current?.focus({ preventScroll: true }); }
   /** Opens actor-scoped history without discarding a currently streaming response. */
   function toggleHistory() { setHistoryOpen(previous => !previous); }
   /** A failed history fetch leaves the chooser visible for retry. */
@@ -73,9 +74,9 @@ export default function FusedAgentChat({ popup, pageTitle, status, messages, com
 
   return (
     <>
-      {/* Detail drawers get the desktop width; mobile chat always occupies the full viewport. */}
+      {/* Mobile chat must paint above fixed detail drawers; desktop keeps the dock or floating popout. */}
       <aside ref={panel} id="fused-assistant" role="complementary" aria-label="Fused assistant" aria-describedby="agent-preview-note" onKeyDown={handlePanelKey}
-        className={`flex h-dvh w-full min-w-0 flex-col overflow-hidden border-slate-200 bg-slate-50 text-slate-900 ${popup ? 'md:fixed md:bottom-5 md:right-5 md:z-[60] md:h-[600px] md:max-h-[calc(100dvh-2.5rem)] md:w-[380px] md:rounded-2xl md:border md:shadow-2xl' : 'md:w-[360px] md:border-l xl:w-[420px]'}`}>
+        className={`fixed inset-0 z-[60] flex h-dvh w-full min-w-0 flex-col overflow-hidden border-slate-200 bg-slate-50 text-slate-900 ${popup ? 'md:inset-auto md:bottom-5 md:right-5 md:h-[600px] md:max-h-[calc(100dvh-2.5rem)] md:w-[380px] md:rounded-2xl md:border md:shadow-2xl' : 'md:relative md:inset-auto md:z-auto md:w-[360px] md:border-l xl:w-[420px]'}`}>
 
         <header className="flex shrink-0 items-center gap-3 border-b border-slate-200/80 bg-white px-5 py-4">
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-violet-700 text-violet-100"><Sparkles className="h-[18px] w-[18px]" /></div>

@@ -1051,6 +1051,8 @@ type Store interface {
 	// along with the total count matching the names filter.
 	ListWorkspaceServicesPage(ctx context.Context, names []string, limit, offset int) ([]WorkspaceService, int, error)
 	ListAuthorizedWorkspaceServicesPage(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string, limit, offset int) ([]WorkspaceService, int, error)
+	// Search retains exact names filters while matching free text within authorized service names and slugs.
+	SearchAuthorizedWorkspaceServicesPage(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string, search string, limit, offset int) ([]WorkspaceService, int, error)
 	ResolveWorkspaceServiceIDsByKeys(ctx context.Context, keys []string) (map[string]uuid.UUID, error)
 	ListBucketServiceSummaries(ctx context.Context, bucketID uuid.UUID, search string, limit, offset int) ([]BucketServiceSummary, int, error)
 	ListAuthorizedBucketServiceSummaries(ctx context.Context, bucketID uuid.UUID, scope accesscontrol.AuthorizedScope, search string, limit, offset int) ([]BucketServiceSummary, int, error)

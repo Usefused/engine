@@ -1617,11 +1617,12 @@ export const api = {
         .then(({ workspaceServices }) => workspaceServices),
 
     // getServicesPage pages the same exact-version membership projection.
-    getServicesPage: (limit: number, offset: number, names?: string[]) =>
+    // Search is separate from exact names so partial text does not alter reference resolution.
+    getServicesPage: (limit: number, offset: number, names?: string[], q?: string) =>
       api
         .mcpGraphql<{ workspaceServicePage: { total: number; page: number; limit: number; data: ActivatedService[] } }>(
-          `query WorkspaceServicePage($limit: Int, $offset: Int, $names: [String]) {
-            workspaceServicePage(limit: $limit, offset: $offset, names: $names) {
+          `query WorkspaceServicePage($limit: Int, $offset: Int, $names: [String], $q: String) {
+            workspaceServicePage(limit: $limit, offset: $offset, names: $names, q: $q) {
               total page limit data {
                 id
                 service_id
@@ -1646,7 +1647,7 @@ export const api = {
               }
             }
           }`,
-          { limit, offset, names }
+          { limit, offset, names, q }
         )
         .then(({ workspaceServicePage }) => workspaceServicePage),
 

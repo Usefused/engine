@@ -162,15 +162,16 @@ export default function EndpointDetailsSidebar({
   const responseSchemas = canonicalResponseSchemas(selectedEndpoint.responses);
   const endpointDrift = drift.filter((snapshot) => snapshot.integration_object_id === selectedEndpoint.id);
 
+  // Isolate fixed surfaces from the parent page's space-y margins without adding a layout box.
   return (
-    <>
+    <div className="contents">
       <div className="fixed inset-0 bg-slate-900/20 z-40 transition-opacity" onClick={() => setSelectedEndpoint(null)} />
       <div data-fused-detail-sidebar className="fixed inset-y-0 right-0 w-full md:w-[600px] bg-white shadow-2xl z-50 overflow-y-auto overflow-x-hidden transform transition-transform border-l border-slate-200 flex flex-col">
         <EndpointSidebarHeader endpoint={selectedEndpoint} endpointType={endpointType} close={() => setSelectedEndpoint(null)} />
         <EndpointDriftPanel snapshots={endpointDrift} driftAction={driftAction} handleDismiss={handleDismiss} handleApply={handleApply} />
         <EndpointContractContent endpoint={selectedEndpoint} isLoading={isLoading} requestSchema={requestSchema} responseSchemas={responseSchemas} serviceId={srv.id} serviceName={srv.name} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
       </div>
-    </>
+    </div>
   );
 }
 

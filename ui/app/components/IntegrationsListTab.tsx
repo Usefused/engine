@@ -1,7 +1,7 @@
 import { Select } from "./forms/Select.ts";
 import { FormEvent } from "react";
 import { Link } from "@remix-run/react";
-import { ArrowUpRight, Check, Loader2, Search, X, ChevronLeft, ChevronRight } from "lucide-react";
+import { Check, Loader2, Search, X, ChevronLeft, ChevronRight } from "lucide-react";
 import { Service, ActivatedService, serviceHref } from "~/lib/api";
 import { formatServiceName, formatVersion, truncateWords, stripMarkdown } from "~/lib/format";
 import { openServiceLink } from "~/lib/service-navigation";
@@ -94,7 +94,7 @@ interface IntegrationsListTabProps {
   totalPages: number;
   totalItems?: number;
   onPageChange: (page: number) => void;
-  viewType?: "workspace" | "catalog";
+  viewType?: "workspace" | "catalog" | "search";
   handleAddWorkspace?: (e: React.MouseEvent, id: string, name: string) => void;
   activeServiceIds?: string[];
   pendingServiceIds?: string[];
@@ -212,11 +212,13 @@ function IntegrationSearch({ query, setQuery, handleSearch, handleClear, searchi
 
 // integrationSearchPlaceholder keeps authentication and view-specific copy in
 // one decision boundary shared by every search render.
-function integrationSearchPlaceholder(isAuth: boolean | undefined, viewType: "workspace" | "catalog"): string {
+function integrationSearchPlaceholder(isAuth: boolean | undefined, viewType: "workspace" | "catalog" | "search"): string {
   // Anonymous visitors search the public service surface rather than a workspace.
   if (!isAuth) {
     return "Search for a service (e.g. Stripe, Shopify...)";
   }
+  // Combined results include existing services and Registry discovery through one field.
+  if (viewType === "search") return "Search workspace and catalog";
   // Authenticated workspace and catalog searches describe their distinct scopes.
   if (viewType === "workspace") {
     return "Search your services";
@@ -322,7 +324,7 @@ function IntegrationCollection(props: IntegrationResultsProps) {
 
 type IntegrationCardProps = IntegrationResultsProps & { service: ListableService };
 
-// IntegrationCard keeps a stationary, linked card surface while independent actions remain above the stretched link.
+// IntegrationCard keeps decorative content out of pointer hit testing so only its link and add action own hover.
 function IntegrationCard(props: IntegrationCardProps) {
   const { service, viewType } = props;
   const href = detailHref(service);
@@ -330,21 +332,19 @@ function IntegrationCard(props: IntegrationCardProps) {
   const providerName = service.is_owner === false ? service.provider?.name || service.provider?.handle : "";
   const apiURL = defaultAPIURL(service);
   return (
-    <article className="group relative flex flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition-[border-color,box-shadow] duration-200 hover:border-black hover:shadow-lg hover:shadow-slate-200/70">
+    <article className="group relative flex cursor-pointer flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition-[border-color,box-shadow] duration-200 hover:border-black hover:shadow-lg hover:shadow-slate-200/70">
+      {/* A real full-card link covers text, statistics and whitespace while retaining native keyboard and new-tab behavior. */}
+      <Link to={href} target="_blank" rel="noopener noreferrer" onClick={(event) => openServiceLink(event, href)}
+        className="absolute inset-0 z-10 cursor-pointer rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-600">
+        <span className="sr-only">{formatServiceName(service.name)}</span>
+      </Link>
+      {/* Text, badges and icons must not compete with the link for hover or cursor ownership. */}
+      <div className="pointer-events-none">
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
           <ServiceIcon name={service.name} iconURL={service.icon_url} />
           <div className="min-w-0">
-            {/* Stretch the semantic link across the stationary card so all navigation areas share its pointer and keyboard behavior. */}
-            <Link
-              to={href}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(event) => openServiceLink(event, href)}
-              className="block truncate text-sm font-semibold cursor-pointer text-slate-900 after:absolute after:inset-0 after:rounded-2xl hover:text-blue-700 focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-blue-600"
-            >
-              {formatServiceName(service.name)}
-            </Link>
+            <h3 className="truncate text-sm font-semibold text-slate-900 group-hover:text-blue-700">{formatServiceName(service.name)}</h3>
             {/* Owned services need no attribution; foreign services identify their actual provider. */}
             {providerName && <p className="mt-0.5 truncate text-xs text-slate-500">@{providerName}</p>}
             {/* The effective API target belongs to service identity rather than the analytics body. */}
@@ -354,28 +354,19 @@ function IntegrationCard(props: IntegrationCardProps) {
         <div className="flex shrink-0 items-center gap-1.5">
           {/* Visibility and exact local version remain independently readable. */}
           <ServiceVisibilityBadge isPublic={service.is_public} />
-          {viewType === "workspace" && service.version && (
+          {/* Workspace versions remain visible when their cards appear in combined search results. */}
+          {service.version && (
             <span className="px-2 py-0.5 bg-slate-100 text-slate-600 text-[10px] font-medium rounded-md">{formatVersion(service.version)}</span>
           )}
         </div>
       </div>
       <IntegrationDescription description={service.description} />
       <ServiceAnalytics endpointCount={service.endpoint_count} webhookCount={service.webhook_count} />
-      <div className="pt-5">
-        <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-4">
-          <Link
-            to={href}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(event) => openServiceLink(event, href)}
-            className="relative z-10 inline-flex cursor-pointer items-center gap-1 text-xs font-semibold text-blue-700 transition-colors hover:text-blue-800"
-          >
-            View details <ArrowUpRight className="h-3.5 w-3.5" />
-          </Link>
-          {/* Workspace controls must receive their own clicks instead of activating the card link. */}
-          <div className="relative z-10"><IntegrationActions {...props} /></div>
-        </div>
       </div>
+      {/* Only authenticated discovery cards need an add action or membership marker; other cards need no empty footer. */}
+      {props.isAuth && viewType !== "workspace" && <div className="pointer-events-none mt-5 flex justify-end border-t border-slate-100 pt-4">
+        <IntegrationActions {...props} />
+      </div>}
     </article>
   );
 }
@@ -448,7 +439,7 @@ function IntegrationActions(props: IntegrationCardProps) {
         onClick={(event) => props.handleAddWorkspace?.(event, props.service.id, props.service.name)}
         disabled={pending}
         aria-busy={pending}
-        className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1 text-xs font-medium text-white shadow-sm transition-all hover:bg-slate-700 disabled:cursor-wait disabled:opacity-70"
+        className="pointer-events-auto relative z-20 inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1 text-xs font-medium text-white shadow-sm transition-all hover:bg-slate-700 disabled:cursor-wait disabled:opacity-70"
         title="Add to workspace"
       >
         {/* A visible spinner makes the single admitted activation request explicit and discourages retries. */}
@@ -470,11 +461,10 @@ function canAddCatalogIntegration(props: IntegrationCardProps): boolean {
   return Boolean(props.isAuth && props.handleAddWorkspace && !props.activeServiceIds?.includes(props.service.id));
 }
 
-// IntegrationPagination hides pagination during filtered/loading states and
-// otherwise keeps page controls independent of list rows.
-function IntegrationPagination({ loading, query, totalPages, totalItems, page, onPageChange }: IntegrationResultsProps) {
-  // Search results and incomplete loads do not represent the unfiltered page count.
-  if (loading || query || totalPages <= 0) {
+// IntegrationPagination preserves server-backed workspace search pages while catalog search remains a bounded result set.
+function IntegrationPagination({ loading, query, viewType, totalPages, totalItems, page, onPageChange }: IntegrationResultsProps) {
+  // Workspace totals include the search predicate; only catalog search lacks a pagination contract.
+  if (loading || (query && viewType === "catalog") || totalPages <= 0) {
     return null;
   }
   return (

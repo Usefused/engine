@@ -764,18 +764,22 @@ func workspaceServiceIDsGraphQLField(s store.Store) *graphql.Field {
 	}
 }
 
+// workspaceServicePageGraphQLField supports exact reference selection and independent free-text discovery.
 func workspaceServicePageGraphQLField(s store.Store, verifier ServiceVerifier) *graphql.Field {
 	return &graphql.Field{
 		Type: workspaceServicePageGraphQLType,
 		Args: graphql.FieldConfigArgument{
+			"q":      &graphql.ArgumentConfig{Type: graphql.String},
 			"names":  &graphql.ArgumentConfig{Type: graphql.NewList(graphql.String)},
 			"limit":  &graphql.ArgumentConfig{Type: graphql.Int},
 			"offset": &graphql.ArgumentConfig{Type: graphql.Int},
 		},
+		// Resolve projects only the authorized page after applying the requested filters.
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.workspace_service_page.list")
 			defer span.End()
 			actor, err := actorFromContext(p.Context)
+			// Do not present incomplete or unauthorized data as a valid result.
 			if err != nil {
 				return nil, err
 			}
@@ -784,26 +788,39 @@ func workspaceServicePageGraphQLField(s store.Store, verifier ServiceVerifier) *
 			limit, offset := bucketPageArgs(p)
 
 			authorized, err := graphQLAuthorizedScope(ctx, accesscontrol.PermissionServiceRead, accesscontrol.ResourceService)
+			// Do not present incomplete or unauthorized data as a valid result.
 			if err != nil {
 				return nil, err
 			}
-			services, total, err := s.ListAuthorizedWorkspaceServicesPage(ctx, authorized, graphQLStringListArg(p, "names"), limit, offset)
+			var services []store.WorkspaceService
+			var total int
+			search, _ := p.Args["q"].(string)
+			// Free-text discovery must not change the exact-reference contract of the legacy names argument.
+			if strings.TrimSpace(search) != "" {
+				services, total, err = s.SearchAuthorizedWorkspaceServicesPage(ctx, authorized, graphQLStringListArg(p, "names"), search, limit, offset)
+			} else {
+				services, total, err = s.ListAuthorizedWorkspaceServicesPage(ctx, authorized, graphQLStringListArg(p, "names"), limit, offset)
+			}
+			// Do not present incomplete or unauthorized data as a valid result.
 			if err != nil {
 				return nil, fmt.Errorf("list workspace services page: %w", err)
 			}
 			serviceIDs := listedServiceIDs(services)
 			versions, err := s.ListWorkspaceServiceVersionsForServices(ctx, serviceIDs)
+			// Do not present incomplete or unauthorized data as a valid result.
 			if err != nil {
 				return nil, fmt.Errorf("list workspace service versions: %w", err)
 			}
 			metadata := fetchServiceCardMetadataForListing(ctx, verifier, apiKeyFromGraphQLContext(p.Context), serviceIDs)
 			authOptions, err := fetchWorkspaceServiceAuthOptions(ctx, verifier, apiKeyFromGraphQLContext(p.Context), services)
+			// Do not present incomplete or unauthorized data as a valid result.
 			if err != nil {
 				return nil, fmt.Errorf("load workspace service auth options: %w", err)
 			}
 			span.SetAttributes(attribute.Int("service_count", len(services)))
 
 			page := 1
+			// A positive page size gives the client a stable one-based page number.
 			if limit > 0 {
 				page = (offset / limit) + 1
 			}

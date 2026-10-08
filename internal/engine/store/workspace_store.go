@@ -355,21 +355,42 @@ func (s *postgresStore) ListWorkspaceServicesPage(ctx context.Context, names []s
 	return services, total, rows.Err()
 }
 
+// ListAuthorizedWorkspaceServicesPage preserves exact reference filters for existing API and CLI callers.
 func (s *postgresStore) ListAuthorizedWorkspaceServicesPage(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string, limit, offset int) ([]WorkspaceService, int, error) {
+	return s.searchAuthorizedWorkspaceServicesPage(ctx, scope, names, "", limit, offset)
+}
+
+// SearchAuthorizedWorkspaceServicesPage applies free-text search before counting and paging authorized rows.
+func (s *postgresStore) SearchAuthorizedWorkspaceServicesPage(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string, search string, limit, offset int) ([]WorkspaceService, int, error) {
+	return s.searchAuthorizedWorkspaceServicesPage(ctx, scope, names, search, limit, offset)
+}
+
+// Literal substring matching treats percent and underscore as user text, not SQL wildcard operators.
+const workspaceServiceSearchSQL = ` AND ($4 = ''
+	OR strpos(lower(COALESCE(s.service_name, '')), lower($4)) > 0
+	OR strpos(lower(COALESCE(s.service_slug, '')), lower($4)) > 0)`
+
+// searchAuthorizedWorkspaceServicesPage shares authorization and search predicates between count and page queries.
+func (s *postgresStore) searchAuthorizedWorkspaceServicesPage(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string, search string, limit, offset int) ([]WorkspaceService, int, error) {
+	// An empty grant scope must never reveal matching names or counts.
 	if !scope.All && len(scope.IDs) == 0 {
 		return nil, 0, nil
 	}
+	search = strings.TrimSpace(search)
+	where := authorizedWorkspaceServicesWhereSQL + workspaceServiceSearchSQL
 	var total int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_workspace_services s `+authorizedWorkspaceServicesWhereSQL, scope.All, scope.IDs, names).Scan(&total); err != nil {
+	// Database failures must not become an authoritative empty search result.
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_workspace_services s `+where, scope.All, scope.IDs, names, search).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("ListAuthorizedWorkspaceServicesPage count: %w", err)
 	}
+	// Skip projection work when no authorized services match.
 	if total == 0 {
 		return nil, 0, nil
 	}
 	query := `WITH paged_services AS (
 		SELECT id, service_id, service_slug, service_name, added_by, created_at
-		FROM fused_workspace_services s ` + authorizedWorkspaceServicesWhereSQL + `
-		ORDER BY created_at DESC LIMIT $4 OFFSET $5
+		FROM fused_workspace_services s ` + where + `
+		ORDER BY created_at DESC LIMIT $5 OFFSET $6
 	)
 	SELECT s.id, s.service_id, COALESCE(s.service_slug, ''),
 	       COALESCE(latest.version, ''),
@@ -383,7 +404,8 @@ func (s *postgresStore) ListAuthorizedWorkspaceServicesPage(ctx context.Context,
 		ORDER BY enabled_at DESC, id DESC LIMIT 1
 	) latest ON true
 	ORDER BY s.created_at DESC`
-	rows, err := s.db.Query(ctx, query, scope.All, scope.IDs, names, limit, offset)
+	rows, err := s.db.Query(ctx, query, scope.All, scope.IDs, names, search, limit, offset)
+	// Preserve query failures for the caller.
 	if err != nil {
 		return nil, 0, fmt.Errorf("ListAuthorizedWorkspaceServicesPage query: %w", err)
 	}
@@ -391,6 +413,7 @@ func (s *postgresStore) ListAuthorizedWorkspaceServicesPage(ctx context.Context,
 	var services []WorkspaceService
 	for rows.Next() {
 		service, err := scanWorkspaceService(rows)
+		// A malformed row invalidates the page rather than silently omitting a match.
 		if err != nil {
 			return nil, 0, err
 		}

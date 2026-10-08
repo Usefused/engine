@@ -51,7 +51,7 @@ test("services route combines paged workspace rows with optional catalogue disco
   assert.match(workspaceLoader, /getServicesPage\(10,/);
   assert.doesNotMatch(workspaceLoader, /getServices\(\)/);
   assert.match(workspaceLoader, /getServiceIds\(\)/);
-  assert.match(workspaceLoader, /catalogVisible\(isAuth, catalogPreference, workspaceServiceIds\)/);
+  assert.match(workspaceLoader, /catalogVisible\(isAuth, catalogPreference, workspaceServiceIds, searchQuery\)/);
   assert.match(workspaceLoader, /loadCatalogData\(\{ knownWorkspaceServiceIds: workspaceServiceIds/);
   assert.doesNotMatch(routeSource, /data-track="view_catalog_tab"/);
   assert.match(routeSource, /role="switch"/);
@@ -116,7 +116,7 @@ test("services render as descriptive catalogue cards", async () => {
   assert.match(iconSource, /referrerPolicy="no-referrer"/);
   assert.match(iconSource, /onError=\{\(\) => setFailed\(true\)\}/);
   assert.match(detailSource, /<ServiceIcon name=\{srv\.name\} iconURL=\{srv\.icon_url\}/);
-  assert.match(listSource, /className="block truncate text-sm font-semibold/);
+  assert.match(listSource, /className="absolute inset-0 z-10 cursor-pointer rounded-2xl/);
   assert.doesNotMatch(listSource, /Service integration/);
   assert.doesNotMatch(listSource, /function WorkspaceIntegrationAction/);
   assert.match(listSource, /In workspace/);

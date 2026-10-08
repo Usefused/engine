@@ -327,9 +327,10 @@ export function FusedAgentProvider({ children, authenticated }: { children: Reac
   function closeSidebar() { setOpen(false); }
 
   return <FusedAgentContext.Provider value={{ isOpen: open, open: launch, registerEditor, registerDraftBuilder }}>
-    {/* Desktop panes scroll independently; the full-height mobile assistant collapses the page without losing its draft. */}
+    {/* Desktop panes scroll independently; mobile chat covers the inert page without losing its draft. */}
     <div className="flex h-dvh min-w-0 flex-col overflow-hidden md:flex-row">
-    <div ref={workspacePane} data-fused-workspace-pane className="isolate min-h-0 min-w-0 flex-1 overflow-auto [transform:translateZ(0)]">{children}</div>
+    {/* Keep fixed drawers anchored to the viewport; transforming this scroller would clip them after page scrolling. */}
+    <div ref={workspacePane} data-fused-workspace-pane className="isolate min-h-0 min-w-0 flex-1 overflow-auto">{children}</div>
     {/* Authentication gates assistant access; a closed pane releases all of its layout space. */}
     {authenticated && <div data-fused-agent className="shrink-0">
       {/* The icon stays discoverable without competing with primary page actions. */}
