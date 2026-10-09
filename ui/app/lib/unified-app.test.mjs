@@ -5,6 +5,7 @@ import ts from "typescript";
 import { webcrypto } from "node:crypto";
 import * as contract from "./unified-app-contract.ts";
 import * as describeContract from "./app-describe-contract.ts";
+import * as sdkLanguages from "./sdk-languages.ts";
 import * as authorization from "./authorization-error.ts";
 
 // Load the real client and typed errors against a recorded transport without invoking a model or mutating an Engine.
@@ -16,6 +17,8 @@ function client(mock, module = "unified-app-api") {
   const require = (name) => {
     // All authoring modules share the same recorded transport.
     if (name === "./app-describe-api") return client(mock, "app-describe-api");
+    // Language validation stays production code while the transport remains mocked.
+    if (name === "./sdk-languages") return sdkLanguages;
     // Pure selection rules remain production code in these integration-style tests.
     if (name === "./app-describe-contract") return describeContract;
     if (name === "./api") return { api: mock };
@@ -568,4 +571,16 @@ test('agent compilation leaves dependency activation and repair to the user', as
   mock.workspace.getServices = async () => [{ service_id: service.service_id, enabled_versions: [{ service_version_id: service.service_version_id, status: 'active' }] }];
   await assert.rejects(client(mock).planUnifiedApp({ name: 'Customer', version: '1' }, { stripe: service }, () => {}, '', false));
   assert.equal(mutations, 0);
+});
+
+// Go intent must survive both package delivery modes without falling back to TypeScript.
+test("SDK describe preserves Go and rejects unknown emitters", async () => {
+  for (const kind of ["sdk", "app"]) {
+    const intent = {name:"go-sdk", language:"go", services:[{name:"Stripe",endpoint_queries:["Get customer"]}]};
+    const mock = transport({ParsePromptIntent:{parseSDKIntent:intent}});
+    const draft = await client(mock.api,"app-describe-api").describeApp("Create a Go SDK",kind,()=>{});
+    assert.equal(draft.language,"go");
+    const unsupported = transport({ParsePromptIntent:{parseSDKIntent:{...intent, language:"rust"}}});
+    await assert.rejects(client(unsupported.api,"app-describe-api").describeApp("Create a Rust SDK",kind,()=>{}), /TypeScript, Python, or Go/);
+  }
 });

@@ -1,3 +1,4 @@
+import { isSDKLanguage, sdkLanguageOrDefault, type SDKLanguage } from "~/lib/sdk-languages";
 import { ImportedMcpPicker, importedMcpCount, type ImportedMcpSelection } from "./ImportedMcpPicker";
 import { AppServiceAuthFields, type AppAuthService } from "~/components/apps/AppServiceAuthFields";
 import { useAppCredentialReview } from "~/components/apps/useAppCredentialReview";
@@ -307,7 +308,7 @@ function buildGenerationConfig(input: {
   bucket: string;
   selections: AppSelection[];
   data: ServiceData[];
-  language: "typescript" | "python";
+  language: SDKLanguage;
   webhookAttachment: string;
   hasWebhookSelections: boolean;
 }): Record<string, unknown> {
@@ -1573,7 +1574,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   const allowedModes = (["app", "sdk", "mcp", "api"] as GenerationMode[]).filter((mode) => mode === "app"
     ? hasWorkspacePermission(access, "app.sdk.create") && hasWorkspacePermission(access, "app.mcp.create")
     : hasWorkspacePermission(access, `app.${mode}.create`));
-  const [language, setLanguage] = useState<"typescript" | "python">("typescript");
+  const [language, setLanguage] = useState<SDKLanguage>("typescript");
   const [describing, setDescribing] = useState(false);
   const [seedBusy, setSeedBusy] = useState(false);
   const selectionRef = useRef(new Set<string>());
@@ -1600,7 +1601,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     const hydrated = await loadDescribedSelection(proposal.services);
     acceptSelection(hydrated); setSdkName(proposal.name); setMcpDescription(proposal.description);
     // An omitted emitter preserves the user's current language choice.
-    if (proposal.language === "typescript" || proposal.language === "python") setLanguage(proposal.language);
+    if (isSDKLanguage(proposal.language)) setLanguage(proposal.language);
     setSdkDeployment(null); setMcpDeployment(null); setIsDuplicate(false);
   }
 
@@ -1659,7 +1660,8 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     setAppVersion(match ? `${match[1]}.${Number(match[2]) + 1}.0` : "");
     // Combined successors preserve their authored MCP description inside the nested delivery config.
     setMcpDescription(source.config.mcp?.description ?? source.config.description ?? "");
-    setLanguage(source.config.language === "python" ? "python" : "typescript");
+    // Preserve the family emitter when preparing a new immutable version.
+    setLanguage(sdkLanguageOrDefault(source.config.language));
   }, [workflowContext.appID]);
 
   const workflowSelectionKey = workflows.map((workflow) => workflow.id).join(",");

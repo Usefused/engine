@@ -44,3 +44,13 @@ test('rich code rendering preserves Markdown safety boundaries', () => {
   assert.notEqual(doc.querySelector('a')?.getAttribute('href'), 'javascript:alert%281%29');
   assert.match(doc.body.textContent, /alt/);
 });
+
+// Go package examples should preserve source and use the registered grammar for either conventional label.
+test('Go SDK code fences are highlighted without changing their contents', () => {
+  for (const language of ['go', 'golang']) {
+    const source = 'package main\n\nfunc main() { println("Fused") }\n';
+    const doc = render('```' + language + '\n' + source + '```');
+    assert.equal(doc.querySelector('pre code').textContent, source);
+    assert.ok(doc.querySelector('pre code span'));
+  }
+});

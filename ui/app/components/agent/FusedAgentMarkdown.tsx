@@ -8,12 +8,13 @@ import javascript from 'react-syntax-highlighter/dist/esm/languages/prism/javasc
 import json from 'react-syntax-highlighter/dist/esm/languages/prism/json.js';
 import yaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml.js';
 import bash from 'react-syntax-highlighter/dist/esm/languages/prism/bash.js';
+import go from 'react-syntax-highlighter/dist/esm/languages/prism/go.js';
 import python from 'react-syntax-highlighter/dist/esm/languages/prism/python.js';
 
 // Limit the bundle to languages used in app source, configuration, and CLI examples.
-for (const [name, grammar] of Object.entries({ typescript, javascript, json, yaml, bash, python })) SyntaxHighlighter.registerLanguage(name, grammar);
-const aliases: Record<string, string> = { ts: 'typescript', js: 'javascript', yml: 'yaml', sh: 'bash', shell: 'bash', py: 'python' };
-const supported = new Set(['typescript', 'javascript', 'json', 'yaml', 'bash', 'python']);
+for (const [name, grammar] of Object.entries({ typescript, javascript, json, yaml, bash, python, go })) SyntaxHighlighter.registerLanguage(name, grammar);
+const aliases: Record<string, string> = { ts: 'typescript', js: 'javascript', yml: 'yaml', sh: 'bash', shell: 'bash', py: 'python', golang: 'go' };
+const supported = new Set(['typescript', 'javascript', 'json', 'yaml', 'bash', 'python', 'go']);
 const tokens = {
   comment: { color: '#64748b' }, keyword: { color: '#7c3aed' }, string: { color: '#047857' },
   number: { color: '#b45309' }, boolean: { color: '#b45309' }, function: { color: '#2563eb' },

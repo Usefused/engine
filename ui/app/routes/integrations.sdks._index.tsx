@@ -145,8 +145,13 @@ function readAppPage(query: string, page: number, state: AppCatalogueState, type
     .then(({ appFamilies }) => appFamilies);
 }
 
-/** Renders the compact generated-client language mark used in catalogue rows. */
+/** Displays the actual immutable package emitter, including unknown future targets. */
 function LanguageBadge({ targetLanguage }: { targetLanguage?: string }) {
+  // Go packages must not inherit the historical TypeScript fallback badge.
+  if (targetLanguage === "go") return <span className="inline-flex items-center justify-center w-5 h-5 text-cyan-600 text-xs font-bold" title="Go" aria-label="Go">Go</span>;
+  // Unknown emitters remain visible instead of being mislabeled as TypeScript.
+  if (targetLanguage && targetLanguage !== "typescript" && targetLanguage !== "python") return <span title={targetLanguage}>{targetLanguage}</span>;
+  // Python retains its recognizable language mark.
   if (targetLanguage === "python") {
     return (
       <span className="inline-flex items-center justify-center w-5 h-5" title="Python" aria-label="Python">

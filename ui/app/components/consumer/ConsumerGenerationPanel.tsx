@@ -1,3 +1,4 @@
+import type { SDKLanguage } from "~/lib/sdk-languages";
 import { FieldLabel } from "~/components/forms/FieldLabel";
 import { Select } from "../forms/Select.ts";
 import type { FormEvent, ReactNode } from "react";
@@ -45,8 +46,8 @@ export interface ConsumerGenerationPanelProps {
   setAppVersion: (value: string) => void;
   checkingDuplicate: boolean;
   isDuplicate: boolean;
-  language: "typescript" | "python";
-  setLanguage: (value: "typescript" | "python") => void;
+  language: SDKLanguage;
+  setLanguage: (value: SDKLanguage) => void;
   totalSelectedServices: number;
   totalSelected: number;
   unactivatedSelectedServiceIds: string[];
@@ -174,7 +175,7 @@ function VersionField({ generationMode, appVersion, setAppVersion, setIsDuplicat
 
 /** Aligns package language with version while allowing the fields to stack in narrow panels. */
 function LanguageSelector({ generationMode, language, setLanguage }: {
-  generationMode: AppCreationMode; language: "typescript" | "python"; setLanguage: (v: "typescript" | "python") => void;
+  generationMode: AppCreationMode; language: SDKLanguage; setLanguage: (v: SDKLanguage) => void;
 }) {
   // Combined delivery generates the same typed package as an SDK-only App.
   if (generationMode !== "sdk" && generationMode !== "app") return null;
@@ -185,11 +186,12 @@ function LanguageSelector({ generationMode, language, setLanguage }: {
         id="app-language"
         data-track="select_app_language"
         value={language}
-        onChange={event => setLanguage(event.target.value as "typescript" | "python")}
+        onChange={/** The select contains only supported emitters. */ event => setLanguage(event.target.value as SDKLanguage)}
         className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm focus:border-[var(--brand-violet)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-violet)]/20"
       >
         <option value="typescript">TypeScript</option>
         <option value="python">Python</option>
+        <option value="go">Go</option>
       </Select>
     </div>
   );

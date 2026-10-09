@@ -1161,7 +1161,8 @@ const AppScopeSchemaVersion = 3
 // MCPServerDescriptionMaxBytes bounds protocol identity prose consistently across Engine admission and runtime loading.
 const MCPServerDescriptionMaxBytes = 1024
 
-const SDKGeneratorVersion = "registry-generator-v5"
+// Version 7 adds Go streaming, connected auth, durable events, and typed hosted bindings.
+const SDKGeneratorVersion = "registry-generator-v7"
 
 const (
 	SDKGenerationStatusPending  = "pending"

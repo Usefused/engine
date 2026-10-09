@@ -1,3 +1,4 @@
+import { isSDKLanguage } from "./sdk-languages";
 import { api } from "./api";
 import { AppDescriptionClarificationError, decodeUnifiedSource, decodeUnifiedSourceRevision, type UnifiedSourceRevision } from "./unified-app-contract";
 import { createDescribeScheduler, settleDescribe, matchDescribeEvents, mergeDescribePin, type DescribeProgress, type DescribeSelectionReady, type DescribeSchedule, type AppServicePin, type AppDescription, type DescribeKind, type DescribeServiceCandidate, type ChooseDescribeService } from "./app-describe-contract";
@@ -212,7 +213,7 @@ function validateAdapterIntent(intent: Intent, kind: DescribeKind): void {
   // Direct REST execution has no receiver, while Unified Apps use the hosted trigger worker.
   if (kind === "api" && inbound) throw new Error("Use a Unified App, SDK, or MCP app to receive webhook events.");
   // The UI must not silently translate a requested emitter it cannot build.
-  if (["sdk", "app"].includes(kind) && intent.language && !["typescript", "python"].includes(intent.language)) throw new Error("Choose TypeScript or Python for the SDK.");
+  if (["sdk", "app"].includes(kind) && intent.language && !isSDKLanguage(intent.language)) throw new Error("Choose TypeScript, Python, or Go for the SDK.");
 }
 
 /** Prevents wildcard operation grants from entering hosted source drafting. */
