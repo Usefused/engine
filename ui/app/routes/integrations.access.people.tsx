@@ -213,7 +213,8 @@ function PeopleList(props: { users: UserSummary[]; total: number; search: string
     <div className="divide-y divide-slate-100">
       {props.loading && <p className="p-4 text-sm text-slate-500">Loading people…</p>}
       {!props.loading && props.users.length === 0 && <p className="p-4 text-sm text-slate-500">No people found.</p>}
-      {props.users.map((user) => <button key={user.id} type="button" onClick={() => props.onSelect(user.id)} aria-label={`Open details for ${user.display_name}`} className={`grid w-full gap-1 px-4 py-3 text-left transition-colors sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] sm:items-center sm:gap-4 ${user.id === props.selectedId ? "bg-blue-50 text-blue-800" : "text-slate-700 hover:bg-slate-50"}`}><span className="truncate text-sm font-medium">{user.display_name}</span><span className="truncate text-xs text-slate-500 sm:text-sm">{user.email}</span><span className="text-xs font-medium text-slate-500">{statusLabel(user.status)}</span></button>)}
+      {/* A neutral outline keeps the current person identifiable independently of hover. */}
+      {props.users.map((user) => <button key={user.id} type="button" onClick={() => props.onSelect(user.id)} aria-label={`Open details for ${user.display_name}`} className={`grid w-full gap-1 px-4 py-3 text-left transition-colors sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] sm:items-center sm:gap-4 ${user.id === props.selectedId ? "bg-white text-slate-950 ring-1 ring-inset ring-slate-950" : "text-slate-700 hover:bg-slate-50"}`}><span className="truncate text-sm font-medium">{user.display_name}</span><span className="truncate text-xs text-slate-500 sm:text-sm">{user.email}</span><span className="text-xs font-medium text-slate-500">{statusLabel(user.status)}</span></button>)}
     </div>
   </section>;
 }
@@ -251,8 +252,9 @@ function PersonEditor(props: PersonEditorProps) {
   </div>;
 }
 
+/** Keeps account lifecycle actions neutral while leaving permission checks with the owner of the form. */
 function PersonEditorHeader({ user, canManage, saving, archived, isSelf, onStatus }: { user: User; canManage: boolean; saving: boolean; archived: boolean; isSelf: boolean; onStatus: () => void }) {
-  return <div className="flex items-start justify-between gap-4"><div><h2 className="text-lg font-semibold text-slate-900">{user.display_name}</h2><p className="text-xs text-slate-500">{statusLabel(user.status)} · {user.id}</p></div>{canManage && !archived && !isSelf && <button type="button" disabled={saving} onClick={onStatus} className="text-sm font-semibold text-rose-600 disabled:opacity-50">{user.status === "SUSPENDED" ? "Reactivate" : "Suspend"}</button>}</div>;
+  return <div className="flex items-start justify-between gap-4"><div><h2 className="text-lg font-semibold text-slate-900">{user.display_name}</h2><p className="text-xs text-slate-500">{statusLabel(user.status)} · {user.id}</p></div>{canManage && !archived && !isSelf && <button type="button" disabled={saving} onClick={onStatus} className="text-sm font-semibold text-slate-950 disabled:opacity-50">{user.status === "SUSPENDED" ? "Reactivate" : "Suspend"}</button>}</div>;
 }
 
 /** Labels required identity fields consistently in the edit form. */

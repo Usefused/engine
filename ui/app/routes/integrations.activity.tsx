@@ -78,7 +78,7 @@ export default function ActivityPage() {
         <h1 className="text-xl font-semibold text-slate-900">Activity</h1>
         <p className="mt-1 text-sm text-slate-500">Workspace execution health and changes that need attention.</p>
       </div>
-      <div className="grid w-full grid-flow-col auto-cols-fr rounded-lg bg-slate-100 p-1 sm:inline-grid sm:w-auto">
+      <div className="fused-tabs-scroll w-full rounded-lg bg-slate-100 p-1 sm:w-fit">
         {tabs.map((value) => (
           <button
             key={value}

@@ -8,7 +8,7 @@ type BucketAddDropdownProps = {
   allowedKinds: BucketEntryKind[];
 };
 
-/** Offers only entry kinds the actor is allowed to create. */
+/** Keeps entry creation secondary to creating a bucket while offering only authorized entry kinds. */
 export function BucketAddDropdown({ disabled, onSelect, allowedKinds }: BucketAddDropdownProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -34,7 +34,7 @@ export function BucketAddDropdown({ disabled, onSelect, allowedKinds }: BucketAd
         type="button"
         disabled={disabled}
         onClick={() => setOpen((value) => !value)}
-        className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+        className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
       >
         <Plus className="w-4 h-4" />
         Add

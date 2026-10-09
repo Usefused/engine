@@ -284,7 +284,7 @@ function ConnectedUserRow({
               type="button"
               onClick={() => onRemoveConnection(connection)}
               disabled={deleting}
-              className="flex items-center gap-2 rounded-md border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-600 shadow-sm hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
+              className="flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-950 shadow-sm hover:bg-slate-50 hover:text-slate-950 disabled:opacity-50"
             >
               {deleting ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -366,7 +366,7 @@ function ConnectionResources({
               <button
                 type="button"
                 onClick={() => onSetDefault(resource.id)}
-                className="shrink-0 text-xs font-medium text-blue-600 hover:text-blue-700"
+                className="shrink-0 text-xs font-medium text-slate-950 hover:text-slate-950"
               >
                 Set default
               </button>

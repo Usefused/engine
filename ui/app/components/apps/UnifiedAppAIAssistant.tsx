@@ -74,7 +74,7 @@ export function UnifiedAppAIAssistant({ source, services, disabled, onApply, onB
         <textarea id="ai-edit-prompt" value={goal} onChange={(event) => setGoal(event.target.value)} disabled={locked} maxLength={16384} rows={3} placeholder="Describe a change or paste an error…" className="block min-h-24 w-full resize-y border-0 bg-transparent px-4 pt-4 pb-2 text-sm leading-6 text-slate-900 outline-none placeholder:text-slate-400 focus:ring-0 disabled:opacity-60" />
         <div className="flex flex-wrap items-center justify-between gap-3 px-3 pb-3">
           <span className="px-1 text-xs text-slate-500">Uses your code and selected services</span>
-          <button type="button" onClick={propose} disabled={locked || !goal.trim()} className="ml-auto inline-flex min-h-9 items-center gap-2 rounded-lg bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700 transition-colors hover:bg-violet-100 disabled:opacity-50">
+          <button type="button" onClick={propose} disabled={locked || !goal.trim()} className="ml-auto inline-flex min-h-9 items-center gap-2 rounded-lg bg-white px-3 py-2 text-sm font-medium text-slate-950 transition-colors hover:bg-slate-50 disabled:opacity-50">
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
             {busy ? "Reviewing…" : "Suggest changes"}
           </button>
@@ -95,7 +95,7 @@ export function UnifiedAppAIAssistant({ source, services, disabled, onApply, onB
             <div className="min-w-0 space-y-2"><h4 className="text-xs font-medium text-slate-500">Current code</h4><TypeScriptEditor id="ai-current-source" value={source} disabled onChange={() => { /* Review never edits the baseline. */ }} /></div>
             <div className="min-w-0 space-y-2"><h4 className="text-xs font-medium text-slate-500">Suggested code</h4><TypeScriptEditor id="ai-suggested-source" value={proposal} disabled onChange={() => { /* Changes are applied explicitly below. */ }} /></div>
           </div>
-          <div className="flex flex-wrap items-center gap-3"><button type="button" disabled={locked} onClick={applyProposal} className="rounded-lg bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-50">Apply to editor</button><button type="button" disabled={locked} onClick={discardProposal} className="px-3 py-2 text-sm text-slate-500 hover:text-slate-900 disabled:opacity-50">Discard</button></div>
+          <div className="flex flex-wrap items-center gap-3"><button type="button" disabled={locked} onClick={applyProposal} className="rounded-lg bg-white px-3 py-2 text-sm font-medium text-slate-950 hover:bg-slate-50 disabled:opacity-50">Apply to editor</button><button type="button" disabled={locked} onClick={discardProposal} className="px-3 py-2 text-sm text-slate-500 hover:text-slate-900 disabled:opacity-50">Discard</button></div>
           <p className="text-xs text-slate-500">Validate and compile after applying.</p>
         </div>}
       </div>}

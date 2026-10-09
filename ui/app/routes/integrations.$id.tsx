@@ -1467,7 +1467,7 @@ function ShareControl({ serviceName }: { serviceName: string }) {
             }}
             className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
           >
-            <MessageSquare className="h-4 w-4 text-sky-500" /> Share on Twitter
+            <MessageSquare className="h-4 w-4" /> Share on Twitter
           </button>
           <button
             data-track="share_on_linkedin"
@@ -1477,7 +1477,7 @@ function ShareControl({ serviceName }: { serviceName: string }) {
             }}
             className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
           >
-            <Briefcase className="h-4 w-4 text-blue-600" /> Share on LinkedIn
+            <Briefcase className="h-4 w-4" /> Share on LinkedIn
           </button>
           <button
             data-track="copy_integration_link"
@@ -1534,7 +1534,7 @@ function VisibilityControl({ srv }: { srv: Service }) {
         onClick={() => detail.setShowVisibilityMenu((open) => !open)}
         className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
       >
-        {srv.is_public ? <Globe2 className="h-4 w-4 text-blue-600" /> : <Lock className="h-4 w-4 text-slate-500" />}
+        {srv.is_public ? <Globe2 className="h-4 w-4" /> : <Lock className="h-4 w-4 text-slate-500" />}
         {srv.is_public ? "Public service" : "Private service"}
         <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
       </button>
@@ -1674,7 +1674,7 @@ function WorkspaceMembershipControl({ srv }: { srv: Service }) {
             onClick={requestWorkspaceRemoval}
             disabled={detail.removingWorkspaceService}
             aria-busy={detail.removingWorkspaceService}
-            className="flex w-full items-center gap-2 whitespace-nowrap rounded-md px-3 py-2 text-left text-sm font-medium text-red-600 hover:bg-red-50 focus:bg-red-50 disabled:cursor-wait disabled:opacity-60"
+            className="flex w-full items-center gap-2 whitespace-nowrap rounded-md px-3 py-2 text-left text-sm font-medium text-slate-950 hover:bg-slate-50 focus:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
           >
             {detail.removingWorkspaceService ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
             {detail.removingWorkspaceService ? "Removing…" : "Remove from workspace"}

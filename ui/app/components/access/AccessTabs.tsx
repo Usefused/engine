@@ -7,7 +7,7 @@ const ACCESS_TABS = [
   { label: "Connected Apps", to: "/integrations/access/connected-apps" },
 ];
 
-/** Keeps all Access destinations consistent and visible without wrapped tab labels on phones. */
+/** Keeps Access destinations on the same scrollable navigation strip as other sections. */
 export function AccessTabs() {
-  return <SectionTabs tabs={ACCESS_TABS} mobileLayout="grid" label="Access navigation" />;
+  return <SectionTabs tabs={ACCESS_TABS} label="Access navigation" />;
 }

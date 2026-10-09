@@ -53,7 +53,7 @@ export function NotificationBanner({
 
   return (
     <div className={`overflow-hidden rounded-lg border ${colors.border} ${colors.bg}`}>
-      <button type="button" data-track="toggle_contextual_notifications" aria-expanded={expanded} aria-controls={contentID} onClick={() => setExpanded((value) => !value)} className="flex w-full cursor-pointer items-start gap-3 px-4 py-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500">
+      <button type="button" data-track="toggle_contextual_notifications" aria-expanded={expanded} aria-controls={contentID} onClick={() => setExpanded((value) => !value)} className="flex w-full cursor-pointer items-start gap-3 px-4 py-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-950">
         <AlertTriangle className={`w-4 h-4 mt-0.5 shrink-0 ${colors.icon}`} />
         <span className="min-w-0 flex-1">
           <span className={`block text-sm font-medium ${colors.title}`}>{copy.title}</span>

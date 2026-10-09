@@ -40,7 +40,7 @@ export function AuthNameField({ name, context = "service" }: { name?: string | n
       name && createElement("button", {
         type: "button", "data-track": "copy_auth_name", "aria-label": "Copy auth name", title: "Copy auth name",
         onClick: handleCopy,
-        className: "shrink-0 rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500",
+        className: "shrink-0 rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-slate-950",
       }, createElement(Copy, { className: "h-3.5 w-3.5", "aria-hidden": true }))),
     createElement("p", { role: "status", className: "text-xs text-slate-500" }, status),
   );

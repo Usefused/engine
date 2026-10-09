@@ -77,7 +77,7 @@ export default function WebhooksPage() {
         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
         <input aria-label="Search webhooks" placeholder="Search webhooks" value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm outline-none focus:border-slate-500 focus:ring-1 focus:ring-gray-500" />
       </div>
-      <button type="button" aria-label="Refresh webhooks" title="Refresh webhooks" disabled={loading} onClick={() => setRefresh((value) => value + 1)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-[var(--brand-violet)] disabled:opacity-40">
+      <button type="button" aria-label="Refresh webhooks" title="Refresh webhooks" disabled={loading} onClick={() => setRefresh((value) => value + 1)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-slate-950 disabled:opacity-40">
         <RefreshCw className="h-4 w-4" aria-hidden="true" />
       </button>
     </div>

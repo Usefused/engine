@@ -58,6 +58,7 @@ function BucketListHeader({ loading, total, onRefresh }: { loading: boolean; tot
 }
 
 /** Distinguishes loading from a successfully loaded empty bucket catalogue. */
+/** Uses a neutral outline to distinguish the selected bucket without recoloring its status details. */
 function BucketRows({ buckets, selectedBucketId, loading, onSelect }: Pick<BucketListProps, "buckets" | "selectedBucketId" | "loading" | "onSelect">) {
   // Pending requests are not evidence of an empty catalogue.
   if (loading) return <BucketEmptyState label="Loading buckets..." />;
@@ -84,7 +85,8 @@ function BucketRow({ bucket, selected, onSelect }: { bucket: BucketSummary; sele
       type="button"
       onClick={onSelect}
       className={`grid w-full cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-4 py-3 text-left transition-colors ${
-        selected ? "bg-blue-50/70" : "hover:bg-slate-50"
+        // A persistent outline distinguishes selection even when the pointer leaves the row.
+        selected ? "bg-white ring-1 ring-inset ring-slate-950" : "hover:bg-slate-50"
       }`}
     >
       <span className="min-w-0">

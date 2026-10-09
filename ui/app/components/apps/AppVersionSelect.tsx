@@ -31,7 +31,7 @@ export function AppVersionSelect({ versions, current, activeId, busy, canDelete,
     <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 bg-slate-50/60 px-4 py-3 sm:px-5">
       {actions}
       {/* Only managers may delete the exact version selected above. */}
-      {canDelete && <button type="button" disabled={busy} onClick={() => onDelete(current)} className="ml-auto min-h-11 rounded-lg px-3 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50">Delete version</button>}
+      {canDelete && <button type="button" disabled={busy} onClick={() => onDelete(current)} className="ml-auto min-h-11 rounded-lg px-3 text-sm font-medium text-slate-950 hover:bg-slate-50 disabled:opacity-50">Delete version</button>}
     </div>
   </section>;
 }

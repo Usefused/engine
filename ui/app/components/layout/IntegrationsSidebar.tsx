@@ -306,26 +306,28 @@ function GenerateButton({ isCollapsed, onClick }: { isCollapsed: boolean; onClic
   );
 }
 
+/** Keeps session exit consistent with other neutral actions in the workspace navigation. */
 function SignOutButton({ isCollapsed, onClick }: { isCollapsed: boolean; onClick: () => void }) {
   return (
     <AuthButton
       isCollapsed={isCollapsed}
       label="Sign out"
       Icon={LogOut}
-      colorClass="text-slate-500 hover:text-rose-600 hover:bg-rose-50/50"
+      colorClass="text-slate-500 hover:text-slate-950 hover:bg-slate-50"
       dataTrack="sign_out"
       onClick={onClick}
     />
   );
 }
 
+/** Keeps sign-in available as a secondary navigation action rather than a competing page CTA. */
 function SignInButton({ isCollapsed, onClick }: { isCollapsed: boolean; onClick: () => void }) {
   return (
     <AuthButton
       isCollapsed={isCollapsed}
       label="Sign in"
       Icon={LogIn}
-      colorClass="text-slate-500 hover:text-[var(--brand-violet)] hover:bg-[var(--brand-violet-tint)]"
+      colorClass="text-slate-500 hover:text-slate-950 hover:bg-slate-50"
       dataTrack="sign_in"
       onClick={onClick}
     />

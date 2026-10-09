@@ -14,6 +14,7 @@ interface ServersFormProps {
   setEditingServers: (editing: boolean) => void;
 }
 
+/** Keeps server editing actions consistent while preserving the existing endpoint validation flow. */
 export function ServersForm({
   draftServers,
   setDraftServers,
@@ -59,7 +60,7 @@ export function ServersForm({
               <button
                 data-track="remove_server_url"
                 onClick={() => setDraftServers((ds) => ds.filter((_, idx) => idx !== i))}
-                className="p-1.5 text-slate-400 hover:text-red-500 cursor-pointer flex items-center gap-1 sm:block"
+                className="p-1.5 text-slate-400 hover:text-slate-950 cursor-pointer flex items-center gap-1 sm:block"
                 title="Remove URL"
               >
                 <Trash className="w-4 h-4" />
@@ -73,7 +74,7 @@ export function ServersForm({
         <button
           data-track="add_server_url"
           onClick={() => setDraftServers((ds) => [...ds, { url: "", description: "" }])}
-          className="text-xs font-medium text-blue-600 hover:text-blue-700 hover:underline cursor-pointer"
+          className="text-xs font-medium text-slate-950 hover:text-slate-950 hover:underline cursor-pointer"
         >
           + Add URL
         </button>
@@ -90,7 +91,7 @@ export function ServersForm({
           data-track="save_servers"
           onClick={handleSaveServers}
           disabled={savingServers}
-          className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50 transition-colors"
+          className="px-3 py-1.5 text-sm font-medium text-slate-700 border border-slate-300 bg-white hover:bg-slate-50 rounded disabled:opacity-50 transition-colors"
         >
           {savingServers ? "Saving..." : "Save"}
         </button>

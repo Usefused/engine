@@ -15,7 +15,7 @@ import type { AppOwningTeam, AppPlanResponse } from "~/lib/app-builder-contract"
 
 // Controls use explicit regular-weight values instead of inheriting the enclosing label typography.
 const field = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-normal text-slate-900 placeholder:text-slate-400 disabled:bg-slate-50";
-const button = "inline-flex items-center justify-center gap-2 rounded-lg bg-[var(--brand-violet)] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50";
+const button = "inline-flex items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50";
 
 /** Gives webhook pages a clear browser identity distinct from service detail routes. */
 export const meta = () => [{ title: "Create webhook - Fused" }];

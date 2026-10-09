@@ -337,8 +337,8 @@ function CreatedSecretNotice({ secret, onClear }: { secret: string | null; onCle
         </>
       )}
       <div className="mt-3 flex gap-2">
-        {secret && <button type="button" onClick={() => navigator.clipboard.writeText(secret)} className="rounded bg-amber-700 px-3 py-1.5 text-xs font-semibold text-white">Copy secret</button>}
-        <button type="button" onClick={onClear} className="rounded border border-amber-400 px-3 py-1.5 text-xs font-semibold text-amber-900">I've saved it</button>
+        {secret && <button type="button" onClick={() => navigator.clipboard.writeText(secret)} className="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">Copy secret</button>}
+        <button type="button" onClick={onClear} className="rounded border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-950">I've saved it</button>
       </div>
     </div>
   );
@@ -384,7 +384,7 @@ function OAuthClientRow({ client, canManage, saving, onRevoke }: { client: OAuth
       </div>
       {/* Read-only and revoked records must never offer the revoke action. */}
       {canManage && !revoked && (
-        <button type="button" onClick={() => onRevoke(client)} disabled={saving} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-rose-200 px-3 text-sm text-rose-600 hover:bg-rose-50 disabled:opacity-50 sm:shrink-0">
+        <button type="button" onClick={() => onRevoke(client)} disabled={saving} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-slate-300 px-3 text-sm text-slate-950 hover:bg-slate-50 disabled:opacity-50 sm:shrink-0">
           <Ban className="w-4 h-4" /> Revoke
         </button>
       )}

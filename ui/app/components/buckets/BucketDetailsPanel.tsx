@@ -173,7 +173,7 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
   );
 }
 
-/** Builds the tab set from readable credential sections. */
+/** Keeps readable credential sections in one scrollable strip without shrinking their labels. */
 function BucketTabs({
   activeTab,
   secretCount,
@@ -200,7 +200,7 @@ function BucketTabs({
     },
   ] satisfies Array<{ key: BucketDetailTab; label: string; count: number; visible: boolean }>).filter((tab) => tab.visible);
   return (
-    <div className="flex rounded-md border border-slate-200 bg-slate-50 p-0.5">
+    <div aria-label="Bucket sections" className="fused-tabs-scroll rounded-md border border-slate-200 bg-slate-50 p-0.5">
       {tabs.map((tab) => (
         <button
           key={tab.key}
@@ -335,7 +335,7 @@ function BucketDetailsHeader({
           type="button"
           onClick={onDeleteBucket}
           disabled={!!deleteDisabledReason}
-          className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:opacity-50 disabled:hover:border-slate-200 disabled:hover:bg-white disabled:hover:text-slate-600"
+          className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:border-slate-400 hover:bg-slate-50 hover:text-slate-950 disabled:opacity-50 disabled:hover:border-slate-200 disabled:hover:bg-white disabled:hover:text-slate-600"
           title={deleteDisabledReason || "Remove bucket"}
         >
           <Trash2 className="w-4 h-4" />

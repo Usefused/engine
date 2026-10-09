@@ -274,7 +274,7 @@ function SdkActionButtons({ sdk, onDownload, onDeactivate, onArchive, onMcpLifec
 		return (
 		  <button
 			onClick={(event) => { event.stopPropagation(); onArchive(sdk.app_family_id, sdk.name); }}
-			className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors cursor-pointer"
+			className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-slate-950 bg-white hover:bg-slate-50 rounded-lg transition-colors cursor-pointer"
 			title="Delete app and release its name"
 		  >
 			<ArchiveIcon className="w-4 h-4" />
@@ -288,7 +288,7 @@ function SdkActionButtons({ sdk, onDownload, onDeactivate, onArchive, onMcpLifec
         sdk.is_downloadable ? (
           <button
             onClick={(e) => { e.stopPropagation(); onDownload(sdk.app_id!, sdk.name, sdk.version!); }}
-            className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors cursor-pointer"
+            className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-slate-950 bg-white hover:bg-slate-50 rounded-lg transition-colors cursor-pointer"
             title="Download latest SDK version"
           >
             <Download className="w-4 h-4" />
@@ -305,13 +305,13 @@ function SdkActionButtons({ sdk, onDownload, onDeactivate, onArchive, onMcpLifec
       ) : null}
       {/* MCP keeps its reversible deprecation controls inside the shared app-row action area. */}
       {sdk.target_type === "mcp" && sdk.status === "active" ? (
-        <button type="button" onClick={(event) => { event.stopPropagation(); onMcpLifecycle(sdk, "deprecate"); }} className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-amber-50 text-amber-700 hover:bg-amber-100" title="Deprecate MCP server"><ServerCrash className="h-4 w-4" /></button>
+        <button type="button" onClick={(event) => { event.stopPropagation(); onMcpLifecycle(sdk, "deprecate"); }} className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-white text-slate-950 hover:bg-slate-50" title="Deprecate MCP server"><ServerCrash className="h-4 w-4" /></button>
       ) : sdk.target_type === "mcp" && sdk.status === "deprecated" ? (
-        <button type="button" onClick={(event) => { event.stopPropagation(); onMcpLifecycle(sdk, "restore"); }} className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100" title="Restore MCP server"><Play className="h-4 w-4" /></button>
+        <button type="button" onClick={(event) => { event.stopPropagation(); onMcpLifecycle(sdk, "restore"); }} className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-white text-slate-950 hover:bg-slate-50" title="Restore MCP server"><Play className="h-4 w-4" /></button>
       ) : null}
       <button
         onClick={(e) => { e.stopPropagation(); onDeactivate(sdk.app_id!, sdk.name, sdk.version!); }}
-        className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors cursor-pointer"
+        className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-slate-950 bg-white hover:bg-slate-50 rounded-lg transition-colors cursor-pointer"
         title="Deactivate latest app version"
       >
         <Trash2 className="w-4 h-4" />
@@ -562,13 +562,13 @@ function AppsCatalogueHeader({ type, canBrowseTemplates, canCreate, selectedCoun
     {/* Template discovery remains scoped to the Unified App tab and its read permission. */}
     {type === "unified_app" && canBrowseTemplates && <Link className="inline-block text-sm font-medium text-[var(--brand-violet)] hover:underline" to="/integrations/unified-apps/templates">Browse Unified App templates</Link>}
     {/* Bulk lifecycle controls appear only for the user's current selection. */}
-    {selectedCount > 0 && <div className="flex justify-end"><button onClick={onDeactivateSelected} disabled={deactivating} className="inline-flex items-center justify-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-600 transition-colors hover:bg-rose-100 disabled:opacity-50"><Trash2 className="h-4 w-4" aria-hidden="true" />{deactivating ? "Deactivating..." : `Deactivate selected (${selectedCount})`}</button></div>}
+    {selectedCount > 0 && <div className="flex justify-end"><button onClick={onDeactivateSelected} disabled={deactivating} className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-950 transition-colors hover:bg-slate-50 disabled:opacity-50"><Trash2 className="h-4 w-4" aria-hidden="true" />{deactivating ? "Deactivating..." : `Deactivate selected (${selectedCount})`}</button></div>}
   </CataloguePageHeader>;
 }
 
-/** Keeps Apps navigation in the requested MCP, Unified App, SDK, REST order. */
+/** Keeps Apps navigation in order on one horizontally scrollable row. */
 function AppCatalogueTypeTabs({ selected, onSelect }: { selected: AppCatalogueType; onSelect: (type: AppCatalogueType) => void }) {
-  return <div role="tablist" aria-label="App type" className="flex flex-wrap gap-2 border-b border-slate-200 pb-3">
+  return <div role="tablist" aria-label="App type" className="fused-tabs-scroll gap-2 border-b border-slate-200 pb-3">
     {/* Every tab controls the same server-filtered result panel. */}
     {APP_CATALOGUE_TYPES.map((item) => <button key={item.type} id={`app-type-${item.type}`} type="button" role="tab" aria-controls="app-catalogue-panel" aria-selected={selected === item.type} onClick={() => onSelect(item.type)} className={`rounded-lg px-4 py-2 text-sm font-medium ${selected === item.type ? "bg-slate-950 text-white" : "text-slate-600 hover:bg-slate-100"}`}>{item.label}</button>)}
   </div>;

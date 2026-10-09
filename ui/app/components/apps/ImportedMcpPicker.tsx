@@ -138,7 +138,7 @@ function McpPickerHeader({ expanded, total, allSelected, onExpand, toggleAll }: 
         <span className="text-xs font-bold uppercase tracking-wider text-slate-500">MCP{total > 0 ? ` (${total})` : ""}</span>
       </button>
       {total > 0 && <button type="button" onClick={toggleAll} aria-label={allSelected ? "Deselect all MCP capabilities" : "Select all MCP capabilities"} className="flex items-center gap-1.5 rounded px-2 py-1 text-[10px] font-medium text-slate-500 transition-colors hover:bg-slate-200 hover:text-slate-700">
-        {allSelected ? <CheckSquare className="h-3.5 w-3.5 text-blue-600" /> : <Square className="h-3.5 w-3.5 text-slate-400" />}
+        {allSelected ? <CheckSquare className="h-3.5 w-3.5 text-slate-950" /> : <Square className="h-3.5 w-3.5 text-slate-400" />}
         {allSelected ? "Deselect All" : `Select All (${total})`}
       </button>}
     </div>

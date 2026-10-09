@@ -222,8 +222,8 @@ function EndpointDriftPanel({ snapshots, driftAction, handleDismiss, handleApply
           <div className="flex items-center justify-between gap-2">
             <p className="text-xs text-orange-800/80">Detected at {new Date(snapshot.detected_at).toLocaleString()}</p>
             <div className="flex gap-2">
-              <button data-track="dismiss_drift_change" onClick={() => handleDismiss(snapshot.id)} disabled={driftAction === snapshot.id} className="rounded border border-orange-200 bg-white px-3 py-1.5 text-xs font-semibold text-orange-800">Dismiss</button>
-              <button data-track="review_drift_import" onClick={() => handleApply(snapshot.id)} disabled={driftAction === snapshot.id} className="rounded bg-orange-600 px-3 py-1.5 text-xs font-semibold text-white">Review Import</button>
+              <button data-track="dismiss_drift_change" onClick={() => handleDismiss(snapshot.id)} disabled={driftAction === snapshot.id} className="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-950">Dismiss</button>
+              <button data-track="review_drift_import" onClick={() => handleApply(snapshot.id)} disabled={driftAction === snapshot.id} className="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700">Review Import</button>
             </div>
           </div>
           {snapshot.diff.map((change, index) => <DriftChangeCard key={`${change.field}:${index}`} change={change} />)}

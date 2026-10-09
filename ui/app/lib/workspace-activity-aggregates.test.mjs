@@ -39,13 +39,13 @@ test("most-used SDK remains informational until an exact app id is available", (
   assert.doesNotMatch(activityPanel, /Most-used SDK"[^\n]+href=/);
 });
 
-// Protects the small-screen layouts from regressing into wide desktop rows.
+// Activity tabs own horizontal overflow while filters and data stay bounded by the phone viewport.
 test("workspace Activity panels use bounded mobile layouts", () => {
-  assert.match(activityRoute, /grid-flow-col auto-cols-fr/);
+  assert.match(activityRoute, /fused-tabs-scroll w-full/);
   assert.match(activityPanel, /grid w-full gap-1\.5[^"]+sm:flex sm:w-auto/);
   assert.match(activityPanel, /grid grid-cols-2 gap-x-4 gap-y-3/);
   assert.match(activityPanel, /sm:grid-cols-\[minmax\(0,1fr\)_repeat\(4,auto\)\]/);
-  assert.match(notificationsPanel, /grid w-full grid-cols-3 gap-1/);
+  assert.match(notificationsPanel, /fused-tabs-scroll w-full gap-1/);
   assert.match(notificationsPanel, /hidden items-center gap-1 sm:flex/);
   assert.match(notificationsPanel, /min-\[380px\]:flex-row/);
 });

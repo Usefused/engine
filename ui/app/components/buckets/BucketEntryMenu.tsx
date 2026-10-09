@@ -67,7 +67,7 @@ export function BucketEntryMenu({ name, onRemove }: { name: string; onRemove: ()
       {/* The destructive command is available only after an explicit menu opening. */}
       {open && (
         <div id={menuId} role="menu" aria-label={`Options for ${name}`} className="absolute right-0 top-full z-30 mt-1 w-40 rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
-          <button ref={removeRef} type="button" role="menuitem" onClick={requestRemoval} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50 focus:bg-red-50">
+          <button ref={removeRef} type="button" role="menuitem" onClick={requestRemoval} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-slate-950 hover:bg-slate-50 focus:bg-slate-50">
             <Trash2 className="h-4 w-4" />
             Remove…
           </button>

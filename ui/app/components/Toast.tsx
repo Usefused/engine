@@ -218,6 +218,7 @@ function CompactToastCard({ toast, iconColors, Icon, handleDismiss }: CompactToa
   );
 }
 
+/** Retains semantic notification colors while presenting confirmation actions in the neutral palette. */
 function ToastItemComponent({ toast }: { toast: ToastItem }) {
   const [isVisible, setIsVisible] = useState(false);
   const [inputValue, setInputValue] = useState(toast.defaultValue || "");
@@ -276,7 +277,7 @@ function ToastItemComponent({ toast }: { toast: ToastItem }) {
     prompt:  "text-blue-500 bg-blue-50 dark:bg-blue-950/40 border border-blue-100 dark:border-blue-900/50",
   }[toast.type];
 
-  const confirmBtnClass = "text-blue-600 dark:text-blue-400 hover:bg-gray-200 dark:hover:bg-slate-700 font-semibold";
+  const confirmBtnClass = "text-slate-950 dark:text-white hover:bg-gray-200 dark:hover:bg-slate-700 font-semibold";
 
   return (
     <div

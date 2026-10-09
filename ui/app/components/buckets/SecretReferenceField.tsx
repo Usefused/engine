@@ -14,7 +14,7 @@ import { workspaceDialogHost } from "~/lib/workspace-dialog-host";
 import { useFusedAgent } from "~/components/agent/FusedAgentContext";
 
 const fieldClass = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-normal text-slate-900 focus:outline-none focus:ring-2 focus:ring-[var(--brand-violet)] disabled:bg-slate-50";
-const actionClass = "text-xs font-semibold text-blue-600 hover:underline disabled:opacity-50";
+const actionClass = "text-xs font-semibold text-slate-950 hover:underline disabled:opacity-50";
 
 /** Offers secret creation beside a reference without navigating away or passing secret values to the parent. */
 export function SecretReferenceField({ value, onChange, required = false, disabled = false, label = "Signing secret reference" }: {

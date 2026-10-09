@@ -25,7 +25,7 @@ export function UnifiedAppCodeEditor({ source, yaml, view, disabled, error, onSo
   /** Every keystroke invalidates the reviewed plan, including incomplete YAML. */
   function edit(value: string) { setText(value); onYAML(value); }
   return <section className="space-y-3" aria-label="App code and configuration">
-    <div className="inline-flex rounded-lg bg-slate-100 p-1" aria-label="Editor view">
+    <div className="fused-tabs-scroll w-fit rounded-lg bg-slate-100 p-1" aria-label="Editor view">
       <button type="button" aria-pressed={view === "typescript"} disabled={disabled || Boolean(error)} onClick={() => select("typescript")} className={`rounded-md px-3 py-1.5 text-sm ${view === "typescript" ? "bg-white font-semibold text-slate-900 shadow-sm" : "text-slate-600"}`}>TypeScript</button>
       <button type="button" aria-pressed={view === "yaml"} disabled={disabled} onClick={() => select("yaml")} className={`rounded-md px-3 py-1.5 text-sm ${view === "yaml" ? "bg-white font-semibold text-slate-900 shadow-sm" : "text-slate-600"}`}>YAML config</button>
     </div>

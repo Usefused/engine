@@ -182,7 +182,7 @@ export default function Login() {
               type="button"
               onClick={() => handleManagedLogin(managedRetry)}
               disabled={managedLoading || apiKeyLoading}
-              className="mt-6 w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition-colors"
+              className="mt-6 w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition-colors"
             >
               {managedLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ExternalLink className="w-4 h-4" />}
               {managedLoading ? "Waiting for sign-in…" : managedRetry ? "Try again" : "Continue with email or SSO"}

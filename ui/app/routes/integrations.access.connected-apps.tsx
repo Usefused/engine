@@ -91,7 +91,7 @@ function ConnectedAppRow({ app, revoking, onRevoke }: { app: OAuthConnectedApp; 
         <p className="mt-1 break-words text-xs leading-5 text-slate-500 [overflow-wrap:anywhere]">Scopes: {app.scope.join(", ")}</p>
         <p className="mt-1 text-xs leading-5 text-slate-500">Connected {new Date(app.granted_at).toLocaleString()}</p>
       </div>
-      <button type="button" onClick={() => onRevoke(app)} disabled={revoking} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-rose-200 px-3 text-sm text-rose-600 hover:bg-rose-50 disabled:opacity-50 sm:shrink-0">
+      <button type="button" onClick={() => onRevoke(app)} disabled={revoking} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-slate-300 px-3 text-sm text-slate-950 hover:bg-slate-50 disabled:opacity-50 sm:shrink-0">
         <Unlink className="w-4 h-4" /> Disconnect
       </button>
     </div>

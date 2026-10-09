@@ -47,7 +47,7 @@ export function WebhookDefinitionEditor({ service, version, onClose, onSaved }: 
         {editor.retainedSource && <RetainedWebhookDraft source={editor.retainedSource} label="Your retained draft before reloading" />}
         {editor.busy && <p role="status" className="text-sm text-slate-500">Processing webhook definition…</p>}
         <EditorDraftForm editor={editor} onInvalid={invalidChanged} />
-        {editor.pendingFile && <section className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-4"><h3 className="font-semibold">Replace draft with imported webhooks?</h3><p className="text-sm">This replaces the complete event catalogue and shared webhook settings. Nothing has been saved.</p><WebhookPlanReview plan={editor.pendingFile.plan} /><div className="flex gap-4"><button type="button" disabled={editor.busy} onClick={() => { editor.acceptFile(); setInvalid(false); }} className="text-sm font-semibold text-indigo-700">Use imported definition</button><button type="button" onClick={editor.cancelFile} className="text-sm">Keep current draft</button></div></section>}
+        {editor.pendingFile && <section className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-4"><h3 className="font-semibold">Replace draft with imported webhooks?</h3><p className="text-sm">This replaces the complete event catalogue and shared webhook settings. Nothing has been saved.</p><WebhookPlanReview plan={editor.pendingFile.plan} /><div className="flex gap-4"><button type="button" disabled={editor.busy} onClick={() => { editor.acceptFile(); setInvalid(false); }} className="text-sm font-semibold text-slate-950">Use imported definition</button><button type="button" onClick={editor.cancelFile} className="text-sm">Keep current draft</button></div></section>}
         {editor.plan && <WebhookPlanReview plan={editor.plan} />}
         {blocker.state === "blocked" && <DiscardNotice busy={editor.busy} onKeep={() => blocker.reset?.()} onDiscard={() => blocker.proceed?.()} />}
       </div>
@@ -79,13 +79,13 @@ function WebhookConflictRecovery({ editor, onStartLatest }: { editor: Editor; on
   return <section aria-label="Webhook conflict recovery" className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm">
     <h3 className="font-semibold">This service version changed</h3>
     <p>Your draft is kept below. Load the latest definition for comparison, then deliberately start from it and reapply your changes. Nothing is saved by either recovery action.</p>
-    <button type="button" disabled={editor.busy || editor.uncertain} onClick={() => void editor.loadLatest()} className="font-semibold text-indigo-700 disabled:opacity-50">Load latest for comparison</button>
+    <button type="button" disabled={editor.busy || editor.uncertain} onClick={() => void editor.loadLatest()} className="font-semibold text-slate-950 disabled:opacity-50">Load latest for comparison</button>
     {editor.latest && <>
       <p>Latest revision: {editor.latest.source.revision} · {editor.latest.draft.events.length} event(s). Your editor still contains the original draft.</p>
       <RetainedWebhookDraft source={editor.latest.source.source_content} label="Latest saved definition" />
       <RetainedWebhookDraft source={editor.latest.referenceSource} label="Your current unsaved draft" />
       {editor.retainedSource && <p>Starting from latest replaces the earlier reference copy below with your current draft. Copy the earlier one first if you still need it.</p>}
-      <button type="button" disabled={editor.busy || editor.uncertain} onClick={onStartLatest} className="font-semibold text-indigo-700 disabled:opacity-50">Start from latest; keep my draft for reference</button>
+      <button type="button" disabled={editor.busy || editor.uncertain} onClick={onStartLatest} className="font-semibold text-slate-950 disabled:opacity-50">Start from latest; keep my draft for reference</button>
     </>}
   </section>;
 }
@@ -101,7 +101,7 @@ function RetainedWebhookDraft({ source, label }: { source: string; label: string
 
 // Reuse one explicit confirmation for closing and navigation without relying on browser-native prompts.
 function DiscardNotice({ busy, onKeep, onDiscard }: { busy: boolean; onKeep: () => void; onDiscard: () => void }) {
-  return <section role="alert" className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-4"><p className="text-sm">Leaving or switching versions discards unsaved webhook changes and any retained reference copy.</p><div className="flex gap-4"><button type="button" onClick={onKeep} className="text-sm font-semibold">Keep editing</button><button type="button" disabled={busy} onClick={onDiscard} className="text-sm text-red-700">Discard and continue</button></div></section>;
+  return <section role="alert" className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-4"><p className="text-sm">Leaving or switching versions discards unsaved webhook changes and any retained reference copy.</p><div className="flex gap-4"><button type="button" onClick={onKeep} className="text-sm font-semibold">Keep editing</button><button type="button" disabled={busy} onClick={onDiscard} className="text-sm text-slate-950">Discard and continue</button></div></section>;
 }
 
 // Retain Escape handling while allowing keyboard access to a concurrently open assistant.
@@ -145,5 +145,5 @@ function EditorError({ editor }: { editor: Editor }) {
 // Save appears only after review, and invalid edits or unresolved apply outcomes cannot reuse that receipt.
 function EditorFooter({ editor, invalid, onClose }: { editor: Editor; invalid: boolean; onClose: () => void }) {
   const disabled = editor.busy || invalid || !editor.draft || editor.uncertain || editor.staleTarget || Boolean(editor.pendingFile);
-  return <footer className="flex items-center justify-between gap-3 border-t border-slate-200 p-4 sm:px-6"><button type="button" disabled={editor.busy} onClick={onClose} className="rounded-md border border-slate-300 px-4 py-2 text-sm disabled:opacity-50">Cancel</button>{editor.plan ? <button type="button" disabled={disabled} onClick={() => void editor.save()} className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">Save changes</button> : <button type="button" disabled={disabled || !editor.dirty} onClick={() => void editor.review()} className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">Review changes</button>}</footer>;
+  return <footer className="flex items-center justify-between gap-3 border-t border-slate-200 p-4 sm:px-6"><button type="button" disabled={editor.busy} onClick={onClose} className="rounded-md border border-slate-300 px-4 py-2 text-sm disabled:opacity-50">Cancel</button>{editor.plan ? <button type="button" disabled={disabled} onClick={() => void editor.save()} className="rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">Save changes</button> : <button type="button" disabled={disabled || !editor.dirty} onClick={() => void editor.review()} className="rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">Review changes</button>}</footer>;
 }

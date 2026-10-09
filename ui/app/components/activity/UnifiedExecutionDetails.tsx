@@ -91,7 +91,7 @@ export function UnifiedExecutionDetails({ event, consumerName, rows, loading, un
     {/* Loading and unavailable states cannot silently imply that every child was skipped. */}
     {loading ? <p role="status" className="mt-4 flex items-center gap-2 text-xs text-slate-500"><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading execution receipts…</p> : null}
     {unavailable ? <p role="status" className="mt-4 text-xs text-slate-500">Child receipts are unavailable.</p> : null}
-    <p className="mt-3 text-xs text-slate-500">Receipt delivery may lag behind completion. <button type="button" disabled={loading} className="font-medium text-blue-700 hover:underline disabled:opacity-50" onClick={onRetry}>Refresh receipts</button></p>
+    <p className="mt-3 text-xs text-slate-500">Receipt delivery may lag behind completion. <button type="button" disabled={loading} className="font-medium text-slate-950 hover:underline disabled:opacity-50" onClick={onRetry}>Refresh receipts</button></p>
     <UnifiedPhase phase="forward" rows={rows} onSelect={onSelect} />
     {/* Hosted TypeScript has no implicit rollback scheduler to report. */}
     {!hosted ? <UnifiedPhase phase="rollback" rows={rows} onSelect={onSelect} /> : null}

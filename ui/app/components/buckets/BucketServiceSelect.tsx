@@ -92,7 +92,7 @@ export function BucketServiceSelect(props: BucketServiceSelectProps) {
       <button
         type="button"
         onClick={() => setOpen((next) => !next)}
-        className={`flex h-[38px] w-full items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 text-left text-sm text-slate-800 shadow-sm outline-none hover:border-slate-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 ${buttonClassName}`}
+        className={`flex h-[38px] w-full items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 text-left text-sm text-slate-800 shadow-sm outline-none hover:border-slate-300 focus:border-slate-400 focus:ring-2 focus:ring-slate-950 ${buttonClassName}`}
         aria-expanded={open}
         aria-controls={id}
         aria-label={required ? `${label} (required)` : label}
@@ -362,7 +362,7 @@ function ServiceOptionRow({
       className="flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
     >
       <span className="truncate">{label}</span>
-      {selected && <Check className="h-4 w-4 shrink-0 text-blue-600" />}
+      {selected && <Check className="h-4 w-4 shrink-0 text-slate-950" />}
     </button>
   );
 }

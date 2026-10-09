@@ -16,10 +16,10 @@ const branding = readFileSync(
   "utf8",
 );
 
-// This contract leaves the first Fused Endpoints card visible while every
-// following disclosure starts collapsed and remains keyboard-native.
-test("settings disclosures start collapsed after the first card", () => {
-  assert.match(disclosure, /useState\(false\)/);
+// Tabbed callers may expose their forms immediately while other disclosures stay compact and keyboard-native.
+test("settings disclosures preserve their collapsed default and allow tabbed forms to start open", () => {
+  assert.match(disclosure, /defaultExpanded = false/);
+  assert.match(disclosure, /useState\(defaultExpanded\)/);
   assert.ok(settings.indexOf("Fused Endpoints") < settings.indexOf("<ConnectBrandingCard"));
   assert.match(disclosure, /<button[\s\S]*type="button"/);
   assert.match(disclosure, /aria-expanded=\{expanded\}/);

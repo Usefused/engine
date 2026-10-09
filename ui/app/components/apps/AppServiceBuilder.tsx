@@ -706,7 +706,7 @@ function AddSelectedServiceToWorkspaceButton({
       type="button"
       onClick={handleAdd}
       disabled={adding || !hasExactVersion}
-      className="inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition-colors hover:border-slate-400 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-violet)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+      className="inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition-colors hover:border-slate-400 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
       data-track="sdk_builder_add_to_workspace"
       title={hasExactVersion ? `Add ${serviceName} to your workspace` : "Select a service version first"}
     >
@@ -907,7 +907,7 @@ function EndpointSelectAllButton({
       className="text-[10px] font-medium px-2 py-1 rounded text-slate-500 hover:text-slate-700 hover:bg-slate-200 transition-colors flex items-center gap-1.5"
     >
       {view.selectAll ? (
-        <><CheckSquare className="w-3.5 h-3.5 text-blue-600" />Deselect All</>
+        <><CheckSquare className="w-3.5 h-3.5 text-slate-950" />Deselect All</>
       ) : (
         <>
           {view.selectedEndpoints.size > 0
@@ -993,7 +993,7 @@ function WebhookSelectAllButton({
       className="text-[10px] font-medium px-2 py-1 rounded text-slate-500 hover:text-slate-700 hover:bg-slate-200 transition-colors flex items-center gap-1.5"
     >
       {allSelected ? (
-        <><CheckSquare className="w-3.5 h-3.5 text-blue-600" />Deselect All</>
+        <><CheckSquare className="w-3.5 h-3.5 text-slate-950" />Deselect All</>
       ) : (
         <>
           {view.selectedWebhooks.size > 0

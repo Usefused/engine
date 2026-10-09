@@ -24,6 +24,7 @@ const cardSource = readFileSync(
   new URL("../components/settings/ConnectBrandingCard.tsx", import.meta.url),
   "utf8",
 );
+const previewSource = readFileSync(new URL("../components/settings/HostedConnectionPreview.tsx", import.meta.url), "utf8");
 const tailwindSource = readFileSync(new URL("../tailwind.css", import.meta.url), "utf8");
 
 test("provides a controlled form with a valid fallback colour", () => {
@@ -204,11 +205,15 @@ test("rejects URL control, length, host, and port edge cases locally", () => {
   );
 });
 
+// The dedicated branding tab opens its editor without changing endpoint ownership or preview privacy.
 test("settings uses the Engine branding endpoint and a non-referring image preview", () => {
   assert.match(apiSource, /req<ConnectBranding>\("\/workspace\/connect-branding"\)/);
   assert.match(apiSource, /method: "PUT"/);
-  assert.match(settingsSource, /<ConnectBrandingCard \/>/);
-  assert.match(cardSource, /referrerPolicy="no-referrer"/);
+  assert.match(settingsSource, /<ConnectBrandingCard defaultExpanded \/>/);
+  assert.match(previewSource, /referrerPolicy="no-referrer"/);
+  assert.match(previewSource, /hosted_connect\.css\?raw/);
+  assert.match(previewSource, /sandbox="allow-same-origin"/);
+  assert.doesNotMatch(previewSource, /dangerouslySetInnerHTML|allow-scripts|allow-forms/);
   assert.doesNotMatch(cardSource, /dangerouslySetInnerHTML/);
 });
 

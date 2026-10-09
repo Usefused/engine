@@ -81,7 +81,7 @@ export default function FusedAgentLauncher({ visible, onOpen, aboveActions = fal
   return <button data-fused-agent type="button" onClick={activate} onPointerDown={begin} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={finish}
     aria-label="Ask Fused" title="Ask Fused · drag to move" aria-controls="fused-assistant" aria-expanded={false}
     style={position ? { left: position.x, top: position.y } : undefined}
-    className={`fixed z-40 flex h-12 w-12 touch-none select-none items-center justify-center rounded-full border border-violet-200 bg-white text-violet-600 shadow-md transition-colors hover:border-violet-300 hover:bg-violet-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500 ${anchor} ${dragging ? 'cursor-grabbing shadow-lg' : 'cursor-grab'}`}>
+    className={`fixed z-40 flex h-12 w-12 touch-none select-none items-center justify-center rounded-full border border-slate-300 bg-white text-slate-950 shadow-md transition-colors hover:border-slate-400 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-950 ${anchor} ${dragging ? 'cursor-grabbing shadow-lg' : 'cursor-grab'}`}>
     <Sparkles className="pointer-events-none h-5 w-5" strokeWidth={1.6} aria-hidden="true" />
   </button>;
 }

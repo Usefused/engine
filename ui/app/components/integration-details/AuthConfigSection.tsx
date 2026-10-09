@@ -74,6 +74,7 @@ interface OAuth2FlowEditorProps {
   onChange: (auth: AuthConfig) => void;
 }
 
+/** Keeps OAuth configuration actions neutral while preserving provider-specific form fields. */
 function OAuth2FlowEditor({ auth, onChange }: OAuth2FlowEditorProps) {
   const entries = oauth2FlowEntries(auth);
   const available = firstAvailableOAuth2Flow(auth);
@@ -86,7 +87,7 @@ function OAuth2FlowEditor({ auth, onChange }: OAuth2FlowEditorProps) {
         <button
           type="button"
           onClick={() => onChange(updateOAuth2Flow(auth, available, emptyOAuth2Flow()))}
-          className="self-start text-xs font-medium text-blue-600 hover:text-blue-700 hover:underline"
+          className="self-start text-xs font-medium text-slate-950 hover:text-slate-950 hover:underline"
         >
           + Add OAuth2 flow
         </button>
@@ -122,7 +123,7 @@ function OAuth2FlowFields({ auth, name, flow, onChange }: OAuth2FlowFieldsProps)
             ))}
           </Select>
         </div>
-        <button type="button" onClick={() => onChange(removeOAuth2Flow(auth, name))} className="self-end p-2 text-slate-400 hover:text-red-500" title="Remove OAuth2 flow">
+        <button type="button" onClick={() => onChange(removeOAuth2Flow(auth, name))} className="self-end p-2 text-slate-400 hover:text-slate-950" title="Remove OAuth2 flow">
           <X className="h-4 w-4" />
         </button>
       </div>
@@ -208,7 +209,7 @@ interface EditableAuthConfigProps {
 function EditableAuthConfig({ auth, onChange, onRemove }: EditableAuthConfigProps) {
   return (
     <div className="flex flex-col gap-3 p-4 border border-slate-100 bg-slate-50 rounded-lg relative">
-      <button data-track="remove_auth_scheme" type="button" onClick={onRemove} className="absolute top-2 right-2 text-slate-400 hover:text-red-500 cursor-pointer" title="Remove scheme">
+      <button data-track="remove_auth_scheme" type="button" onClick={onRemove} className="absolute top-2 right-2 text-slate-400 hover:text-slate-950 cursor-pointer" title="Remove scheme">
         <X className="w-4 h-4" />
       </button>
       <div className="flex flex-wrap gap-4">
@@ -289,6 +290,7 @@ interface AuthConfigSectionProps {
   handleSaveAuth: (e: FormEvent) => void;
 }
 
+/** Presents authentication editing actions consistently without changing how configuration is saved. */
 export function AuthConfigSection({
   srv,
   isAuth,
@@ -346,7 +348,7 @@ export function AuthConfigSection({
                   { type: "apiKey", location: "header", key_name: "" },
                 ])
               }
-              className="text-xs font-medium text-blue-600 hover:text-blue-700 hover:underline cursor-pointer"
+              className="text-xs font-medium text-slate-950 hover:text-slate-950 hover:underline cursor-pointer"
             >
               + Add Auth Scheme
             </button>
@@ -365,7 +367,7 @@ export function AuthConfigSection({
               data-track="save_auth_config"
               type="submit"
               disabled={savingAuth}
-              className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50 transition-colors"
+              className="px-3 py-1.5 text-sm font-medium text-slate-700 border border-slate-300 bg-white hover:bg-slate-50 rounded disabled:opacity-50 transition-colors"
             >
               {savingAuth ? "Saving..." : "Save"}
             </button>

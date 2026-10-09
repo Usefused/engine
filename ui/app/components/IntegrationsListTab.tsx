@@ -287,7 +287,7 @@ function IntegrationEmptyState({ query, isAuth, viewType, setShowNewPanel }: Int
       <div className="text-center py-16 text-slate-400">
         <p className="text-base font-medium text-slate-600 mb-1">Service not found</p>
         <p className="text-sm text-slate-400 mb-4">Define it from an OpenAPI or GraphQL spec, or point Fused to its docs.</p>
-        <button data-track="submit_schema_or_docs_url" onClick={() => setShowNewPanel(true)} className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium rounded-lg transition-colors cursor-pointer">
+        <button data-track="submit_schema_or_docs_url" onClick={() => setShowNewPanel(true)} className="px-4 py-2 bg-slate-950 hover:bg-slate-800 text-white text-sm font-medium rounded-lg transition-colors cursor-pointer">
           Define this service
         </button>
       </div>
@@ -299,7 +299,7 @@ function IntegrationEmptyState({ query, isAuth, viewType, setShowNewPanel }: Int
       <div className="text-center py-16 text-slate-400">
         <p className="text-lg mb-2">{viewType === "workspace" ? "No services added yet" : "No services found"}</p>
         {viewType === "workspace" && <p className="text-sm text-slate-400 mb-3">Add one from the catalog, or define a service from a spec or docs.</p>}
-        <button data-track="create_first_integration" onClick={() => setShowNewPanel(true)} className="text-blue-500 hover:text-blue-600 text-sm underline cursor-pointer">
+        <button data-track="create_first_integration" onClick={() => setShowNewPanel(true)} className="text-slate-950 hover:text-slate-950 text-sm underline cursor-pointer">
           Define a service
         </button>
       </div>

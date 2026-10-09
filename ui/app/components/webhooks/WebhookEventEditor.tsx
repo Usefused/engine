@@ -13,7 +13,7 @@ export function WebhookEventEditor({ draft, onChange }: { draft: WebhookEditorDr
   // Deletion is explicit and remains subject to the subsequent server removal review.
   function remove(id: string) { onChange({ ...draft, events: draft.events.filter((event) => event.id !== id) }); }
   return <section className="space-y-3" aria-label="Webhook events">
-    <div className="flex items-center justify-between"><h3 className="font-semibold">Events ({draft.events.length})</h3><button type="button" className="text-sm font-medium text-indigo-700" onClick={() => onChange({ ...draft, events: [...draft.events, newWebhookEvent()] })}>Add event</button></div>
+    <div className="flex items-center justify-between"><h3 className="font-semibold">Events ({draft.events.length})</h3><button type="button" className="text-sm font-medium text-slate-950" onClick={() => onChange({ ...draft, events: [...draft.events, newWebhookEvent()] })}>Add event</button></div>
     {draft.events.map((event) => <EventFields key={event.id} event={event} onChange={(patch) => update(event.id, patch)} onRemove={() => remove(event.id)} />)}
   </section>;
 }
@@ -26,7 +26,7 @@ function EventFields({ event, onChange, onRemove }: { event: WebhookDraftEvent; 
     <label className="mt-3 block text-sm">Description<textarea className={webhookFieldClass} rows={2} value={event.description} onChange={(e) => onChange({ description: e.target.value })} /></label>
     <DeliveryMethod event={event} onChange={onChange} />
     <PayloadFields event={event} onChange={onChange} />
-    <button type="button" className="mt-3 text-sm text-red-700" onClick={onRemove}>Remove event</button>
+    <button type="button" className="mt-3 text-sm text-slate-950" onClick={onRemove}>Remove event</button>
   </fieldset>;
 }
 
@@ -47,7 +47,7 @@ function DeliveryMethod({ event, onChange }: { event: WebhookDraftEvent; onChang
       {/* Non-default imports must not silently acquire POST semantics or appear executable by this receiver. */}
       {!supported && <p role="note" className="text-sm text-amber-800">{event.method.toUpperCase()} is preserved from the imported spec but unsupported by Fused ingress (POST/GET only).</p>}
       {/* Undo restores only this row's original transport, without offering unsupported verbs for unrelated events. */}
-      {event.method !== event.originalMethod && <button type="button" className="text-sm font-medium text-indigo-700" onClick={() => onChange({ method: event.originalMethod })}>Restore original {event.originalMethod.toUpperCase()} method</button>}
+      {event.method !== event.originalMethod && <button type="button" className="text-sm font-medium text-slate-950" onClick={() => onChange({ method: event.originalMethod })}>Restore original {event.originalMethod.toUpperCase()} method</button>}
     </div>
   </details>;
 }

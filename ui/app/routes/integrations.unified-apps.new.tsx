@@ -388,7 +388,7 @@ export default function CreateUnifiedApp() {
     {/* The shared agent owns intent and follow-ups; manual selection remains directly available. */}
     {!editID && agent && <section className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-violet-200 bg-violet-50/50 p-5">
       <div className="min-w-0"><h2 className="font-semibold text-slate-900">Build with Fused</h2><p className="mt-1 text-sm text-slate-600">Tell Fused what you need, then refine the app together.</p></div>
-      <button type="button" disabled={busy || describing || yamlActive} onClick={() => agent.open("Help me build a Unified App. ")} className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-violet-200 bg-white px-3 py-2 text-sm font-medium text-violet-700 hover:bg-violet-50 disabled:opacity-50"><Sparkles className="h-4 w-4" aria-hidden="true" />Ask Fused</button>
+      <button type="button" disabled={busy || describing || yamlActive} onClick={() => agent.open("Help me build a Unified App. ")} className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-950 hover:bg-slate-50 disabled:opacity-50"><Sparkles className="h-4 w-4" aria-hidden="true" />Ask Fused</button>
     </section>}
     {/* Describe shares the same draft state, so its progress remains visible outside the conversation. */}
     {describing && <p role="status" className="flex items-center gap-2 text-sm text-slate-600"><Loader2 className="h-4 w-4 animate-spin" />{progress || "Drafting your Unified App…"}</p>}
@@ -443,7 +443,7 @@ export default function CreateUnifiedApp() {
       {draftingSource && !draft.source && <p role="status" className="text-sm text-slate-500">Generating TypeScript from your selected operations and events…</p>}
       <UnifiedAppCodeEditor view={yamlActive ? "yaml" : "typescript"} source={draft.source} yaml={unifiedEditorYAML(draft, name, version, editSource?.config.bucket ?? buckets.find((item) => item.resource_id === bucket)?.display_name ?? "", editSource)} disabled={busy || describing || selecting} error={yamlError} onSource={updateSource} onYAML={updateYAML} onViewChange={changeEditorView} />
       {/* The shared conversation edits this draft while keeping deployment in the existing user-controlled flow. */}
-      <button type="button" onClick={() => agent?.open("Help me review and improve this Unified App.")} className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700">Edit with Fused AI</button>
+      <button type="button" onClick={() => agent?.open("Help me review and improve this Unified App.")} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-950">Edit with Fused AI</button>
       <p className="text-xs text-slate-500">Validate and compile checks TypeScript and selected operation bindings without running provider calls. It enables missing pinned service versions. Deploying is a separate step.</p>
       {/* The plan is invalidated on every edit, so deployment cannot apply stale reviewed content. */}
       {editSource && <p className="text-sm text-slate-600">Deploying switches new traffic to this version. Earlier versions remain available in version history.</p>}

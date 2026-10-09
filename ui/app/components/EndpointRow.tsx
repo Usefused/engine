@@ -52,14 +52,16 @@ function BulkCheckbox({ selected, onSelect }: RowSelectionControlsProps) {
   );
 }
 
+/** Keeps endpoint selection explicit through its label and neutral action emphasis. */
 function SelectButton({ selected, onSelect }: RowSelectionControlsProps) {
   return (
     <div className="shrink-0 ml-auto p-2 -m-2 group/select" onClick={(e) => e.stopPropagation()}>
       <button
         type="button"
         className={`text-xs font-medium uppercase tracking-wide transition-opacity duration-200 ${
-          selected 
-            ? 'opacity-100 text-blue-600' 
+          // Selection remains visible through its explicit label and stronger neutral contrast.
+          selected
+            ? 'opacity-100 text-slate-950'
             : 'opacity-0 group-hover/select:opacity-100 focus-within:opacity-100 text-slate-400 hover:text-slate-600'
         }`}
         onClick={(e) => {
@@ -125,7 +127,7 @@ function EndpointDescription({ description }: { description: string }) {
           type="button"
           aria-expanded={expanded}
           onClick={toggleExpanded}
-          className="mt-1 text-xs font-medium text-blue-600 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+          className="mt-1 text-xs font-medium text-slate-950 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950 focus-visible:ring-offset-2"
         >
           {expanded ? "Show less" : "Show more"}
         </button>

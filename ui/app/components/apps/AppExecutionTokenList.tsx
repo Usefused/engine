@@ -116,7 +116,7 @@ export function AppExecutionTokenList({ familyID, revision, onRevoked, onPromptC
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 flex-wrap items-center gap-2"><span className="break-all text-sm font-medium text-slate-900">{token.name}</span><span className={`rounded-md px-2 py-0.5 text-xs capitalize ${token.status === "active" ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{token.status}</span></div>
           {/* Historical credentials cannot be revoked again, and only one review can be in flight. */}
-          {token.status === "active" && <button type="button" aria-label={`Revoke ${token.name}`} disabled={reviewing} onClick={() => requestRevocation(token)} className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50">{revoking === token.id && <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin" />}{revoking === token.id ? "Revoking…" : "Revoke"}</button>}
+          {token.status === "active" && <button type="button" aria-label={`Revoke ${token.name}`} disabled={reviewing} onClick={() => requestRevocation(token)} className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-slate-950 hover:bg-slate-50 disabled:opacity-50">{revoking === token.id && <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin" />}{revoking === token.id ? "Revoking…" : "Revoke"}</button>}
         </div>
         <dl className="mt-2 grid gap-x-6 gap-y-1 text-xs text-slate-500 sm:grid-cols-3">
           <div><dt className="inline">Created </dt><dd className="inline">{tokenDate(token.created_at, "Unknown")}</dd></div>

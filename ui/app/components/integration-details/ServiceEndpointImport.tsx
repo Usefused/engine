@@ -128,7 +128,7 @@ export function ServiceEndpointImport(props: ImportProps) {
       {editor.error && <p role="alert" className="mb-4 rounded-md bg-red-50 p-3 text-sm text-red-700">{editor.error}</p>}
       <EndpointImportSource editor={editor} service={service} />
       {/* Unknown commits can be inspected, but neither replayed nor silently dismissed. */}
-      {editor.uncertain && <button type="button" className="mt-4 text-sm font-medium text-blue-600" disabled={editor.busy} onClick={editor.checkStatus}>Check import status</button>}
+      {editor.uncertain && <button type="button" className="mt-4 text-sm font-medium text-slate-950" disabled={editor.busy} onClick={editor.checkStatus}>Check import status</button>}
       {editor.busy && <p role="status" className="mt-4 text-sm text-slate-500">Processing import…</p>}
       <EndpointImportDiscard editor={editor} onClose={props.onClose} />
     </section>

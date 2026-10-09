@@ -5,6 +5,7 @@ interface SettingsDisclosureCardProps {
   title: string;
   description: ReactNode;
   children: ReactNode;
+  defaultExpanded?: boolean;
 }
 
 // SettingsDisclosureCard gives independent settings areas one keyboard-native disclosure without unmounting their state.
@@ -13,10 +14,10 @@ export function SettingsDisclosureCard({
   title,
   description,
   children,
+  defaultExpanded = false,
 }: SettingsDisclosureCardProps) {
-  // Fused Endpoints is the first, always-visible settings card. Every
-  // disclosure that follows starts collapsed to keep the page scannable.
-  const [expanded, setExpanded] = useState(false);
+  // Tabbed settings expose the selected form immediately; other callers retain compact disclosures.
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const contentID = `${id}-content`;
   const descriptionID = `${id}-description`;
 
@@ -32,7 +33,7 @@ export function SettingsDisclosureCard({
         <h2>
           <button
             type="button"
-            className="group flex w-full items-center justify-between gap-4 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+            className="group flex w-full items-center justify-between gap-4 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-950 focus-visible:ring-offset-2"
             aria-expanded={expanded}
             aria-controls={contentID}
             aria-describedby={descriptionID}

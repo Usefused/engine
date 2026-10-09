@@ -235,8 +235,9 @@ function TeamEditorPanel(props: { editor: TeamEditorData | null; members: TeamMe
   return <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm"><TeamEditorHeader team={props.editor.team} canManage={canEditTeam} saving={props.saving} onArchive={props.onArchive} /><TeamDetailsForm team={props.editor.team} name={props.name} description={props.description} saving={props.saving} canManage={canEditTeam} onName={props.onName} onDescription={props.onDescription} onUpdate={props.onUpdate} /><TeamAccessControls team={props.editor.team} services={props.editor.services} buckets={props.editor.buckets} disabled={disabled} canManageOwners={props.canManageOwners} onWorkspaceRoleChange={props.onWorkspaceRole} onResourceAccessChange={props.onResourceAccess} onAppAccessChange={props.onAppAccess} /><TeamMembersControls members={props.members} disabled={disabled} onAdd={props.onAddMember} onRemove={props.onRemoveMember} /></section>;
 }
 
+/** Presents permitted team lifecycle actions without borrowing status colors. */
 function TeamEditorHeader({ team, canManage, saving, onArchive }: { team: Team; canManage: boolean; saving: boolean; onArchive: () => void }) {
-  return <div className="flex items-start justify-between gap-4 mb-5"><div><h2 className="text-lg font-semibold text-slate-900">{team.name}</h2><p className="text-xs text-slate-500">{team.status === "active" ? "Active" : "Archived"} · {team.slug}</p></div>{canManage && team.status === "active" && <button type="button" onClick={onArchive} disabled={saving} className="inline-flex items-center gap-1.5 text-sm text-rose-600 hover:text-rose-700 disabled:opacity-50"><Archive className="w-4 h-4" /> Archive</button>}</div>;
+  return <div className="flex items-start justify-between gap-4 mb-5"><div><h2 className="text-lg font-semibold text-slate-900">{team.name}</h2><p className="text-xs text-slate-500">{team.status === "active" ? "Active" : "Archived"} · {team.slug}</p></div>{canManage && team.status === "active" && <button type="button" onClick={onArchive} disabled={saving} className="inline-flex items-center gap-1.5 text-sm text-slate-950 hover:text-slate-950 disabled:opacity-50"><Archive className="w-4 h-4" /> Archive</button>}</div>;
 }
 
 /** Keeps editable identity fields aligned with the same required labels as team creation. */
@@ -244,8 +245,10 @@ function TeamDetailsForm(props: { team: Team; name: string; description: string;
   return <form onSubmit={props.onUpdate} className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,12rem),1fr))] items-end gap-3 mb-6"><label className="flex min-w-0 flex-col gap-1 text-sm font-medium text-slate-700"><FieldLabel required>Team name</FieldLabel><input value={props.name} disabled={!props.canManage} onChange={(event) => props.onName(event.target.value)} required maxLength={100} aria-label="Edit team name" className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-50" /></label><label className="flex min-w-0 flex-col gap-1 text-sm font-medium text-slate-700"><FieldLabel>Description</FieldLabel><input value={props.description} disabled={!props.canManage} onChange={(event) => props.onDescription(event.target.value)} maxLength={500} placeholder="Team description" aria-label="Edit team description" className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-50" /></label>{props.canManage && <button type="submit" disabled={teamEditorDisabled(props.saving, props.team.status)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50">Save</button>}</form>;
 }
 
+/** Marks the current team with a neutral outline so selection remains visible without a colored fill. */
 function TeamListButton({ team, selected, onSelect }: { team: Team; selected: boolean; onSelect: (id: string) => void }) {
-  const selectedClass = selected ? "bg-blue-50 text-blue-800" : "hover:bg-slate-50 text-slate-700";
+  // Preserve the selected row distinction with an outline instead of a colored background.
+  const selectedClass = selected ? "bg-white text-slate-950 ring-1 ring-inset ring-slate-950" : "hover:bg-slate-50 text-slate-700";
   return <button type="button" onClick={() => onSelect(team.id)} className={`w-full text-left px-4 py-3 ${selectedClass}`}>
     <span className="block text-sm font-medium truncate">{team.name}</span>
     <span className="block text-xs text-slate-500 mt-0.5">{team.status === "active" ? "Active" : "Archived"}</span>

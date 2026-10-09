@@ -175,7 +175,7 @@ export function DefineServiceDrawer({
                     type="button"
                     onClick={handleChangeImportSource}
                     disabled={starting}
-                    className="text-sm font-medium text-[var(--brand-violet)] hover:text-[var(--brand-violet-hover)] disabled:cursor-not-allowed disabled:text-slate-400"
+                    className="text-sm font-medium text-slate-950 hover:text-slate-950 disabled:cursor-not-allowed disabled:text-slate-400"
                   >
                     Change source
                   </button>
@@ -190,7 +190,7 @@ export function DefineServiceDrawer({
                       data-track="select_import_method_openapi"
                       type="button"
                       onClick={() => setImportMethod("openapi")}
-                      className={`pb-2 text-sm font-medium ${importMethod === "openapi" ? "text-[var(--brand-violet)] border-b-2 border-[var(--brand-violet)]" : "text-slate-500 hover:text-slate-700"} cursor-pointer`}
+                      className={`pb-2 text-sm font-medium ${importMethod === "openapi" ? "text-slate-950 border-b-2 border-slate-300" : "text-slate-500 hover:text-slate-700"} cursor-pointer`}
                     >
                       Spec file or URL
                     </button>
@@ -198,7 +198,7 @@ export function DefineServiceDrawer({
                       data-track="select_import_method_docs"
                       type="button"
                       onClick={() => setImportMethod("docs")}
-                      className={`pb-2 text-sm font-medium ${importMethod === "docs" ? "text-[var(--brand-violet)] border-b-2 border-[var(--brand-violet)]" : "text-slate-500 hover:text-slate-700"} cursor-pointer`}
+                      className={`pb-2 text-sm font-medium ${importMethod === "docs" ? "text-slate-950 border-b-2 border-slate-300" : "text-slate-500 hover:text-slate-700"} cursor-pointer`}
                     >
                       Docs URL
                       <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-50 text-amber-700 border border-amber-200 uppercase tracking-wider">

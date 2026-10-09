@@ -49,8 +49,8 @@ export default function IntegrationsPendingTab({ activeSessions, setNewSessionId
                 </div>
               </div>
               <div className="flex items-center gap-3 shrink-0">
-                <button data-track="resume_pending_integration" onClick={() => setNewSessionId(session.session_id)} className="px-4 py-2 text-sm font-medium text-blue-600 hover:text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg cursor-pointer">Resume</button>
-                <button data-track="cancel_pending_integration" onClick={() => cancelDiscoveryRun(session)} className="p-2 text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 rounded-lg cursor-pointer" title="Cancel discovery run"><XCircle className="w-4 h-4" /></button>
+                <button data-track="resume_pending_integration" onClick={() => setNewSessionId(session.session_id)} className="px-4 py-2 text-sm font-medium text-slate-950 hover:text-slate-950 bg-white hover:bg-slate-50 rounded-lg cursor-pointer">Resume</button>
+                <button data-track="cancel_pending_integration" onClick={() => cancelDiscoveryRun(session)} className="p-2 text-slate-950 hover:text-slate-950 bg-white hover:bg-slate-50 rounded-lg cursor-pointer" title="Cancel discovery run"><XCircle className="w-4 h-4" /></button>
               </div>
             </div>
           ))}

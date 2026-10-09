@@ -163,7 +163,7 @@ function ImportForm({ initial, busy, onDiscover, onCancel }: { initial: McpCatal
 /** Opens MCP metadata using the same row-to-inspector flow as operation endpoints. */
 function CatalogResourceRow({ kind, item, onSelect }: { kind: McpCatalogKind; item: McpCatalogItem; onSelect: () => void }) {
   const badge = catalogTypeBadges[kind];
-  return <button type="button" onClick={onSelect} className="block w-full px-4 py-4 text-left transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 sm:px-5">
+  return <button type="button" onClick={onSelect} className="block w-full px-4 py-4 text-left transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-950 sm:px-5">
     <span className="mb-1 flex items-start justify-between gap-3 sm:items-center"><span className="flex min-w-0 items-start gap-3 sm:items-center"><span className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-bold ${badge.color}`}>{badge.label}</span><code className="min-w-0 break-all text-sm text-slate-700">{mcpItemKey(kind, item)}</code></span><ChevronDown aria-hidden="true" className="h-4 w-4 shrink-0 -rotate-90 text-slate-400" /></span>
     {/* Long provider copy is bounded in the list and available in full inside the inspector. */}
     {item.description && <span className="mt-1 block line-clamp-3 whitespace-pre-wrap text-xs text-slate-500">{item.description}</span>}

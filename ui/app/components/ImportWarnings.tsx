@@ -35,6 +35,7 @@ export function WarningRow({ warning }: { warning: EndpointWarning }) {
   );
 }
 
+/** Separates the neutral dismiss action from the warning content that still needs attention. */
 export function ImportWarningPanel({
   warnings,
   onClear,
@@ -61,7 +62,7 @@ export function ImportWarningPanel({
             data-track="clear_import_warnings"
             type="button"
             onClick={onClear}
-            className="text-xs font-medium text-amber-800 hover:text-amber-950"
+            className="text-xs font-medium text-slate-950 hover:text-slate-950"
           >
             Clear
           </button>

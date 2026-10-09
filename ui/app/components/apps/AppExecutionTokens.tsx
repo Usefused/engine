@@ -156,7 +156,7 @@ function TokenGenerator({ familyID, onBusyChange, onPromptChange, headerActions 
         </div>
         <p className="text-xs text-slate-500">All app operations, including future versions.</p>
         {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
-        <div className="flex items-center justify-end gap-2 pt-1"><button type="button" disabled={busy} onClick={() => setOpen(false)} className="h-9 rounded-lg px-3 text-sm text-slate-500 hover:bg-slate-50 hover:text-slate-700 disabled:opacity-50">Cancel</button><button type="submit" disabled={busy || !name.trim() || (expiry === "custom" && customSeconds === null)} className="inline-flex h-9 items-center gap-2 rounded-lg bg-violet-700 px-3 text-sm font-medium text-white hover:bg-violet-800 disabled:opacity-50">{busy && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}{busy ? "Generating…" : "Generate token"}</button></div>
+        <div className="flex items-center justify-end gap-2 pt-1"><button type="button" disabled={busy} onClick={() => setOpen(false)} className="h-9 rounded-lg px-3 text-sm text-slate-500 hover:bg-slate-50 hover:text-slate-700 disabled:opacity-50">Cancel</button><button type="submit" disabled={busy || !name.trim() || (expiry === "custom" && customSeconds === null)} className="inline-flex h-9 items-center gap-2 rounded-lg bg-slate-950 px-3 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">{busy && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}{busy ? "Generating…" : "Generate token"}</button></div>
       </div>
     </form>}
     {/* One-time credentials and their controls are excluded from assistant page snapshots. */}

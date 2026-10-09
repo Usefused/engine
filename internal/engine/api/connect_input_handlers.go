@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -110,27 +111,12 @@ type resolvedConnectInputSession struct {
 	values   map[string]string
 }
 
-const hostedConnectShellTemplate = `{{define "hosted-connect-shell-style"}}<style>
-  :root{color-scheme:only light;font-family:Inter,ui-sans-serif,system-ui,sans-serif}
-  *{box-sizing:border-box}
-  body{min-height:100svh;margin:0;padding:clamp(1rem,4vw,3rem);background:#fbfaf8;color:#15121c}
-  main{width:min(100%,29rem);margin:clamp(1rem,8vh,6rem) auto;padding:clamp(1.25rem,4vw,2rem);background:#fff;border:1px solid #e7e2ea;border-top:3px solid var(--connect-accent);border-radius:1rem;box-shadow:0 18px 50px rgba(21,18,28,.09)}
-  .connect-brand{display:flex;align-items:center;gap:.7rem;margin-bottom:2rem;font-size:.9rem;font-weight:750;color:#15121c;overflow-wrap:anywhere}
-  .connect-logo{width:40px;height:40px;object-fit:contain}
-  .connect-eyebrow{margin:0 0 .65rem;font-size:.72rem;line-height:1.2;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:#4f2bd4}
-  .connect-eyebrow[data-tone="success"]{color:#047857}
-  .connect-eyebrow[data-tone="warning"]{color:#a16207}
-  .connect-eyebrow[data-tone="danger"]{color:#b91c1c}
-  h1{font-size:clamp(1.55rem,5vw,2rem);line-height:1.15;letter-spacing:-.025em;margin:0;color:#15121c;overflow-wrap:anywhere}
-  .connect-copy{margin:.85rem 0 0;color:rgba(21,18,28,.68);line-height:1.6}
-  .connect-action{display:flex;min-height:46px;width:100%;align-items:center;justify-content:center;margin-top:1.5rem;padding:.78rem 1rem;border:1px solid rgba(21,18,28,.18);border-radius:.7rem;background:var(--connect-accent);color:var(--connect-accent-foreground);font:inherit;font-weight:750;text-align:center;text-decoration:none;cursor:pointer;box-shadow:0 1px 2px rgba(21,18,28,.08);transition:filter .15s ease,transform .15s ease}
-  .connect-action:hover{filter:brightness(.96)}
-  .connect-action:active{transform:translateY(1px)}
-  .connect-links{display:flex;flex-wrap:wrap;gap:1rem;margin-top:2rem;padding-top:1.25rem;border-top:1px solid #f0edf2;font-size:.875rem}
-  .connect-links a{color:#4f2bd4}
-  :focus-visible{outline:3px solid #6941ff;outline-offset:2px}
-  @media(max-width:36rem){body{padding:1rem}main{margin:1rem auto;border-radius:.85rem}.connect-brand{margin-bottom:1.5rem}}
-</style>{{end}}`
+// hostedConnectStyles keeps the Settings preview and hosted pages on the same visual contract.
+//
+//go:embed hosted_connect.css
+var hostedConnectStyles string
+
+var hostedConnectShellTemplate = `{{define "hosted-connect-shell-style"}}<style>` + hostedConnectStyles + `</style>{{end}}`
 
 // parseHostedConnectTemplate installs one trusted light shell around every
 // hosted state so browser colour preferences cannot change the owner's brand.
@@ -145,9 +131,7 @@ var connectInputTemplate = parseHostedConnectTemplate("connect-input", `<!doctyp
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Connect your account · {{.Branding.DisplayName}}</title>
   {{template "hosted-connect-shell-style"}}
-  <style>
-    .connect-form{margin-top:1.5rem}.connect-form-helper{margin:0 0 1.25rem;color:rgba(21,18,28,.58);font-size:.875rem;line-height:1.5}.connect-field+.connect-field{margin-top:1.15rem}.connect-label{display:flex;align-items:baseline;justify-content:space-between;gap:1rem;margin:0 0 .45rem;font-size:.92rem;font-weight:700;overflow-wrap:anywhere}.connect-field-requirement{flex:none;color:rgba(21,18,28,.52);font-size:.72rem;font-weight:650;text-transform:uppercase;letter-spacing:.055em}.connect-field-description{margin:.4rem 0 0;color:rgba(21,18,28,.58);font-size:.82rem;line-height:1.45;overflow-wrap:anywhere}input,select{width:100%;min-height:46px;padding:.72rem .8rem;border:1px solid #b8b1bc;border-radius:.65rem;background:#fff;color:#15121c;font:inherit;font-size:1rem;box-shadow:0 1px 2px rgba(21,18,28,.04)}input:hover,select:hover{border-color:#8f8794}input:focus,select:focus{border-color:#6941ff;outline:3px solid #eee9ff;outline-offset:1px}.connect-alert{margin-top:1.25rem;padding:.9rem 1rem;border:1px solid #fecaca;border-radius:.7rem;background:#fef2f2;color:#7f1d1d}.connect-alert strong{display:block;font-size:.9rem}.connect-alert p{margin:.25rem 0 0;color:#991b1b;font-size:.875rem;line-height:1.5}
-  </style>
+
 </head>
 <body><main style="--connect-accent:{{.Branding.PrimaryColor}};--connect-accent-foreground:{{.Branding.AccentForeground}}">
   <header class="connect-brand">{{if .Branding.LogoURL}}<img class="connect-logo" src="{{.Branding.LogoURL}}" width="48" height="48" alt="" referrerpolicy="no-referrer">{{end}}<span>{{.Branding.DisplayName}}</span></header>

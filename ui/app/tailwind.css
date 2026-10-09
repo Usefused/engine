@@ -90,6 +90,26 @@
 
 /* Component defaults live below utilities so pages can configure layout and presentation. */
 @layer components {
+  /* Tab strips keep their labels intact and own horizontal overflow instead of widening the page. */
+  .fused-tabs-scroll {
+    display: flex;
+    flex-wrap: nowrap;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    white-space: nowrap;
+    scrollbar-width: none;
+  }
+
+  /* Share spare width across destinations, but preserve their natural size when scrolling is needed. */
+  .fused-tabs-scroll > * {
+    flex: 1 0 auto;
+    justify-content: center;
+    text-align: center;
+  }
+  .fused-tabs-scroll::-webkit-scrollbar { display: none; }
+
   .fused-select {
     min-width: 0;
     border: 1px solid #cbd5e1;

@@ -66,7 +66,7 @@ export default function WebhooksTab({
             data-track="toggle_webhook_guide"
             onClick={() => setShowGuide(!showGuide)}
             className={`inline-flex items-center gap-1 text-xs font-semibold transition-colors cursor-pointer ${
-              showGuide ? "text-indigo-800 underline" : "text-indigo-600 hover:text-indigo-800 hover:underline"
+              showGuide ? "text-slate-950 underline" : "text-slate-950 hover:text-slate-950 hover:underline"
             }`}
           >
             <Info className="w-3.5 h-3.5" />

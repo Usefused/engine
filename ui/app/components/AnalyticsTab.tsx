@@ -389,7 +389,7 @@ function ExecutionHistory({
               key={event.id}
               type="button"
               onClick={() => setSelectedExecutionID(event.id)}
-              className={`group block w-full min-w-0 p-4 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${selected ? "bg-slate-50" : "bg-white hover:bg-slate-50/70"}`}
+              className={`group block w-full min-w-0 p-4 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-950 ${selected ? "bg-slate-50" : "bg-white hover:bg-slate-50/70"}`}
               aria-haspopup="dialog"
               aria-label={`Inspect ${event.operation}`}
             >

@@ -119,7 +119,7 @@ function NotificationActions({ item, isAcknowledged, onMarkRead, onDismiss }: { 
     <button type="button" onClick={(event) => { event.preventDefault(); setOpen((value) => !value); }} className="px-2 py-1 rounded border border-slate-200 bg-white text-slate-500 hover:text-slate-700 hover:bg-slate-50 transition-all text-xs flex items-center gap-1 font-medium shadow-sm cursor-pointer" aria-haspopup="true" aria-expanded={open}>Options <ChevronDown className="w-3 h-3" /></button>
     {open && <div className="absolute right-0 top-full mt-1 w-32 bg-white rounded-lg shadow-lg border border-slate-200 py-1 z-10 flex flex-col">
       {!isAcknowledged && <button className="w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50 flex items-center gap-2 cursor-pointer" onClick={(event) => { event.preventDefault(); onMarkRead(item.id); setOpen(false); }}><Check className="w-3.5 h-3.5 text-slate-400" /> Read</button>}
-      <button className="w-full text-left px-3 py-1.5 text-xs text-red-600 hover:bg-red-50 flex items-center gap-2 cursor-pointer" onClick={dismiss}><X className="w-3.5 h-3.5 text-red-400" /> Dismiss</button>
+      <button className="w-full text-left px-3 py-1.5 text-xs text-slate-950 hover:bg-slate-50 flex items-center gap-2 cursor-pointer" onClick={dismiss}><X className="w-3.5 h-3.5" /> Dismiss</button>
     </div>}
   </div>;
 }

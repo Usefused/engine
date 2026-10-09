@@ -35,7 +35,7 @@ export function CopyButton({ value, label, onCopied }: { value: string; label: s
   }
   // Empty values cannot be copied; status text distinguishes confirmed success from a browser failure.
   return <span className="relative inline-flex shrink-0">
-    <button type="button" aria-label={status === "copied" ? `${label} copied` : `Copy ${label}`} title={status === "copied" ? "Copied" : `Copy ${label}`} disabled={!value} onClick={copy} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-[var(--brand-violet)] disabled:opacity-40">
+    <button type="button" aria-label={status === "copied" ? `${label} copied` : `Copy ${label}`} title={status === "copied" ? "Copied" : `Copy ${label}`} disabled={!value} onClick={copy} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-slate-950 disabled:opacity-40">
       {status === "copied" ? <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" /> : <Copy className="h-3.5 w-3.5" aria-hidden="true" />}
     </button>
     <span role="status" className={status === "failed" ? "absolute right-0 top-full z-20 mt-1 w-48 rounded-md border border-slate-200 bg-white p-2 text-xs text-red-700 shadow-sm" : "sr-only"}>{status === "failed" ? "Could not copy. Select the value and copy it manually." : status === "copied" ? "Copied to clipboard." : ""}</span>

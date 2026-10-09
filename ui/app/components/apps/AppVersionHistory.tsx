@@ -50,7 +50,7 @@ function AppVersionHistoryRow<T extends AppVersionHistoryItem>({ version, curren
           </button>
         ) : (
           <div className="flex min-w-0 max-w-full items-center gap-2">
-            <button type="button" onClick={() => onSelect(version.id)} className="min-w-0 break-all text-left font-medium text-slate-800 hover:text-blue-600">
+            <button type="button" onClick={() => onSelect(version.id)} className="min-w-0 break-all text-left font-medium text-slate-800 hover:text-slate-950">
               {version.version}
             </button>
             {/* The marker identifies the open immutable version without implying it is the family default. */}
@@ -68,7 +68,7 @@ function AppVersionHistoryRow<T extends AppVersionHistoryItem>({ version, curren
               type="button"
               disabled={Boolean(deletingVersionId)}
               onClick={() => onDelete(version)}
-              className="inline-flex h-11 w-11 shrink-0 items-center sm:h-8 sm:w-8 justify-center rounded-lg bg-red-50 text-red-600 transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-11 w-11 shrink-0 items-center sm:h-8 sm:w-8 justify-center rounded-lg bg-white text-slate-950 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
               title={`Delete version ${version.version}`}
               aria-label={`Delete version ${version.version}`}
             >
@@ -83,7 +83,7 @@ function AppVersionHistoryRow<T extends AppVersionHistoryItem>({ version, curren
       {expanded && renderDetails ? (
         <div className="space-y-3 border-t border-slate-100 bg-slate-50/60 px-4 py-4 sm:px-5">
           {renderDetails(version)}
-          <button type="button" onClick={() => onSelect(version.id)} className="text-xs font-medium text-blue-600 hover:text-blue-700">
+          <button type="button" onClick={() => onSelect(version.id)} className="text-xs font-medium text-slate-950 hover:text-slate-950">
             Open version details
           </button>
         </div>

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { type MetaFunction } from "@remix-run/react";
+import { Link, useSearchParams, type MetaFunction } from "@remix-run/react";
 
 export const meta: MetaFunction = ({ matches }) => {
   const parentMeta = matches
@@ -10,6 +10,8 @@ export const meta: MetaFunction = ({ matches }) => {
     { title: "Settings - Fused" },
   ];
 };
+import { Settings } from "lucide-react";
+import { CataloguePageHeader } from "~/components/layout/CataloguePageHeader";
 import { api, Account } from "~/lib/api";
 import { useToast } from "~/components/Toast";
 import { ConnectBrandingCard } from "~/components/settings/ConnectBrandingCard";
@@ -30,9 +32,30 @@ function displayEndpoint(value: string, emptyLabel: string) {
   return value || emptyLabel;
 }
 
-// SettingsPage manages account details and key rotation while keeping generated credentials out of agent context.
+const SETTINGS_TABS = [
+  { id: "general", label: "General" },
+  { id: "branding", label: "Connection branding" },
+  { id: "managed-auth", label: "Managed auth" },
+  { id: "api-key", label: "API key" },
+];
+
+// Resolve section links independently so malformed URLs cannot hide every settings panel.
+function settingsSection(requested: string | null) {
+  // General retains the account and endpoints entry point for absent or unknown sections.
+  return SETTINGS_TABS.find((tab) => tab.id === requested)?.id ?? "general";
+}
+
+// SettingsPage preserves settings drafts across linkable sections while keeping generated credentials out of agent context.
 export default function SettingsPage() {
   const toast = useToast();
+  const [searchParams] = useSearchParams();
+  const activeTab = settingsSection(searchParams.get("tab"));
+  // Keep unrelated URL state intact so tab navigation composes with workspace links.
+  const tabs = SETTINGS_TABS.map(({ id, label }) => {
+    const params = new URLSearchParams(searchParams);
+    params.set("tab", id);
+    return { label, to: `?${params.toString()}`, selected: activeTab === id };
+  });
   const [account, setAccount] = useState<Account | null>(null);
   const [email, setEmail] = useState("");
   const [savingEmail, setSavingEmail] = useState(false);
@@ -98,14 +121,16 @@ export default function SettingsPage() {
   }
 
   return (
-    <div className="max-w-2xl mx-auto space-y-8">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-900">Account Settings</h1>
-        <p className="text-slate-500 mt-1">
-          Manage your account details and API credentials.
-        </p>
-      </div>
+    <div className="min-w-0 space-y-6">
+      <CataloguePageHeader title="Settings" icon={Settings} description="Manage your account, connections, and API credentials." />
+      <nav aria-label="Settings sections" className="fused-tabs-scroll gap-2 border-b border-slate-200 pb-3">
+        {/* Match Apps' filled selected tab while keeping narrow screens horizontally scrollable while retaining linkable settings sections. */}
+        {tabs.map((tab) => <Link key={tab.to} to={tab.to} aria-current={tab.selected ? "page" : undefined} className={`rounded-lg px-4 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-950 ${tab.selected ? "bg-slate-950 text-white" : "text-slate-600 hover:bg-slate-100"}`}>{tab.label}</Link>)}
+      </nav>
 
+      {/* Keep inactive sections mounted so navigation cannot discard drafts or a newly generated key. */}
+      <section aria-label="General settings" hidden={activeTab !== "general"}>
+      <div className="max-w-2xl space-y-6">
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="p-6">
           <h2 className="text-lg font-semibold text-slate-900">
@@ -169,12 +194,9 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      <ConnectBrandingCard />
-
-      <ManagedAuthCard />
-
       <SettingsDisclosureCard
         id="account-details-settings"
+        defaultExpanded
         title="Account Details"
         description="Update your personal information."
       >
@@ -216,7 +238,7 @@ export default function SettingsPage() {
                   data-track="save_email_settings"
                   type="submit"
                   disabled={savingEmail}
-                  className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 transition-colors"
+                  className="px-4 py-2 bg-slate-950 text-white text-sm font-medium rounded-lg hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-950 disabled:opacity-50 transition-colors"
                 >
                   {savingEmail ? "Saving..." : "Save Changes"}
                 </button>
@@ -235,8 +257,21 @@ export default function SettingsPage() {
         )}
       </SettingsDisclosureCard>
 
+      </div>
+      </section>
+
+      {/* Each section keeps its own forms and permission checks unchanged while hidden. */}
+      <section aria-label="Connection branding settings" hidden={activeTab !== "branding"}>
+        <ConnectBrandingCard defaultExpanded />
+      </section>
+      <section aria-label="Managed auth settings" hidden={activeTab !== "managed-auth"}>
+        <div className="max-w-2xl"><ManagedAuthCard /></div>
+      </section>
+      <section aria-label="API key settings" hidden={activeTab !== "api-key"}>
+      <div className="max-w-2xl">
       <SettingsDisclosureCard
         id="api-key-management-settings"
+        defaultExpanded
         title="API Key Management"
         description={
           <>
@@ -269,7 +304,7 @@ export default function SettingsPage() {
                   data-track="confirm_regenerate_api_key"
                   onClick={handleRegenerateKey}
                   disabled={regenerating}
-                  className="px-4 py-2 bg-orange-600 text-white text-sm font-medium rounded-lg hover:bg-orange-700 disabled:opacity-50 transition-colors"
+                  className="px-4 py-2 bg-slate-950 text-white text-sm font-medium rounded-lg hover:bg-slate-800 disabled:opacity-50 transition-colors"
                 >
                   {regenerating ? "Regenerating..." : "Yes, Regenerate"}
                 </button>
@@ -306,7 +341,7 @@ export default function SettingsPage() {
                     navigator.clipboard.writeText(newKey);
                     toast.success("Copied to clipboard!");
                   }}
-                  className="px-3 py-2 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 transition-colors"
+                  className="px-3 py-2 border border-slate-300 bg-white text-slate-700 text-sm font-medium rounded-md hover:bg-slate-50 transition-colors"
                 >
                   Copy
                 </button>
@@ -314,6 +349,8 @@ export default function SettingsPage() {
           </div>
         )}
       </SettingsDisclosureCard>
+      </div>
+      </section>
     </div>
   );
 }

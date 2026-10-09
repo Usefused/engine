@@ -173,7 +173,7 @@ export function NotificationsContent() {
   return (
     <div className="min-w-0 space-y-5 sm:space-y-6">
       <div className="flex min-w-0 flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div className="grid w-full grid-cols-3 gap-1 rounded-lg bg-slate-100/80 p-1 md:flex md:w-fit">
+        <div aria-label="Notification severity" className="fused-tabs-scroll w-full gap-1 rounded-lg bg-slate-100/80 p-1 md:w-fit">
           {([
             ["all", `All (${items.length})`],
             ["breaking", `Breaking (${breakingCount})`],
@@ -184,7 +184,7 @@ export function NotificationsContent() {
               data-track={`filter_notifications_${value}`}
               type="button"
               onClick={() => setFilter(value)}
-              className={`min-w-0 truncate rounded-md px-1.5 py-2 text-[11px] font-medium transition-all cursor-pointer sm:px-3 sm:py-1.5 sm:text-sm ${
+              className={`rounded-md px-3 py-2 text-[11px] font-medium transition-all cursor-pointer sm:px-3 sm:py-1.5 sm:text-sm ${
                 filter === value ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
               }`}
             >
@@ -204,7 +204,7 @@ export function NotificationsContent() {
               className="w-full rounded-lg border border-slate-200 py-2 pl-9 pr-3 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500 md:py-1.5"
             />
           </div>
-          <div className="grid w-full grid-cols-3 rounded-lg border border-slate-200 bg-slate-100 p-0.5 md:flex md:w-auto">
+          <div aria-label="Notification read state" className="fused-tabs-scroll w-full rounded-lg border border-slate-200 bg-slate-100 p-0.5 md:w-auto">
             <button
               onClick={() => setReadFilter("unread")}
               className={`rounded-md px-3 py-2 text-sm font-medium transition-colors md:py-1 ${

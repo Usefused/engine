@@ -83,21 +83,21 @@ export function AppDetailBackLink({ to, className = "" }: AppDetailBackLinkProps
 /** Applies one consistent primary-action treatment while allowing each adapter to own its behavior. */
 export function AppDetailPrimaryAction({ icon, label, onClick }: AppDetailPrimaryActionProps) {
   return (
-    <button type="button" onClick={onClick} className="inline-flex w-full cursor-pointer items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-blue-700 md:w-auto">
+    <button type="button" onClick={onClick} className="inline-flex w-full cursor-pointer items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-slate-800 md:w-auto">
       {icon}
       {label}
     </button>
   );
 }
 
-/** Renders shared immutable-version navigation and hides it for single-version families. */
+/** Renders scrollable immutable-version navigation and hides it for single-version families. */
 export function AppVersionSwitcher({ label, versions, currentId, onSelect }: AppVersionSwitcherProps) {
   // A single immutable version needs no secondary family navigation.
   if (versions.length <= 1) return null;
   return (
     <div className="flex flex-wrap items-center gap-2">
       <span className="mr-1 text-xs font-medium uppercase tracking-wider text-slate-500">{label}</span>
-      <div className="flex flex-wrap gap-0.5 rounded-lg bg-slate-100/80 p-1">
+      <div className="fused-tabs-scroll gap-0.5 rounded-lg bg-slate-100/80 p-1">
         {versions.map((version) => (
           <button key={version.id} type="button" onClick={() => onSelect(version.id)} className={`cursor-pointer rounded-md px-3 py-1 text-xs font-medium transition-all ${version.id === currentId ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
             {version.version}

@@ -18,7 +18,7 @@ interface Props {
   openSession: (id: string) => Promise<boolean>; deleteSession: (id: string) => Promise<void>;
   approval: HarnestApproval | null; decideApproval: (id: string, decision: 'approve' | 'deny') => void;
 }
-const focusStyle = 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-700';
+const focusStyle = 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-950';
 
 /** Renders the conversation above desktop drawer actions, retaining full-screen chat on mobile. */
 export default function FusedAgentChat({ popup, pageTitle, status, messages, composer, setComposer, includeContext, setIncludeContext, isSending, loadingHistory, error, sessionId, sendMessage, newConversation, closeAgent, stop, refreshAgentStatus, openSession, deleteSession, approval, decideApproval }: Props) {
@@ -109,8 +109,8 @@ export default function FusedAgentChat({ popup, pageTitle, status, messages, com
               <div className="mt-7 space-y-2.5">
                 {previewTasks.map(task => {
                   const Icon = task.icon;
-                  return <button key={task.id} disabled={!isReady} onClick={() => startExample(task.prompt)} className={`group disabled:cursor-not-allowed disabled:opacity-50 flex w-full items-center gap-3 rounded-xl border border-slate-200 bg-white p-3.5 text-left transition hover:border-violet-800/30 hover:bg-violet-50/30 ${focusStyle}`}>
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-50 text-slate-600 group-hover:bg-violet-50 group-hover:text-violet-800"><Icon className="h-4 w-4" strokeWidth={1.6} /></div>
+                  return <button key={task.id} disabled={!isReady} onClick={() => startExample(task.prompt)} className={`group disabled:cursor-not-allowed disabled:opacity-50 flex w-full items-center gap-3 rounded-xl border border-slate-200 bg-white p-3.5 text-left transition hover:border-slate-400 hover:bg-slate-50 ${focusStyle}`}>
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-50 text-slate-600 group-hover:bg-slate-100 group-hover:text-slate-950"><Icon className="h-4 w-4" strokeWidth={1.6} /></div>
                     <div className="min-w-0 flex-1"><p className="text-xs font-semibold">{task.title}</p><p className="mt-1 text-[11px] text-slate-500">{task.description}</p></div><ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-400" />
                   </button>;
                 })}
@@ -147,12 +147,12 @@ export default function FusedAgentChat({ popup, pageTitle, status, messages, com
             <p className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-slate-600">{approval.message}</p>
             <div className="mt-3 flex justify-end gap-2">
               <button type="button" onClick={() => decideApproval(approval.id, 'deny')} className={`rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 ${focusStyle}`}>Deny</button>
-              <button type="button" onClick={() => decideApproval(approval.id, 'approve')} className={`rounded-lg bg-violet-700 px-3 py-1.5 text-xs font-medium text-white ${focusStyle}`}>Approve</button>
+              <button type="button" onClick={() => decideApproval(approval.id, 'approve')} className={`rounded-lg bg-slate-950 px-3 py-1.5 text-xs font-medium text-white ${focusStyle}`}>Approve</button>
             </div>
           </section>}
           {error && <p role="alert" className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-700">{error}</p>}
           <form onSubmit={send} className="rounded-2xl border border-slate-300/80 bg-white p-3 shadow-sm focus-within:border-violet-800/50 focus-within:ring-2 focus-within:ring-violet-800/5">
-            <button type="button" aria-pressed={includeContext} onClick={() => setIncludeContext(!includeContext)} aria-label="Include current page" title="Use visible page content. Sensitive values stay hidden." className={`mb-2 flex max-w-full items-center gap-1.5 rounded-md px-2 py-1 text-[10px] ${includeContext ? 'bg-violet-50 text-violet-900' : 'bg-slate-100 text-slate-500'} ${focusStyle}`}>
+            <button type="button" aria-pressed={includeContext} onClick={() => setIncludeContext(!includeContext)} aria-label="Include current page" title="Use visible page content. Sensitive values stay hidden." className={`mb-2 flex max-w-full items-center gap-1.5 rounded-md px-2 py-1 text-[10px] ${includeContext ? 'bg-white text-slate-950' : 'bg-slate-100 text-slate-500'} ${focusStyle}`}>
               <MapPin className="h-3 w-3 shrink-0" /><span className="truncate">{includeContext ? pageTitle : 'Page context off'}</span>{includeContext && <Check className="h-3 w-3 shrink-0" />}
             </button>
             <label htmlFor="agent-message" className="sr-only">Message Fused</label>
@@ -160,7 +160,7 @@ export default function FusedAgentChat({ popup, pageTitle, status, messages, com
               onKeyDown={handleComposerKey}
               placeholder="Describe what you’d like to do…"
               className="block max-h-36 min-h-12 w-full resize-none bg-transparent text-[13px] leading-relaxed text-slate-800 outline-none placeholder:text-slate-400" />
-            <div className="mt-2 flex items-center justify-between gap-2"><span className="text-[10px] text-slate-400">Enter to send · Shift + Enter for a new line</span>{isSending ? <button type="button" onClick={stop} aria-label="Stop response" className={`flex h-8 w-8 items-center justify-center rounded-lg bg-slate-800 text-white ${focusStyle}`}><Square className="h-3.5 w-3.5" /></button> : <button type="submit" disabled={!isReady || !composer.trim() || loadingHistory} aria-label="Send message" className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-violet-700 text-white transition hover:bg-violet-800 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-300 ${focusStyle}`}><ArrowUp className="h-4 w-4" /></button>}</div>
+            <div className="mt-2 flex items-center justify-between gap-2"><span className="text-[10px] text-slate-400">Enter to send · Shift + Enter for a new line</span>{isSending ? <button type="button" onClick={stop} aria-label="Stop response" className={`flex h-8 w-8 items-center justify-center rounded-lg bg-slate-800 text-white ${focusStyle}`}><Square className="h-3.5 w-3.5" /></button> : <button type="submit" disabled={!isReady || !composer.trim() || loadingHistory} aria-label="Send message" className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-950 text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-300 ${focusStyle}`}><ArrowUp className="h-4 w-4" /></button>}</div>
           </form>
           <p id="agent-preview-note" className="mt-2.5 text-center text-[10px] leading-relaxed text-slate-400">Review changes before saving.</p>
         </footer>

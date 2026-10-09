@@ -89,7 +89,7 @@ function PrimaryServerURL({ url, description, onCopy }: { url?: string; descript
       <EnvironmentBadge description={description} />
       <button
         onClick={() => onCopy(url)}
-        className="min-w-0 max-w-full cursor-pointer truncate text-left font-mono text-xs text-slate-600 transition-colors hover:text-blue-600 sm:max-w-sm"
+        className="min-w-0 max-w-full cursor-pointer truncate text-left font-mono text-xs text-slate-600 transition-colors hover:text-slate-950 sm:max-w-sm"
         title={url}
         aria-label={`Copy URL ${url}`}
       >
@@ -125,7 +125,7 @@ function ExtraServerMenu({ servers, open, onToggle, onCopy }: { servers: Server[
             >
               <div className="flex min-w-0 flex-col">
                 <EnvironmentBadge description={server.description} compact />
-                <span className="truncate font-mono text-xs text-slate-500 transition-colors group-hover:text-blue-600">{server.url}</span>
+                <span className="truncate font-mono text-xs text-slate-500 transition-colors group-hover:text-slate-950">{server.url}</span>
               </div>
             </button>
           ))}

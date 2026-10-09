@@ -115,13 +115,13 @@ function ServicesTabs({ isAuth, view, activeSessions, setView }: {
 }) {
   if (!isAuth) return null;
   return (
-    <div className="flex bg-slate-100 p-1 rounded-lg w-full sm:w-fit mb-6">
+    <div className="fused-tabs-scroll bg-slate-100 p-1 rounded-lg w-full sm:w-fit mb-6">
       <button data-track="view_workspace_tab" type="button" onClick={() => setView("workspace")}
-        className={`flex-1 sm:flex-none px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition-all ${view === "workspace" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"} cursor-pointer`}>
+        className={`shrink-0 px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition-all ${view === "workspace" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"} cursor-pointer`}>
         Workspace
       </button>
       <button data-track="view_imports_tab" type="button" onClick={() => setView("pending")}
-        className={`relative flex-1 sm:flex-none px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition-all ${view === "pending" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"} cursor-pointer`}>
+        className={`relative shrink-0 px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition-all ${view === "pending" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"} cursor-pointer`}>
         Imports
         {activeSessions.length > 0 && <span className="ml-2 text-[10px] font-bold text-amber-700">{activeSessions.length}</span>}
       </button>
@@ -183,7 +183,7 @@ function CatalogToggle({ checked, onChange }: { checked: boolean; onChange: () =
       </div>
       {/* The switch's color and thumb position share the accessible checked state. */}
       <button type="button" role="switch" aria-checked={checked} onClick={onChange} data-track="toggle_service_catalogue"
-        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${checked ? "bg-blue-600" : "bg-slate-300"}`}>
+        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${checked ? "bg-slate-950" : "bg-slate-300"}`}>
         <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${checked ? "translate-x-5" : "translate-x-0"}`} />
       </button>
     </div>

@@ -208,7 +208,7 @@ export function BucketEntryComposer({
           <button
             type="submit"
             disabled={saving || (kind !== "bucket_secret" && services.length === 0)}
-            className="inline-flex h-[38px] w-[32px] items-center justify-center text-blue-600 hover:text-blue-700 disabled:opacity-40"
+            className="inline-flex h-[38px] w-[32px] items-center justify-center text-slate-950 hover:text-slate-950 disabled:opacity-40"
             aria-label={`Save ${composerKindLabel(kind)}`}
             title="Save"
           >
