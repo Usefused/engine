@@ -249,3 +249,14 @@ test("branding save requires a safe confirmation before PUT", () => {
   assert.match(cardSource, /if \(!pendingSave \|\| saving\) return/);
   assert.equal([...cardSource.matchAll(/\{content\}/g)].length, 1);
 });
+
+// Both Docker UI stages copy only ui/, so the shared preview stylesheet must resolve inside that context.
+test("hosted preview stylesheet is included in standalone UI build contexts", () => {
+  const importPath = /import hostedStyles from "([^"?]+)\?raw"/.exec(previewSource)?.[1];
+  assert.ok(importPath, "Preview must import its shared stylesheet");
+  const previewURL = new URL("../components/settings/HostedConnectionPreview.tsx", import.meta.url);
+  const stylesheetURL = new URL(importPath, previewURL);
+  const uiRoot = new URL("../../", import.meta.url);
+  assert.ok(stylesheetURL.href.startsWith(uiRoot.href), "Stylesheet must stay inside the UI build context");
+  assert.match(readFileSync(stylesheetURL, "utf8"), /\.connect-action/);
+});

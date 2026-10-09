@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,6 +17,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/managedauthclient"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/ui/branding"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -111,12 +111,8 @@ type resolvedConnectInputSession struct {
 	values   map[string]string
 }
 
-// hostedConnectStyles keeps the Settings preview and hosted pages on the same visual contract.
-//
-//go:embed hosted_connect.css
-var hostedConnectStyles string
-
-var hostedConnectShellTemplate = `{{define "hosted-connect-shell-style"}}<style>` + hostedConnectStyles + `</style>{{end}}`
+// Both renderers consume a UI-local asset so standalone Docker builds remain self-contained.
+var hostedConnectShellTemplate = `{{define "hosted-connect-shell-style"}}<style>` + branding.HostedConnectStyles + `</style>{{end}}`
 
 // parseHostedConnectTemplate installs one trusted light shell around every
 // hosted state so browser colour preferences cannot change the owner's brand.

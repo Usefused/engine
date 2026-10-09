@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import hostedStyles from "../../../../internal/engine/api/hosted_connect.css?raw";
+import hostedStyles from "../../../branding/hosted_connect.css?raw";
 import { safeLogoPreviewURL, safePrimaryColour } from "~/lib/connect-branding";
 
 interface HostedConnectionPreviewProps {
