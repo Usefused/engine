@@ -231,6 +231,12 @@ func validateMCPServerDescription(doc sdkConfigDocument, kind string) error {
 
 // validateMCPAppRestrictions rejects package-only or unbounded MCP fields before they cross the app configuration boundary.
 func validateMCPAppRestrictions(doc sdkConfigDocument, kind string) error {
+	// Imported capabilities currently require a standalone hosted MCP adapter.
+	for _, service := range doc.Services {
+		if service.MCP != nil && kind != store.AppKindMCP.String() {
+			return errors.New("imported MCP capabilities require kind: mcp")
+		}
+	}
 	// SDK documents share this decoder but do not inherit MCP transport restrictions.
 	if kind != store.AppKindMCP.String() {
 		return nil
@@ -262,22 +268,8 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
-	bindings, err := resolveSDKContractBindings(ctx, registryClient, call.apiKey, append(resolved, credentialSources...))
-	// Local snapshot identity fences MCP refreshes without requiring a generated-package pin.
-	if err != nil {
-		return sdkPlanResult{}, generationPinPlanError(err, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to bind service contract revisions"})
-	}
-	targetBindings, credentialSourceBindings := splitAppContractBindings(bindings, resolved)
-	selections = finalizeAppSelections(selections, targetBindings)
-
-	selections, err = resolveMCPEndpointIDs(ctx, s, selections)
-	// Physical endpoint IDs must come from the exact local contract snapshot.
-	if err != nil {
-		return sdkPlanResult{}, err
-	}
-	readiness, err := inspectAppBucketReadiness(ctx, s, buckets, selections, appReadinessServiceNames(append(append([]sdkResolvedService{}, resolved...), credentialSources...), nil))
-	// Mutable credential absence becomes review metadata only after the exact
-	// immutable physical scope has passed admission.
+	selections, targetBindings, credentialSourceBindings, readiness, err := resolveMCPPlanContracts(ctx, s, registryClient, call, selections, resolved, credentialSources, buckets)
+	// Every immutable contract and imported definition must be admitted before persisting a plan.
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
@@ -577,4 +569,35 @@ func loadConfigPlanForApply(ctx context.Context, configStore store.ConfigReposit
 		return nil, nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "plan_stale"}
 	}
 	return plan, state, nil
+}
+
+// resolveMCPPlanContracts binds physical and imported capabilities before reviewing mutable credential readiness.
+func resolveMCPPlanContracts(ctx context.Context, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall, selections []models.SDKSelection, resolved, credentialSources []sdkResolvedService, buckets appBucketSet) ([]models.SDKSelection, []sdkContractBinding, []sdkContractBinding, *appCredentialReadiness, error) {
+	bindings, err := resolveSDKContractBindings(ctx, registryClient, call.apiKey, append(resolved, credentialSources...))
+	// Local snapshot identity fences MCP refreshes without requiring a generated-package pin.
+	if err != nil {
+		return nil, nil, nil, nil, generationPinPlanError(err, workspaceConfigHTTPError{status: http.StatusBadRequest, message: "failed to bind service contract revisions"})
+	}
+	targetBindings, credentialSourceBindings := splitAppContractBindings(bindings, resolved)
+	selections = finalizeAppSelections(selections, targetBindings)
+
+	selections, err = resolveMCPEndpointIDs(ctx, s, selections)
+	// Physical endpoint IDs must come from the exact local contract snapshot.
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	// Imported definitions are resolved under the planning actor and copied into immutable scope.
+	selections, err = resolveImportedMCPSelections(ctx, s, call, selections, resolved, buckets)
+	// Catalog changes require a fresh reviewed plan, never an implicit runtime refresh.
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	readiness, err := inspectAppBucketReadiness(ctx, s, buckets, selections, appReadinessServiceNames(append(append([]sdkResolvedService{}, resolved...), credentialSources...), nil))
+	// Mutable credential absence becomes review metadata only after the exact
+	// immutable physical scope has passed admission.
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	return selections, targetBindings, credentialSourceBindings, readiness, nil
 }

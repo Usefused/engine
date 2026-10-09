@@ -168,6 +168,7 @@ export interface FixtureResponseContract {
 }
 
 export interface FixtureOperation {
+  imported_input_schema?: Record<string, unknown>;
   service_version_id?: string;
   operation_id: string;
   service_id: string;

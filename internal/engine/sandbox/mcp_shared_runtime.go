@@ -159,6 +159,10 @@ func mcpCorrectArgumentsResponse(code, message string) mcpCallResponse {
 
 // decodeMCPPhysicalCallInput admits provider params and the Engine-owned pagination option as separate concerns.
 func decodeMCPPhysicalCallInput(operation *FixtureOperation, request mcpCallRequest) (map[string]any, *engine.PaginationIntent, int, mcpCallResponse) {
+	// Imported MCP tools have no HTTP pagination policy and must not silently ignore caller controls.
+	if len(operation.ImportedInputSchema) > 0 && request.Pagination != nil {
+		return nil, nil, http.StatusBadRequest, mcpCallResponse{Error: "imported MCP tools do not support Engine pagination"}
+	}
 	var params map[string]any
 	// Physical params preserve their flat-map contract while Unified input remains exact raw JSON.
 	if len(request.Params) != 0 {
@@ -445,6 +449,10 @@ func dispatchMCPCall(ctx context.Context, sess *mcpSession, operationID string, 
 	ctx = contextWithMCPConnectionSelectors(ctx)
 	ctx = contextWithMCPPhysicalExecutionIdentity(ctx, params, pagination)
 
+	// Imported tool names can only reach the Engine's scoped MCP adapter.
+	if strings.HasPrefix(operationID, "mcp:") {
+		return dispatchImportedMCPCall(ctx, sess, operationID, params)
+	}
 	buf := engine.NewBoundedBufferStream(maxMCPPhysicalResultBytes)
 	err := engineExecuteCore(
 		ctx, globalObjectCache, globalDispatcher, globalTokenValidator,

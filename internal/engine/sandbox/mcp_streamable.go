@@ -130,6 +130,10 @@ func handleMCPStreamablePost(ctx context.Context, span trace.Span, w http.Respon
 		recordMCPTransportOutcome(span, "rate_limited", true)
 		return
 	}
+	// Session requests repeat token admission before native provider reads or prompt retrieval.
+	if handleImportedSessionNative(ctx, w, sess, request) {
+		return
+	}
 	serveMCPStreamableRequest(ctx, span, w, sess, body, request)
 }
 
@@ -361,6 +365,8 @@ func writeMCPStreamableRuntimeResponse(span trace.Span, w http.ResponseWriter, s
 			recordMCPTransportFailure(span, "denied", failure)
 			return false
 		}
+		// Legacy clients discover native imported capabilities during initialization.
+		response = importedInitializeResponse(response, sess.fixture)
 		w.Header().Set(mcpSessionIDHeader, sess.sessionID)
 		w.Header().Set(mcpProtocolVersionHeader, protocolVersion)
 	}

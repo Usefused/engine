@@ -1,4 +1,4 @@
-// Package mcpcatalog discovers definitions without executing provider tools or reading resource contents.
+// Package mcpcatalog discovers reviewed definitions and invokes explicitly admitted capabilities through a bounded public-HTTPS transport.
 package mcpcatalog
 
 import (

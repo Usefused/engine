@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -119,7 +120,13 @@ func buildBatchedSessionFixture(ctx context.Context, cache ObjectCache, selectio
 			return nil, err
 		}
 	}
+	// Imported tools share the same indexed catalog after exact token filtering.
+	operations, err = appendImportedFixtureOperations(operations, selections, store.AppTokenPolicy{AllowAll: allowedOperations == nil, AllowedOperations: allowedOperations})
+	if err != nil {
+		return nil, err
+	}
 	fixture := newFixtureFromOperations(ctx, operations)
+	fixture.ImportedCapabilities = importedProtocolCapabilities(selections, auth.RuntimeIdentity{TokenPolicy: store.AppTokenPolicy{AllowAll: allowedOperations == nil, AllowedOperations: allowedOperations}})
 	// Dictionary lookup is an in-memory batch over metadata preloaded during app connection.
 	if err := attachMCPDefinitions(fixture, cache, selections); err != nil {
 		return nil, err

@@ -447,3 +447,16 @@ func (fixture appTokenPolicyFixture) createToken(t *testing.T, name string, poli
 	}
 	return token
 }
+
+// TestImportedMCPCapabilityExpansionCountsStrictTokens includes revision-qualified MCP grants in the shared SQL accounting.
+func TestImportedMCPCapabilityExpansionCountsStrictTokens(t *testing.T) {
+	fixture := newAppTokenPolicyFixture(t)
+	prefix := "service:" + uuid.NewString() + ":" + uuid.NewString()
+	operation := "mcp:" + uuid.NewString() + ":prompt:summary"
+	existing := prefix + ":mcp:" + uuid.NewString() + ":operation:" + operation
+	fixture.addCapability(t, existing)
+	fixture.createToken(t, "all-imported", AppTokenPolicy{AllowAll: true})
+	fixture.createToken(t, "strict-imported", AppTokenPolicy{AllowedOperations: []string{operation}})
+	fixture.createToken(t, "other-imported", AppTokenPolicy{AllowedOperations: []string{"unselected"}})
+	fixture.assertExpansion(t, []string{prefix + ":mcp:" + uuid.NewString() + ":operation:" + operation}, true, 2, "imported revision expansion")
+}

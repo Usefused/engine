@@ -199,7 +199,7 @@ function LanguageSelector({ generationMode, language, setLanguage }: {
 function SelectedOperationsSummary({ totalSelectedServices, totalSelected }: { totalSelectedServices: number; totalSelected: number }) {
   return (
     <div className="mb-3 flex items-center justify-between">
-      <span className="text-sm text-slate-500 font-medium">Selected operations</span>
+      <span className="text-sm text-slate-500 font-medium">Selected capabilities</span>
       <div className="flex items-center gap-3">
         {totalSelectedServices > 10 && (
           <span className="text-xs font-semibold text-rose-600 bg-rose-50 px-2.5 py-1 rounded-full border border-rose-200">

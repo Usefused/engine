@@ -62,7 +62,9 @@ func Keys(raw []byte) ([]string, error) {
 	return result, nil
 }
 
+// addSelection includes every callable namespace in family-token expansion accounting.
 func addSelection(keys map[string]struct{}, selection models.SDKSelection) {
+	addImportedMCP(keys, selection)
 	prefix := "service:" + selection.ServiceID.String() + ":" + selection.ServiceVersionID.String()
 	keys[prefix] = struct{}{}
 	addSelectAll(keys, prefix, selection)

@@ -408,13 +408,14 @@ func (s *postgresStore) AssessAppCapabilityExpansion(
 			EXCEPT
 			SELECT capability_key FROM existing
 		), missing_operations AS (
+            -- Imported revision pins still map to the same exact family-token operation grant.
 			SELECT regexp_replace(
 			         capability_key,
-			         '^(service:[^:]+:[^:]+|unified:[^:]+):operation:',
+			         '^(service:[^:]+:[^:]+(:mcp:[^:]+)?|unified:[^:]+):operation:',
 			         ''
 			       ) AS operation_name
 			FROM missing
-			WHERE capability_key ~ '^(service:[^:]+:[^:]+|unified:[^:]+):operation:'
+			WHERE capability_key ~ '^(service:[^:]+:[^:]+(:mcp:[^:]+)?|unified:[^:]+):operation:'
 		), expansion AS (
 			SELECT EXISTS(SELECT 1 FROM runnable_apps)
 			   AND EXISTS(SELECT 1 FROM missing) AS expands

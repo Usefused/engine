@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	engine "github.com/Usefused/engine/internal/engine"
+	"github.com/Usefused/engine/internal/engine/mcpcatalog"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/getkin/kin-openapi/openapi3"
 )
@@ -19,6 +20,10 @@ import (
 // touches a vendor. A rejection here is a clean, script-visible error --
 // never a malformed request reaching the vendor.
 func validateCallParams(op *FixtureOperation, params map[string]any) error {
+	// Imported tool arguments preserve the reviewed JSON Schema rather than HTTP parameter flattening.
+	if len(op.ImportedInputSchema) > 0 {
+		return mcpcatalog.ValidateArguments(op.ImportedInputSchema, params)
+	}
 	var selected *engine.SelectedRequestRepresentation
 	if op.RequestContent != nil {
 		var err error

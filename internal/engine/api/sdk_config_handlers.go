@@ -107,10 +107,12 @@ var appVersionPattern = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\
 const appServerVariableLocation = "server_variable"
 
 type sdkConfigServiceDoc struct {
-	Version    string   `json:"version"`
-	Operations []string `json:"operations"`
-	Webhooks   []string `json:"webhooks,omitempty"`
-	SelectAll  bool     `json:"select_all,omitempty"`
+	// MCP selects exact imported capabilities independently of physical endpoints.
+	MCP        *models.ImportedMCPSelection `json:"mcp,omitempty"`
+	Version    string                       `json:"version"`
+	Operations []string                     `json:"operations"`
+	Webhooks   []string                     `json:"webhooks,omitempty"`
+	SelectAll  bool                         `json:"select_all,omitempty"`
 	// WebhooksSelectAll is the webhook-only counterpart to SelectAll --
 	// mirrors app service webhooks_select_all (same key) so a service can
 	// select every webhook event independent of whether it also selects
@@ -916,8 +918,8 @@ func validateAppServiceDoc(name string, service sdkConfigServiceDoc) error {
 // validateAppServiceCapabilitySelection requires a useful surface and keeps explicit and wildcard operation authority mutually exclusive.
 func validateAppServiceCapabilitySelection(name string, service sdkConfigServiceDoc) error {
 	// An empty capability surface cannot produce a usable immutable app selection.
-	if len(service.Operations) == 0 && !service.SelectAll && len(service.Webhooks) == 0 && !service.WebhooksSelectAll {
-		return fmt.Errorf("service %s requires at least one operation or webhook", name)
+	if !hasAppServiceCapabilities(service) {
+		return fmt.Errorf("service %s requires at least one operation, webhook, or imported MCP capability", name)
 	}
 	// Explicit names and select-all are competing authorities, so accepting both would make immutable scope intent ambiguous.
 	if len(service.Operations) > 0 && service.SelectAll {
@@ -1576,6 +1578,7 @@ func canonicalAppDocument(doc sdkConfigDocument) sdkConfigDocument {
 		service.Version = strings.TrimSpace(service.Version)
 		service.Operations = sortedUniqueStrings(service.Operations)
 		service.Webhooks = sortedUniqueStrings(service.Webhooks)
+		service.MCP = canonicalImportedMCPSelection(service.MCP)
 		service.Bucket = strings.TrimSpace(service.Bucket)
 		if service.Auth != nil {
 			auth := *service.Auth
@@ -2643,7 +2646,7 @@ func validateSDKServiceSelection(
 	allowedVersions map[uuid.UUID][]store.WorkspaceServiceVersion,
 ) (uuid.UUID, string, error) {
 	// An empty physical scope cannot create a meaningful service selection.
-	if len(serviceDoc.Operations) == 0 && len(serviceDoc.Webhooks) == 0 && !serviceDoc.SelectAll && !serviceDoc.WebhooksSelectAll {
+	if !hasAppServiceCapabilities(serviceDoc) {
 		return uuid.Nil, "", workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("service %s requires at least one operation or webhook", serviceName)}
 	}
 	// Registry existence alone never authorizes a service that has not been activated locally.

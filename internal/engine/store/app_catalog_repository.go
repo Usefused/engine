@@ -129,12 +129,13 @@ func (s *postgresStore) ListAuthorizedAppsByFamily(ctx context.Context, accountI
 	return scanAppCatalogItems(rows)
 }
 
+// ListAuthorizedAppServiceSummaries counts absent or JSON-null physical lists as empty for imported-only apps.
 func (s *postgresStore) ListAuthorizedAppServiceSummaries(ctx context.Context, accountID, appID uuid.UUID, scope accesscontrol.AuthorizedScope) ([]AppServiceSummary, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT service.service_id, COALESCE(service.service_slug, ''), COALESCE(service.service_name, ''),
 		       COALESCE(version.version, ''), COALESCE((selection->>'select_all')::boolean, false),
-		       jsonb_array_length(COALESCE(selection->'endpoint_ids', '[]'::jsonb)),
-		       jsonb_array_length(COALESCE(selection->'webhook_ids', '[]'::jsonb))
+		       jsonb_array_length(COALESCE(NULLIF(selection->'endpoint_ids', 'null'::jsonb), '[]'::jsonb)),
+		       jsonb_array_length(COALESCE(NULLIF(selection->'webhook_ids', 'null'::jsonb), '[]'::jsonb))
 		FROM fused_apps app
 		CROSS JOIN LATERAL jsonb_array_elements(app.selections) selection
 		JOIN fused_workspace_services service ON service.service_id = (selection->>'service_id')::uuid

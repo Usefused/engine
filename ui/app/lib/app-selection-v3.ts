@@ -1,6 +1,7 @@
 export const APP_SELECTION_SCHEMA_VERSION = 3;
 
 export type AppSelectionPayload = {
+  mcp_capabilities?: Array<{ kind: string; name: string; operation_id: string }>;
   service_id: string;
   service_version_id?: string | null;
   schema_version: number;

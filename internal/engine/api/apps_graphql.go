@@ -50,6 +50,7 @@ var appSummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 var appSelectionGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "AppSelection",
 	Fields: graphql.Fields{
+		"mcp_capabilities":   &graphql.Field{Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(importedMCPCapabilityGraphQLType)))},
 		"service_id":         &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
 		"service_version_id": &graphql.Field{Type: graphql.String},
 		"schema_version":     &graphql.Field{Type: graphql.NewNonNull(graphql.Int)},
@@ -335,6 +336,16 @@ func mergeMCPAppOperations(selections []models.SDKSelection, matches []store.Ser
 			return nil, err
 		}
 	}
+	// Imported native grants belong in the token picker alongside callable tools.
+	for _, selection := range selections {
+		for _, item := range models.ImportedMCPCapabilities(selection) {
+			operation := mcpAppOperation{OperationID: item.OperationID, Kind: "mcp_" + item.Kind, ServiceID: selection.ServiceID, ServiceVersionID: selection.ServiceVersionID}
+			// A physical operation cannot shadow an imported grant in the shared execute namespace.
+			if err := appendUniqueMCPAppOperation(&operations, seen, operation); err != nil {
+				return nil, err
+			}
+		}
+	}
 	sort.Slice(operations, func(left, right int) bool {
 		// Operation ID is the public invocation key; kind is only a deterministic tie-breaker for corrupt duplicate input.
 		if operations[left].OperationID == operations[right].OperationID {
@@ -369,7 +380,7 @@ func mcpAppOperationCatalogueFields(catalogue mcpAppOperationCatalogue) map[stri
 	for _, operation := range catalogue.Operations {
 		serviceID, serviceVersionID := "", ""
 		// Physical rows retain exact service provenance while Unified rows intentionally expose no private targets.
-		if operation.Kind == appOperationKindPhysical {
+		if operation.Kind == appOperationKindPhysical || strings.HasPrefix(operation.Kind, "mcp_") {
 			serviceID, serviceVersionID = operation.ServiceID.String(), operation.ServiceVersionID.String()
 		}
 		operations = append(operations, map[string]interface{}{
@@ -559,8 +570,9 @@ func appSelectionFields(item store.AppCatalogItem) []map[string]interface{} {
 		}
 		selections = append(selections, map[string]interface{}{
 			"service_id": selection.ServiceID.String(), "service_version_id": serviceVersionID,
-			"schema_version": selection.SchemaVersion,
-			"endpoint_ids":   endpointIDs, "operation_names": nonNilStrings(selection.OperationNames),
+			"schema_version":   selection.SchemaVersion,
+			"mcp_capabilities": importedMCPCapabilityFields(selection),
+			"endpoint_ids":     endpointIDs, "operation_names": nonNilStrings(selection.OperationNames),
 			"webhook_ids": webhookIDs, "webhook_names": nonNilStrings(selection.WebhookNames),
 			"select_all": selection.SelectAll, "webhook_select_all": selection.WebhookSelectAll,
 			"auth_type": selection.AuthType, "auth_name": selection.AuthName, "auth_ref": selection.AuthRef,
@@ -606,4 +618,19 @@ func appServiceSummaryFields(service store.AppServiceSummary) map[string]interfa
 		"select_all": service.SelectAll, "endpoint_count": service.EndpointCount,
 		"webhook_count": service.WebhookCount,
 	}
+}
+
+var importedMCPCapabilityGraphQLType = graphql.NewObject(graphql.ObjectConfig{Name: "ImportedMCPCapability", Fields: graphql.Fields{
+	"kind":         &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+	"name":         &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+	"operation_id": &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+}})
+
+// importedMCPCapabilityFields exposes only reviewed names, never connection credentials or provider headers.
+func importedMCPCapabilityFields(selection models.SDKSelection) []map[string]interface{} {
+	result := []map[string]interface{}{}
+	for _, item := range models.ImportedMCPCapabilities(selection) {
+		result = append(result, map[string]interface{}{"kind": item.Kind, "name": item.Name, "operation_id": item.OperationID})
+	}
+	return result
 }

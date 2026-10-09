@@ -1021,7 +1021,7 @@ type ServiceChangelogConfigType string
 
 const (
 	ServiceChangelogConfigTypeVersion           ServiceChangelogConfigType = "version"
-	ServiceChangelogConfigTypeExecutionPolicy  ServiceChangelogConfigType = "execution_policy"
+	ServiceChangelogConfigTypeExecutionPolicy   ServiceChangelogConfigType = "execution_policy"
 	ServiceChangelogConfigTypeConnectionProfile ServiceChangelogConfigType = "connection_profile"
 )
 
@@ -1111,14 +1111,16 @@ type SDKRequiredAuth struct {
 }
 
 type SDKSelection struct {
-	ServiceID        uuid.UUID   `json:"service_id"`
-	ServiceVersionID uuid.UUID   `json:"service_version_id"`
-	SchemaVersion    int         `json:"schema_version,omitempty"`
-	EndpointIDs      []uuid.UUID `json:"endpoint_ids"`
-	OperationNames   []string    `json:"operation_names,omitempty"`
-	WebhookIDs       []uuid.UUID `json:"webhook_ids,omitempty"`
-	WebhookNames     []string    `json:"webhook_names,omitempty"`
-	SelectAll        bool        `json:"select_all,omitempty"`
+	// ImportedMCP is pinned at plan time rather than following the mutable service catalog.
+	ImportedMCP      *ImportedMCPBinding `json:"imported_mcp,omitempty"`
+	ServiceID        uuid.UUID           `json:"service_id"`
+	ServiceVersionID uuid.UUID           `json:"service_version_id"`
+	SchemaVersion    int                 `json:"schema_version,omitempty"`
+	EndpointIDs      []uuid.UUID         `json:"endpoint_ids"`
+	OperationNames   []string            `json:"operation_names,omitempty"`
+	WebhookIDs       []uuid.UUID         `json:"webhook_ids,omitempty"`
+	WebhookNames     []string            `json:"webhook_names,omitempty"`
+	SelectAll        bool                `json:"select_all,omitempty"`
 	// WebhookSelectAll is the webhook-only counterpart to SelectAll -- a
 	// service can select every operation and only an explicit subset of
 	// webhooks, or vice versa (see cli/internal/configfile's
@@ -1186,21 +1188,21 @@ type SDKContractBinding struct {
 
 type SDKGenerationRequest struct {
 	// UnifiedApps carries public hosted contracts, never source or execution tokens.
-	UnifiedApps []UnifiedAppBinding `json:"unified_apps,omitempty"`
-	Name             string         `json:"name"`
-	Description      string         `json:"description"`
-	Version          string         `json:"version"`
-	AppFamilyID      uuid.UUID      `json:"app_family_id"`
-	AppID            uuid.UUID      `json:"app_id"`
-	SourceHash       string         `json:"source_hash"`
-	GeneratorVersion string         `json:"generator_version"`
-	IdempotencyKey   string         `json:"idempotency_key,omitempty"`
-	Selections       []SDKSelection `json:"selections"`
-	IncludeMCP       bool           `json:"include_mcp"`
-	TargetType       string         `json:"target_type"`
-	TargetLanguage   string         `json:"target_language"`
-	DefaultEngineURL string         `json:"default_engine_url,omitempty"`
-	SkipSandbox      bool           `json:"skip_sandbox"`
+	UnifiedApps      []UnifiedAppBinding `json:"unified_apps,omitempty"`
+	Name             string              `json:"name"`
+	Description      string              `json:"description"`
+	Version          string              `json:"version"`
+	AppFamilyID      uuid.UUID           `json:"app_family_id"`
+	AppID            uuid.UUID           `json:"app_id"`
+	SourceHash       string              `json:"source_hash"`
+	GeneratorVersion string              `json:"generator_version"`
+	IdempotencyKey   string              `json:"idempotency_key,omitempty"`
+	Selections       []SDKSelection      `json:"selections"`
+	IncludeMCP       bool                `json:"include_mcp"`
+	TargetType       string              `json:"target_type"`
+	TargetLanguage   string              `json:"target_language"`
+	DefaultEngineURL string              `json:"default_engine_url,omitempty"`
+	SkipSandbox      bool                `json:"skip_sandbox"`
 	// SkipPackaging resolves the scope and publishes the app version without
 	// building a downloadable package (sdk.yaml generate: false). Everything
 	// validated here -- selections, generator version, scope schema version --

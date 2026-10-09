@@ -10,10 +10,11 @@ references stay local to the imported document; inspection never fetches resourc
 or executes tools. Search fields fill their catalog toolbar, and Operations has an
 exact method filter that retains pagination and selected resource versions. Opening the tab reads the saved snapshot without contacting the server.
 
-This first implementation is an Engine-local catalog attachment. It does not
-publish definitions into Registry, add executable operations to existing apps,
-call tools, render prompts, or fetch resource contents. Approved catalog revisions
-are retained separately from the immutable Registry execution contract.
+Catalog attachments remain Engine-local and separate from Registry contracts.
+Importing or refreshing a service catalog does not change existing apps. A new MCP
+app version can explicitly select tools, prompts, resources, and resource templates
+from an approved catalog revision. The app stores those exact definitions and its
+connection reference in the existing immutable selection contract.
 
 ## Connection and access
 
@@ -100,3 +101,40 @@ Additional browser checks passed for GET/POST filtering, combined operation sear
 and method filtering, widened searches in all three tabs, grouped MCP search,
 tool inspector schema expansion, and Escape restoring focus to the selected row.
 The focused UI tests pass (19 total); three unrelated baseline TypeScript errors remain.
+
+## Using imported capabilities in MCP apps
+
+The MCP app builder renders a collapsible MCP section beside Endpoints and Webhooks,
+with explicit Select All, search, resource-type filtering, and grouped rows. Its
+selection pins `mcp.revision_id` and exact `tools`, `prompts`, `resources`, and
+`resource_templates` arrays in the service entry. Resources are selected by URI;
+templates by URI template. Empty, stale, duplicate, or unknown selections fail plan.
+Imported capabilities are currently admitted only for `kind: mcp`.
+
+Selected tools appear in `search_docs` with their original input schema and execute
+through `execute` using `call("mcp:<service-id>:tool:<name>", args)`. Fused still
+exposes exactly two tools. Native `prompts/list` / `prompts/get` and
+`resources/list` / `resources/templates/list` / `resources/read` expose selected
+prompts and resources directly. Prompt names and resource URIs are service-qualified
+to prevent collisions. Resource templates grant only matching concrete URIs.
+
+Family-token restrictions apply to discovery and invocation using the same exact
+capability grants. Adding imported capabilities participates in normal immutable
+versioning, capability hashes, and restricted-token expansion checks. Connections
+use the service's app-family bucket; credential-derived catalogs require the same
+bucket used at import. Provider credentials remain in Engine. Calls use the normal
+account quota/concurrency gate and canonical execution-event publisher. Activity
+metadata excludes arguments, results, credentials, and concrete resource URIs.
+
+Upstream invocation uses the same public-HTTPS and DNS restrictions as discovery,
+a 30-second budget, bounded results, and no automatic retries. Tool arguments are
+validated against the pinned schema with no remote reference fetching. Upstream
+change notifications, subscriptions, interactive OAuth, and bidirectional provider
+requests are not forwarded. Catalog refresh requires an explicit new app selection
+to expose changed definitions.
+
+Verification includes real SDK tool/prompt/resource calls for both supported
+protocol revisions, exact selection and token isolation, schema validation,
+resource-template admission, URI namespacing, immutable pinning, and PostgreSQL
+restricted-token expansion checks. The local Fused UI also created an imported-only
+MCP app and called its selected public DeepWiki tool through `search_docs`/`execute`.

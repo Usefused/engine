@@ -13,17 +13,18 @@ import (
 // intentionally reuses canonical execution-contract types so search_docs and
 // call validation cannot drift into a second request or response schema.
 type FixtureOperation struct {
-	ServiceVersionID string                 `json:"service_version_id,omitempty"`
-	OperationID      string                 `json:"operation_id"`
-	ServiceID        string                 `json:"service_id"`
-	Name             string                 `json:"name"`
-	Description      string                 `json:"description"`
-	Method           string                 `json:"method"`
-	Path             string                 `json:"path"`
-	Parameters       []models.Parameter     `json:"parameters"`
-	RequestContent   *models.RequestContent `json:"request_content,omitempty"`
-	Responses        models.Responses       `json:"responses"`
-	Pagination       FixturePagination      `json:"pagination"`
+	ImportedInputSchema json.RawMessage        `json:"imported_input_schema,omitempty"`
+	ServiceVersionID    string                 `json:"service_version_id,omitempty"`
+	OperationID         string                 `json:"operation_id"`
+	ServiceID           string                 `json:"service_id"`
+	Name                string                 `json:"name"`
+	Description         string                 `json:"description"`
+	Method              string                 `json:"method"`
+	Path                string                 `json:"path"`
+	Parameters          []models.Parameter     `json:"parameters"`
+	RequestContent      *models.RequestContent `json:"request_content,omitempty"`
+	Responses           models.Responses       `json:"responses"`
+	Pagination          FixturePagination      `json:"pagination"`
 }
 
 // FixturePagination exposes only the caller controls needed to invoke an operation safely.
@@ -44,7 +45,8 @@ type FixtureServerMetadata struct {
 
 // Fixture is the app-scoped operation catalogue serialized for the shared MCP runtime.
 type Fixture struct {
-	Server FixtureServerMetadata `json:"server"`
+	ImportedCapabilities map[string]any        `json:"imported_capabilities,omitempty"`
+	Server               FixtureServerMetadata `json:"server"`
 	// Request-local classifier output is never persisted or supplied by an MCP caller.
 	ClassifierOperationNames *[]string `json:"classifier_operation_names,omitempty"`
 	// Version-keyed dictionaries are serialized once for lazy schema documentation lookup.
@@ -53,7 +55,7 @@ type Fixture struct {
 
 	// byOperationID is built once so repeated tool calls do not scan the app's
 	// complete selected operation set.
-	byOperationID        map[string]*FixtureOperation
+	byOperationID map[string]*FixtureOperation
 }
 
 // LoadFixture reads a serialized catalogue for contract tests and offline

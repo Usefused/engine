@@ -28,16 +28,16 @@ type ServiceConsumerRepository interface {
 	ListServiceConsumers(context.Context, uuid.UUID, accesscontrol.AuthorizedScope, uuid.UUID) ([]ServiceConsumer, error)
 }
 
-// listServiceConsumersSQL treats building apps as dependency owners even though they are not executable yet.
+// listServiceConsumersSQL retains building and imported-only dependencies; JSON-null physical lists count as empty.
 const listServiceConsumersSQL = `
 		SELECT app.app_id, family.display_name,
 		       app.version, family.kind, app.status,
 		       NULLIF(selection->>'service_version_id', '')::uuid,
 		       COALESCE((selection->>'select_all')::boolean, false),
-		       jsonb_array_length(COALESCE(selection->'endpoint_ids', '[]'::jsonb))
-		         + jsonb_array_length(COALESCE(selection->'operation_names', '[]'::jsonb)),
-		       jsonb_array_length(COALESCE(selection->'webhook_ids', '[]'::jsonb))
-		         + jsonb_array_length(COALESCE(selection->'webhook_names', '[]'::jsonb)),
+		       jsonb_array_length(COALESCE(NULLIF(selection->'endpoint_ids', 'null'::jsonb), '[]'::jsonb))
+		         + jsonb_array_length(COALESCE(NULLIF(selection->'operation_names', 'null'::jsonb), '[]'::jsonb)),
+		       jsonb_array_length(COALESCE(NULLIF(selection->'webhook_ids', 'null'::jsonb), '[]'::jsonb))
+		         + jsonb_array_length(COALESCE(NULLIF(selection->'webhook_names', 'null'::jsonb), '[]'::jsonb)),
 		       app.created_at
 		FROM fused_apps app
 		JOIN fused_app_families family ON family.app_family_id = app.app_family_id AND family.account_id = app.account_id

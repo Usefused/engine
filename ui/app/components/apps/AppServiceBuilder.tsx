@@ -1,3 +1,4 @@
+import { ImportedMcpPicker, importedMcpCount, type ImportedMcpSelection } from "./ImportedMcpPicker";
 import { AppServiceAuthFields, type AppAuthService } from "~/components/apps/AppServiceAuthFields";
 import { useAppCredentialReview } from "~/components/apps/useAppCredentialReview";
 import { applyAppAuthEdits, type AppAuthEdits } from "~/lib/app-service-auth";
@@ -70,6 +71,7 @@ type ServiceData = {
 };
 
 type AppSelection = {
+  mcp?: ImportedMcpSelection;
   service_id: string;
   service_name?: string;
   service_slug?: string;
@@ -82,6 +84,7 @@ type AppSelection = {
 type GenerationMode = AppCreationMode;
 
 type SelectionMaps = {
+  mcpSelections?: Record<string, ImportedMcpSelection | undefined>;
   selections: Record<string, Set<string>>;
   selectAllServices: Set<string>;
   webhookSelections: Record<string, Set<string>>;
@@ -140,7 +143,7 @@ type BuilderCreationContext = {
 function hasServiceSelection(serviceId: string, maps: SelectionMaps): boolean {
   return maps.selectAllServices.has(serviceId) ||
     (maps.selections[serviceId]?.size || 0) > 0 ||
-    (maps.webhookSelections[serviceId]?.size || 0) > 0;
+    (maps.webhookSelections[serviceId]?.size || 0) > 0 || importedMcpCount(maps.mcpSelections?.[serviceId]) > 0;
 }
 
 // buildAppSelection creates one exact-version service selection for plan/apply.
@@ -150,13 +153,14 @@ function buildAppSelection(
   maps: SelectionMaps
 ): AppSelection {
   const serviceData = data.find((candidate) => candidate.service.id === serviceId);
-  const serviceVersionId = maps.versionSelections[serviceId] || serviceData?.serviceVersions[0]?.id;
+  const serviceVersionId = selectedBuilderVersion(maps, serviceId, serviceData);
   const endpointIds = maps.selectAllServices.has(serviceId)
     ? []
     : Array.from(maps.selections[serviceId] || new Set<string>());
   // Provider-qualified identity keeps two publishers with the same slug from overwriting each other's grants.
   const serviceKey = serviceData ? serviceReference(serviceData.service) : undefined;
   return {
+    mcp: selectedImportedMcp(maps, serviceId),
     service_id: serviceId,
     service_name: serviceData?.service.name,
     service_slug: serviceKey || serviceData?.service.slug,
@@ -173,6 +177,7 @@ function buildAppSelections(data: ServiceData[], maps: SelectionMaps): AppSelect
     ...Object.keys(maps.selections),
     ...maps.selectAllServices,
     ...Object.keys(maps.webhookSelections),
+    ...Object.keys(maps.mcpSelections ?? {}),
   ]);
   return Array.from(serviceIds)
     .filter((serviceId) => hasServiceSelection(serviceId, maps))
@@ -618,6 +623,7 @@ function appServiceEntry(selection: AppSelection, services: ServiceData[]): [str
     operations: appOperations(selection, service),
     webhooks: appWebhooks(selection, service),
     select_all: selection.select_all,
+    mcp: selection.mcp,
   }];
 }
 
@@ -715,6 +721,8 @@ function AddSelectedServiceToWorkspaceButton({
 }
 
 type BuilderServiceInteractions = {
+  mcpSelections: Record<string, ImportedMcpSelection | undefined>;
+  updateMcpSelection: (serviceID: string, value?: ImportedMcpSelection) => void;
   specificOperationsOnly?: boolean;
   allowWebhooks?: boolean;
   expanded: Record<string, boolean>;
@@ -806,7 +814,7 @@ function serviceCardView(item: ServiceData, state: BuilderServiceInteractions): 
     selectAll,
     endpointCount,
     webhookCount,
-    totalSelected: selectedEndpointCount + selectedWebhooks.size,
+    totalSelected: selectedEndpointCount + selectedWebhooks.size + importedMcpCount(state.mcpSelections[serviceId]),
   };
 }
 
@@ -1075,6 +1083,8 @@ function BuilderExpandedService({
         onSelect={state.handleVersionSelection}
       />
       <BuilderEndpointsSection item={item} view={view} sections={sections} state={state} />
+      {/* Native capabilities are currently supported by standalone hosted MCP apps. */}
+      {generationMode === "mcp" && <ImportedMcpPicker key={selectedVersionId} serviceID={serviceId} versionID={selectedVersionId} value={state.mcpSelections[serviceId]} onChange={state.updateMcpSelection} />}
       {/* Hosted source keeps exact operation pins while using the shared event picker. */}
       {state.allowWebhooks && <BuilderWebhooksSection item={item} view={view} sections={sections} state={state} />}
     </div>
@@ -1521,6 +1531,9 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   // Services where ALL endpoints are selected — no need to enumerate IDs
   const [selectAllServices, setSelectAllServices] = useState<Set<string>>(new Set());
   // Webhook selection state: Map of Service ID -> Set of Webhook IDs
+  const [mcpSelections, setMcpSelections] = useState<Record<string, ImportedMcpSelection | undefined>>({});
+  // Exact catalog selections share the form's immutable service-version lifetime.
+  const updateMcpSelection = (serviceID: string, value?: ImportedMcpSelection) => setMcpSelections((previous) => ({ ...previous, [serviceID]: value }));
   const [webhookSelections, setWebhookSelections] = useState<Record<string, Set<string>>>({});
   // Service version selection state: Map of Service ID -> Service Version ID
   const [versionSelections, setVersionSelections] = useState<Record<string, string>>({});
@@ -1564,7 +1577,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   const [describing, setDescribing] = useState(false);
   const [seedBusy, setSeedBusy] = useState(false);
   const selectionRef = useRef(new Set<string>());
-  selectionRef.current = new Set([...Object.keys(selections).filter((id) => selections[id].size), ...selectAllServices, ...Object.keys(webhookSelections).filter((id) => webhookSelections[id].size)]);
+  selectionRef.current = new Set([...Object.keys(selections).filter((id) => selections[id].size), ...selectAllServices, ...Object.keys(webhookSelections).filter((id) => webhookSelections[id].size), ...Object.keys(mcpSelections).filter((id) => importedMcpCount(mcpSelections[id]) > 0)]);
   const pickerChange = useRef(picker?.onChange);
   pickerChange.current = picker?.onChange;
   const emittedSelection = useRef("");
@@ -1613,7 +1626,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     // In-flight version changes cannot publish old row IDs under a new version pin.
     if (!picker || hydratedSeed.current !== picker.seed || seedBusy || Object.values(loadingService).some(Boolean)) return;
     const pins: Record<string, AppServicePin> = {};
-    for (const selection of buildAppSelections(data, { selections, selectAllServices, webhookSelections, versionSelections })) {
+    for (const selection of buildAppSelections(data, { selections, selectAllServices, webhookSelections, mcpSelections, versionSelections })) {
       const row = data.find((item) => item.service.id === selection.service_id);
       const version = row?.serviceVersions.find((item) => item.id === selection.service_version_id);
       // A loading or unpinned row cannot become a valid hosted capability.
@@ -1629,7 +1642,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     if (serialized === emittedSelection.current) return;
     emittedSelection.current = serialized;
     pickerChange.current?.(pins);
-  }, [picker?.seed, seedBusy, loadingService, data, selections, selectAllServices, webhookSelections, versionSelections]);
+  }, [picker?.seed, seedBusy, loadingService, data, selections, selectAllServices, webhookSelections, mcpSelections, versionSelections]);
 
 
   const selectionPending = seedBusy || Boolean(picker && hydratedSeed.current !== picker.seed) || Object.values(loadingService).some(Boolean);
@@ -2061,6 +2074,8 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
       // could generate a selection the Registry correctly rejects.
       setSelections((previous) => ({ ...previous, [serviceId]: new Set() }));
       setWebhookSelections((previous) => ({ ...previous, [serviceId]: new Set() }));
+      // A different service version cannot retain the old catalog revision.
+      updateMcpSelection(serviceId, undefined);
       setSelectAllServices((previous) => {
         const next = new Set(previous);
         next.delete(serviceId);
@@ -2170,7 +2185,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     const endpointCount = selectAllServices.has(service.id)
       ? (service.endpoint_count || integrations.length || 0)
       : (selections[service.id]?.size || 0);
-    return acc + endpointCount + (webhookSelections[service.id]?.size || 0);
+    return acc + endpointCount + (webhookSelections[service.id]?.size || 0) + importedMcpCount(mcpSelections[service.id]);
   }, 0);
   const totalSelectedWebhooks = Object.values(webhookSelections).reduce((total, selected) => total + selected.size, 0);
   // An existing app's hidden manual choices cannot expand its immutable source.
@@ -2178,7 +2193,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   const attachedAliases = new Set(Object.keys(source?.config.unified_apps ?? {}));
   if (attachment) attachedAliases.add(attachmentAlias);
   const totalSelected = builderPhysicalCount(source, physicalSelected) + workflowSelection.operations + attachedAliases.size;
-  const totalSelectedServices = builderServiceCount(source, workflowSelection, data, { selections, selectAllServices, webhookSelections, versionSelections });
+  const totalSelectedServices = builderServiceCount(source, workflowSelection, data, { selections, selectAllServices, webhookSelections, mcpSelections, versionSelections });
 
   // Task 7 (engine_workspace_registration_plan.md): the Registry's direct
   // /sdks/generate is now workspace-gated server-side (Task 6), so a
@@ -2191,7 +2206,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     .filter(({ service }) =>
       selectAllServices.has(service.id) ||
       (selections[service.id]?.size || 0) > 0 ||
-      (webhookSelections[service.id]?.size || 0) > 0
+      (webhookSelections[service.id]?.size || 0) > 0 || importedMcpCount(mcpSelections[service.id]) > 0
     )
     .map(({ service }) => service.id);
   const unactivatedSelectedServiceIds = unactivatedBuilderServices(Boolean(source), isAuth, canReadServices, workspaceServicesLoaded, selectedServiceIdsForGate, workspaceServiceIds);
@@ -2234,7 +2249,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     // Inbound-only selections have no provider request whose auth can be changed.
     if (!service || (!service.operations?.length && !service.select_all)) return [];
     return [{ key: pin.key, service_id: pin.service_id, version: service.version, auth: service.auth }];
-  }) : buildAppSelections(data, { selections, selectAllServices, webhookSelections, versionSelections }).flatMap((selection) => {
+  }) : buildAppSelections(data, { selections, selectAllServices, webhookSelections, mcpSelections, versionSelections }).flatMap((selection) => {
     const [key, service] = appServiceEntry(selection, data);
     // A selected version is required before fetching its auth contract.
     if (!service.version || (!(service.operations as string[]).length && !selection.select_all)) return [];
@@ -2259,6 +2274,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
       selections,
       selectAllServices,
       webhookSelections,
+      mcpSelections,
       versionSelections,
     });
     const validation = validateGenerationInput({
@@ -2342,6 +2358,8 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     loadedServices,
     selections,
     webhookSelections,
+    mcpSelections,
+    updateMcpSelection,
     selectAllServices,
     loadingService,
     expandedSections,
@@ -2459,3 +2477,8 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   // Source loading requires app.manage; new-app creation remains governed by its workspace create permission.
   return <BuilderCreationAccess existing={Boolean(source)} mode={generationMode}>{pageContent}{(sdkDeployment || mcpDeployment) && credentialReview.warning}{credentialCreation.dialog}{credentialReview.dialog}</BuilderCreationAccess>;
 }
+
+/** Reads an optional imported selection without mixing its revision with physical row IDs. */
+function selectedImportedMcp(maps: SelectionMaps, serviceId: string) { return maps.mcpSelections?.[serviceId]; }
+/** Uses the explicit version pin before the service's initially displayed version. */
+function selectedBuilderVersion(maps: SelectionMaps, serviceId: string, data?: ServiceData) { return maps.versionSelections[serviceId] || data?.serviceVersions[0]?.id; }

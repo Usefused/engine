@@ -9,17 +9,20 @@ export type { AppConnectedServiceSelection } from "~/lib/app-connected-services"
 
 /** Describes the immutable selection without implying that IDs were relabelled later. */
 function selectionSummary(selection: AppConnectedServiceSelection): string {
-  if (selection.select_all) return "All operations";
   const operationCount = selection.operation_names?.length || selection.endpoint_ids.length;
   const webhookCount = selection.webhook_names?.length || selection.webhook_ids.length;
-  const labels = [countLabel(operationCount, "operation"), countLabel(webhookCount, "webhook")].filter(Boolean);
+  // Selecting all physical operations does not imply any imported MCP grants.
+  const operations = selection.select_all ? "All operations" : countLabel(operationCount, "operation");
+  const labels = [operations, countLabel(webhookCount, "webhook"), countLabel(selection.mcp_capabilities?.length ?? 0, "MCP capability", "MCP capabilities")].filter(Boolean);
   return labels.join(" · ") || "No selected resources";
 }
 
 /** Keeps singular and plural resource labels consistent in every app detail page. */
-function countLabel(count: number, label: string): string {
+function countLabel(count: number, label: string, plural = `${label}s`): string {
+  // Empty categories should not clutter the connected-service summary.
   if (count === 0) return "";
-  return `${count} ${label}${count === 1 ? "" : "s"}`;
+  // Imported capabilities need an explicit irregular plural.
+  return `${count} ${count === 1 ? label : plural}`;
 }
 
 function AllOperationsNotice({ selection }: { selection: AppConnectedServiceSelection }) {
@@ -102,10 +105,24 @@ export function AppConnectedServices({ selections }: { selections: AppConnectedS
           <div className="bg-white">
             <SelectedOperations selection={selection} />
             <SelectedWebhooks selection={selection} />
+            <SelectedImportedMcp selection={selection} />
             {selection.service_slug ? <div className="border-t border-slate-100 px-4 py-3 sm:px-5"><ServiceLink selection={selection} /></div> : null}
           </div>
         </details>
       ))}
     </div>
   );
+}
+
+/** Shows the immutable imported grant list beside selected endpoints and webhooks. */
+function SelectedImportedMcp({ selection }: { selection: AppConnectedServiceSelection }) {
+  // Older physical-only apps have no imported metadata to render.
+  if (!selection.mcp_capabilities?.length) return null;
+  return <section aria-label="Enabled MCP capabilities">
+    <div className="border-y border-slate-100 bg-slate-50 px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-slate-600 sm:px-5">MCP capabilities</div>
+    <div className="divide-y divide-slate-100">{selection.mcp_capabilities.map((item) => <div key={item.operation_id} className="flex min-w-0 items-start gap-3 px-4 py-3 sm:px-5">
+      <span className="rounded bg-violet-50 px-2 py-1 text-[10px] font-semibold uppercase text-violet-700">{item.kind}</span>
+      <span className="min-w-0 break-words text-sm text-slate-800">{item.name}</span>
+    </div>)}</div>
+  </section>;
 }

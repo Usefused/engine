@@ -129,8 +129,9 @@ func startMCPSSESession(r *http.Request, w http.ResponseWriter, routeID, appID, 
 		return "", nil, nil, false
 	}
 	registerMCPSession(sessionCtx, &mcpSession{
-		clientMetadata: initialMCPSessionMetadata(r),
-		appID:          appID, routeID: routeID, sessionID: sessionID, tokenID: identity.TokenID,
+		clientMetadata:      initialMCPSessionMetadata(r),
+		serverNotifications: make(chan string, maxMCPServerNotifications),
+		appID:               appID, routeID: routeID, sessionID: sessionID, tokenID: identity.TokenID,
 		protocolVersion: "2024-11-05", transport: "sse", cmd: cmd, stdin: stdin,
 		cancel: cancel, token: token, fixture: fixture, authContext: authContext,
 	})
@@ -702,6 +703,7 @@ func processMCPStream(ctx context.Context, w http.ResponseWriter, flusher http.F
 		_ = scanMCPResponseLines(ctx, stdout, stdoutLines)
 	}()
 
+	serverNotifications := importedSSENotifications(sessionID)
 	pingTicker := time.NewTicker(15 * time.Second)
 	defer pingTicker.Stop()
 	for {
@@ -716,8 +718,11 @@ func processMCPStream(ctx context.Context, w http.ResponseWriter, flusher http.F
 			if !ok {
 				return
 			}
+			line = importedSSEInitializeResponse(sessionID, line)
 			writeMCPSSEMessage(w, flusher, line)
 			handleMCPResponse(line, sessionID)
+		case response := <-serverNotifications:
+			writeMCPSSEMessage(w, flusher, response)
 		case failure := <-serverFailures:
 			writeMCPSSEMessage(w, flusher, failure.payload)
 			terminateMCPSession(sessionID, failure.endReason)
@@ -843,6 +848,10 @@ func mcpMessageHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		recordMCPMessageLimit(ctx, sess.appID, "sse", err)
 		recordMCPTransportOutcome(span, "invalid", true)
+		return
+	}
+	// Native imported requests share legacy authentication and rate limits before asynchronous delivery.
+	if handleImportedSSENative(ctx, w, sess, body) {
 		return
 	}
 	dispatchMCPSSEMessage(ctx, span, w, sess, body)

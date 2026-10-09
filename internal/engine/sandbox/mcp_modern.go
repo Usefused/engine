@@ -113,27 +113,11 @@ func handleMCPModernPost(ctx context.Context, span trace.Span, w http.ResponseWr
 		return
 	}
 	// The modern surface unifies the established tool runtime with event resources on one stateless endpoint.
-	switch request.Method {
-	case "server/discover":
-		handleMCPModernDiscover(w, request, admission)
-	case "ping":
-		writeMCPModernResult(w, request.ID, map[string]any{}, admission.server)
-	case "tools/list":
-		handleMCPModernToolsList(ctx, span, w, r, routeID, token, request, admission)
-	case "tools/call":
-		handleMCPModernToolsCall(ctx, span, w, r, routeID, token, request, admission)
-	case "resources/list":
-		handleMCPModernResourcesList(w, request, admission)
-	case "resources/templates/list":
-		handleMCPModernResourceTemplatesList(w, request, admission)
-	case "resources/read":
-		handleMCPModernResourceRead(w, request, admission)
-	case "subscriptions/listen":
-		handleMCPModernSubscriptionsListen(ctx, w, token, request, admission)
-	default:
-		// Removed and unadvertised methods fail explicitly instead of falling through to the sessionful child runtime.
-		writeMCPModernError(w, request.ID, -32601, "method is not available for protocol version "+mcpModernProtocolVersion, http.StatusNotFound, nil)
+	// Native imported capabilities share exact app admission and the transport's message budget.
+	if handleImportedNative(ctx, w, request, admission.identity, &admission.server, admission.resources) {
+		return
 	}
+	dispatchMCPModernRequest(ctx, span, w, r, routeID, token, request, admission)
 	recordMCPTransportOutcome(span, "success", false)
 }
 
@@ -242,7 +226,7 @@ func allowMCPModernSubscriptionStart(w http.ResponseWriter, requestID json.RawMe
 // mcpModernRequestName returns the exact parameter mirrored by Mcp-Name for standard routed methods.
 func mcpModernRequestName(request mcpJSONRPCRequest) (string, bool, error) {
 	// List and discovery methods have no routed name to mirror at the HTTP edge.
-	if request.Method != "resources/read" && request.Method != "tools/call" {
+	if request.Method != "resources/read" && request.Method != "tools/call" && request.Method != "prompts/get" {
 		return "", false, nil
 	}
 	var params struct {
@@ -254,22 +238,13 @@ func mcpModernRequestName(request mcpJSONRPCRequest) (string, bool, error) {
 		return "", true, errors.New(request.Method + " requires valid params")
 	}
 	// Tool calls mirror their exact bounded public tool name for gateway routing.
-	if request.Method == "tools/call" {
+	if request.Method == "tools/call" || request.Method == "prompts/get" {
 		if strings.TrimSpace(params.Name) == "" || len(params.Name) > 256 {
 			return "", true, errors.New("tools/call requires a valid name")
 		}
 		return params.Name, true, nil
 	}
-	// An empty or oversized URI cannot become either an authorization lookup or a routing header value.
-	if strings.TrimSpace(params.URI) == "" || len(params.URI) > maxMCPModernResourceURIBytes {
-		return "", true, errors.New("resources/read requires a valid uri")
-	}
-	parsed, err := url.ParseRequestURI(params.URI)
-	// Resource identities must be absolute URIs so routing cannot depend on an implicit base.
-	if err != nil || parsed.Scheme == "" {
-		return "", true, errors.New("resources/read requires an absolute uri")
-	}
-	return params.URI, true, nil
+	return mcpModernResourceRequestName(params.URI)
 }
 
 // admitMCPModernApp authenticates one request against an immutable route before loading public resource metadata.
@@ -308,8 +283,19 @@ func admitMCPModernApp(ctx context.Context, routeID, token string) (*mcpModernAd
 }
 
 // handleMCPModernDiscover advertises the unified stateless tool and selected event-resource capabilities.
-func handleMCPModernDiscover(w http.ResponseWriter, request mcpJSONRPCRequest, admission *mcpModernAdmission) {
+func handleMCPModernDiscover(ctx context.Context, w http.ResponseWriter, request mcpJSONRPCRequest, admission *mcpModernAdmission) {
 	capabilities := map[string]any{"tools": map[string]any{}}
+	// Imported capabilities are advertised only after exact app and token admission.
+	if adapter := importedMCPAdapter(); adapter != nil {
+		selections, err := adapter.ImportedMCPScope(ctx, admission.identity)
+		if err != nil {
+			writeMCPModernError(w, request.ID, -32603, "MCP capabilities unavailable", http.StatusBadGateway, nil)
+			return
+		}
+		for key, value := range importedProtocolCapabilities(selections, admission.identity) {
+			capabilities[key] = value
+		}
+	}
 	// Resource capability is absent for operation-only versions instead of advertising an unusable empty namespace.
 	if len(admission.resources) > 0 {
 		capabilities["resources"] = map[string]any{"subscribe": true}
@@ -600,4 +586,44 @@ func mcpModernServerInfo(server FixtureServerMetadata) map[string]any {
 func writeMCPModernError(w http.ResponseWriter, id json.RawMessage, code int, message string, status int, data any) {
 	w.Header().Set(mcpProtocolVersionHeader, mcpModernProtocolVersion)
 	writeMCPJSONRPCErrorData(w, id, code, message, status, data)
+}
+
+// dispatchMCPModernRequest selects protocol behavior only after shared app and message admission.
+func dispatchMCPModernRequest(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, routeID, token string, request mcpJSONRPCRequest, admission *mcpModernAdmission) {
+	// The closed protocol switch never forwards unknown methods into a provider session.
+	switch request.Method {
+	case "server/discover":
+		handleMCPModernDiscover(ctx, w, request, admission)
+	case "ping":
+		writeMCPModernResult(w, request.ID, map[string]any{}, admission.server)
+	case "tools/list":
+		handleMCPModernToolsList(ctx, span, w, r, routeID, token, request, admission)
+	case "tools/call":
+		handleMCPModernToolsCall(ctx, span, w, r, routeID, token, request, admission)
+	case "resources/list":
+		handleMCPModernResourcesList(w, request, admission)
+	case "resources/templates/list":
+		handleMCPModernResourceTemplatesList(w, request, admission)
+	case "resources/read":
+		handleMCPModernResourceRead(w, request, admission)
+	case "subscriptions/listen":
+		handleMCPModernSubscriptionsListen(ctx, w, token, request, admission)
+	default:
+		// Removed and unadvertised methods fail explicitly instead of falling through to the sessionful child runtime.
+		writeMCPModernError(w, request.ID, -32601, "method is not available for protocol version "+mcpModernProtocolVersion, http.StatusNotFound, nil)
+	}
+}
+
+// mcpModernResourceRequestName validates absolute resource identity independently from named tool and prompt routing.
+func mcpModernResourceRequestName(uri string) (string, bool, error) {
+	// An empty or oversized URI cannot become either an authorization lookup or a routing header value.
+	if strings.TrimSpace(uri) == "" || len(uri) > maxMCPModernResourceURIBytes {
+		return "", true, errors.New("resources/read requires a valid uri")
+	}
+	parsed, err := url.ParseRequestURI(uri)
+	// Resource identities must be absolute URIs so routing cannot depend on an implicit base.
+	if err != nil || parsed.Scheme == "" {
+		return "", true, errors.New("resources/read requires an absolute uri")
+	}
+	return uri, true, nil
 }

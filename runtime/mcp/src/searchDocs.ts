@@ -481,6 +481,8 @@ function toPhysicalCandidate(operation: FixtureOperation, fixture: Fixture): Sea
 
 /** Builds one compact flat call schema from endpoint parameters and the selected request representation. */
 function canonicalParamsSchema(operation: FixtureOperation, fixture: Fixture): CanonicalParamsSchema {
+  // Imported MCP tools keep their native object schema, including local references and composition.
+  if (operation.imported_input_schema) return operation.imported_input_schema as unknown as CanonicalParamsSchema;
   const properties: Record<string, unknown> = {};
   const required = new Set<string>();
   for (const parameter of operation.parameters ?? []) {
