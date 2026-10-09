@@ -197,7 +197,7 @@ test("imported delivery methods remain exact and unsupported methods show an exp
   }
 });
 
-// Walk the real hook-free event form to exercise its callbacks instead of duplicating the selector's state transitions.
+// Walk event controls with expansion state stubbed; contract callbacks remain the production implementation.
 function eventFormControls(element) {
   // Primitive children are display copy, not interactive controls.
   if (!element || typeof element !== "object") return [];
@@ -211,7 +211,8 @@ function eventFormControls(element) {
 
 // A method edit and its explicit undo must retain payloads and source metadata while using the parent's normal dirty/review path.
 test("actual method callbacks preserve payloads and can restore an imported unsupported method", () => {
-  const events = loadModule("../components/webhooks/WebhookEventEditor.tsx", { "~/lib/webhook-editor-draft": draftContract });
+  // Expansion is presentation state; this callback test exercises contract edits directly.
+  const events = loadModule("../components/webhooks/WebhookEventEditor.tsx", { "~/lib/webhook-editor-draft": draftContract, react: { useState: (initial) => [initial, () => {}] } });
   const operation = sourceDocument().webhooks["Issue:Created"].post;
   const document = { openapi: "3.1.0", webhooks: { "invoice.deleted": { delete: operation } } };
   let draft = draftContract.readWebhookDraft(JSON.stringify(document));
@@ -538,6 +539,8 @@ test("recovery drawer renders read-only source and blocks accidental discard aft
   let beforeUnload;
   const { WebhookDefinitionEditor } = loadModule("../components/webhooks/WebhookDefinitionEditor.tsx", {
     "@remix-run/react": { useBlocker: (value) => { blocked = value; return { state: "unblocked" }; }, useBeforeUnload: (callback) => { beforeUnload = callback; } },
+    // No assistant is mounted in this isolated recovery renderer.
+    "~/components/agent/FusedAgentContext": { useFusedAgent: () => null },
     "./useWebhookEditor": { useWebhookEditor: () => editor },
     "./WebhookEventEditor": { WebhookEventEditor: () => null },
     "./WebhookSettingsEditor": { WebhookSettingsEditor: () => null },

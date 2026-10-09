@@ -1430,6 +1430,9 @@ export const api = {
   },
 
   integrations: {
+    // Owner-only display edits share the CLI endpoint and cannot change service identity.
+    updateDetails: (id: string, details: { name: string; description: string }) =>
+      req<void>(`/integrations/${encodeURIComponent(id)}/details`, { method: "PATCH", body: JSON.stringify(details) }),
     // Builder and uploaded-source reviews share Registry's authoritative parser and receipt.
     planImport: (input: {
       name: string;

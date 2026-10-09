@@ -1,3 +1,4 @@
+import { ServiceDetailsEditor } from "~/components/integration-details/ServiceDetailsEditor";
 import { PageBackLink } from "~/components/layout/PageBackLink";
 import { AgentServiceImport } from "~/components/integration-details/AgentServiceImport";
 import { CopyButton } from "~/components/CopyValue";
@@ -1597,6 +1598,7 @@ function VisibilityMenu({ srv }: { srv: Service }) {
 function WorkspaceMembershipControl({ srv }: { srv: Service }) {
   const detail = useDetail();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [editingDetails, setEditingDetails] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
@@ -1639,8 +1641,19 @@ function WorkspaceMembershipControl({ srv }: { srv: Service }) {
 
   // The disclosure trigger changes presentation state without performing a workspace mutation.
   function toggleActionsMenu() {
+    // The actions menu and its edit popover share an anchor and must not overlap.
+    setEditingDetails(false);
     setMenuOpen((open) => !open);
   }
+
+  // Editing opens a draft; only the editor's Save button persists it.
+  function editDetails() { setMenuOpen(false); setEditingDetails(true); }
+
+  // Closing discards local draft state by unmounting the editor.
+  function closeDetails() { setEditingDetails(false); }
+
+  // Reload the canonical service projection after a successful owner edit.
+  function detailsSaved() { setEditingDetails(false); void detail.loadData(); }
 
   // A selected destructive action closes the disclosure before confirmation begins.
   function requestWorkspaceRemoval() {
@@ -1666,7 +1679,8 @@ function WorkspaceMembershipControl({ srv }: { srv: Service }) {
       {menuOpen && (
         <div role="menu" aria-label="More actions" className="absolute right-0 top-full z-40 mt-2 w-56 rounded-lg border border-slate-200 bg-white p-1.5 shadow-xl">
           <ServiceConfigurationMenuItems srv={srv} onClose={() => setMenuOpen(false)} />
-          <div className="my-1 border-t border-slate-100" />
+          {/* Workspace management alone does not confer ownership of a provider's service. */}
+          {srv.is_owner && <button type="button" role="menuitem" onClick={editDetails} className="block w-full rounded-md px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">Edit details</button>}
           <button
             type="button"
             role="menuitem"
@@ -1681,6 +1695,8 @@ function WorkspaceMembershipControl({ srv }: { srv: Service }) {
           </button>
         </div>
       )}
+      {/* Recheck ownership while the editor is open if permissions refresh. */}
+      {editingDetails && srv.is_owner && <ServiceDetailsEditor service={srv} anchor={triggerRef} onClose={closeDetails} onSaved={detailsSaved} />}
     </div>
   );
 }
@@ -1696,8 +1712,7 @@ function ServiceConfigurationMenuItems({ srv, onClose }: { srv: Service; onClose
   const canReadProfile = hasVersion && hasProfile && serviceReadAllowed(detail.access, srv.id) && hasWorkspacePermission(detail.access, "credentials.metadata.read");
   const className = "block rounded-md px-3 py-2 text-sm text-slate-700 hover:bg-slate-50";
   return <>
-    <a role="menuitem" href="#service-configuration" onClick={onClose} className={className}>Service configuration</a>
-    {/* Services without supported connection profiles retain only their general configuration shortcut. */}
+    {/* Only services with an accessible connection profile show this shortcut. */}
     {canReadProfile && <a role="menuitem" href="#connection-profile" onClick={onClose} className={className}>Connection profiles</a>}
   </>;
 }

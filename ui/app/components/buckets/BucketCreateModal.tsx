@@ -1,5 +1,6 @@
+import { AnchoredPopover, focusPopoverAnchor } from "~/components/forms/AnchoredPopover";
 import { FieldLabel } from "~/components/forms/FieldLabel";
-import { type FormEvent, type RefObject, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type FormEvent, type RefObject, useEffect, useState } from "react";
 import { Loader2, Plus, X } from "lucide-react";
 import { createPortal } from "react-dom";
 import { api, type Bucket } from "~/lib/api";
@@ -19,60 +20,12 @@ export function BucketCreateModal({ open, onClose, onCreated, anchor }: BucketCr
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [created, setCreated] = useState<Bucket | null>(null);
-  const form = useRef<HTMLFormElement>(null);
-  const [position, setPosition] = useState({ top: 0, left: 0, width: 384 });
-
   /** Returns keyboard focus to the action after an explicit dismissal. */
   function dismiss() {
     onClose();
-    anchor?.current?.querySelector<HTMLButtonElement>('button')?.focus();
+    // Centered selector dialogs do not provide an external anchor.
+    if (anchor) focusPopoverAnchor(anchor);
   }
-
-  // Body portals avoid clipping; measured placement follows the trigger as its pane scrolls.
-  useLayoutEffect(() => {
-    // Existing selector dialogs keep their centered layout.
-    if (!open || !anchor?.current) return;
-    const trigger = anchor.current;
-    /** Fits the name field within narrow screens and flips above a low trigger. */
-    function place() {
-      const rect = trigger.getBoundingClientRect();
-      const width = Math.min(384, window.innerWidth - 32);
-      const height = form.current?.offsetHeight ?? 180;
-      // Prefer below the action, unless the viewport cannot fit the complete form.
-      const top = rect.bottom + 10 + height <= window.innerHeight - 16 ? rect.bottom + 10 : Math.max(16, rect.top - height - 10);
-      setPosition({ top, left: Math.max(16, Math.min(rect.right - width, window.innerWidth - width - 16)), width });
-    }
-    place();
-    const resize = new ResizeObserver(place);
-    resize.observe(trigger);
-    // Error and loading content can change the form height while it is open.
-    if (form.current) resize.observe(form.current);
-    window.addEventListener('resize', place);
-    document.addEventListener('scroll', place, true);
-    return () => { resize.disconnect(); window.removeEventListener('resize', place); document.removeEventListener('scroll', place, true); };
-  }, [open, anchor]);
-
-  // A non-modal popover allows the page to remain usable without a dimmed backdrop.
-  useEffect(() => {
-    // Do not dismiss an in-flight creation and lose its completion receipt.
-    if (!open || !anchor || saving) return;
-    /** Dismisses on outside interaction without stealing focus from the clicked control. */
-    function outside(event: PointerEvent) {
-      const target = event.target as Node;
-      // Assistant interaction keeps the draft available for requested form edits.
-      if (form.current?.contains(target) || anchor?.current?.contains(target) || (target instanceof Element && target.closest('[data-fused-agent]'))) return;
-      onClose();
-    }
-    /** Escape closes only this form and restores its trigger focus. */
-    function escape(event: KeyboardEvent) {
-      // Escape inside the assistant belongs to the conversation panel.
-      if (event.key !== 'Escape' || (event.target instanceof Element && event.target.closest('[data-fused-agent]'))) return;
-      event.preventDefault(); event.stopPropagation(); dismiss();
-    }
-    document.addEventListener('pointerdown', outside);
-    document.addEventListener('keydown', escape, true);
-    return () => { document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape, true); };
-  }, [open, anchor, saving, onClose]);
 
   // Closing clears the name and completion receipt before another explicit creation.
   useEffect(() => {
@@ -110,20 +63,15 @@ export function BucketCreateModal({ open, onClose, onCreated, anchor }: BucketCr
     }
   };
 
-  // The transformed workspace pane must not change the dialog's viewport positioning.
-  return createPortal(
-    <div data-fused-workspace-dialog className={anchor ? "fixed z-50" : "fixed inset-0 z-50 flex items-center justify-center px-4"} style={anchor ? position : undefined}>
-      {/* Anchored creation stays lightweight; selector dialogs retain their existing backdrop. */}
-      {!anchor && <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={saving ? undefined : onClose} />}
-      {/* An open assistant remains an accessible sibling rather than being hidden by modal semantics. */}
+  // Both presentations use the same form and creation receipt.
+  const content = (
       <form
         onSubmit={submit}
-        ref={form}
         id={anchor ? "create-bucket-popover" : undefined}
         role="dialog"
         aria-modal={anchor ? false : !agent?.isOpen}
         aria-labelledby={anchor ? "create-bucket-label" : "create-credential-set-title"}
-        className={anchor ? "relative w-full rounded-xl border border-slate-200 bg-white p-5 shadow-lg" : "relative w-full max-w-md rounded-xl border border-slate-200 bg-white shadow-xl"}
+        className={anchor ? "relative w-full p-5" : "relative w-full max-w-md rounded-xl border border-slate-200 bg-white shadow-xl"}
       >
         {/* The label alone identifies the compact form; a second title would repeat it. */}
         {!anchor && <div className="flex items-center justify-between border-b border-slate-100 px-5 py-5 sm:px-6">
@@ -177,6 +125,14 @@ export function BucketCreateModal({ open, onClose, onCreated, anchor }: BucketCr
           </button>
         </div>
       </form>
+  );
+  // Page actions use the shared popover; embedded selectors retain their centered dialog.
+  if (anchor) return <AnchoredPopover anchor={anchor} busy={saving} onClose={onClose}>{content}</AnchoredPopover>;
+  return createPortal(
+    <div data-fused-workspace-dialog className="fixed inset-0 z-50 flex items-center justify-center px-4">
+      {/* An in-flight creation must finish before the backdrop can dismiss its receipt. */}
+      <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={saving ? undefined : onClose} />
+      {content}
     </div>, document.body
   );
 }

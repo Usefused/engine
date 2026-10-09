@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { Upload, X } from "lucide-react";
+import { useEffect, useId, useRef, useState, type ChangeEvent } from "react";
 import { useBeforeUnload, useBlocker } from "@remix-run/react";
 import type { Service, SpecificationImportPlan } from "~/lib/api";
 import { useFusedAgent } from "~/components/agent/FusedAgentContext";
@@ -38,8 +39,8 @@ export function WebhookDefinitionEditor({ service, version, onClose, onSaved }: 
   return <>
     <div className="fixed inset-0 z-40 bg-slate-900/30" aria-hidden="true" onClick={close} />
     {/* An open assistant remains keyboard-accessible beside this detail editor. */}
-    <div data-fused-detail-sidebar ref={panel} tabIndex={-1} role="dialog" aria-modal={!agent?.isOpen} aria-labelledby="webhook-editor-title" className="fixed inset-y-0 right-0 z-50 flex w-full max-w-3xl flex-col bg-white shadow-2xl outline-none" onKeyDown={(event) => handleEditorKeyboard(event, panel.current, close, !agent?.isOpen)}>
-      <header className="flex items-start justify-between gap-4 border-b border-slate-200 p-4 sm:p-6"><div><h2 id="webhook-editor-title" className="text-lg font-semibold">Edit webhook</h2><p className="mt-1 break-all text-sm text-slate-500">{service.name} · {version}</p></div><button type="button" aria-label="Close webhook editor" disabled={editor.busy} onClick={close} className="p-2 text-slate-600 disabled:opacity-40">✕</button></header>
+    <div data-fused-detail-sidebar ref={panel} tabIndex={-1} role="dialog" aria-modal={!agent?.isOpen} aria-labelledby="webhook-editor-title" className="fixed inset-y-0 right-0 z-50 flex w-full max-w-2xl flex-col border-l border-slate-200 bg-white shadow-xl outline-none" onKeyDown={(event) => handleEditorKeyboard(event, panel.current, close, !agent?.isOpen)}>
+      <header className="flex items-start justify-between gap-4 border-b border-slate-200 p-4 sm:p-6"><div><h2 id="webhook-editor-title" className="text-lg font-semibold tracking-tight text-slate-900">Edit webhooks</h2><p className="mt-1 break-all text-sm text-slate-500">{service.name} · {version}</p></div><button type="button" aria-label="Close webhook editor" disabled={editor.busy} onClick={close} className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40"><X className="h-5 w-5" /></button></header>
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4 sm:p-6">
         {confirmClose && <DiscardNotice busy={editor.busy} onKeep={() => setConfirmClose(false)} onDiscard={onClose} />}
         <EditorError editor={editor} />
@@ -118,9 +119,20 @@ function handleEditorKeyboard(event: React.KeyboardEvent, panel: HTMLDivElement 
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
 }
 
-// File selection starts only a server-side preview and does not modify the current draft yet.
+// File selection stays secondary to editing and starts only a review, never an automatic save.
 function OpenAPIInput({ editor }: { editor: Editor }) {
-  return <section className="rounded-lg border border-slate-200 p-3"><label className="block text-sm font-medium">Import OpenAPI<input type="file" accept=".json,.yaml,.yml,application/json,application/yaml" className="mt-2 block w-full text-sm" onChange={(event) => { const file = event.target.files?.[0]; if (file) void editor.importFile(file); event.target.value = ""; }} /></label><p className="mt-2 text-xs text-slate-500">Optional. Preview and confirm replacement first; uploading never saves automatically. Maximum 4 MiB.</p></section>;
+  const inputID = useId();
+  // Clear the input after planning so choosing the same corrected file can trigger a fresh preview.
+  function chooseFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    // Closing the picker without selecting a file must leave the draft untouched.
+    if (file) void editor.importFile(file);
+    event.target.value = "";
+  }
+  return <section className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 px-4 py-3">
+    <div><h3 className="text-sm font-medium text-slate-700">Import from OpenAPI</h3><p className="mt-0.5 text-xs text-slate-500">JSON or YAML · up to 4 MiB</p></div>
+    <label htmlFor={inputID} className="relative inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 focus-within:ring-2 focus-within:ring-violet-300"><Upload className="h-3.5 w-3.5" />Choose file<input id={inputID} aria-label="Import OpenAPI" type="file" accept=".json,.yaml,.yml,application/json,application/yaml" className="sr-only" onChange={chooseFile} /></label>
+  </section>;
 }
 
 // The review is the server receipt, including removals and dependent workspace warnings.

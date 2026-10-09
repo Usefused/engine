@@ -3,18 +3,19 @@ import { useEffect, useState } from "react";
 import { updateWebhookSetting, webhookDiscriminatorText, webhookDiscriminatorValue, webhookRecord, type WebhookDocument, type WebhookEditorDraft } from "~/lib/webhook-editor-draft";
 import { webhookFieldClass } from "./WebhookEventEditor";
 
-// Settings define verification instructions only; bucket secrets and registration bindings are never loaded.
+// Shared routing and verification stay in a secondary disclosure; credentials are never loaded.
 export function WebhookSettingsEditor({ draft, onChange, onInvalid }: { draft: WebhookEditorDraft; onChange: (next: WebhookEditorDraft) => void; onInvalid: (invalid: boolean) => void }) {
   const config = webhookRecord(draft.document["x-fused-webhook"]);
   const advanced = Boolean(draft.document["x-fused-signature-policy"] || config.signature_policy);
   // Extension replacement preserves the full document and invalidates review in the caller.
   function setConfig(value: WebhookDocument) { onChange(updateWebhookSetting(draft, "x-fused-webhook", value)); }
-  return <section className="space-y-3 border-t border-slate-200 pt-5" aria-label="Webhook definition settings">
-    <h3 className="font-semibold">Settings</h3>
-    <p className="text-sm text-slate-500">These are shared service rules, not workspace setup. Signing secrets and tokens remain in buckets.</p>
+  return <details className="rounded-xl border border-slate-200 text-sm" aria-label="Webhook definition settings">
+    <summary className="cursor-pointer px-4 py-3.5 font-medium text-slate-700">Event routing &amp; verification</summary>
+    <div className="space-y-4 border-t border-slate-100 p-4"><p className="text-xs leading-relaxed text-slate-500">Shared across all events. Credentials stay in buckets.</p>
     <DiscriminatorField draft={draft} onChange={onChange} onInvalid={onInvalid} />
     {advanced ? <AdvancedVerification document={draft.document} /> : <VerificationFields config={config} onChange={setConfig} />}
-  </section>;
+    </div>
+  </details>;
 }
 
 // Composite routing uses the existing extension grammar and is checked by the ordinary server planner.

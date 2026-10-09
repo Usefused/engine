@@ -307,6 +307,10 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodPut, "/integrations/{service_id}/versions/{version}/execution-policy", false, []routeRequirement{
 		pathRequirement(accesscontrol.PermissionServiceManage, accesscontrol.ResourceService, "service_id"),
 	}},
+	// Display metadata still requires service management; Registry additionally enforces ownership.
+	{http.MethodPatch, "/integrations/{service_id}/details", false, []routeRequirement{
+		pathRequirement(accesscontrol.PermissionServiceManage, accesscontrol.ResourceService, "service_id"),
+	}},
 	{http.MethodPut, "/integrations/{service_id}/public", false, []routeRequirement{
 		pathRequirement(accesscontrol.PermissionServiceManage, accesscontrol.ResourceService, "service_id"),
 	}},
