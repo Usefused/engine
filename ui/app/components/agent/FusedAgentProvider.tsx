@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "@remix-run/react";
-import { Sparkles } from "lucide-react";
-import { FusedAgentContext, type FusedDraftBuilderBridge, type FusedEditorBridge } from "./FusedAgentContext";
+import { FusedAgentContext, type FusedServiceImportBridge, type FusedDraftBuilderBridge, type FusedEditorBridge } from "./FusedAgentContext";
 import { FusedAgentPage, fusedValueHidden, fusedPagePath } from "~/lib/fused-agent-page";
 import { harnest, messageText, type HarnestApproval, type HarnestClientTool, type HarnestStreamEvent } from "~/lib/fused-agent-transport";
 import { searchAgentServices, searchAgentOperations, readAgentServiceContract } from "~/lib/fused-agent-discovery";
@@ -10,9 +9,10 @@ import { readAgentContracts } from "~/lib/fused-agent-contracts";
 import { agentInput, visibleUserRequest } from "./agent-input";
 import { updateToolActivity } from "./tool-activity";
 import FusedAgentChat from "./FusedAgentChat";
+import FusedAgentLauncher from "./FusedAgentLauncher";
 import type { FusedChatMessage as Message } from "./fused-chat-types";
 
-/** Preserves one conversation while yielding desktop sidebar space to workspace detail drawers. */
+/** Preserves the conversation and movable launcher while yielding desktop space to detail drawers. */
 export function FusedAgentProvider({ children, authenticated }: { children: ReactNode; authenticated: boolean }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -30,6 +30,7 @@ export function FusedAgentProvider({ children, authenticated }: { children: Reac
   const run = useRef<AbortController | null>(null);
   const page = useRef(new FusedAgentPage());
   const editor = useRef<FusedEditorBridge | null>(null);
+  const serviceImport = useRef<FusedServiceImportBridge | null>(null);
   const draftBuilder = useRef<FusedDraftBuilderBridge | null>(null);
   const route = useRef(location.pathname + location.search);
   route.current = location.pathname + location.search;
@@ -80,7 +81,7 @@ export function FusedAgentProvider({ children, authenticated }: { children: Reac
     const workspace = workspacePane.current;
     // The provider may unmount before the workspace ref becomes available.
     if (!workspace) return;
-    /** Tracks mounted detail drawers without coupling conversation state to individual routes. */
+    /** Tracks detail drawers without resetting the conversation or launcher position. */
     function updateSidebarPresence() {
       setDetailSidebarOpen(Boolean(workspace?.querySelector("[data-fused-detail-sidebar]")));
     }
@@ -112,6 +113,11 @@ export function FusedAgentProvider({ children, authenticated }: { children: Reac
   const registerDraftBuilder = useCallback((bridge: FusedDraftBuilderBridge) => {
     draftBuilder.current = bridge;
     return () => { /* A newer page registration must survive the old page's cleanup. */ if (draftBuilder.current === bridge) draftBuilder.current = null; };
+  }, []);
+  /** Binds import planning to the currently mounted service rather than model-supplied identities. */
+  const registerServiceImport = useCallback((bridge: FusedServiceImportBridge) => {
+    serviceImport.current = bridge;
+    return () => { /* A later service owns its own registration. */ if (serviceImport.current === bridge) serviceImport.current = null; };
   }, []);
   /** Launches the shared sidebar from any page-specific entry point. */
   const launch = useCallback((message?: string) => { setOpen(true); /* Optional launcher text stays editable before sending. */ if (message) setPrompt(message); }, []);
@@ -171,7 +177,16 @@ export function FusedAgentProvider({ children, authenticated }: { children: Reac
       if (call.name === "read_service_contract") return await readAgentServiceContract(String(args.service_id ?? ""), String(args.version ?? ""), String(args.operation ?? ""), String(args.path ?? ""), Number(args.offset ?? 0));
       const source = editor.current && document.getElementById(editor.current.fieldID);
       const bridge = source && !fusedValueHidden(source) && source.getClientRects().length > 0 ? editor.current : null;
-      if (call.name === "get_page_context") return { ...context, canDescribeUnifiedApp: Boolean(draftBuilder.current?.available), unifiedApp: bridge ? { services: bridge.services, view: bridge.view, configError: bridge.configError, canCompile: bridge.available, canRevise: bridge.available && bridge.view === "typescript" } : undefined };
+      if (call.name === "get_page_context") return { ...context, serviceImport: serviceImport.current ? { available: serviceImport.current.available, name: serviceImport.current.name, version: serviceImport.current.version } : undefined, canDescribeUnifiedApp: Boolean(draftBuilder.current?.available), unifiedApp: bridge ? { services: bridge.services, view: bridge.view, configError: bridge.configError, canCompile: bridge.available, canRevise: bridge.available && bridge.view === "typescript" } : undefined };
+      // Import planning is a review-only operation scoped by the mounted service and current actor.
+      if (call.name === "prepare_service_import") {
+        // A stale page or locked review cannot be replaced by a late model response.
+        if (!serviceImport.current?.available || Number(args.expected_revision) !== context.revision) throw new Error("Read an available service import page before preparing its import.");
+        const result = await serviceImport.current.prepare({ target_type: String(args.target_type) as "endpoints" | "webhooks", source_url: String(args.source_url ?? ""), source_content: String(args.source_content ?? ""), source_mode: String(args.source_mode ?? "spec") as "spec" | "docs" }, signal);
+        // The next tool must observe the visible review and its locked import bridge.
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        return result;
+      }
       // The agent switches ordinary non-secret editor tabs instead of reading hidden fields through another channel.
       if (call.name === "set_unified_app_view") {
         // Only the connected authorized editor can switch; stale context must not target a different draft.
@@ -326,15 +341,15 @@ export function FusedAgentProvider({ children, authenticated }: { children: Reac
   /** Restores workspace space while preserving the conversation and in-progress response. */
   function closeSidebar() { setOpen(false); }
 
-  return <FusedAgentContext.Provider value={{ isOpen: open, open: launch, registerEditor, registerDraftBuilder }}>
+  return <FusedAgentContext.Provider value={{ isOpen: open, open: launch, registerEditor, registerDraftBuilder, registerServiceImport }}>
     {/* Desktop panes scroll independently; mobile chat covers the inert page without losing its draft. */}
     <div className="flex h-dvh min-w-0 flex-col overflow-hidden md:flex-row">
     {/* Keep fixed drawers anchored to the viewport; transforming this scroller would clip them after page scrolling. */}
     <div ref={workspacePane} data-fused-workspace-pane className="isolate min-h-0 min-w-0 flex-1 overflow-auto">{children}</div>
     {/* Authentication gates assistant access; a closed pane releases all of its layout space. */}
     {authenticated && <div data-fused-agent className="shrink-0">
-      {/* The icon stays discoverable without competing with primary page actions. */}
-      {!open && <button type="button" onClick={openSidebar} aria-label="Ask Fused" title="Ask Fused" aria-controls="fused-assistant" aria-expanded={false} className="fixed bottom-5 right-5 z-40 flex h-12 w-12 items-center justify-center rounded-full border border-violet-200 bg-white text-violet-600 shadow-md transition-colors hover:border-violet-300 hover:bg-violet-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-500"><Sparkles className="h-5 w-5" strokeWidth={1.6} aria-hidden="true" /></button>}
+      {/* Keep the launcher mounted so a user-chosen position survives opening and closing chat. */}
+      <FusedAgentLauncher visible={!open} onOpen={openSidebar} aboveActions={detailSidebarOpen} />
       {/* The copied chat renderer shares the existing provider so popup transitions preserve active tools and drafts. */}
       {open && <FusedAgentChat popup={detailSidebarOpen} pageTitle={typeof document === 'undefined' ? 'Workspace' : document.title.replace(/\s*-\s*Fused$/, '')}
         status={status} messages={messages} composer={prompt} setComposer={setPrompt} includeContext={includePage} setIncludeContext={setIncludePage}

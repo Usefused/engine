@@ -13,31 +13,37 @@ interface DiscoveryReviewSummaryPanelProps {
   summary: DiscoveryReviewSummary | null;
   loading: boolean;
   error: string;
+  surface?: "webhooks";
+  embedded?: boolean;
 }
 
-// DiscoveryReviewSummaryPanel renders only the Registry's bounded structural projection.
-export default function DiscoveryReviewSummaryPanel({ summary, loading, error }: DiscoveryReviewSummaryPanelProps) {
+// DiscoveryReviewSummaryPanel reuses the bounded projection without nesting a second service card inside a drawer.
+export default function DiscoveryReviewSummaryPanel({ summary, loading, error, surface, embedded = false }: DiscoveryReviewSummaryPanelProps) {
+  // Loading and failures remain explicit rather than showing an empty contract.
   if (loading) {
     return <div className="rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-500 flex items-center gap-3"><Loader2 className="w-4 h-4 animate-spin text-[var(--brand-violet)]" />Loading the contract review summary...</div>;
   }
+  // Failed summaries cannot be presented as successful empty reviews.
   if (error) {
     return <div className="rounded-xl border border-red-200 bg-red-50 p-5 text-sm text-red-700"><strong>Contract summary unavailable</strong><p className="mt-1">{error}</p></div>;
   }
+  // The receipt may arrive before its structural summary.
   if (!summary) {
     return <div className="rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-500">Waiting for the immutable contract summary...</div>;
   }
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
-      <div className="p-5 border-b border-slate-100">
+    <div className={embedded ? "min-w-0" : "rounded-2xl border border-slate-200 bg-white overflow-hidden"}>
+      {/* A drawer already names its service and version; only standalone summaries need this heading. */}
+      {!embedded && <div className="p-5 border-b border-slate-100">
         <div className="flex items-start justify-between gap-4">
           <div><h3 className="font-semibold text-slate-900">{summary.info.title}</h3><p className="text-xs text-slate-500 mt-1">Contract version {summary.info.version || "not declared"}</p></div>
           <div className="text-right text-[10px] uppercase tracking-wide text-slate-400"><div>{summary.evidence_count} evidence item{summary.evidence_count === 1 ? "" : "s"}</div><div>{summary.diagnostic_count} review note{summary.diagnostic_count === 1 ? "" : "s"}</div></div>
         </div>
-      </div>
-      <div className="p-5 space-y-6">
-        <ReviewServers summary={summary} />
-        <ReviewAuthSchemes summary={summary} />
-        <ReviewOperations summary={summary} />
+      </div>}
+      <div className={embedded ? "space-y-6" : "p-5 space-y-6"}>
+        {/* An inbound-only review must not imply that preserved outbound contracts or authentication were removed. */}
+        {surface !== "webhooks" && <><ReviewServers summary={summary} /><ReviewAuthSchemes summary={summary} /><ReviewOperations summary={summary} /></>}
+        <ReviewWebhooks summary={summary} />
       </div>
     </div>
   );
@@ -80,25 +86,29 @@ function ReviewOperations({ summary }: { summary: DiscoveryReviewSummary }) {
   );
 }
 
-// ReviewOperation keeps the service-detail operation identity visible while
-// placing bounded contract facts behind an initially closed disclosure.
-function ReviewOperation({ operation }: { operation: DiscoveryReviewOperation }) {
+// ReviewOperation keeps event rows compact and reserves wire details for the disclosure.
+function ReviewOperation({ operation, webhook = false }: { operation: DiscoveryReviewOperation; webhook?: boolean }) {
   const parameters = operation.parameters || [];
   const responses = operation.responses || [];
   const method = operation.method.toUpperCase();
   return (
-    <details className="group overflow-hidden rounded-xl border border-slate-200 bg-white">
-      <summary className="flex cursor-pointer list-none items-start justify-between gap-3 px-4 py-4 transition-colors hover:bg-slate-50 [&::-webkit-details-marker]:hidden">
+    <details className={webhook ? "group bg-white open:bg-slate-50/60" : "group overflow-hidden rounded-xl border border-slate-200 bg-white"}>
+      <summary className="flex cursor-pointer list-none items-start justify-between gap-3 px-4 py-3.5 transition-colors hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-violet-500 [&::-webkit-details-marker]:hidden">
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-start gap-3 sm:items-center">
-            <span className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-bold ${METHOD_COLORS[method] ?? "bg-slate-100 text-slate-700 border-slate-200"}`}>{method}</span>
-            <code className="min-w-0 break-all text-sm text-slate-700">{operation.path}</code>
+            {/* Named events do not need the same POST badge repeated on every row. */}
+            {!webhook && <span className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-bold ${METHOD_COLORS[method] ?? "bg-slate-100 text-slate-700 border-slate-200"}`}>{method}</span>}
+            <code className="min-w-0 break-words text-sm text-slate-800 [overflow-wrap:anywhere]">{operation.path}</code>
           </div>
-          <div className="mt-1.5 break-all font-mono text-xs text-slate-500">{operation.operation_id}</div>
+          {/* Identical event and operation names carry no additional information. */}
+          {operation.operation_id && operation.operation_id !== operation.path && <div className="mt-1.5 break-all font-mono text-xs text-slate-500">{operation.operation_id}</div>}
         </div>
         <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
       </summary>
       <div className="border-t border-slate-100 px-4 pb-4 pt-3">
+        {/* The method remains available when inspecting an event's delivery contract. */}
+        {webhook && <p className="mb-2 text-xs font-medium text-slate-500">HTTP {method}</p>}
+        {/* Empty provider descriptions should not leave a blank paragraph. */}
         {operation.summary && <p className="text-xs text-slate-600">{operation.summary}</p>}
         <div className={`${operation.summary ? "mt-3" : ""} grid gap-3 text-[11px] md:grid-cols-2`}>
           <ReviewFact label="Parameters" counts={operation.parameter_counts} values={parameters.map((parameter) => `${parameter.in}:${parameter.name}${parameter.required ? "*" : ""}`)} />
@@ -136,4 +146,13 @@ function OmittedReviewCount({ counts }: { counts: DiscoveryReviewListCounts }) {
 // EmptyReviewValue distinguishes an admitted empty collection from a loading fallback.
 function EmptyReviewValue({ children }: { children: ReactNode }) {
   return <p className="text-xs text-slate-400">{children}</p>;
+}
+
+/** Presents inbound events as one scannable list, with wire details available on demand. */
+function ReviewWebhooks({ summary }: { summary: DiscoveryReviewSummary }) {
+  // Older endpoint-only summaries have no inbound section to display.
+  if (!summary.webhook_counts?.total) return null;
+  return <ReviewSection icon={<ShieldCheck className="w-4 h-4" />} title="Webhook events" counts={summary.webhook_counts}>
+    <div className="overflow-hidden rounded-xl border border-slate-200 divide-y divide-slate-100">{(summary.webhooks || []).map((event) => <ReviewOperation key={`${event.method}:${event.path}`} operation={event} webhook />)}</div>
+  </ReviewSection>;
 }

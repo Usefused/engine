@@ -1,6 +1,6 @@
 {
-  "call_count": 114,
-  "document_count": 132,
+  "call_count": 115,
+  "document_count": 133,
   "calls": [
     {
       "endpoint": "engine",
@@ -426,6 +426,12 @@
       "endpoint": "registry",
       "file": "app/lib/fused-agent-discovery.ts",
       "call": 3,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/fused-agent-import.ts",
+      "call": 1,
       "document_count": 1
     },
     {
@@ -1184,6 +1190,13 @@
       "call": 3,
       "variant": 1,
       "document": "query FusedAgentSearchOperations($id: String!, $version: String!, $q: String!, $offset: Int!) {\n    searchEndpoints(serviceId: $id, version: $version, q: $q, limit: 20, offset: $offset) { name description method path deprecated }\n  }"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/fused-agent-import.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "query AgentImportWebhookBaseline($service_id: String!, $version: String!) {\n      serviceWebhookEditor(service_id: $service_id, version: $version) { service_id service_version_id revision }\n    }"
     },
     {
       "endpoint": "engine",

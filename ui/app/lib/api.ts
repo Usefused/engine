@@ -486,6 +486,8 @@ export interface DiscoveryReviewOperation {
 }
 
 export interface DiscoveryReviewSummary {
+  webhooks?: DiscoveryReviewOperation[];
+  webhook_counts?: DiscoveryReviewListCounts;
   schema_version: 1;
   session_id: string;
   draft_id: string;
@@ -527,6 +529,7 @@ export interface DiscoveryEnrichmentProposal {
 }
 
 export interface DiscoveryPayload {
+  import_plan?: SpecificationImportPlan;
   effective_workers: number;
   max_pages: number;
   max_depth: number;
@@ -558,6 +561,9 @@ export interface DiscoveryEventEnvelope {
 }
 
 export interface DiscoveryStartRequest {
+  target_type?: "endpoints" | "webhooks";
+  destination_version?: string;
+  expected_target?: SpecificationImportTarget;
   name: string;
   slug: string;
   version?: string;
@@ -1397,6 +1403,8 @@ export const api = {
   },
 
   appConfig: {
+    // Read-only schema export respects app read access and never retrieves private source.
+    openAPI: (appID: string, operation: string, signal?: AbortSignal) => req<unknown>(`/apps/${encodeURIComponent(appID)}/openapi?operation=${encodeURIComponent(operation)}`, { signal }),
     // Engine preserves the complete webhook bundle while reviewing one signing-secret replacement.
     webhookSecretPlan: <T>(slug: string, secret: string) => req<T>("/webhook-config/signing-secret/plan", { method: "POST", body: JSON.stringify({ slug, secret }) }),
     // Ordinary receipt readers can inspect the retained failure without requesting private diagnostics.

@@ -15,9 +15,16 @@ export interface FusedDraftBuilderBridge {
   available: boolean;
   describe: (goal: string, signal: AbortSignal) => Promise<unknown>;
 }
+export interface FusedServiceImportBridge {
+  available: boolean;
+  name: string;
+  version: string;
+  prepare: (input: import("~/lib/fused-agent-import").AgentImportSource, signal: AbortSignal) => Promise<unknown>;
+}
 export interface FusedAgentContextValue {
   isOpen: boolean;
   open: (message?: string) => void;
+  registerServiceImport: (bridge: FusedServiceImportBridge) => () => void;
   registerEditor: (bridge: FusedEditorBridge) => () => void;
   registerDraftBuilder: (bridge: FusedDraftBuilderBridge) => () => void;
 }

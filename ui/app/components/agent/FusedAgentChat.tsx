@@ -20,7 +20,7 @@ interface Props {
 }
 const focusStyle = 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-700';
 
-/** Renders conversation activity, readable code examples, and explicit approval controls in each chat layout. */
+/** Renders the conversation above desktop drawer actions, retaining full-screen chat on mobile. */
 export default function FusedAgentChat({ popup, pageTitle, status, messages, composer, setComposer, includeContext, setIncludeContext, isSending, loadingHistory, error, sessionId, sendMessage, newConversation, closeAgent, stop, refreshAgentStatus, openSession, deleteSession, approval, decideApproval }: Props) {
   const isReady = status === 'ready';
   const checkingAgentStatus = status === 'loading' || status === 'starting';
@@ -76,7 +76,7 @@ export default function FusedAgentChat({ popup, pageTitle, status, messages, com
     <>
       {/* Mobile chat must paint above fixed detail drawers; desktop keeps the dock or floating popout. */}
       <aside ref={panel} id="fused-assistant" role="complementary" aria-label="Fused assistant" aria-describedby="agent-preview-note" onKeyDown={handlePanelKey}
-        className={`fixed inset-0 z-[60] flex h-dvh w-full min-w-0 flex-col overflow-hidden border-slate-200 bg-slate-50 text-slate-900 ${popup ? 'md:inset-auto md:bottom-5 md:right-5 md:h-[600px] md:max-h-[calc(100dvh-2.5rem)] md:w-[380px] md:rounded-2xl md:border md:shadow-2xl' : 'md:relative md:inset-auto md:z-auto md:w-[360px] md:border-l xl:w-[420px]'}`}>
+        className={`fixed inset-0 z-[60] flex h-dvh w-full min-w-0 flex-col overflow-hidden border-slate-200 bg-slate-50 text-slate-900 ${popup ? 'md:inset-auto md:bottom-24 md:right-5 md:h-[600px] md:max-h-[calc(100dvh-7rem)] md:w-[380px] md:rounded-2xl md:border md:shadow-2xl' : 'md:relative md:inset-auto md:z-auto md:w-[360px] md:border-l xl:w-[420px]'}`}>
 
         <header className="flex shrink-0 items-center gap-3 border-b border-slate-200/80 bg-white px-5 py-4">
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-violet-700 text-violet-100"><Sparkles className="h-[18px] w-[18px]" /></div>

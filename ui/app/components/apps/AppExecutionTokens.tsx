@@ -33,7 +33,7 @@ export function AppExecutionTokens({ familyID, kind }: { familyID: string; kind:
   return canManage ? <TokenPanelLauncher key={`${access?.subject_id}:${kind}:${familyID}`} familyID={familyID} /> : <p className="text-xs text-slate-500">{loading ? "Checking token permissions…" : failed ? "Could not check token permissions. Refresh to try again." : "You need permission to manage execution tokens for this app."}</p>;
 }
 
-/** Keeps the overview compact and loads credential metadata only when the user opens the panel. */
+/** Uses a concise token launcher and loads credential metadata only when its panel opens. */
 function TokenPanelLauncher({ familyID }: { familyID: string }) {
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -41,7 +41,7 @@ function TokenPanelLauncher({ familyID }: { familyID: string }) {
   /** Returns keyboard users to the same action after dismissing token management. */
   function close() { setOpen(false); trigger.current?.focus({ preventScroll: true }); }
   return <div className="flex justify-end">
-    <button ref={trigger} type="button" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-expanded={open} aria-controls={open ? id : undefined} className={secondary}><KeyRound className="h-4 w-4" aria-hidden="true" />Execution tokens</button>
+    <button ref={trigger} type="button" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-expanded={open} aria-controls={open ? id : undefined} className={secondary}><KeyRound className="h-4 w-4" aria-hidden="true" />Tokens</button>
     {/* Portaling keeps the fixed panel outside any transformed or clipped overview container. */}
     {open && createPortal(<TokenPanel familyID={familyID} id={id} onClose={close} />, document.body)}
   </div>;

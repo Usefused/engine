@@ -88,3 +88,13 @@ edits, remain visible for correction, and block compilation. Actual credential v
 stay in buckets. Both editor views share one unsaved draft; neither tool saves or
 publishes it. In the browser fixture, messages beginning with `config` exercise YAML
 editing; add `invalid` to check validation feedback.
+
+### Existing-service imports
+
+The `import-service-webhooks` and `import-service-endpoints` skills use
+`prepare_service_import` on an owned service details page. The browser binds the
+selected service/version and calls the ordinary import plan API; the model cannot
+choose another destination or apply the result. The review shows additions,
+changes and removals, and uses the shared confirmation prompt for manual apply.
+Uncertain outcomes use import status recovery. Both skills accept specification URLs or documents. Webhook imports also accept a documentation website with `source_mode: docs`: the shared Registry discovery API extracts cited JSON POST event schemas, preserves existing events and verification settings, and returns a review.
+Webhook definition import does not provision receiving URLs or signing secrets.

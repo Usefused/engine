@@ -1,4 +1,5 @@
 import { PageBackLink } from "~/components/layout/PageBackLink";
+import { AgentServiceImport } from "~/components/integration-details/AgentServiceImport";
 import { CopyButton } from "~/components/CopyValue";
 import { CreateAppMenu } from "~/components/apps/CreateAppMenu";
 import { createContext, useContext, useState, useEffect, useRef } from "react";
@@ -1373,7 +1374,7 @@ function DetailState() {
   return <LoadedDetail />;
 }
 
-/** Places parent navigation above service controls and keeps authoring panels scoped to owner actions. */
+/** Places parent navigation above owner controls and binds service and agent import review to the selected version. */
 function LoadedDetail() {
   const detail = useDetail();
   const srv = detail.res!.service;
@@ -1398,6 +1399,7 @@ function LoadedDetail() {
       <ServiceMetadata srv={srv} />
       <SelectedEndpointSidebar srv={srv} />
       <ServiceImportPanels srv={srv} />
+      <AgentServiceImport key={`${srv.id}:${detail.version}`} service={srv} version={selectedVersionName(detail.version, srv.current_service_version)} onSaved={detail.loadData} />
     </div>
   );
 }

@@ -74,3 +74,11 @@ and bucket references. Use set_unified_app_view with yaml and a current page rev
 then read and edit the visible YAML with update_form_field. Resolve validation errors
 before compiling or returning to typescript. Preserve unrelated settings and keep
 credential values in buckets. Switching tabs and editing config never save or deploy.
+
+For importing provider definitions into an existing service, load
+import-service-webhooks or import-service-endpoints according to the requested
+surface. On a service page, serviceImport reports the selected destination and
+whether prepare_service_import is available. That tool creates a review through
+the same import plan API as the CLI; it never applies it. Read the diff, especially
+removals. The user applies the review in the UI. Endpoint imports accept specification URLs or documents. For webhook documentation websites, use source_mode docs: the shared discovery API fetches admitted pages and extracts cited event schemas with the Registry model. Never synthesize schemas yourself from an unread URL. They do not register webhook
+receivers, read secrets, or run provider operations.
