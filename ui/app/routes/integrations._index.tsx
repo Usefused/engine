@@ -1,3 +1,5 @@
+import { Layers, Plus } from "lucide-react";
+import { CataloguePageHeader, catalogueActionClassName } from "~/components/layout/CataloguePageHeader";
 import { useState, useEffect, useRef, useCallback, type ComponentProps, type FormEvent } from "react";
 import { useNavigate, useSearchParams, useRouteLoaderData, type MetaFunction } from "@remix-run/react";
 
@@ -596,20 +598,18 @@ export default function IntegrationsIndex() {
 
   return (
     <div>
-      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-6">
-        <div className="min-w-0 max-w-xl">
-          <h1 className="text-xl font-semibold text-slate-900">Services</h1>
-          <p className="text-slate-500 text-sm mt-1">Choose and configure the services your apps and MCP servers can use.</p>
-        </div>
-        <div className="flex w-full sm:w-auto items-center gap-3">
+      <div className="mb-6">
+        <CataloguePageHeader title="Services" icon={Layers} description="Choose and configure the services your apps and MCP servers can use." actions={
           <button
+            type="button"
             data-track="open_new_service_panel"
+            // Keep service definition in its existing drawer without changing access or import flows.
             onClick={() => setShowNewPanel(true)}
-            className="flex-1 sm:flex-none px-4 py-2 bg-slate-950 hover:bg-slate-800 text-white text-sm font-medium rounded-lg shadow-sm cursor-pointer"
+            className={catalogueActionClassName}
           >
-            Define service
+            <Plus className="h-3.5 w-3.5" aria-hidden="true" />Define service
           </button>
-        </div>
+        } />
       </div>
 
       <ServicesTabs

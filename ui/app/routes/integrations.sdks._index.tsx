@@ -1,3 +1,4 @@
+import { CataloguePageHeader } from "~/components/layout/CataloguePageHeader";
 import { hasAnyAppPermission } from "~/lib/current-actor-access";
 import { useState, useEffect, useRef } from "react";
 import { Link, useNavigate, useSearchParams, type MetaFunction } from "@remix-run/react";
@@ -9,7 +10,7 @@ export const meta: MetaFunction = ({ matches }) => {
     { title: "Apps - Fused" },
   ];
 };
-import { Archive as ArchiveIcon, Download, Globe2, Package, Play, ServerCrash, TerminalSquare, Trash2, Loader2, Search, X } from "lucide-react";
+import { Archive as ArchiveIcon, Layers3, Download, Globe2, Package, Play, ServerCrash, TerminalSquare, Trash2, Loader2, Search, X } from "lucide-react";
 import { api } from "~/lib/api";
 import { useToast } from "~/components/Toast";
 import { AppRuntimeStatus } from "~/components/apps/AppRuntimeStatus";
@@ -543,7 +544,7 @@ function SdkPagination({ page, total, onPage }: {
   );
 }
 
-/** Renders the selected app type's concise purpose and shared family actions. */
+/** Aligns app discovery with the shared catalogue header while keeping bulk lifecycle controls near the list. */
 function AppsCatalogueHeader({ type, canBrowseTemplates, canCreate, selectedCount, deactivating, onDeactivateSelected }: {
   type: AppCatalogueType;
   canBrowseTemplates: boolean;
@@ -552,34 +553,17 @@ function AppsCatalogueHeader({ type, canBrowseTemplates, canCreate, selectedCoun
   deactivating: boolean;
   onDeactivateSelected: () => void;
 }) {
-  return (
-    <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
-      <div className="min-w-0">
-        <h1 className="text-xl font-semibold text-slate-900">Apps</h1>
-        {/* Unified Apps need one clear use case, while the other tabs retain the general catalogue introduction. */}
-        <p className="text-slate-500 text-sm mt-1">{type === "unified_app" ? "Combine approved services into one typed action for onboarding, fulfillment, or reporting." : "Choose which services and operations an app can use."}</p>
-        {/* Template discovery belongs to the Unified App section rather than the global sidebar. */}
-        {type === "unified_app" && canBrowseTemplates && <Link className="mt-2 inline-block text-sm font-medium text-[var(--brand-violet)] hover:underline" to="/integrations/unified-apps/templates">Browse Unified App templates</Link>}
-      </div>
-      <div className="flex w-full sm:w-auto items-center gap-3">
-        {/* Bulk lifecycle controls appear only after the user selects manageable exact versions. */}
-        {selectedCount > 0 && (
-          <button
-            onClick={onDeactivateSelected}
-            disabled={deactivating}
-            className="inline-flex flex-1 sm:flex-none items-center justify-center gap-2 px-4 py-2 bg-rose-50 text-rose-600 hover:bg-rose-100 text-sm font-medium rounded-lg transition-all border border-rose-200 cursor-pointer"
-          >
-            <Trash2 className="w-4 h-4" />
-            {deactivating ? "Deactivating..." : `Deactivate selected (${selectedCount})`}
-          </button>
-        )}
-        {/* One menu routes each permitted type to its own creation flow. */}
-        {canCreate && (
-		  <CreateAppMenu className="flex-1 sm:flex-none" />
-        )}
-      </div>
-    </div>
-  );
+  // Unified Apps explain their coordination role; other tabs share the app catalogue introduction.
+  const description = type === "unified_app" ? "Combine approved services into one typed action for onboarding, fulfillment, or reporting." : "Choose which services and operations an app can use.";
+  return <CataloguePageHeader title="Apps" icon={Layers3} description={description} actions={
+    // The menu retains the per-type creation permissions rather than defaulting to one app kind.
+    canCreate && <CreateAppMenu appearance="catalogue" />
+  }>
+    {/* Template discovery remains scoped to the Unified App tab and its read permission. */}
+    {type === "unified_app" && canBrowseTemplates && <Link className="inline-block text-sm font-medium text-[var(--brand-violet)] hover:underline" to="/integrations/unified-apps/templates">Browse Unified App templates</Link>}
+    {/* Bulk lifecycle controls appear only for the user's current selection. */}
+    {selectedCount > 0 && <div className="flex justify-end"><button onClick={onDeactivateSelected} disabled={deactivating} className="inline-flex items-center justify-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-600 transition-colors hover:bg-rose-100 disabled:opacity-50"><Trash2 className="h-4 w-4" aria-hidden="true" />{deactivating ? "Deactivating..." : `Deactivate selected (${selectedCount})`}</button></div>}
+  </CataloguePageHeader>;
 }
 
 /** Keeps Apps navigation in the requested MCP, Unified App, SDK, REST order. */

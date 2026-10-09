@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { createPortal } from "react-dom";
+import { CataloguePageHeader, catalogueActionClassName } from "~/components/layout/CataloguePageHeader";
 import { Link, useSearchParams } from "@remix-run/react";
 import { ChevronLeft, ChevronRight, Plus, RefreshCw, Search, Webhook } from "lucide-react";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
@@ -65,15 +65,10 @@ export default function WebhooksPage() {
   }, [canRead, accessLoading, selected, search, offset, refresh]);
   const createURL = `/integrations/webhooks/new${selected ? `?service=${encodeURIComponent(selected)}` : ""}`;
   return <div className="min-w-0 space-y-5 sm:space-y-6">
-    <header className="space-y-3">
-      <div className="flex min-w-0 items-center gap-3">
-        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-600"><Webhook className="h-5 w-5" aria-hidden="true" /></span>
-        <div className="min-w-0"><h1 className="text-xl font-semibold text-slate-900">Webhooks</h1></div>
-      </div>
-      <p className="text-sm text-slate-600">Receive service events and trigger actions in your apps.</p>
-      {/* Route actions share the same utility row as Service details and notifications. */}
-      {canCreate && <WebhookHeaderAction to={createURL} />}
-    </header>
+    <CataloguePageHeader title="Webhooks" icon={Webhook} description="Receive service events and trigger actions in your apps." actions={
+      // The title action preserves the existing webhook creation permission.
+      canCreate && <Link to={createURL} className={catalogueActionClassName}><Plus className="h-3.5 w-3.5" aria-hidden="true" />Create webhook</Link>
+    } />
     {params.get("created") && <p role="status" className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">Webhook created. Copy its receiving URL into your provider’s webhook settings.</p>}
     <section aria-label="Registered webhooks" className="overflow-hidden rounded-lg border border-slate-200 bg-white">
     {/* Search queries persisted webhooks directly without a catalogue-backed service selector. */}
@@ -113,15 +108,6 @@ export default function WebhooksPage() {
     </nav>}
     </section>
   </div>;
-}
-
-/** Uses the same authenticated utility row as Service details without reserving another header column. */
-function WebhookHeaderAction({ to }: { to: string }) {
-  const [host, setHost] = useState<HTMLElement | null>(null);
-  useEffect(() => { setHost(document.getElementById("integrations-header-actions")); }, []);
-  // The portal target only exists after the shared layout has mounted in the browser.
-  if (!host) return null;
-  return createPortal(<Link to={to} className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"><Plus className="h-3.5 w-3.5" aria-hidden="true" />Create webhook</Link>, host);
 }
 
 /** Keeps provider URLs visible and copyable while distinguishing managed subscriptions from direct ingress. */

@@ -81,7 +81,7 @@ export default function IntegrationsLayout() {
         {/* Main content */}
         <main className="flex-1 min-w-0 overflow-y-auto">
           {signOutError && <p role="alert" className="m-4 rounded-md bg-red-50 p-3 text-sm text-red-700">{signOutError}</p>}
-          <div className="max-w-6xl mx-auto w-full px-4 py-5 sm:px-6 sm:py-8 lg:px-8">
+          <div className="max-w-6xl mx-auto w-full px-4 pt-3 pb-5 sm:px-6 sm:pt-4 sm:pb-8 lg:px-8">
             {/* Back navigation leads the page; global utilities share its row without displacing the title. */}
             <div className="mb-5 flex min-h-8 items-center justify-between gap-4">
               <div id="integrations-back-navigation" className="min-w-0 flex-1 empty:hidden" />

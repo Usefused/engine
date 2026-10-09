@@ -1,3 +1,4 @@
+import { catalogueActionClassName } from "~/components/layout/CataloguePageHeader";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
 import { useEffect, useId, useRef, useState, type ComponentType } from "react";
@@ -16,6 +17,7 @@ export type CreateAppOption = {
 
 type CreateAppMenuProps = {
   className?: string;
+  appearance?: "primary" | "catalogue";
   align?: "end" | "center";
   service?: ServiceAppSource;
 };
@@ -39,8 +41,8 @@ export const CREATE_APP_OPTIONS: CreateAppOption[] = [
   },
 ];
 
-/** Offers authorized creation paths with compact service actions and a menu contained by the mobile action row. */
-export function CreateAppMenu({ className = "", align = "end", service }: CreateAppMenuProps) {
+/** Shares authorized creation choices across catalogue title actions and service action menus. */
+export function CreateAppMenu({ className = "", appearance = "primary", align = "end", service }: CreateAppMenuProps) {
   const { access } = useCurrentActorAccess();
   // Each choice appears only when its own creation permission is available.
   const options = CREATE_APP_OPTIONS.filter((option) => {
@@ -92,11 +94,7 @@ export function CreateAppMenu({ className = "", align = "end", service }: Create
     setOpen(false);
   }
 
-  // Empty-state triggers are centered; header triggers anchor the popup to their trailing edge.
-  const alignmentClass = align === "center" ? "left-1/2 -translate-x-1/2" : "right-0";
-  // Service menus use the whole action row on phones so a trailing action cannot push the popup off-screen.
-  const rootPosition = service ? "static shrink-0 sm:relative" : "relative min-w-0";
-  const menuPosition = service ? "inset-x-0 w-full sm:left-auto sm:right-0 sm:w-72" : `${alignmentClass} w-72`;
+  const { rootPosition, menuPosition, buttonClass } = createAppMenuPresentation(appearance, align, service);
   // A disclosure with no authorized destinations would leave readers at a dead end.
   if (options.length === 0) return null;
 
@@ -109,7 +107,7 @@ export function CreateAppMenu({ className = "", align = "end", service }: Create
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={menuId}
-        className="inline-flex h-11 w-full shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-slate-950 px-3 text-sm font-medium text-white shadow-sm transition-colors hover:bg-slate-800 sm:h-9 sm:w-auto sm:gap-2 sm:px-4"
+        className={buttonClass}
       >
         {/* The label carries the mobile action; the decorative plus returns when space allows. */}
         <Plus className={`h-4 w-4 shrink-0 ${service ? "hidden sm:block" : ""}`} aria-hidden="true" />
@@ -151,4 +149,16 @@ export function CreateAppMenu({ className = "", align = "end", service }: Create
       )}
     </div>
   );
+}
+
+/** Keeps catalogue button styling and popup placement independent of the menu's interaction and access rules. */
+function createAppMenuPresentation(appearance: "primary" | "catalogue", align: "end" | "center", service?: ServiceAppSource) {
+  // Empty-state triggers are centered; header triggers anchor the popup to their trailing edge.
+  const alignmentClass = align === "center" ? "left-1/2 -translate-x-1/2" : "right-0";
+  // Service menus use the whole action row on phones so a trailing action cannot push the popup off-screen.
+  const rootPosition = service ? "static shrink-0 sm:relative" : "relative min-w-0";
+  const menuPosition = service ? "inset-x-0 w-full sm:left-auto sm:right-0 sm:w-72" : `${alignmentClass} w-72`;
+  // Catalogue actions match the shared title row; existing service and empty-state actions keep their emphasis.
+  const buttonClass = appearance === "catalogue" ? catalogueActionClassName : "inline-flex h-11 w-full shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-slate-950 px-3 text-sm font-medium text-white shadow-sm transition-colors hover:bg-slate-800 sm:h-9 sm:w-auto sm:gap-2 sm:px-4";
+  return { rootPosition, menuPosition, buttonClass };
 }

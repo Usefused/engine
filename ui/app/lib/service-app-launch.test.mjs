@@ -58,6 +58,8 @@ test('Use in App offers permitted destinations and hides when none are allowed',
   /** Stubs route navigation while retaining the menu's actual focus, permission, and dismissal logic. */
   function resolve(name) {
     const dependencies = {
+      // Header styling is irrelevant to this permission and navigation contract.
+      '~/components/layout/CataloguePageHeader': { catalogueActionClassName: '' },
       '~/components/access/CurrentActorAccess': { useCurrentActorAccess: () => { /* Supply the currently tested actor. */ return { access }; } },
       '~/lib/current-actor-access': { hasWorkspacePermission },
       '~/lib/service-app-launch': { serviceAppHref },
