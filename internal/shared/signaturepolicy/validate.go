@@ -31,8 +31,8 @@ func Validate(config *Config) error {
 		return nil
 	}
 	// Older policy versions must not silently ignore security-bearing extensions.
-	if config.Version != Version && config.Version != VersionAuthenticated {
-		return errors.New("signature_policy version must be 1 or 2")
+	if config.Version != Version && config.Version != VersionAuthenticated && config.Version != VersionStructuredHeaders {
+		return errors.New("signature_policy version must be 1, 2 or 3")
 	}
 	// Bounded rule count limits work at the public ingress boundary.
 	if len(config.Rules) < 1 || len(config.Rules) > MaxRules {
@@ -195,8 +195,15 @@ func validateComponent(component InputComponent) error {
 	if component.Kind != ComponentConstant && component.Value != "" {
 		return errors.New("only constant components accept value")
 	}
+	// A source is executable metadata and must never be ignored by another component kind.
+	if component.Source != nil && component.Kind != ComponentSource {
+		return errors.New("source is only supported by source components")
+	}
 	// Each signed input admits only its own fields so ignored metadata cannot change perceived coverage.
 	switch component.Kind {
+	// Explicit scalar inputs reject missing or repeated values at runtime.
+	case ComponentSource:
+		return validateSourceComponent(component)
 	case ComponentConstant:
 		return validateConstantComponent(component)
 	case ComponentSelectedHeaders:
@@ -326,7 +333,16 @@ func validateChallenge(challenge *ChallengeResponse) error {
 	return nil
 }
 
+// validateSource admits field extraction only from a bounded, explicitly named header.
 func validateSource(source ValueSource) error {
+	// Extraction has no meaning on JSON or query sources and cannot be silently ignored.
+	if source.Field != nil {
+		// Closed delimiter choices define an unquoted grammar rather than an arbitrary parser language.
+		if source.Location != LocationHeader || !identifierPattern.MatchString(source.Field.Key) || (source.Field.Separator != "," && source.Field.Separator != ";") || (source.Field.Assignment != "=" && source.Field.Assignment != ":") {
+			return errors.New("invalid header field extraction")
+		}
+	}
+	// Location determines the underlying scalar source and its allowed metadata.
 	switch source.Location {
 	case LocationHeader:
 		return validateNamedSource(source, headerPattern, "header")
@@ -390,10 +406,14 @@ func validBoundedFragment(value string, maximum int) bool {
 	return len(value) <= maximum && !strings.ContainsAny(value, "\r\n\x00")
 }
 
-// validatePolicyVersion prevents older runtimes from silently dropping security-bearing v2 fields.
+// validatePolicyVersion prevents older runtimes from silently dropping newer security-bearing fields.
 func validatePolicyVersion(config *Config) error {
-	// Version two explicitly negotiates the extended recipe contract.
-	if config.Version == VersionAuthenticated {
+	// Structured sources must be negotiated even when nested in predicates or challenge responses.
+	if err := validateStructuredVersion(config); err != nil {
+		return err
+	}
+	// Both newer versions include timestamp and authenticated challenge semantics.
+	if config.Version >= VersionAuthenticated {
 		return nil
 	}
 	for _, rule := range config.Rules {
@@ -469,8 +489,12 @@ func validateSignatureTimestamp(signature *SignatureVerification) error {
 		return nil
 	}
 	// Positive bounded age and bounded future skew avoid disabled checks and duration overflow.
-	if !headerPattern.MatchString(stamp.Header) || stamp.MaxAgeMs < 1 || stamp.MaxAgeMs > MaxClockSkewMs || stamp.MaxFutureMs < 0 || stamp.MaxFutureMs > MaxClockSkewMs {
+	if (stamp.Source == nil && !headerPattern.MatchString(stamp.Header)) || stamp.MaxAgeMs < 1 || stamp.MaxAgeMs > MaxClockSkewMs || stamp.MaxFutureMs < 0 || stamp.MaxFutureMs > MaxClockSkewMs {
 		return errors.New("signature timestamp window or header is invalid")
+	}
+	// A structured timestamp must be signed through the exact same selector, never a similarly named field.
+	if stamp.Source != nil {
+		return validateSignedTimestampSource(signature.Components, stamp)
 	}
 	return validateSignedTimestampHeader(signature.Components, stamp.Header)
 }

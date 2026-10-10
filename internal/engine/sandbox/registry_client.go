@@ -2850,19 +2850,19 @@ const registrySignaturePolicyGraphQLFields = `
 	version
 	rules {
 		name kind
-		response { value { location name path } body_field status_code }
-		predicates { source { location name path } operator value }
+		response { value { location name path field { key separator assignment } } body_field status_code }
+		predicates { source { location name path field { key separator assignment } } operator value }
 		verification {
 			kind
 			signature {
 				secret_ref
-				signature { location name path }
-				components { value kind names join algorithm encoding }
-				timestamp { header max_age_ms max_future_ms }
+				signature { location name path field { key separator assignment } }
+				components { value kind names join algorithm encoding source { location name path field { key separator assignment } } }
+				timestamp { header max_age_ms max_future_ms source { location name path field { key separator assignment } } }
 				algorithm encoding comparison prefix component_separator
 			}
-			jwt { secret_ref token { location name path } algorithms issuer audience clock_skew_ms }
-			challenge { value { location name path } body_field status_code }
+			jwt { secret_ref token { location name path field { key separator assignment } } algorithms issuer audience clock_skew_ms }
+			challenge { value { location name path field { key separator assignment } } body_field status_code }
 		}
 	}
 `

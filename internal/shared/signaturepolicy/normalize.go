@@ -63,6 +63,10 @@ func normalizeSignature(signature *SignatureVerification) {
 	// Header spelling is normalized without changing signed constant values.
 	if signature.Timestamp != nil {
 		signature.Timestamp.Header = strings.TrimSpace(signature.Timestamp.Header)
+		// Source normalization preserves delimiter and field-key bytes.
+		if signature.Timestamp.Source != nil {
+			normalizeSource(signature.Timestamp.Source)
+		}
 	}
 	signature.SecretRef = normalizeSecretRef(signature.SecretRef)
 	normalizeSource(&signature.Signature)
@@ -71,6 +75,10 @@ func normalizeSignature(signature *SignatureVerification) {
 	signature.Comparison = Comparison(strings.ToLower(strings.TrimSpace(string(signature.Comparison))))
 	for index := range signature.Components {
 		component := &signature.Components[index]
+		// Source components use the same header-name normalization as digest sources.
+		if component.Source != nil {
+			normalizeSource(component.Source)
+		}
 		component.Kind = ComponentKind(strings.ToLower(strings.TrimSpace(string(component.Kind))))
 		component.Join = ComponentJoin(strings.ToLower(strings.TrimSpace(string(component.Join))))
 		component.Algorithm = Algorithm(strings.ToLower(strings.TrimSpace(string(component.Algorithm))))
