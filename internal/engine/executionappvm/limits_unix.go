@@ -9,16 +9,14 @@ import (
 
 // limitCapabilityWorker bounds process memory, CPU time, and file descriptors independently of Goja limits.
 func limitCapabilityWorker() error {
+	// Install platform-specific memory bounds before any authored code can be read.
+	if err := limitCapabilityMemory(); err != nil {
+		return err
+	}
 	limits := []struct {
 		resource int
 		limit    uint64
 	}{
-		// A 755 KiB bundle failed under a 1 GiB virtual cap but passed under 2 GiB with 48 MiB peak RSS;
-		// Go on Linux arm64 needs address reservations beyond physical usage, so retain this OS bound.
-		{syscall.RLIMIT_AS, 2 << 30},
-		// Linux charges anonymous worker memory to RLIMIT_DATA, giving a smaller physical-growth
-		// ceiling without rejecting the Go runtime's mostly untouched virtual reservations.
-		{syscall.RLIMIT_DATA, 128 << 20},
 		// The CPU limit is cumulative for a persistent process; each request also has a
 		// 30-second interrupt deadline, and the Engine replaces a worker that exits.
 		{syscall.RLIMIT_CPU, 300},

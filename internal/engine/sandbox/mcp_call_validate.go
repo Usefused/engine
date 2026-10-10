@@ -162,7 +162,7 @@ func modelSchemaToOpenAPI(s *models.Schema) (*openapi3.Schema, error) {
 	}
 
 	schema := &openapi3.Schema{
-		Type:     schemaTypeOrDefault(s.Type),
+		Type:     projectedSchemaType(s.Type),
 		Format:   s.Format,
 		Required: s.Required,
 	}
@@ -198,14 +198,12 @@ func modelSchemaToOpenAPI(s *models.Schema) (*openapi3.Schema, error) {
 	return schema, nil
 }
 
-// schemaTypeOrDefault treats an unspecified type as "object": the fixture's
-// RequestContent schemas describe request bodies, and an empty Type field
-// (common for hand-authored fixtures, e.g. fixture.json's request bodies)
-// should validate as a permissive object rather than failing kin-openapi's
-// type check outright.
-func schemaTypeOrDefault(t string) *openapi3.Types {
+// projectedSchemaType preserves an absent projection type: unions can have no single
+// type, so inventing "object" would reject valid strings and arrays before dispatch.
+func projectedSchemaType(t string) *openapi3.Types {
+	// Only explicit projection types constrain values; required fields and child schemas still apply.
 	if t == "" {
-		t = "object"
+		return nil
 	}
 	return &openapi3.Types{t}
 }

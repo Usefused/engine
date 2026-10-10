@@ -52,9 +52,14 @@ func TestDeepFormBoundsAndNestedValues(t *testing.T) {
 	}
 	cycle := map[string]any{}
 	cycle["self"] = cycle
-	// Supporting structured arrays must not allow scalar values to masquerade as deep objects.
-	if err := addDeepFormValue("value", "scalar", queryParameters{}, false, 0); err == nil {
-		t.Fatal("scalar deep form property accepted")
+	// Provider union fields may select a scalar rather than their structured branch.
+	if err := addDeepFormValue("value", "scalar", form, false, 0); err != nil {
+		t.Fatal(err)
+	}
+	values, _ = url.ParseQuery(form.EncodeForm())
+	// The selected scalar must retain its original field name and value.
+	if values.Get("value") != "scalar" {
+		t.Fatal("scalar union form property changed")
 	}
 	// Cycles from internal callers must fail rather than exhaust the Engine stack.
 	if err := addDeepFormValue("value", cycle, queryParameters{}, false, 0); err == nil || !strings.Contains(err.Error(), "depth") {

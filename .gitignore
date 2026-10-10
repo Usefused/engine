@@ -29,3 +29,6 @@ runtime/execution/dist/**
 # Interpreter caches are local build byproducts, not agent source.
 /fused-agent/**/__pycache__/
 /fused-agent/**/*.pyc
+
+# Local isolated checkouts may link existing UI dependencies.
+/ui/node_modules

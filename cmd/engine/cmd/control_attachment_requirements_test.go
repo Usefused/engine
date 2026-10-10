@@ -30,10 +30,10 @@ func (s *attachmentRequirementStore) ResolveUnifiedAppBindings(_ context.Context
 	return s.bindings, nil
 }
 
-// TestReferenceOnlyConsumerAuthorization keeps hosted-only SDKs and MCPs deployable without bypassing dependency grants.
+// TestReferenceOnlyConsumerAuthorization keeps all hosted-app consumers deployable without bypassing dependency grants.
 func TestReferenceOnlyConsumerAuthorization(t *testing.T) {
-	for _, kind := range []string{"sdk", "mcp"} {
-		// Both delivery adapters must cross the same plan and apply authorization boundary.
+	for _, kind := range []string{"sdk", "mcp", "unified_app"} {
+		// All delivery adapters must cross the same plan and apply authorization boundary.
 		t.Run(kind, func(t *testing.T) {
 			accountID, workspaceID, bucketID, familyID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 			binding := models.UnifiedAppBinding{Alias: "checkout", Name: "Checkout", Version: "1.0.0", AppID: uuid.New(), AppFamilyID: familyID}
@@ -55,48 +55,13 @@ func TestReferenceOnlyConsumerAuthorization(t *testing.T) {
 					body = `{"plan_id":"` + plan.ID.String() + `"}`
 					policy = dynamicDesiredConfigApply
 				}
-				request := httptest.NewRequest(http.MethodPost, "/"+kind+"-config/"+phase, strings.NewReader(body))
+				request := httptest.NewRequest(http.MethodPost, "/"+strings.ReplaceAll(kind, "_", "-")+"-config/"+phase, strings.NewReader(body))
 				requirements, err := resolver.ResolveControlRequirements(context.Background(), actor, policy, nil, request)
 				// Hosted-only scope is valid and must yield create, bucket, and dependency authority.
 				if err != nil || len(requirements) != 3 {
 					t.Fatalf("%s requirements=%v error=%v", phase, requirements, err)
 				}
-				var grants []accesscontrol.Grant
-				for _, role := range accesscontrol.BuiltInRoles() {
-					// Use the shipped Admin definition instead of inventing a permissive test actor.
-					if role.Slug == accesscontrol.RoleAdmin {
-						for _, permission := range role.Permissions {
-							grants = append(grants, accesscontrol.Grant{Permission: permission, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}})
-						}
-					}
-				}
-				actor.Authorization, err = accesscontrol.NewAuthorizationSnapshot(1, grants...)
-				// An invalid fixture grant must not masquerade as a policy failure.
-				if err != nil {
-					t.Fatal(err)
-				}
-				// A workspace administrator can deploy the reference-only consumer in both phases.
-				if err = (accesscontrol.SnapshotAuthorizer{}).CheckAll(context.Background(), actor, requirements...); err != nil {
-					t.Fatalf("admin %s: %v", phase, err)
-				}
-				grants = nil
-				for _, requirement := range requirements {
-					// Withhold only hosted-app use to prove bucket and creation access cannot substitute for it.
-					if requirement.Permission != accesscontrol.PermissionAppUnifiedAppUse {
-						grants = append(grants, accesscontrol.Grant{Permission: requirement.Permission, Resource: requirement.Resource})
-					}
-				}
-				actor.Authorization, err = accesscontrol.NewAuthorizationSnapshot(2, grants...)
-				// Construct only valid scoped grants before checking the deliberate denial.
-				if err != nil {
-					t.Fatal(err)
-				}
-				err = (accesscontrol.SnapshotAuthorizer{}).CheckAll(context.Background(), actor, requirements...)
-				missing := accesscontrol.MissingRequirements(err)
-				// Denial must identify the exact attached family, rather than a generic empty-service policy error.
-				if !errors.Is(err, accesscontrol.ErrPermissionDenied) || len(missing) != 1 || missing[0].Permission != accesscontrol.PermissionAppUnifiedAppUse || missing[0].Resource.ID != familyID {
-					t.Fatalf("dependency denial=%v missing=%v", err, missing)
-				}
+				assertAttachmentAuthority(t, actor, requirements, familyID, phase)
 			}
 			// Plan resolves one account-scoped batch; apply consumes the stored identities without another lookup.
 			if stores.loads != 1 || stores.accountID != accountID {
@@ -106,7 +71,55 @@ func TestReferenceOnlyConsumerAuthorization(t *testing.T) {
 	}
 }
 
-// TestStoredAttachmentRequirementsFailClosed keeps malformed and recursive dependencies from bypassing normal grants.
+// attachmentAdminGrants uses the shipped role definition so tests cannot invent broader authority.
+func attachmentAdminGrants(workspaceID uuid.UUID) []accesscontrol.Grant {
+	var grants []accesscontrol.Grant
+	for _, role := range accesscontrol.BuiltInRoles() {
+		// Use the shipped Admin definition instead of inventing a permissive test actor.
+		if role.Slug == accesscontrol.RoleAdmin {
+			for _, permission := range role.Permissions {
+				grants = append(grants, accesscontrol.Grant{Permission: permission, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspaceID}})
+			}
+		}
+	}
+	return grants
+}
+
+// assertAttachmentAuthority proves both administrative access and exact denial when child use is withheld.
+func assertAttachmentAuthority(t *testing.T, actor accesscontrol.Actor, requirements []accesscontrol.Requirement, familyID uuid.UUID, phase string) {
+	t.Helper()
+
+	var err error
+	actor.Authorization, err = accesscontrol.NewAuthorizationSnapshot(1, attachmentAdminGrants(actor.WorkspaceID)...)
+	// An invalid fixture grant must not masquerade as a policy failure.
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A workspace administrator can deploy the reference-only consumer in both phases.
+	if err = (accesscontrol.SnapshotAuthorizer{}).CheckAll(context.Background(), actor, requirements...); err != nil {
+		t.Fatalf("admin %s: %v", phase, err)
+	}
+	var grants []accesscontrol.Grant
+	for _, requirement := range requirements {
+		// Withhold only hosted-app use to prove bucket and creation access cannot substitute for it.
+		if requirement.Permission != accesscontrol.PermissionAppUnifiedAppUse {
+			grants = append(grants, accesscontrol.Grant{Permission: requirement.Permission, Resource: requirement.Resource})
+		}
+	}
+	actor.Authorization, err = accesscontrol.NewAuthorizationSnapshot(2, grants...)
+	// Construct only valid scoped grants before checking the deliberate denial.
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = (accesscontrol.SnapshotAuthorizer{}).CheckAll(context.Background(), actor, requirements...)
+	missing := accesscontrol.MissingRequirements(err)
+	// Denial must identify the exact attached family, rather than a generic empty-service policy error.
+	if !errors.Is(err, accesscontrol.ErrPermissionDenied) || len(missing) != 1 || missing[0].Permission != accesscontrol.PermissionAppUnifiedAppUse || missing[0].Resource.ID != familyID {
+		t.Fatalf("dependency denial=%v missing=%v", err, missing)
+	}
+}
+
+// TestStoredAttachmentRequirementsFailClosed keeps malformed and unsupported dependencies from bypassing normal grants.
 func TestStoredAttachmentRequirementsFailClosed(t *testing.T) {
 	bucketID, serviceID := uuid.New(), uuid.New()
 	valid := models.UnifiedAppBinding{AppID: uuid.New(), AppFamilyID: uuid.New()}
@@ -120,7 +133,8 @@ func TestStoredAttachmentRequirementsFailClosed(t *testing.T) {
 		{name: "mixed MCP", kind: store.ConfigTypeMCP, bindings: []models.UnifiedAppBinding{valid}, bucket: bucketID},
 		{name: "missing family", kind: store.ConfigTypeMCP, bindings: []models.UnifiedAppBinding{{AppID: valid.AppID}}, bucket: bucketID, wantDenied: true},
 		{name: "missing version", kind: store.ConfigTypeSDK, bindings: []models.UnifiedAppBinding{{AppFamilyID: valid.AppFamilyID}}, bucket: bucketID, wantDenied: true},
-		{name: "recursive", kind: store.ConfigTypeUnifiedApp, bindings: []models.UnifiedAppBinding{valid}, bucket: bucketID, wantDenied: true},
+		{name: "nested app", kind: store.ConfigTypeUnifiedApp, bindings: []models.UnifiedAppBinding{valid}, bucket: bucketID},
+		{name: "unsupported webhook", kind: store.ConfigTypeWebhook, bindings: []models.UnifiedAppBinding{valid}, bucket: bucketID, wantDenied: true},
 		{name: "oversized", kind: store.ConfigTypeMCP, bindings: make([]models.UnifiedAppBinding, 17), bucket: bucketID, wantDenied: true},
 		{name: "missing bucket", kind: store.ConfigTypeMCP, bindings: []models.UnifiedAppBinding{valid}, wantDenied: true},
 	} {

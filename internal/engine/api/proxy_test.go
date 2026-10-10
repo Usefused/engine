@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -201,5 +202,59 @@ func TestForwardAndInspect_SkipsOnSuccessForNonSuccessStatus(t *testing.T) {
 	clientBody, _ := io.ReadAll(rec.Body)
 	if string(clientBody) != `{"error":"source hash mismatch"}` {
 		t.Errorf("expected error body to still reach the client unchanged, got %q", string(clientBody))
+	}
+}
+
+// TestBillingOriginComesFromEngineConfig proves browser headers cannot select a billing return destination.
+func TestBillingOriginComesFromEngineConfig(t *testing.T) {
+	for _, tc := range []struct{ method, path, configured, want string }{
+		{http.MethodPost, "/account/billing/link", "http://127.0.0.1:53182", "http://127.0.0.1:53182"},
+		{http.MethodPost, "/account/billing/link", "", ""},
+		{http.MethodGet, "/account/billing", "https://engine.example", ""},
+		{http.MethodPost, "/integrations/import/plan", "https://engine.example", ""},
+	} {
+		var got string
+		// Capture only the effective header received by Registry after the real reverse proxy boundary.
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.Header.Get("X-Fused-Billing-Engine-Origin")
+			w.WriteHeader(http.StatusOK)
+		}))
+		proxy := NewRegistryProxy(backend.URL, testRegistryLicense, tc.configured)
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req.Header.Set("X-Fused-Billing-Engine-Origin", "https://attacker.example")
+		req.Header.Set("Origin", "https://attacker.example")
+		req.Host = "attacker.example"
+		proxy.Forward(httptest.NewRecorder(), req, "")
+		backend.Close()
+		// The configured value is authoritative only on the intended billing mutation route.
+		if got != tc.want {
+			t.Fatalf("%s %s: got origin %q, want %q", tc.method, tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestBillingSyncRefreshesAccessBeforeSuccess prevents paid upgrades waiting for a periodic heartbeat or reporting failed persistence as success.
+func TestBillingSyncRefreshesAccessBeforeSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		path          string
+		upstream      int
+		refreshed     bool
+		calls, status int
+	}{
+		{"/account/billing/sync", 200, true, 1, 200}, {"/account/billing/sync", 200, false, 1, 503},
+		{"/account/billing/sync", 503, true, 0, 503}, {"/account/billing/link", 200, true, 0, 200},
+	} {
+		// Model Registry reconciliation independently from local entitlement persistence.
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(tc.upstream) }))
+		proxy := NewRegistryProxy(backend.URL, testRegistryLicense)
+		calls := 0
+		proxy.BillingSync = func(context.Context) bool { calls++; return tc.refreshed } // Record completion before the response reaches the caller.
+		response := httptest.NewRecorder()
+		proxy.Forward(response, httptest.NewRequest(http.MethodPost, tc.path, nil), "")
+		backend.Close()
+		// Link creation and failed synchronization never trigger or claim updated access.
+		if calls != tc.calls || response.Code != tc.status {
+			t.Fatalf("%+v: calls=%d status=%d", tc, calls, response.Code)
+		}
 	}
 }

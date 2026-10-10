@@ -15,11 +15,14 @@ func registerProxyRoutes(r chi.Router, proxy api.Forwarder, s store.Store) {
 	registerProxyRoutesWithRuntimeContracts(r, proxy, s, nil)
 }
 
+// registerProxyRoutesWithRuntimeContracts keeps billing identity server-side after the shared Engine authorization boundary.
 func registerProxyRoutesWithRuntimeContracts(r chi.Router, proxy api.Forwarder, s store.Store, contractFetcher api.RuntimeContractFetcher) {
 	// Proxy routes authenticate locally, then RegistryProxy replaces inbound
 	// auth with the Engine's licensed workspace identity.
 	r.Post("/graphql", api.GraphQLProxyHandler(proxy, s))
 
+	// Permission introspection is local; no browser credential is forwarded to Registry.
+	r.Get("/account/billing/access", api.BillingAccessHandler)
 	restHandler := api.RESTProxyHandlerWithRuntimeContracts(proxy, s, contractFetcher)
 	for _, path := range api.RESTProxyMountPaths {
 		if path == "/leads" {

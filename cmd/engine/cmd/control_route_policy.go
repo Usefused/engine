@@ -330,6 +330,11 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodGet, "/account", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionAccountRead),
 	}},
+	// Billing recovery retains the same read/manage split as other account operations.
+	{http.MethodGet, "/account/billing", false, []routeRequirement{workspaceRequirement(accesscontrol.PermissionBillingRead)}},
+	{http.MethodGet, "/account/billing/access", false, []routeRequirement{workspaceRequirement(accesscontrol.PermissionBillingRead)}},
+	{http.MethodPost, "/account/billing/link", false, []routeRequirement{workspaceRequirement(accesscontrol.PermissionBillingManage)}},
+	{http.MethodPost, "/account/billing/sync", false, []routeRequirement{workspaceRequirement(accesscontrol.PermissionBillingManage)}},
 	{http.MethodGet, "/account/balance/stream", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionBillingRead),
 	}},

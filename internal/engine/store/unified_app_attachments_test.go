@@ -24,6 +24,11 @@ func assertUnifiedAppAttachmentResolution(t *testing.T, ctx context.Context, poo
 	if err != nil || len(bindings) != 1 || bindings[0].AppID != activeID || bindings[0].Alias != "lookup" {
 		t.Fatalf("bindings=%v error=%v", bindings, err)
 	}
+	// The SQL runtime projection must retain the digest used by nested execution admission.
+	runtime, err := NewPostgresStore(pool).GetAppRuntime(ctx, activeID)
+	if err != nil || runtime.BundleDigest == "" || runtime.BundleDigest != bindings[0].BundleDigest {
+		t.Fatalf("runtime bundle identity lost: runtime=%v error=%v", runtime, err)
+	}
 	assertUnifiedAppConsumerRecovery(t, ctx, pool, accountID, familyID, bindings)
 	// Another account must not discover or reuse the same named capability.
 	if _, err := repository.ResolveUnifiedAppBindings(ctx, uuid.New(), refs); err == nil {

@@ -224,3 +224,26 @@ func TestModelSchemaToOpenAPI_AdditionalPropertiesValuesValidate(t *testing.T) {
 		t.Fatal("invalid map value accepted")
 	}
 }
+
+// Union projections must not acquire an invented object type while neighboring typed fields remain enforced.
+func TestModelSchemaToOpenAPIUntypedUnionProjection(t *testing.T) {
+	schema, err := modelSchemaToOpenAPI(&models.Schema{Type: "object", Required: []string{"enabled"}, Properties: map[string]models.Schema{
+		"return_url": {}, "allowed_updates": {}, "enabled": {Type: "boolean"},
+	}})
+	// A conversion failure prevents this test from exercising runtime validation.
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Provider unions can admit scalar and array values despite lacking one projected type.
+	if err := schema.VisitJSON(map[string]any{"return_url": "https://fused.example/billing", "allowed_updates": []any{"price"}, "enabled": true}); err != nil {
+		t.Fatalf("valid union fields rejected: %v", err)
+	}
+	// Retaining unknown union types must not relax explicit sibling types.
+	if err := schema.VisitJSON(map[string]any{"enabled": "true"}); err == nil {
+		t.Fatal("invalid explicit boolean accepted")
+	}
+	// Retaining unknown union types must not relax required property constraints.
+	if err := schema.VisitJSON(map[string]any{"return_url": "https://fused.example/billing"}); err == nil {
+		t.Fatal("missing required property accepted")
+	}
+}

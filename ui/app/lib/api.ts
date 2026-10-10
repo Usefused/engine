@@ -1324,6 +1324,19 @@ export const api = {
     logout: () => req<{ logout_url?: string }>("/auth/logout", { method: "POST", body: "{}" }),
   },
 
+  billing: {
+    // state reads canonical Registry state through the authenticated Engine proxy.
+    state: () => req<BillingState>("/account/billing"),
+    // access uses Engine's existing workspace grant, including while billing recovery is needed.
+    access: () => req<{ can_manage: boolean }>("/account/billing/access"),
+    // sync asks Registry to verify changes made at the payment provider before refreshing the UI.
+    sync: () => req<{ status: string }>("/account/billing/sync", { method: "POST", body: "{}" }),
+    // link carries intent only; Engine supplies the account license and Registry resolves the return destination.
+    link: (action: "subscribe" | "manage" | "cancel", plan: string | undefined, requestID: string) => req<{ url: string }>("/account/billing/link", {
+      method: "POST", headers: { "Idempotency-Key": requestID }, body: JSON.stringify({ action, plan, return_to: "engine" }),
+    }),
+  },
+
   // Account
   getAccount: () => req<Account>("/account"),
   updateEmail: (email: string) =>
@@ -2360,4 +2373,17 @@ export const api = {
   },
 
   health: () => req<{ status: string }>("/health"),
+};
+
+export type BillingState = {
+ available: boolean;
+ plan: string;
+ status: string;
+ access_until: string | null;
+ cancel_at_period_end: boolean;
+ subscription_plan?: string;
+ pending_plan?: string;
+ pending_change?: "" | "scheduled" | "awaiting_payment";
+ change_at?: string | null;
+ plans: Array<{ id: string; name: string; monthly_price_cents: number; currency: string; entitlements?: Record<string, number | boolean | string> }>;
 };

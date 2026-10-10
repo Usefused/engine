@@ -4,6 +4,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,18 +19,21 @@ import (
 // handling) lives, so GraphQL and REST proxy handlers don't each reimplement
 // it -- that's the DRY boundary this file exists to enforce.
 type RegistryProxy struct {
-	target     *url.URL
-	licenseKey string
+	target              *url.URL
+	licenseKey          string
+	billingEngineOrigin string
+	// BillingSync refreshes persisted Engine entitlements after a successful canonical billing sync.
+	BillingSync func(context.Context) bool
 }
 
-// NewRegistryProxy builds a proxy targeting the Registry's base URL.
+// NewRegistryProxy binds Registry authentication and the optional configured Engine billing origin.
 // registryEndpoint is accepted in either form the config already uses
 // elsewhere in the codebase: a bare host or the GraphQL-suffixed form used by
 // the Engine's metadata client in registry_client.go. The suffix is
 // stripped so one proxy instance can serve both /graphql and REST paths --
 // mirroring the same trailing-suffix trim registry_client.go already does
 // when it derives the handshake URL from the same config value.
-func NewRegistryProxy(registryEndpoint, licenseKey string) *RegistryProxy {
+func NewRegistryProxy(registryEndpoint, licenseKey string, engineOrigins ...string) *RegistryProxy {
 	base := strings.TrimSuffix(registryEndpoint, "/graphql")
 
 	target, err := url.Parse(base)
@@ -43,10 +47,17 @@ func NewRegistryProxy(registryEndpoint, licenseKey string) *RegistryProxy {
 		target = &url.URL{}
 	}
 
-	return &RegistryProxy{target: target, licenseKey: licenseKey}
+	// Only operator configuration can establish the billing origin; never infer it from request headers.
+	origin := ""
+	// Existing callers without a configured Engine origin retain Registry's legacy return behavior.
+	if len(engineOrigins) > 0 {
+		origin = engineOrigins[0]
+	}
+	return &RegistryProxy{target: target, licenseKey: licenseKey, billingEngineOrigin: origin}
 }
 
-// Forward relays r to the Registry and copies the Registry's response
+// Forward relays r to Registry and refreshes Engine access after confirmed billing synchronization.
+// It copies the Registry response
 // (status, headers, body) back to w unchanged. stripPrefix, if non-empty, is
 // removed from the outgoing request path before forwarding.
 //
@@ -56,6 +67,7 @@ func (p *RegistryProxy) Forward(w http.ResponseWriter, r *http.Request, stripPre
 	proxy := p.newReverseProxy(stripPrefix)
 	proxy.ModifyResponse = func(res *http.Response) error {
 		stripCORSHeaders(res)
+		p.refreshBillingAccess(res)
 		return nil
 	}
 	proxy.ServeHTTP(w, r)
@@ -94,8 +106,20 @@ func (p *RegistryProxy) ForwardAndInspect(w http.ResponseWriter, r *http.Request
 	proxy.ServeHTTP(w, r)
 }
 
+// refreshBillingAccess completes the normal durable heartbeat path before reporting successful billing refresh.
+func (p *RegistryProxy) refreshBillingAccess(res *http.Response) {
+	// Only successful canonical sync can trigger entitlement refresh; link creation and failed payment cannot grant access.
+	if p.BillingSync == nil || res.Request.Method != http.MethodPost || res.Request.URL.Path != "/account/billing/sync" || res.StatusCode < 200 || res.StatusCode >= 300 {
+		return
+	}
+	// A confirmed payment with failed local persistence must not falsely claim the new limits are already usable.
+	if !p.BillingSync(res.Request.Context()) {
+		replaceProxyJSONResponse(res, http.StatusServiceUnavailable, []byte(`{"error":"Payment status was synchronized, but Engine access could not refresh. Retry Refresh."}`))
+	}
+}
+
 // newReverseProxy builds the *httputil.ReverseProxy shared Director (path
-// stripping, Host rewriting) both Forward and ForwardAndInspect need --
+// stripping, Host rewriting, and trusted billing origin) both forwarding paths need --
 // defined once here so that logic can't drift between the two.
 func (p *RegistryProxy) newReverseProxy(stripPrefix string) *httputil.ReverseProxy {
 	proxy := httputil.NewSingleHostReverseProxy(p.target)
@@ -116,6 +140,12 @@ func (p *RegistryProxy) newReverseProxy(stripPrefix string) *httputil.ReversePro
 		// both accepted inbound forms prevents them becoming Registry identity.
 		req.Header.Set("Authorization", "Bearer "+p.licenseKey)
 		req.Header.Set("X-API-Key", p.licenseKey)
+		// Remove forged browser values before adding the server-owned billing origin.
+		req.Header.Del("X-Fused-Billing-Engine-Origin")
+		// Other Registry endpoints must never inherit billing redirect authority from a caller.
+		if req.Method == http.MethodPost && req.URL.Path == "/account/billing/link" && p.billingEngineOrigin != "" {
+			req.Header.Set("X-Fused-Billing-Engine-Origin", p.billingEngineOrigin)
+		}
 		// X-Forwarded-For is intentionally NOT set here: httputil.ReverseProxy
 		// already appends the client IP to it in ServeHTTP itself (has done so
 		// since early Go versions), so adding it in the Director would double

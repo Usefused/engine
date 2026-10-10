@@ -183,3 +183,30 @@ func TestUnaryLicenseEnforcement_BlocksExpiredLease(t *testing.T) {
 		t.Fatalf("gRPC status = %v, want %v", status.Code(err), codes.Unavailable)
 	}
 }
+
+// TestBillingRecoveryKeepsRuntimeBlocked verifies suspension allows only the exact billing recovery contract.
+func TestBillingRecoveryKeepsRuntimeBlocked(t *testing.T) {
+	entitlement.EngineSuspended.Store(true)
+	defer entitlement.EngineSuspended.Store(false)
+	for _, tc := range []struct {
+		method, path string
+		allowed      bool
+	}{
+		{"GET", "/account/billing", true}, {"GET", "/account/billing/access", true},
+		{"POST", "/account/billing/link", true}, {"POST", "/account/billing/sync", true},
+		{"POST", "/account/billing/engine", false}, {"DELETE", "/account/billing", false},
+		{"GET", "/account/billing/secrets", false}, {"POST", "/v1/apps/example/executions", false},
+	} {
+		// A recovery exemption continues into the normal authentication/authorization chain.
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) })
+		out := httptest.NewRecorder()
+		LicenseEnforcement(next).ServeHTTP(out, httptest.NewRequest(tc.method, tc.path, nil))
+		expected := http.StatusForbidden
+		if tc.allowed {
+			expected = http.StatusUnauthorized
+		} // Recovery is not an authorization bypass.
+		if out.Code != expected {
+			t.Fatalf("%s %s: got %d want %d", tc.method, tc.path, out.Code, expected)
+		}
+	}
+}

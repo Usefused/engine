@@ -16,7 +16,8 @@ import (
 // goroutine so the check is lock-free and imposes negligible latency.
 func LicenseEnforcement(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if licenseRecoveryHTTPPath(r.URL.Path) {
+		// Billing recovery still passes through authentication and authorization below this runtime gate.
+		if licenseRecoveryHTTPPath(r.URL.Path) || billingRecoveryRequest(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -99,4 +100,14 @@ func grpcLicenseError() error {
 		return status.Error(codes.Unavailable, "license verification expired")
 	}
 	return nil
+}
+
+// billingRecoveryRequest opens only the exact control actions needed to repair or cancel an unpaid subscription.
+func billingRecoveryRequest(r *http.Request) bool {
+	switch r.Method + " " + r.URL.Path { // Prefix matches would inadvertently exempt future runtime actions.
+	case "GET /account/billing", "GET /account/billing/access", "POST /account/billing/link", "POST /account/billing/sync":
+		return true
+	default:
+		return false
+	}
 }
