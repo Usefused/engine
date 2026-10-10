@@ -125,7 +125,14 @@ func predicateMatches(predicate signaturepolicy.Predicate, value string, present
 	}
 }
 
+// sourceValue extracts a scalar; repeated structured members are never implicitly first-wins.
 func sourceValue(source signaturepolicy.ValueSource, input PolicyInput) (string, bool) {
+	// Scalar consumers such as predicates and challenges must reject ambiguity.
+	if source.Field != nil {
+		values, ok := headerFieldValues(source, input)
+		return singularExtractedValue(values, ok)
+	}
+	// Legacy sources preserve their existing selection semantics.
 	switch source.Location {
 	case signaturepolicy.LocationHeader:
 		values := input.Request.Header.Values(source.Name)
@@ -177,32 +184,36 @@ func verifyRecipe(ctx context.Context, recipe *signaturepolicy.SignatureVerifica
 	if err != nil || secret == "" {
 		return policyFail(CodeSecretUnavailable, "signature secret is unavailable")
 	}
-	provided, present := singleSignatureValue(recipe.Signature, input)
-	// Multiple signature headers or query values are ambiguous and fail closed.
+	candidates, present := signatureCandidates(recipe.Signature, input)
+	// Rotation permits bounded alternatives, never a missing or ambiguous header.
 	if !present {
-		return policyFail(CodeCredentialMissing, "signature is missing or ambiguous")
+		return policyFail(CodeCredentialMissing, "signature is missing, malformed or ambiguous")
 	}
-	// Prefixes are part of the provider protocol, not optional text to strip if convenient.
-	if !strings.HasPrefix(provided, recipe.Prefix) {
-		return policyFail(CodeCredentialInvalid, "signature prefix is invalid")
-	}
-	return compareRecipeSignature(recipe, input, secret, strings.TrimPrefix(provided, recipe.Prefix))
+	return compareRecipeSignatures(recipe, input, secret, candidates)
 }
 
-// compareRecipeSignature reconstructs and compares the exact provider digest after credential checks.
-func compareRecipeSignature(recipe *signaturepolicy.SignatureVerification, input PolicyInput, secret, provided string) PolicyResult {
+// compareRecipeSignatures computes the digest once and checks every bounded rotation candidate.
+func compareRecipeSignatures(recipe *signaturepolicy.SignatureVerification, input PolicyInput, secret string, candidates []string) PolicyResult {
 	message, err := signatureMessage(recipe, input)
-	// Invalid signed-input reconstruction must never fall back to signing the body alone.
+	// Invalid signed input cannot fall back to body-only verification.
 	if err != nil {
 		return policyFail(CodePolicyInvalid, "signature input is invalid")
 	}
 	expected, err := encodedHMAC(recipe.Algorithm, recipe.Encoding, secret, message)
-	// Unsupported algorithms remain a policy error rather than a comparison bypass.
+	// Invalid algorithms remain configuration errors, never unsigned acceptance.
 	if err != nil {
 		return policyFail(CodePolicyInvalid, "signature algorithm is unsupported")
 	}
-	// Constant-time equality accepts exactly the expected digest bytes.
-	if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+	matched := 0
+	for _, provided := range candidates {
+		// Prefixes are exact protocol data; substring matches cannot authorize an event.
+		if !strings.HasPrefix(provided, recipe.Prefix) {
+			return policyFail(CodeCredentialInvalid, "signature prefix is invalid")
+		}
+		matched |= subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(provided, recipe.Prefix)), []byte(expected))
+	}
+	// Do not short-circuit at the matching key's position in the rotation list.
+	if matched != 1 {
 		return policyFail(CodeCredentialInvalid, "signature is invalid")
 	}
 	return PolicyResult{VerifyResult: ok()}
@@ -210,6 +221,11 @@ func compareRecipeSignature(recipe *signaturepolicy.SignatureVerification, input
 
 // singleSignatureValue rejects repeated credentials instead of trusting parser-specific first-value selection.
 func singleSignatureValue(source signaturepolicy.ValueSource, input PolicyInput) (string, bool) {
+	// Field selection must occur before the legacy whole-header path.
+	if source.Field != nil {
+		values, ok := headerFieldValues(source, input)
+		return singularExtractedValue(values, ok)
+	}
 	// Body sources retain the bounded JSON-path semantics of the existing recipe engine.
 	switch source.Location {
 	// HTTP signatures must have one unambiguous header value.
@@ -241,6 +257,10 @@ func validSignatureTime(policy *signaturepolicy.SignatureTimestamp, input Policy
 		return true
 	}
 	raw, ok := singularValue(input.Request.Header.Values(policy.Header))
+	// Version-three freshness uses the same scalar selector as the signed source component.
+	if policy.Source != nil {
+		raw, ok = singleSignatureValue(*policy.Source, input)
+	}
 	// A malformed or duplicated timestamp is rejected before parsing.
 	if !ok || len(raw) > 20 {
 		return false
@@ -275,7 +295,14 @@ func signatureMessage(recipe *signaturepolicy.SignatureVerification, input Polic
 func componentValue(component signaturepolicy.InputComponent, input PolicyInput) (string, error) {
 	// Each component uses its declared source so the reconstructed message matches provider bytes.
 	switch component.Kind {
-	// Literal protocol versions are contract data, not mutable request headers.
+	// Scalar sources must be present and singular; missing bytes must never become an empty signed input.
+	case signaturepolicy.ComponentSource:
+		value, ok := singleSignatureValue(*component.Source, input)
+		if !ok {
+			return "", errors.New("signature source is missing or ambiguous")
+		}
+		return value, nil
+		// Literal protocol versions are contract data, not mutable request headers.
 	case signaturepolicy.ComponentConstant:
 		return component.Value, nil
 	case signaturepolicy.ComponentRawBody:

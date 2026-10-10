@@ -16,6 +16,8 @@ const (
 	Version = 1
 	// VersionAuthenticated adds timestamped signatures and authenticated challenge responses.
 	VersionAuthenticated = 2
+	// VersionStructuredHeaders negotiates field extraction and signature rotation candidates.
+	VersionStructuredHeaders = 3
 
 	RuleChallenge RuleKind = "challenge"
 	RuleEvent     RuleKind = "event"
@@ -32,6 +34,7 @@ const (
 	VerificationJWT       VerificationKind = "jwt"
 	VerificationChallenge VerificationKind = "challenge_response"
 
+	ComponentSource           ComponentKind = "source"
 	ComponentConstant         ComponentKind = "constant"
 	ComponentRawBody          ComponentKind = "raw_body"
 	ComponentExactCallbackURL ComponentKind = "exact_callback_url"
@@ -77,10 +80,19 @@ type Predicate struct {
 	Value    string            `json:"value,omitempty" yaml:"value,omitempty"`
 }
 
+// HeaderFieldExtraction describes unquoted, delimiter-separated key/value members.
+// Keys are case-sensitive; optional SP/HTAB surrounding members is ignored.
+type HeaderFieldExtraction struct {
+	Key        string `json:"key" yaml:"key"`
+	Separator  string `json:"separator" yaml:"separator"`
+	Assignment string `json:"assignment" yaml:"assignment"`
+}
+
 type ValueSource struct {
-	Location ValueLocation `json:"location" yaml:"location"`
-	Name     string        `json:"name,omitempty" yaml:"name,omitempty"`
-	Path     string        `json:"path,omitempty" yaml:"path,omitempty"`
+	Field    *HeaderFieldExtraction `json:"field,omitempty" yaml:"field,omitempty"`
+	Location ValueLocation          `json:"location" yaml:"location"`
+	Name     string                 `json:"name,omitempty" yaml:"name,omitempty"`
+	Path     string                 `json:"path,omitempty" yaml:"path,omitempty"`
 }
 
 type Verification struct {
@@ -116,6 +128,7 @@ type SignatureVerification struct {
 // value, or RFC3986 percent-encoded name=value pairs joined by '&'. body_hash
 // contributes the encoded digest of the exact raw body.
 type InputComponent struct {
+	Source    *ValueSource  `json:"source,omitempty" yaml:"source,omitempty"`
 	Value     string        `json:"value,omitempty" yaml:"value,omitempty"`
 	Kind      ComponentKind `json:"kind" yaml:"kind"`
 	Names     []string      `json:"names" yaml:"names"`
@@ -139,9 +152,10 @@ type ChallengeResponse struct {
 	StatusCode int         `json:"status_code" yaml:"status_code"`
 }
 
-// SignatureTimestamp requires one signed Unix-seconds header within a bounded clock window.
+// SignatureTimestamp requires one signed Unix-seconds value, from a whole header or extracted field, within a bounded clock window.
 type SignatureTimestamp struct {
-	Header      string `json:"header" yaml:"header"`
-	MaxAgeMs    int64  `json:"max_age_ms" yaml:"max_age_ms"`
-	MaxFutureMs int64  `json:"max_future_ms" yaml:"max_future_ms"`
+	Source      *ValueSource `json:"source,omitempty" yaml:"source,omitempty"`
+	Header      string       `json:"header,omitempty" yaml:"header,omitempty"`
+	MaxAgeMs    int64        `json:"max_age_ms" yaml:"max_age_ms"`
+	MaxFutureMs int64        `json:"max_future_ms" yaml:"max_future_ms"`
 }

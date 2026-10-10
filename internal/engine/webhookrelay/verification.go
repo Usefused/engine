@@ -5,7 +5,7 @@ import "github.com/Usefused/engine/internal/shared/signaturepolicy"
 // ValidateExportVerification requires body-authenticated, fresh provider events before the registration can export resource claims.
 func ValidateExportVerification(policy *signaturepolicy.Config) error {
 	// Unsigned and legacy challenge-only registrations cannot attest to remote provider resource ownership.
-	if policy == nil || policy.Version != signaturepolicy.VersionAuthenticated || len(policy.Rules) == 0 {
+	if policy == nil || (policy.Version != signaturepolicy.VersionAuthenticated && policy.Version != signaturepolicy.VersionStructuredHeaders) || len(policy.Rules) == 0 {
 		return ErrDenied
 	}
 	// Every event-accepting branch must authenticate the same body from which routing identity is extracted.
