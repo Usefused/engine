@@ -27,10 +27,7 @@ func addDeepFormValue(name string, value any, form queryParameters, allowReserve
 			}
 		}
 	default:
-		// A deep-encoded property must retain a structured root; primitives use ordinary form encoding.
-		if depth == 0 {
-			return fmt.Errorf("deep form property requires an object or array")
-		}
+		// Union fields can choose a scalar (including an empty-string reset); its bracket path is already complete.
 		form.Add(name, fmt.Sprint(value), allowReserved)
 	}
 	return nil

@@ -296,15 +296,14 @@ func capabilityExecutable() (string, error) {
 	return worker, nil
 }
 
-// capabilityExecutableForTest resolves a packaged worker or builds one for Linux package integration tests.
+// capabilityExecutableForTest resolves a packaged worker or builds one for supported native integration tests.
 func capabilityExecutableForTest() (string, error) {
-	// macOS package tests exercise the interpreter directly because its nested sandbox profile
-	// is unavailable on this host; Linux integration tests use a packaged or locally built worker.
-	if runtime.GOOS != "linux" {
+	// Only platforms with a production confinement implementation may start test workers.
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		return "", ErrCapabilityWorkerUnavailable
 	}
 	capabilityTestWorker.once.Do(func() {
-		// A prebuilt test worker permits hermetic Linux containers without a Go toolchain.
+		// A prebuilt test worker permits hermetic native checks without a Go toolchain.
 		if prebuilt := os.Getenv("FUSED_EXECUTION_WORKER_TEST_BINARY"); filepath.IsAbs(prebuilt) {
 			capabilityTestWorker.path = prebuilt
 			return

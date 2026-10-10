@@ -290,6 +290,12 @@ func TestControlEndpointRoleMatrix(t *testing.T) {
 		path    string
 		allowed map[string]bool
 	}{
+		// Billing uses the established read/manage role boundary, including recovery while suspended.
+		{http.MethodGet, "/account/billing", map[string]bool{accesscontrol.RoleOwner: true, accesscontrol.RoleAdmin: true, accesscontrol.RoleBuilder: true, accesscontrol.RoleViewer: true}},
+		{http.MethodGet, "/account/billing/access", map[string]bool{accesscontrol.RoleOwner: true, accesscontrol.RoleAdmin: true, accesscontrol.RoleBuilder: true, accesscontrol.RoleViewer: true}},
+		{http.MethodPost, "/account/billing/link", map[string]bool{accesscontrol.RoleOwner: true}},
+		{http.MethodPost, "/account/billing/sync", map[string]bool{accesscontrol.RoleOwner: true}},
+		{http.MethodPost, "/account/billing/engine", map[string]bool{}},
 		{http.MethodGet, "/account", map[string]bool{accesscontrol.RoleOwner: true, accesscontrol.RoleAdmin: true, accesscontrol.RoleBuilder: true, accesscontrol.RoleViewer: true}},
 		{http.MethodGet, "/audit/export", map[string]bool{accesscontrol.RoleOwner: true, accesscontrol.RoleAdmin: true}},
 		{http.MethodPut, "/account", map[string]bool{accesscontrol.RoleOwner: true}},

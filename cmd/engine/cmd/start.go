@@ -240,7 +240,10 @@ func runEngine(cmd *cobra.Command) {
 	localObjectCache := sandbox.NewLocalObjectCache(engineStore)
 	subscribeCacheInvalidation(natsClient, localObjectCache, webhookStreams)
 
-	registryProxy := api.NewRegistryProxy(cfg.Engine.RegistryEndpoint, envLicense)
+	// Billing returns use the configured Engine origin, never the browser Host or Referer.
+	registryProxy := api.NewRegistryProxy(cfg.Engine.RegistryEndpoint, envLicense, cfg.Engine.PublicURL)
+	// Billing sync uses the ordinary persisted heartbeat path so paid upgrades can unlock work immediately.
+	registryProxy.BillingSync = func(ctx context.Context) bool { return sendEngineHeartbeat(ctx, registryClient, entitlementStore) }
 	authRefreshStore, err := backgroundStore.connectedAuthRefreshCapability()
 	if err != nil {
 		// Managed refresh cannot operate safely without durable claims;
@@ -831,7 +834,17 @@ func startPublicServiceInsightReporting(ctx context.Context, engineStore store.S
 	return reportWorker
 }
 
+var engineHeartbeatGate = make(chan struct{}, 1)
+
+// sendEngineHeartbeat serializes scheduled and billing-triggered refreshes to prevent stale concurrent responses overwriting a newer grant.
 func sendEngineHeartbeat(ctx context.Context, registryClient *sandbox.HTTPRegistryClient, entitlementStore runtimeEntitlementStore) bool {
+	// Waiting for another refresh respects request cancellation and never starts a second concurrent entitlement write.
+	select {
+	case engineHeartbeatGate <- struct{}{}:
+		defer func() { <-engineHeartbeatGate }() // Release the single refresh slot on every completion path.
+	case <-ctx.Done():
+		return false
+	}
 	applied := entitlementpkg.LiveEntitlement.Load()
 	resp, err := registryClient.SendHeartbeat(ctx, Version, BuildHash, applied.Plan, applied.EntitlementRevision, time.Now())
 	if err != nil {
@@ -847,8 +860,10 @@ func sendEngineHeartbeat(ctx context.Context, registryClient *sandbox.HTTPRegist
 
 	if resp.PlanChanged && resp.Entitlements != nil {
 		newEntitlement := sandbox.RuntimeEntitlementFromHandshake(resp.Entitlements)
+		// Local access is successful only after the new signed bundle is durably stored.
 		if err := persistHeartbeatEntitlement(ctx, entitlementStore, newEntitlement); err != nil {
 			slog.WarnContext(ctx, "Failed to persist updated entitlement after plan change", slog.Any("error", err))
+			return false
 		}
 	}
 
@@ -1010,7 +1025,6 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	r.Use(discardInboundRequestID)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
-	r.Use(enginemiddleware.LicenseEnforcement)
 	// Embedded SPA assets are many small JS/CSS chunks; compressing here keeps
 	// local Engine hosting close to what a CDN would normally do for the UI.
 	// JSON stays uncompressed so proxied GraphQL does not add buffering while
@@ -1024,6 +1038,8 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 		EnginePublicURL:     deps.cfg.Engine.PublicURL,
 		EnginePublicGRPCURL: deps.cfg.Engine.PublicGRPCURL,
 	}))
+	// Serve the static sign-in/settings shell during suspension; API and execution traffic still pass through the license gate.
+	r.Use(enginemiddleware.LicenseEnforcement)
 	auditRecorder, _ := deps.engineStore.(accesscontrol.AuditRecorder)
 	r.Use(controlActorMiddlewareWithAudit(deps.controlAuth, auditRecorder, deps.browserCookies))
 	r.Use(controlGraphQLAuditMiddleware(auditRecorder))

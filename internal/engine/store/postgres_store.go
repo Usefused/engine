@@ -172,7 +172,7 @@ COALESCE((
 	  AND applied.status = 'applied'
 	ORDER BY applied.applied_at DESC NULLS LAST, applied.created_at DESC
 	LIMIT 1
-), false), a.version, a.config_key, a.created_at`
+), false), a.version, a.config_key, a.created_at, COALESCE(a.bundle_digest, '')`
 
 func scanAppRuntime(row pgx.Row) (*AppRuntime, error) {
 	scope, _, err := scanAppRuntimeRow(row, false)
@@ -183,7 +183,7 @@ func scanAppRuntimeWithTotal(row pgx.Row) (*AppRuntime, int, error) {
 	return scanAppRuntimeRow(row, true)
 }
 
-// scanAppRuntimeRow maps the stable query column order into one Engine persistence value.
+// scanAppRuntimeRow retains the immutable bundle digest so nested execution can verify the reviewed target identity.
 func scanAppRuntimeRow(row pgx.Row, includeTotal bool) (*AppRuntime, int, error) {
 	var scope AppRuntime
 	var bucketID *uuid.UUID
@@ -195,11 +195,13 @@ func scanAppRuntimeRow(row pgx.Row, includeTotal bool) (*AppRuntime, int, error)
 		&scope.AccountID, &scope.AppFamilyID, &scope.AppID, &scope.StableAppID, &ownerSubjectID, &ownerTeamID,
 		&bucketID, &scope.ScopeSchemaVersion, &scope.Selections,
 		&scope.Status,
-		&scope.Kind, &scope.HostedMCP, &name, &scope.Description, &scope.FusedIntelligentClassifier, &version, &configKey, &scope.CreatedAt,
+		&scope.Kind, &scope.HostedMCP, &name, &scope.Description, &scope.FusedIntelligentClassifier, &version, &configKey, &scope.CreatedAt, &scope.BundleDigest,
 	}
+	// List queries append a count after the complete immutable runtime projection.
 	if includeTotal {
 		targets = append(targets, &total)
 	}
+	// A partial row cannot establish runtime or bundle authority.
 	if err := row.Scan(targets...); err != nil {
 		return nil, 0, err
 	}

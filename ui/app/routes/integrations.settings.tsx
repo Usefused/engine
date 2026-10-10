@@ -10,6 +10,7 @@ export const meta: MetaFunction = ({ matches }) => {
     { title: "Settings - Fused" },
   ];
 };
+import { BillingSettings } from "~/components/settings/BillingSettings";
 import { Settings } from "lucide-react";
 import { CataloguePageHeader } from "~/components/layout/CataloguePageHeader";
 import { api, Account } from "~/lib/api";
@@ -34,6 +35,7 @@ function displayEndpoint(value: string, emptyLabel: string) {
 
 const SETTINGS_TABS = [
   { id: "general", label: "General" },
+  { id: "billing", label: "Billing" },
   { id: "branding", label: "Connection branding" },
   { id: "managed-auth", label: "Managed auth" },
   { id: "api-key", label: "API key" },
@@ -128,6 +130,7 @@ export default function SettingsPage() {
         {tabs.map((tab) => <Link key={tab.to} to={tab.to} aria-current={tab.selected ? "page" : undefined} className={`rounded-lg px-4 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-950 ${tab.selected ? "bg-slate-950 text-white" : "text-slate-600 hover:bg-slate-100"}`}>{tab.label}</Link>)}
       </nav>
 
+      <section aria-label="Billing settings" hidden={activeTab !== "billing"}><BillingSettings active={activeTab === "billing"} /></section>
       {/* Keep inactive sections mounted so navigation cannot discard drafts or a newly generated key. */}
       <section aria-label="General settings" hidden={activeTab !== "general"}>
       <div className="max-w-2xl space-y-6">

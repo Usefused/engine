@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/shared/db"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -90,10 +91,10 @@ func TestUnifiedAppBundleImmutableVersions(t *testing.T) {
 	first := UnifiedAppBundle{AppID: firstID, SourceHash: "sha256:first", BundleJS: "exports.run = () => 1;", Manifest: manifest}
 	second := UnifiedAppBundle{AppID: secondID, SourceHash: "sha256:second", BundleJS: "exports.run = () => 2;", Manifest: manifest}
 	_, err = pool.Exec(ctx, `
-		INSERT INTO fused_apps (app_id, app_family_id, account_id, version, config_key, source_hash, bundle_digest, hosted_mcp, status)
-		VALUES ($1, $3, $4, '1.0.0', $5, 'sha256:first', $7, true, 'active'),
-		       ($2, $3, $4, '2.0.0', $6, 'sha256:second', $8, true, 'active')
-	`, firstID, secondID, familyID, accountID, "bundle:first:"+firstID.String(), "bundle:second:"+secondID.String(), UnifiedAppBundleDigest([]byte(first.BundleJS)), UnifiedAppBundleDigest([]byte(second.BundleJS)))
+		INSERT INTO fused_apps (app_id, app_family_id, account_id, version, config_key, source_hash, bundle_digest, hosted_mcp, status, scope_schema_version, selections)
+		VALUES ($1, $3, $4, '1.0.0', $5, 'sha256:first', $7, true, 'active', $9, '[]'),
+		       ($2, $3, $4, '2.0.0', $6, 'sha256:second', $8, true, 'active', $9, '[]')
+	`, firstID, secondID, familyID, accountID, "bundle:first:"+firstID.String(), "bundle:second:"+secondID.String(), UnifiedAppBundleDigest([]byte(first.BundleJS)), UnifiedAppBundleDigest([]byte(second.BundleJS)), models.AppScopeSchemaVersion)
 	// Persistence must see both exact version foreign-key targets before saving artifacts.
 	if err != nil {
 		t.Fatalf("seed app versions: %v", err)

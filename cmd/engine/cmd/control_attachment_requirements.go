@@ -15,8 +15,8 @@ func (r *storeBackedControlRequirementResolver) desiredAttachmentRequirements(ct
 	if len(references) == 0 {
 		return nil, nil
 	}
-	// Only SDK/MCP consumers can attach apps, and resolution must remain bounded to the caller's account.
-	if (kind != store.ConfigTypeSDK && kind != store.ConfigTypeMCP) || len(references) > 16 || accountID == uuid.Nil {
+	// All three execution adapters may attach apps; resolution stays bounded to the caller's account.
+	if (kind != store.ConfigTypeSDK && kind != store.ConfigTypeMCP && kind != store.ConfigTypeUnifiedApp) || len(references) > 16 || accountID == uuid.Nil {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
 	repository, ok := r.store.(store.UnifiedAppAttachmentStore)
@@ -38,8 +38,8 @@ func attachedBindingRequirements(kind store.ConfigType, bindings []models.Unifie
 	if len(bindings) == 0 {
 		return nil, nil
 	}
-	// Corrupt or recursive stored scope cannot authorize a hosted dependency.
-	if (kind != store.ConfigTypeSDK && kind != store.ConfigTypeMCP) || len(bindings) > 16 {
+	// Unsupported adapters and oversized scope cannot authorize a hosted dependency; runtime owns cycle checks.
+	if (kind != store.ConfigTypeSDK && kind != store.ConfigTypeMCP && kind != store.ConfigTypeUnifiedApp) || len(bindings) > 16 {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
 	requirements := make([]accesscontrol.Requirement, 0, len(bindings))
