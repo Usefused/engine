@@ -1,3 +1,4 @@
+import { importedMcpEnabled } from "~/lib/features";
 import { useEffect, useState } from "react";
 import { CheckSquare, Square, ChevronDown, ChevronRight, Search, X } from "lucide-react";
 import { api } from "~/lib/api";
@@ -38,8 +39,15 @@ function useImportedCatalog(serviceID: string, versionID: string) {
   return { snapshot, loading, error, retry: () => setAttempt((previous) => previous + 1) };
 }
 
+/** Keeps catalog requests and imported selections behind the operator's runtime flag. */
+export function ImportedMcpPicker(props: PickerProps) {
+  // Do not mount effects for a disabled preview, including when editing an older app.
+  if (!importedMcpEnabled()) return null;
+  return <EnabledImportedMcpPicker {...props} />;
+}
+
 /** Uses the same compact section header and independent Select All control as endpoints and webhooks. */
-export function ImportedMcpPicker({ serviceID, versionID, value, onChange }: PickerProps) {
+function EnabledImportedMcpPicker({ serviceID, versionID, value, onChange }: PickerProps) {
   const { snapshot, loading, error, retry } = useImportedCatalog(serviceID, versionID);
   const [expanded, setExpanded] = useState(false);
   const total = mcpCatalogSections.reduce((count, section) => count + (snapshot?.catalog[section.kind].length ?? 0), 0);

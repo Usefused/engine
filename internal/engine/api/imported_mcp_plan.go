@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/features"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"sort"
@@ -41,6 +42,10 @@ func importedMCPRequest(doc sdkConfigDocument, services []sdkResolvedService, id
 
 // resolveImportedMCPBinding copies metadata only after exact revision and credential-bucket admission.
 func resolveImportedMCPBinding(ctx context.Context, s store.Store, subject uuid.UUID, selection models.SDKSelection, request *models.ImportedMCPSelection, bucket store.Bucket) (*models.ImportedMCPBinding, error) {
+	// Internal planning callers share the same gate as browser and CLI admission.
+	if !features.ImportedMCPEnabled() {
+		return nil, features.ErrImportedMCPDisabled
+	}
 	repository, ok := s.(store.MCPCatalogStore)
 	// A missing repository cannot turn the authored request into unchecked metadata.
 	if !ok {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/features"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"net/http"
@@ -77,6 +78,10 @@ func namespaceImportedContents(value any, service uuid.UUID) {
 
 // appendImportedFixtureOperations gives search_docs the exact selected tool input schemas and stable call names.
 func appendImportedFixtureOperations(operations []FixtureOperation, selections []models.SDKSelection, policy store.AppTokenPolicy) ([]FixtureOperation, error) {
+	// Keep endpoint tools available while withholding imported search_docs entries.
+	if !features.ImportedMCPEnabled() {
+		return operations, nil
+	}
 	identity := auth.RuntimeIdentity{TokenPolicy: policy}
 	for _, selection := range selections {
 		// Physical services have no additional documentation entries.
@@ -127,6 +132,10 @@ func dispatchImportedMCPCall(ctx context.Context, sess *mcpSession, name string,
 // importedNativeLists projects token-visible prompt and resource definitions without credentials or upstream URLs.
 func importedNativeLists(selections []models.SDKSelection, identity auth.RuntimeIdentity) map[string][]any {
 	lists := map[string][]any{"prompts": {}, "resources": {}, "resourceTemplates": {}}
+	// Native provider namespaces must disappear alongside imported tool discovery.
+	if !features.ImportedMCPEnabled() {
+		return lists
+	}
 	for _, selection := range selections {
 		// The immutable selection is the only authority; current service discovery is irrelevant.
 		if selection.ImportedMCP == nil {

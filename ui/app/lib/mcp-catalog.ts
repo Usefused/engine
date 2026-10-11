@@ -20,7 +20,7 @@ export interface McpCatalog {
   resources: McpCatalogItem[];
   resource_templates: McpCatalogItem[];
 }
-export interface McpDiscoveryInput { url: string; bucket_name?: string; secret_name?: string }
+export interface McpDiscoveryInput { url: string }
 export interface McpCatalogSnapshot {
   id: string;
   url: string;

@@ -834,6 +834,10 @@ func decodeAppApplyPlan(ctx context.Context, configStore store.ConfigRepository,
 	if json.Unmarshal(plan.DesiredState, &doc) != nil || json.Unmarshal(plan.ResolvedPayload, &payload) != nil {
 		return sdkConfigDocument{}, appResolvedPayload{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "invalid resolved " + kind + " plan"}
 	}
+	// Recheck operator opt-in before a previously planned import can mutate app state.
+	if err := validateImportedMCPFeature(doc); err != nil {
+		return sdkConfigDocument{}, appResolvedPayload{}, workspaceConfigHTTPError{status: http.StatusForbidden, message: err.Error()}
+	}
 	// References retain the exact authorized version across delayed applies.
 	if err := verifyUnifiedAppAttachments(ctx, s, doc, payload); err != nil {
 		return sdkConfigDocument{}, appResolvedPayload{}, err

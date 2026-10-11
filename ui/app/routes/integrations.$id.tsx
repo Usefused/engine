@@ -92,6 +92,7 @@ import {
 import { canEditWebhook } from "~/lib/webhook-editor-draft";
 import { WebhookDefinitionEditor } from "~/components/webhooks/WebhookDefinitionEditor";
 import { ServiceEndpointImport } from "~/components/integration-details/ServiceEndpointImport";
+import { importedMcpEnabled } from "~/lib/features";
 import McpCatalogTab from "~/components/mcp/McpCatalogTab";
 import EndpointsTab from "~/components/EndpointsTab";
 import WebhooksTab from "~/components/WebhooksTab";
@@ -198,6 +199,8 @@ function resolvedRouteID(loaderID: string | null | undefined, routeID?: string) 
 
 /** Admits only supported service tabs from the URL, including the private MCP catalog. */
 function resolvedDetailTab(value: string | null): DetailTab {
+  // Direct links to a disabled catalog fall back to normal operation browsing.
+  if (value === "mcp" && !importedMcpEnabled()) return "endpoints";
   const tabs: DetailTab[] = ["endpoints", "webhooks", "mcp", "analytics"];
   // Unknown links retain the ordinary operations landing view.
   return tabs.includes(value as DetailTab) ? (value as DetailTab) : "endpoints";
@@ -2007,7 +2010,8 @@ function TabNavigation({ srv, totalEndpoints }: { srv: Service; totalEndpoints: 
     <div className="mb-6 flex max-w-full overflow-x-auto whitespace-nowrap rounded-lg bg-slate-100/80 p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <button data-track="view_endpoints_tab" onClick={() => handleTabChange("endpoints")} className={tabClass(activeTab === "endpoints")}>Operations ({totalEndpoints})</button>
       <button data-track="view_webhooks_tab" onClick={() => handleTabChange("webhooks")} className={tabClass(activeTab === "webhooks")}>Webhooks ({srv.webhook_count ?? 0})</button>
-      <button data-track="view_mcp_catalog_tab" onClick={() => handleTabChange("mcp")} className={tabClass(activeTab === "mcp")}>MCP</button>
+      {/* Import navigation is exposed only after the Engine operator opts in. */}
+      {importedMcpEnabled() && <button data-track="view_mcp_catalog_tab" onClick={() => handleTabChange("mcp")} className={tabClass(activeTab === "mcp")}>MCP</button>}
       {/* Activity requires audit access to an enabled workspace service. */}
       {isAuth && workspaceServiceActive === true && canReadActivity && (
         <button data-track="view_activity_tab" onClick={() => handleTabChange("analytics")} className={tabClass(activeTab === "analytics")}>Activity</button>

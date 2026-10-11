@@ -1,12 +1,13 @@
 package mcpcatalog
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/Usefused/engine/internal/shared/features"
 	"io"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -14,32 +15,39 @@ import (
 
 // Discover negotiates the official SDK's supported protocols using a private, bounded HTTPS client.
 func Discover(ctx context.Context, endpoint, token string) (Catalog, error) {
-	// Reject unsafe endpoints before constructing a credential-bearing transport.
+	// The provider boundary also fails closed for callers outside the HTTP API.
+	if !features.ImportedMCPEnabled() {
+		return Catalog{}, features.ErrImportedMCPDisabled
+	}
+	// Discovery cannot borrow runtime credentials or establish an importer's shared identity.
+	if token != "" {
+		return Catalog{}, ErrAuthenticatedDiscoveryUnsupported
+	}
+	// Reject unsafe endpoints before constructing the anonymous transport.
 	if err := ValidateEndpoint(endpoint); err != nil {
 		return Catalog{}, err
 	}
-	client, closeIdle := discoveryHTTPClient(endpoint, token)
+	client, closeIdle := discoveryHTTPClient(endpoint, "")
 	defer closeIdle()
-	catalog, err := discoverWithClient(ctx, endpoint, client)
-	// Reflected bearer material must not enter a persisted definition or browser response.
-	if err != nil {
-		return Catalog{}, err
-	}
-	raw, _ := json.Marshal(catalog)
-	encoded, _ := json.Marshal(token)
-	// Reflected credential material is rejected before catalog data leaves the discovery boundary.
-	if token != "" && (bytes.Contains(raw, []byte(token)) || bytes.Contains(raw, encoded[1:len(encoded)-1])) {
-		return Catalog{}, ErrDiscovery
-	}
-	return catalog, nil
+	return discoverWithClient(ctx, endpoint, client)
 }
 
 // discoverWithClient isolates protocol discovery so tests can use a local fixture without weakening production egress policy.
-func discoverWithClient(ctx context.Context, endpoint string, httpClient *http.Client) (Catalog, error) {
+func discoverWithClient(ctx context.Context, endpoint string, httpClient *http.Client) (catalog Catalog, err error) {
+	observer := &discoveryAuthTransport{base: httpClient.Transport}
+	clientCopy := *httpClient
+	clientCopy.Transport = observer
+	// Preserve a fixed actionable error even when the SDK wraps initialization or list failures.
+	defer func() {
+		// Any rejected discovery request invalidates the entire preview, never just one category.
+		if observer.required.Load() {
+			catalog, err = Catalog{}, ErrAuthenticatedDiscoveryUnsupported
+		}
+	}()
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	client := mcp.NewClient(&mcp.Implementation{Name: "Fused", Version: "1.0.0"}, &mcp.ClientOptions{Capabilities: &mcp.ClientCapabilities{}, MultiRoundTrip: &mcp.MultiRoundTripOptions{Disabled: true}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
-	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: httpClient, MaxRetries: -1, DisableStandaloneSSE: true, MaxEventSize: 2 << 20}, nil)
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: &clientCopy, MaxRetries: -1, DisableStandaloneSSE: true, MaxEventSize: 2 << 20}, nil)
 	// A failed negotiation produces no partial catalog and no provider-auth error text.
 	if err != nil {
 		return Catalog{}, ErrDiscovery
@@ -51,7 +59,7 @@ func discoverWithClient(ctx context.Context, endpoint string, httpClient *http.C
 		return Catalog{}, ErrDiscovery
 	}
 	info, caps := initialized.ServerInfo, initialized.Capabilities
-	catalog := Catalog{ProtocolVersion: initialized.ProtocolVersion, Server: ServerInfo{Name: info.Name, Version: info.Version, Title: info.Title}, Supported: map[string]bool{"tools": caps.Tools != nil, "prompts": caps.Prompts != nil, "resources": caps.Resources != nil, "resource_templates": caps.Resources != nil}, Tools: []json.RawMessage{}, Prompts: []json.RawMessage{}, Resources: []json.RawMessage{}, ResourceTemplates: []json.RawMessage{}}
+	catalog = Catalog{ProtocolVersion: initialized.ProtocolVersion, Server: ServerInfo{Name: info.Name, Version: info.Version, Title: info.Title}, Supported: map[string]bool{"tools": caps.Tools != nil, "prompts": caps.Prompts != nil, "resources": caps.Resources != nil, "resource_templates": caps.Resources != nil}, Tools: []json.RawMessage{}, Prompts: []json.RawMessage{}, Resources: []json.RawMessage{}, ResourceTemplates: []json.RawMessage{}}
 	// All four lists complete before the snapshot is eligible for validation and persistence.
 	if err = discoverCollections(ctx, session, &catalog); err != nil {
 		return Catalog{}, err
@@ -181,4 +189,25 @@ func templatePage(s *mcp.ClientSession) listPage[*mcp.ResourceTemplate] {
 		}
 		return result.ResourceTemplates, result.NextCursor, nil
 	}
+}
+
+// discoveryAuthTransport records only HTTP auth status, never provider bodies or challenge URLs.
+type discoveryAuthTransport struct {
+	base     http.RoundTripper
+	required atomic.Bool
+}
+
+// RoundTrip distinguishes unsupported authenticated discovery at every protocol stage.
+func (t *discoveryAuthTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	base := t.base
+	// Match net/http's default transport semantics for fixture clients with no custom transport.
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	response, err := base.RoundTrip(r)
+	// Include GET negotiation as well as POST lists, but exclude best-effort session teardown.
+	if r.Method != http.MethodDelete && response != nil && (response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
+		t.required.Store(true)
+	}
+	return response, err
 }

@@ -79,6 +79,8 @@ func TestImportedPlanSelection(t *testing.T) {
 
 // TestImportedOnlyMCPConfig admits native-only services without requiring unrelated physical endpoints.
 func TestImportedOnlyMCPConfig(t *testing.T) {
+	// Exercise existing behavior only after the operator explicitly opts into imports.
+	t.Setenv("FUSED_ENABLE_IMPORTED_MCP", "true")
 	doc := sdkConfigDocument{APIVersion: "fused/v1", Kind: "mcp", Name: "imported", Version: "1.0.0", Description: "Browse documentation", Bucket: "default", Services: map[string]sdkConfigServiceDoc{"demo": {Version: "1.0.0", MCP: &models.ImportedMCPSelection{RevisionID: uuid.New(), Tools: []string{"echo"}}}}}
 	// Empty physical lists are intentional when imported capabilities supply the app's surface.
 	if err := validateAppConfigDocument(doc, "mcp"); err != nil {

@@ -7,6 +7,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/mcpcatalog"
 	"github.com/Usefused/engine/internal/engine/sandbox"
+	"github.com/Usefused/engine/internal/shared/features"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"github.com/yosida95/uritemplate/v3"
@@ -16,6 +17,10 @@ import (
 
 // ImportedMCPScope rechecks exact app identity before exposing its immutable imported selections.
 func (s *EngineGRPCServer) ImportedMCPScope(ctx context.Context, identity auth.RuntimeIdentity) ([]models.SDKSelection, error) {
+	// Existing deployments retain their data but expose no imported capabilities while disabled.
+	if !features.ImportedMCPEnabled() {
+		return nil, nil
+	}
 	runtime, err := s.store.GetAppRuntime(ctx, identity.AppID)
 	// Neither cross-account nor cross-family reads may borrow an authenticated app's identity.
 	if err != nil || runtime == nil || runtime.AccountID != identity.AccountID || runtime.AppFamilyID != identity.AppFamilyID || runtime.Kind != identity.Kind {
@@ -26,6 +31,10 @@ func (s *EngineGRPCServer) ImportedMCPScope(ctx context.Context, identity auth.R
 
 // InvokeImportedMCP dispatches only exact app-selected, token-authorized capabilities with Engine-owned credentials.
 func (s *EngineGRPCServer) InvokeImportedMCP(ctx context.Context, identity auth.RuntimeIdentity, method, name string, arguments json.RawMessage) (json.RawMessage, error) {
+	// Recheck at dispatch so already initialized sessions cannot reuse upstream authority.
+	if !features.ImportedMCPEnabled() {
+		return nil, features.ErrImportedMCPDisabled
+	}
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.mcp.imported_invoke")
 	defer span.End()
 	selections, err := s.ImportedMCPScope(ctx, identity)

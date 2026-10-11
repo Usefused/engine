@@ -9,7 +9,10 @@ import (
 	"time"
 )
 
+// TestEmbeddedUIMiddleware verifies runtime configuration and SPA routing without exposing API routes.
 func TestEmbeddedUIMiddleware(t *testing.T) {
+	// Default-off imports must remain deterministic regardless of the test runner environment.
+	t.Setenv("FUSED_ENABLE_IMPORTED_MCP", "false")
 	handler := testEmbeddedUIHandler()
 
 	tests := []struct {
@@ -28,7 +31,7 @@ func TestEmbeddedUIMiddleware(t *testing.T) {
 			path:       "/env.js",
 			accept:     "*/*",
 			wantStatus: http.StatusOK,
-			wantBody:   `window.__FUSED_ENV={"BACKEND_URL":"","ENGINE_PUBLIC_URL":"https://acme.example.com","ENGINE_PUBLIC_GRPC_URL":"https://acme-grpc.example.com:443"};`,
+			wantBody:   `window.__FUSED_ENV={"IMPORTED_MCP_ENABLED":false,"BACKEND_URL":"","ENGINE_PUBLIC_URL":"https://acme.example.com","ENGINE_PUBLIC_GRPC_URL":"https://acme-grpc.example.com:443"};`,
 			wantCache:  "no-cache",
 		},
 		{

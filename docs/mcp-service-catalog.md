@@ -16,6 +16,9 @@ app version can explicitly select tools, prompts, resources, and resource templa
 from an approved catalog revision. The app stores those exact definitions and its
 connection reference in the existing immutable selection contract.
 
+The feature is disabled by default; enable `FUSED_ENABLE_IMPORTED_MCP=true` as
+explained in [Engine configuration](engine-configuration.md#imported-mcp-preview-feature).
+
 ## Connection and access
 
 Remote Streamable HTTP over public HTTPS is supported through the official Go
@@ -34,10 +37,13 @@ identity; provider handshake names and versions are not shown as a separate serv
 All mutation entries require confirmed Registry
 service ownership and catalogue-import permission; route shape never implies ownership.
 MCP discovery and apply also require service management access and recheck
-Registry ownership before contacting a provider or promoting a draft. Bearer authentication uses
-an existing generic bucket secret, selected by bucket name and secret name.
-Choosing a token destination additionally requires workspace credential-management
-and bucket-use permissions. Tokens remain in Engine and are not saved in drafts.
+Registry ownership before contacting a provider or promoting a draft. Discovery is
+anonymous-only: imports and refreshes never read or send bucket credentials.
+A 401 or 403 during initialization or capability listing returns:
+"This server requires authentication to discover its capabilities. Authenticated
+discovery isn't supported yet." No partial preview is saved. Runtime authentication
+is separate; importing a public catalog does not establish a user connection.
+Call-time OAuth remains unsupported by the current runtime.
 Catalog reads require service-read access; bucket-derived metadata also requires
 current bucket-use access. Each catalog is private to its importing actor.
 
@@ -49,7 +55,9 @@ The version-scoped control routes are:
 - `POST /workspace/services/{id}/versions/{version_id}/mcp-catalog/discover`
 - `POST /workspace/services/{id}/versions/{version_id}/mcp-catalog/apply`
 
-Discovery accepts `url` and optional `bucket_name` / `secret_name`. Apply accepts
+Discovery accepts only `url`; legacy nonempty `bucket_name` / `secret_name`
+references are rejected. Authenticated drafts from older releases must be
+rediscovered anonymously before apply. Apply accepts
 only a server-issued `draft_id`, never browser-supplied definitions. A preview
 expires after 15 minutes and pins the previously approved revision. Concurrent
 changes cause a conflict requiring new discovery. Applying the current approved

@@ -209,3 +209,21 @@ its non-sensitive state but cannot toggle it. Do not put actual secrets in sourc
 or ordinary descriptive fields: use the private-field marker for custom sensitive
 content. Turning off **Current page** blocks further page tools; previously
 shared context remains in that conversation, so start a new conversation to clear it.
+
+## Imported MCP preview feature
+
+Imported service MCP servers are disabled by default. Set
+`FUSED_ENABLE_IMPORTED_MCP=true` in the Engine environment and restart to opt in.
+Only the exact value `true` enables this preview. When using the standalone UI
+server, set the same environment variable there and restart it too; the embedded
+UI receives the value directly from Engine. Reload open browser tabs afterward.
+
+When disabled, service MCP tabs and imported capability selectors are hidden.
+Catalog reads, discovery, imports, and app plan/apply with imported selections
+are rejected. Existing app versions omit imported tools, prompts, and resources
+from discovery, and upstream invocation is blocked, including existing sessions.
+Saved catalogs, app selections, and bucket credentials are preserved. Ordinary
+Fused MCP apps built from endpoints and their webhook resources remain available.
+
+This is an operator rollout gate, not an authorization grant. Enabling it does
+not add upstream OAuth support or bypass service ownership and bucket permissions.

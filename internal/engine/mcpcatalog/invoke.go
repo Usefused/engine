@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Usefused/engine/internal/shared/features"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"io"
@@ -36,6 +37,10 @@ func ValidateArguments(raw json.RawMessage, value any) error {
 
 // Invoke uses the discovery egress boundary and never forwards an app token or retries a provider call.
 func Invoke(ctx context.Context, endpoint, token, method string, params json.RawMessage) (json.RawMessage, error) {
+	// The provider boundary also fails closed for callers outside the HTTP API.
+	if !features.ImportedMCPEnabled() {
+		return nil, features.ErrImportedMCPDisabled
+	}
 	// Endpoint validation precedes credential-bearing network construction.
 	if err := ValidateEndpoint(endpoint); err != nil {
 		return nil, err

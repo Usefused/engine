@@ -52,6 +52,7 @@ server.listen(port, () => {
 	console.log(`Fused UI SPA listening on http://localhost:${port}`);
 });
 
+// serveEnv exposes non-secret deployment choices for standalone UI hosting.
 function serveEnv(res) {
 	// External/static UI runs need an absolute API origin; embedded Engine UI
 	// uses root.tsx's default relative origin and does not depend on this file.
@@ -63,6 +64,7 @@ function serveEnv(res) {
 	res.end(
 		`window.__FUSED_ENV=${JSON.stringify({
 			BACKEND_URL: backendURL,
+			IMPORTED_MCP_ENABLED: process.env.FUSED_ENABLE_IMPORTED_MCP === "true",
 			ENGINE_PUBLIC_URL: enginePublicURL,
 			ENGINE_PUBLIC_GRPC_URL: enginePublicGRPCURL,
 		})};`

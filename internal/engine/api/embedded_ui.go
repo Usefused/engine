@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"github.com/Usefused/engine/internal/shared/features"
 	"net/http"
 	"path"
 	"strings"
@@ -11,6 +12,7 @@ import (
 const embeddedUIIndex = "index.html"
 
 type EmbeddedUIRuntimeConfig struct {
+	ImportedMCPEnabled  bool   `json:"IMPORTED_MCP_ENABLED"`
 	BackendURL          string `json:"BACKEND_URL"`
 	EnginePublicURL     string `json:"ENGINE_PUBLIC_URL"`
 	EnginePublicGRPCURL string `json:"ENGINE_PUBLIC_GRPC_URL"`
@@ -77,11 +79,14 @@ func firstEmbeddedUIRuntimeConfig(configs []EmbeddedUIRuntimeConfig) EmbeddedUIR
 	return configs[0]
 }
 
+// serveEmbeddedUIRuntimeConfig publishes the Engine gate without exposing deployment secrets.
 func serveEmbeddedUIRuntimeConfig(w http.ResponseWriter, r *http.Request, config EmbeddedUIRuntimeConfig) {
+	config.ImportedMCPEnabled = features.ImportedMCPEnabled()
 	payload, _ := json.Marshal(config)
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// HEAD exposes headers only, as it does for other UI assets.
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(append(append([]byte("window.__FUSED_ENV="), payload...), ';'))
 	}

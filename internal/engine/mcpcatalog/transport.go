@@ -13,7 +13,9 @@ import (
 )
 
 var ErrEndpoint = errors.New("MCP requires a public HTTPS endpoint without credentials, a query, or a fragment")
-var ErrDiscovery = errors.New("MCP discovery failed; check the endpoint, credentials, and supported transport")
+var ErrDiscovery = errors.New("MCP discovery failed; check the endpoint and supported transport")
+
+var ErrAuthenticatedDiscoveryUnsupported = errors.New("This server requires authentication to discover its capabilities. Authenticated discovery isn't supported yet.")
 
 // ValidateEndpoint keeps credentials out of stored URLs and restricts discovery to remote HTTPS servers.
 func ValidateEndpoint(value string) error {

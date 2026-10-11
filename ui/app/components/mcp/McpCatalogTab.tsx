@@ -1,3 +1,4 @@
+import { importedMcpEnabled } from "~/lib/features";
 import { McpCatalogDetails, catalogTypeBadges } from "./McpCatalogDetails";
 import { ServiceCatalogHeader, ServiceCatalogOptions } from "~/components/integration-details/ServiceCatalogHeader";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -11,6 +12,8 @@ const buttonClass = "inline-flex items-center justify-center gap-2 rounded-lg bg
 
 /** Mounts only an authorized exact version, so navigation cannot retain another version's draft. */
 export default function McpCatalogTab({ serviceID, versionID, canRead, canManage }: { serviceID: string; versionID?: string; canRead: boolean; canManage: boolean }) {
+  // A disabled surface must not mount catalog effects even through a direct component entry.
+  if (!importedMcpEnabled()) return null;
   // A private catalog must never initiate discovery or reads from a public service page.
   if (!canRead) return <p className="rounded-xl border border-slate-200 bg-white p-8 text-sm text-slate-500">Sign in with service access to view your imported MCP catalog.</p>;
   // Catalogs attach to an exact active workspace version, never a floating service label.
@@ -133,29 +136,24 @@ function CatalogActions({ saved, canManage, busy, onEdit, onRefresh }: { saved: 
   // Catalog read access never implies authority to change the service's MCP attachment.
   if (!canManage) return null;
   const actions = [{ label: connectionActionLabel(saved), onSelect: onEdit }];
-  // Refresh is meaningful only after a connection has been saved; credentials remain references.
-  if (saved) actions.push({ label: "Refresh catalog", onSelect: () => { void onRefresh({ url: saved.url, bucket_name: saved.bucket_name, secret_name: saved.secret_name }); } });
+  // Refresh always discovers anonymously, including catalogs imported by an older release.
+  if (saved) actions.push({ label: "Refresh catalog", onSelect: () => { void onRefresh({ url: saved.url }); } });
   return <ServiceCatalogOptions actions={actions} disabled={busy} />;
 }
 
-/** Collects an endpoint and optional secret reference without asking the browser to handle bearer tokens. */
+/** Collects only the endpoint because authentication is separate from catalog import. */
 function ImportForm({ initial, busy, onDiscover, onCancel }: { initial: McpCatalogSnapshot | null; busy: boolean; onDiscover: (input: McpDiscoveryInput) => Promise<void>; onCancel?: () => void }) {
   const [url, setURL] = useState(initial?.url ?? "");
-  const [auth, setAuth] = useState(initial?.bucket_name ? "bearer" : "none");
-  const [bucket, setBucket] = useState(initial?.bucket_name ?? "default");
-  const [secret, setSecret] = useState(initial?.secret_name ?? "");
   return <form className="space-y-4 border-b border-slate-200 bg-slate-50/50 p-5" onSubmit={(event) => {
-    // Browser validation admits only complete connection references; Engine performs authoritative validation.
+    // Browser validation checks the URL; Engine enforces anonymous discovery.
     event.preventDefault();
-    void onDiscover({ url, ...(auth === "bearer" ? { bucket_name: bucket, secret_name: secret } : {}) });
+    void onDiscover({ url });
   }}>
     {/* The form changes the current service attachment; it never asks for another server identity. */}
     <h3 className="text-sm font-semibold text-slate-900">{connectionActionLabel(initial)}</h3>
     <label className="block space-y-1 text-sm font-medium text-slate-700"><span>Server URL</span><input className={inputClass} required type="url" pattern="https://.*" placeholder="https://example.com/mcp" value={url} disabled={busy} onChange={(event) => setURL(event.target.value)} /></label>
     <p className="text-xs text-slate-500">Remote Streamable HTTP servers over HTTPS are supported.</p>
-    <label className="block space-y-1 text-sm font-medium text-slate-700"><span>Authentication</span><Select value={auth} disabled={busy} className={inputClass} onChange={(event) => setAuth(event.target.value)}><option value="none">No authentication</option><option value="bearer">Bearer token from a bucket</option></Select></label>
-    {/* Credential references are shown only when the server requires bearer authentication. */}
-    {auth === "bearer" && <div className="grid gap-4 sm:grid-cols-2"><label className="space-y-1 text-sm text-slate-700"><span>Bucket name</span><input className={inputClass} required value={bucket} disabled={busy} onChange={(event) => setBucket(event.target.value)} /></label><label className="space-y-1 text-sm text-slate-700"><span>Bucket secret name</span><input className={inputClass} required value={secret} disabled={busy} onChange={(event) => setSecret(event.target.value)} /></label><p className="text-xs text-slate-500 sm:col-span-2">Use an existing generic bucket secret containing the token. Requires credential management and bucket use access. Fused keeps its value in Engine.</p></div>}
+    <p className="text-xs text-slate-500">Discovery must be available without signing in. Authenticated discovery isn't supported yet.</p>
     <div className="flex items-center gap-4"><button className={buttonClass} disabled={busy} type="submit">Discover server</button><button type="button" disabled={busy} className="text-sm text-slate-500" onClick={onCancel}>Cancel</button></div>
   </form>;
 }

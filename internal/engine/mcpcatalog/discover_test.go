@@ -1,10 +1,12 @@
 package mcpcatalog
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Usefused/engine/internal/shared/features"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -152,7 +154,7 @@ func TestDiscoveryFailureDoesNotReturnProviderSecrets(t *testing.T) {
 	defer fixture.Close()
 	_, err := discoverWithClient(context.Background(), fixture.URL, fixture.Client())
 	// Provider error text may contain credentials and must become the fixed public error.
-	if !errors.Is(err, ErrDiscovery) || strings.Contains(err.Error(), "secret-token") {
+	if !errors.Is(err, ErrAuthenticatedDiscoveryUnsupported) || strings.Contains(err.Error(), "secret-token") {
 		t.Fatalf("unsafe error=%v", err)
 	}
 }
@@ -195,5 +197,64 @@ func TestBoundedTransportKeepsCredentialsAtOneEndpoint(t *testing.T) {
 	// An anonymous client must never inherit a bearer header from another discovery.
 	if <-seen != "" {
 		t.Fatal("credential leaked between clients")
+	}
+}
+
+// TestAnonymousDiscoveryChallenges covers auth failures after successful initialization and earlier lists.
+func TestAnonymousDiscoveryChallenges(t *testing.T) {
+	for _, method := range []string{"initialize", "server/discover", "tools/list", "prompts/list", "resources/list", "resources/templates/list"} {
+		for _, status := range []int{401, 403, 500} {
+			// Independent servers isolate session state and prove every discovery stage fails atomically.
+			t.Run(fmt.Sprintf("%s/%d", method, status), func(t *testing.T) {
+				options := &mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}, Prompts: &mcp.PromptCapabilities{}, Resources: &mcp.ResourceCapabilities{}}}
+				// Force the legacy handshake separately from modern server/discover negotiation.
+				if method == "initialize" {
+					options.SupportedProtocolVersions = []string{"2025-11-25"}
+				}
+				server := mcp.NewServer(&mcp.Implementation{Name: "Fixture", Version: "1"}, options)
+				// The fixture handler never needs credentials or content execution to serve metadata.
+				handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true})
+				// Inspect the requested protocol method so only the selected discovery stage requires authentication.
+				fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					// Anonymous discovery must never send an authorization header.
+					if r.Header.Get("Authorization") != "" {
+						t.Error("discovery sent credentials")
+					}
+					body, _ := io.ReadAll(r.Body)
+					r.Body = io.NopCloser(bytes.NewReader(body))
+					var request struct {
+						Method string `json:"method"`
+					}
+					_ = json.Unmarshal(body, &request)
+					// A generic modern-handshake failure must also block legacy fallback to model an unavailable provider.
+					if request.Method == method || (method == "server/discover" && status == 500 && request.Method == "initialize") {
+						http.Error(w, "private upstream detail", status)
+						return
+					}
+					handler.ServeHTTP(w, r)
+				}))
+				defer fixture.Close()
+				catalog, err := discoverWithClient(context.Background(), fixture.URL, fixture.Client())
+				expected := ErrAuthenticatedDiscoveryUnsupported
+				// Non-auth failures must keep their generic diagnosis rather than claiming OAuth is needed.
+				if status == 500 {
+					expected = ErrDiscovery
+				}
+				// Error responses must discard all earlier metadata and sanitize provider prose.
+				if !errors.Is(err, expected) || catalog.ProtocolVersion != "" || strings.Contains(err.Error(), "private upstream") {
+					t.Fatalf("catalog=%+v err=%v", catalog, err)
+				}
+			})
+		}
+	}
+}
+
+// TestDiscoveryRejectsCredentialMaterial proves direct callers cannot bypass anonymous-only import.
+func TestDiscoveryRejectsCredentialMaterial(t *testing.T) {
+	t.Setenv(features.ImportedMCPEnvironment, "true")
+	_, err := Discover(context.Background(), "https://example.com/mcp", "fixture-token")
+	// Credentials are rejected before constructing a network connection.
+	if !errors.Is(err, ErrAuthenticatedDiscoveryUnsupported) {
+		t.Fatal(err)
 	}
 }

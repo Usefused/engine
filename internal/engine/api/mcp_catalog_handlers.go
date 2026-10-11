@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Usefused/engine/internal/shared/features"
 	"io"
 	"net/http"
 	"strings"
@@ -27,6 +28,11 @@ type mcpCatalogRequest struct {
 
 // admitMCPCatalog enforces service permission and exact active-version membership even when mounted without route middleware.
 func admitMCPCatalog(w http.ResponseWriter, r *http.Request, s store.Store, permission accesscontrol.Permission) (mcpCatalogRequest, bool) {
+	// Disabled imports must not read catalogs, resolve credentials, or contact providers.
+	if !features.ImportedMCPEnabled() {
+		writeMCPCatalogError(w, r, refreshHTTPError{status: http.StatusForbidden, message: features.ErrImportedMCPDisabled.Error()})
+		return mcpCatalogRequest{}, false
+	}
 	actor, ok := accesscontrol.ActorFromContext(r.Context())
 	// App tokens and missing actor identities cannot use control-plane discovery.
 	if !ok || actor.SubjectID == uuid.Nil || actor.WorkspaceID == uuid.Nil || actor.Kind == accesscontrol.SubjectApp {
@@ -188,19 +194,18 @@ func discoverMCPCatalogHandler(s store.Store, masterKey []byte, discover func(co
 			writeMCPCatalogError(w, r, err)
 			return
 		}
-		bucketID, token, err := resolveMCPCatalogToken(ctx, s, masterKey, input)
-		// Credential resolution must finish successfully before the provider is contacted.
+		// Import is anonymous-only; reject legacy credential references before any secret lookup.
+		if input.BucketName != "" || input.SecretName != "" {
+			writeMCPCatalogError(w, r, mcpcatalog.ErrAuthenticatedDiscoveryUnsupported)
+			return
+		}
+		catalog, err := discover(ctx, input.URL, "")
+		// An authentication challenge or protocol failure must not create a partial draft.
 		if err != nil {
 			writeMCPCatalogError(w, r, err)
 			return
 		}
-		catalog, err := discover(ctx, input.URL, token)
-		// Credential resolution must finish successfully before the provider is contacted.
-		if err != nil {
-			writeMCPCatalogError(w, r, err)
-			return
-		}
-		draft := store.MCPCatalogDraft{MCPCatalogSnapshot: store.MCPCatalogSnapshot{ID: uuid.New(), URL: input.URL, BucketName: input.BucketName, SecretName: input.SecretName, BucketID: bucketID, CreatedAt: time.Now().UTC(), Catalog: catalog}, ExpiresAt: time.Now().UTC().Add(15 * time.Minute)}
+		draft := store.MCPCatalogDraft{MCPCatalogSnapshot: store.MCPCatalogSnapshot{ID: uuid.New(), URL: input.URL, CreatedAt: time.Now().UTC(), Catalog: catalog}, ExpiresAt: time.Now().UTC().Add(15 * time.Minute)}
 		before := mcpcatalog.Catalog{}
 		// The first import uses an empty base; later previews pin the exact previously approved revision.
 		if prior != nil {
@@ -238,6 +243,11 @@ func ApplyMCPCatalogHandler(s store.Store, ownership ServiceVisibilityResolver) 
 		// Only an existing server-held draft can reach the approval boundary.
 		if err != nil {
 			writeMCPCatalogError(w, r, err)
+			return
+		}
+		// Drafts created by older authenticated discovery must be rediscovered anonymously.
+		if draft.BucketID != uuid.Nil || draft.BucketName != "" || draft.SecretName != "" {
+			writeMCPCatalogError(w, r, mcpcatalog.ErrAuthenticatedDiscoveryUnsupported)
 			return
 		}
 		// Credential grants are rechecked at apply, not merely when discovery began.
@@ -280,54 +290,6 @@ func authorizeMCPCatalogBucket(ctx context.Context, id uuid.UUID) error {
 	return accesscontrol.AuthorizeAll(ctx, accesscontrol.SnapshotAuthorizer{}, accesscontrol.Requirement{Permission: accesscontrol.PermissionBucketUse, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: id}})
 }
 
-// resolveMCPCatalogToken reads an exact generic bucket secret after authorization, without creating buckets or copying credentials into previews.
-func resolveMCPCatalogToken(ctx context.Context, s store.Store, masterKey []byte, input mcpDiscoveryInput) (uuid.UUID, string, error) {
-	// Both omitted fields select anonymous discovery; partial references are invalid.
-	if input.BucketName == "" && input.SecretName == "" {
-		return uuid.Nil, "", nil
-	}
-	// A partial credential reference must never silently fall back to anonymous discovery.
-	if input.BucketName == "" || input.SecretName == "" {
-		return uuid.Nil, "", refreshHTTPError{status: 400, message: "bucket_name and secret_name are both required"}
-	}
-	key, err := bucketSecretStorageKey(input.SecretName)
-	// Generic secret references must remain within their dedicated namespace.
-	if err != nil {
-		return uuid.Nil, "", refreshHTTPError{status: 400, message: "invalid bucket secret name"}
-	}
-	bucket, err := resolveMCPCatalogBucket(ctx, s, input.BucketName)
-	// Credential destination and bucket authority are checked before any secret lookup.
-	if err != nil {
-		return uuid.Nil, "", err
-	}
-	secret, err := s.GetSecret(ctx, bucket.ID, uuid.Nil, key)
-	// Missing credential material cannot be interpreted as an anonymous connection.
-	if err != nil || secret == nil {
-		return uuid.Nil, "", refreshHTTPError{status: 422, message: "bucket credential is unavailable"}
-	}
-	token, err := decryptMCPCatalogToken(masterKey, secret)
-	return bucket.ID, token, err
-}
-
-// resolveMCPCatalogBucket requires credential-management authority because the actor chooses a new destination for the token.
-func resolveMCPCatalogBucket(ctx context.Context, s store.Store, name string) (*store.Bucket, error) {
-	actor, _ := accesscontrol.ActorFromContext(ctx)
-	// Bucket runtime-use authority alone does not permit forwarding an existing secret to arbitrary endpoints.
-	if err := accesscontrol.AuthorizeAll(ctx, accesscontrol.SnapshotAuthorizer{}, accesscontrol.Requirement{Permission: accesscontrol.PermissionCredentialsManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: actor.WorkspaceID}}); err != nil {
-		return nil, err
-	}
-	bucket, err := s.GetBucketByName(ctx, name)
-	// Missing buckets never trigger creation or a fallback to another bucket.
-	if err != nil || bucket == nil {
-		return nil, refreshHTTPError{status: 422, message: "bucket credential is unavailable"}
-	}
-	// Credential-derived definitions remain visible only while the actor can use their bucket.
-	if err = authorizeMCPCatalogBucket(ctx, bucket.ID); err != nil {
-		return nil, err
-	}
-	return bucket, nil
-}
-
 // decryptMCPCatalogToken admits only unexpired, valid header material and never returns cryptographic error detail.
 func decryptMCPCatalogToken(masterKey []byte, secret *store.WorkspaceSecret) (string, error) {
 	// Expired secrets may remain as metadata but cannot authorize discovery.
@@ -366,6 +328,9 @@ func writeMCPCatalogError(w http.ResponseWriter, r *http.Request, err error) {
 		status, code, message = 400, "mcp_catalog_endpoint_invalid", mcpcatalog.ErrEndpoint.Error()
 	case errors.Is(err, mcpcatalog.ErrInvalidCatalog):
 		status, code, message = 422, "mcp_catalog_invalid", mcpcatalog.ErrInvalidCatalog.Error()
+	// Upstream auth requirements are a supported, actionable validation outcome, not a Fused login failure.
+	case errors.Is(err, mcpcatalog.ErrAuthenticatedDiscoveryUnsupported):
+		status, code, message = 422, "mcp_catalog_auth_unsupported", mcpcatalog.ErrAuthenticatedDiscoveryUnsupported.Error()
 	case errors.Is(err, mcpcatalog.ErrDiscovery):
 		status, code, message = 502, "mcp_catalog_discovery_failed", mcpcatalog.ErrDiscovery.Error()
 	}

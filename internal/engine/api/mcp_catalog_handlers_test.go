@@ -47,8 +47,12 @@ func (s *catalogAPIStore) SaveMCPCatalogDraft(_ context.Context, scope store.MCP
 	return nil
 }
 
-// GetMCPCatalogDraft models a missing server-owned preview without accepting client-supplied definitions.
-func (s *catalogAPIStore) GetMCPCatalogDraft(context.Context, store.MCPCatalogScope, uuid.UUID) (*store.MCPCatalogDraft, error) {
+// GetMCPCatalogDraft returns only the exact server-owned preview, never client-supplied definitions.
+func (s *catalogAPIStore) GetMCPCatalogDraft(_ context.Context, _ store.MCPCatalogScope, id uuid.UUID) (*store.MCPCatalogDraft, error) {
+	// Only a fixture-created exact draft can exercise the delayed-apply boundary.
+	if s.draft != nil && s.draft.ID == id {
+		return s.draft, nil
+	}
 	return nil, store.ErrMCPCatalogConflict
 }
 
@@ -91,6 +95,8 @@ func catalogAPIRequest(handler http.HandlerFunc, actor *accesscontrol.Actor, ser
 
 // TestMCPCatalogHTTPAdmission proves authorization, active-version, strict-body, and failure boundaries precede persistence.
 func TestMCPCatalogHTTPAdmission(t *testing.T) {
+	// Exercise existing behavior only after the operator explicitly opts into imports.
+	t.Setenv("FUSED_ENABLE_IMPORTED_MCP", "true")
 	serviceID, versionID := uuid.New(), uuid.New()
 	actor := catalogTestActor(t, serviceID, true)
 	readOnly := catalogTestActor(t, serviceID, false)
@@ -107,7 +113,7 @@ func TestMCPCatalogHTTPAdmission(t *testing.T) {
 		{"unsafe URL", &actor, true, `{"url":"http://127.0.0.1/mcp"}`, 400},
 		{"unknown property", &actor, true, `{"url":"https://example.com/mcp","token":"secret"}`, 400},
 		{"trailing JSON", &actor, true, `{"url":"https://example.com/mcp"} {}`, 400},
-		{"partial credential", &actor, true, `{"url":"https://example.com/mcp","bucket_name":"default"}`, 400},
+		{"partial credential", &actor, true, `{"url":"https://example.com/mcp","bucket_name":"default"}`, 422},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -129,6 +135,8 @@ func TestMCPCatalogHTTPAdmission(t *testing.T) {
 
 // TestMCPCatalogHTTPDiscovery verifies discovery saves a private preview and scrubs upstream error prose.
 func TestMCPCatalogHTTPDiscovery(t *testing.T) {
+	// Exercise existing behavior only after the operator explicitly opts into imports.
+	t.Setenv("FUSED_ENABLE_IMPORTED_MCP", "true")
 	serviceID, versionID := uuid.New(), uuid.New()
 	actor := catalogTestActor(t, serviceID, true)
 	s := &catalogAPIStore{active: true}
@@ -222,72 +230,6 @@ func TestMCPCatalogBrowserPreview(t *testing.T) {
 	}
 }
 
-// bearerCatalogStore binds test credentials to one exact generic bucket lookup.
-type bearerCatalogStore struct {
-	store.Store
-	bucket  store.Bucket
-	secret  store.WorkspaceSecret
-	lookups int
-}
-
-// GetBucketByName returns only the explicit test bucket and never invents a fallback.
-func (s *bearerCatalogStore) GetBucketByName(_ context.Context, name string) (*store.Bucket, error) {
-	if name != s.bucket.Name {
-		return nil, errors.New("absent")
-	}
-	return &s.bucket, nil
-}
-
-// GetSecret verifies catalog discovery cannot read provider-scoped credentials through a generic reference.
-func (s *bearerCatalogStore) GetSecret(_ context.Context, bucketID, serviceID uuid.UUID, key string) (*store.WorkspaceSecret, error) {
-	s.lookups++
-	// Generic bearer lookup must stay within the selected bucket and the generic secret namespace.
-	if bucketID != s.bucket.ID || serviceID != uuid.Nil || key != "secret:mcp_token" {
-		return nil, errors.New("unexpected secret identity")
-	}
-	return &s.secret, nil
-}
-
-// TestMCPCatalogBearerAuthorization proves both destination-management and bucket-use authority are required before decryption.
-func TestMCPCatalogBearerAuthorization(t *testing.T) {
-	key := []byte("0123456789abcdef0123456789abcdef")
-	encryptedDEK, dek, err := store.WrapDEK(key)
-	// Fixture setup must succeed before the behavior assertions can be trusted.
-	if err != nil {
-		t.Fatal(err)
-	}
-	encryptedValue, err := store.EncryptWithDEK(dek, "fixture-bearer-token")
-	// Fixture setup must succeed before the behavior assertions can be trusted.
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := &bearerCatalogStore{bucket: store.Bucket{ID: uuid.New(), Name: "test"}, secret: store.WorkspaceSecret{EncryptedDEK: encryptedDEK, EncryptedValue: encryptedValue}}
-	actor := catalogTestActor(t, uuid.New(), true)
-	input := mcpDiscoveryInput{URL: "https://example.com/mcp", BucketName: "test", SecretName: "mcp_token"}
-	_, _, err = resolveMCPCatalogToken(accesscontrol.ContextWithActor(context.Background(), actor), s, key, input)
-	// Denied actors must stop before any provider call, secret read, or saved preview.
-	if !errors.Is(err, accesscontrol.ErrPermissionDenied) || s.lookups != 0 {
-		t.Fatalf("unmanaged credential access=%v lookups=%d", err, s.lookups)
-	}
-	grants := []accesscontrol.Grant{{Permission: accesscontrol.PermissionCredentialsManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: actor.WorkspaceID}}, {Permission: accesscontrol.PermissionBucketUse, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceBucket, ID: s.bucket.ID}}}
-	actor.Authorization, err = accesscontrol.NewAuthorizationSnapshot(1, grants...)
-	// Fixture setup must succeed before the behavior assertions can be trusted.
-	if err != nil {
-		t.Fatal(err)
-	}
-	bucketID, token, err := resolveMCPCatalogToken(accesscontrol.ContextWithActor(context.Background(), actor), s, key, input)
-	// Only the still-current reviewed preview may change the saved catalog.
-	if err != nil || bucketID != s.bucket.ID || token != "fixture-bearer-token" {
-		t.Fatalf("authorized discovery failed: %v", err)
-	}
-	expired := time.Now().Add(-time.Minute)
-	s.secret.ExpiresAt = &expired
-	// Only the still-current reviewed preview may change the saved catalog.
-	if _, _, err = resolveMCPCatalogToken(accesscontrol.ContextWithActor(context.Background(), actor), s, key, input); err == nil {
-		t.Fatal("expired credential admitted")
-	}
-}
-
 // catalogOwnerVerifier makes service ownership independent of the test actor's workspace grants.
 type catalogOwnerVerifier struct {
 	owner   bool
@@ -309,6 +251,8 @@ func (v catalogOwnerVerifier) FetchServiceVisibility(_ context.Context, ids []uu
 
 // TestMCPCatalogOwnerAdmission proves management grants alone cannot discover or apply catalogs.
 func TestMCPCatalogOwnerAdmission(t *testing.T) {
+	// Exercise existing behavior only after the operator explicitly opts into imports.
+	t.Setenv("FUSED_ENABLE_IMPORTED_MCP", "true")
 	serviceID, versionID := uuid.New(), uuid.New()
 	actor := catalogTestActor(t, serviceID, true)
 	cases := []struct {
@@ -340,5 +284,41 @@ func TestMCPCatalogOwnerAdmission(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestMCPCatalogAnonymousOnly blocks credential references and preserves saved state after an auth challenge.
+func TestMCPCatalogAnonymousOnly(t *testing.T) {
+	t.Setenv("FUSED_ENABLE_IMPORTED_MCP", "true")
+	serviceID, versionID := uuid.New(), uuid.New()
+	actor := catalogTestActor(t, serviceID, true)
+	saved := &store.MCPCatalogSnapshot{ID: uuid.New(), URL: "https://example.com/mcp"}
+	for _, body := range []string{`{"url":"https://example.com/mcp"}`, `{"url":"https://example.com/mcp","bucket_name":"default","secret_name":"token"}`} {
+		s := &catalogAPIStore{active: true, snapshot: saved}
+		calls := 0
+		// A provider challenge supplies fixed guidance without saving a preview or reading a secret.
+		discover := func(_ context.Context, _ string, token string) (mcpcatalog.Catalog, error) {
+			calls++
+			// The HTTP boundary must pass no credentials even to injected discovery implementations.
+			if token != "" {
+				t.Error("credential forwarded")
+			}
+			return mcpcatalog.Catalog{}, mcpcatalog.ErrAuthenticatedDiscoveryUnsupported
+		}
+		response := catalogAPIRequest(discoverMCPCatalogHandler(s, nil, discover, catalogOwnerVerifier{owner: true}), &actor, serviceID, versionID, body)
+		// Neither an unsupported input nor a challenge may alter the existing catalog.
+		if response.Code != 422 || !strings.Contains(response.Body.String(), "mcp_catalog_auth_unsupported") || !strings.Contains(response.Body.String(), "Authenticated discovery isn't supported yet.") || s.saves != 0 || s.snapshot != saved {
+			t.Fatalf("status=%d body=%s saves=%d", response.Code, response.Body.String(), s.saves)
+		}
+		// Explicit credential references are rejected before contacting any provider.
+		if strings.Contains(body, "bucket_name") && calls != 0 {
+			t.Fatal("credential request reached provider")
+		}
+	}
+	s := &catalogAPIStore{active: true, draft: &store.MCPCatalogDraft{MCPCatalogSnapshot: store.MCPCatalogSnapshot{ID: uuid.New(), BucketID: uuid.New()}}}
+	response := catalogAPIRequest(ApplyMCPCatalogHandler(s, catalogOwnerVerifier{owner: true}), &actor, serviceID, versionID, `{"draft_id":"`+s.draft.ID.String()+`"}`)
+	// An older authenticated draft must not bypass the new import restriction via delayed apply.
+	if response.Code != 422 || !strings.Contains(response.Body.String(), "mcp_catalog_auth_unsupported") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }

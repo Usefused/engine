@@ -16,6 +16,8 @@ import (
 
 // TestImportedCatalogTokenFiltering verifies search and native discovery expose the same exact token scope.
 func TestImportedCatalogTokenFiltering(t *testing.T) {
+	// Exercise existing behavior only after the operator explicitly opts into imports.
+	t.Setenv("FUSED_ENABLE_IMPORTED_MCP", "true")
 	id := uuid.New()
 	selection := models.SDKSelection{ServiceID: id, ImportedMCP: &models.ImportedMCPBinding{Tools: []json.RawMessage{json.RawMessage(`{"name":"echo","inputSchema":{"type":"object"}}`)}, Prompts: []json.RawMessage{json.RawMessage(`{"name":"echo"}`)}, Resources: []json.RawMessage{json.RawMessage(`{"name":"guide","uri":"fixture://guide"}`)}}}
 	policy := store.AppTokenPolicy{AllowedOperations: []string{models.ImportedMCPOperation(id, "tool", "echo")}}

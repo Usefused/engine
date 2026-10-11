@@ -231,6 +231,10 @@ func validateMCPServerDescription(doc sdkConfigDocument, kind string) error {
 
 // validateMCPAppRestrictions rejects package-only or unbounded MCP fields before they cross the app configuration boundary.
 func validateMCPAppRestrictions(doc sdkConfigDocument, kind string) error {
+	// Operator opt-in is independent of the selected app transport.
+	if err := validateImportedMCPFeature(doc); err != nil {
+		return err
+	}
 	// Imported capabilities currently require a standalone hosted MCP adapter.
 	for _, service := range doc.Services {
 		if service.MCP != nil && kind != store.AppKindMCP.String() {
