@@ -102,6 +102,9 @@ WORKDIR /app
 # the Go binary, so containers never run npm against tenant storage.
 RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates gosu nats-server tini && rm -rf /var/lib/apt/lists/*
 
+# Docker applies seccomp before startup; ship the matching profile and license for host-side extraction.
+COPY deploy/unified-app-workers/ /app/deploy/unified-app-workers/
+
 RUN groupadd --system fused && useradd --system --create-home --gid fused fused && \
     mkdir -p /app/data/sandboxes && \
     chown -R fused:fused /app

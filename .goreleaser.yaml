@@ -77,6 +77,8 @@ dockers:
     extra_files:
       - engine.yaml
       - entrypoint.sh
+      # Docker build contexts must include the version-matched worker deployment bundle.
+      - deploy/unified-app-workers
       - runtime/execution/package.json
       - runtime/execution/package-lock.json
       - runtime/execution/tsconfig.json
@@ -100,6 +102,8 @@ dockers:
     extra_files:
       - engine.yaml
       - entrypoint.sh
+      # Docker build contexts must include the version-matched worker deployment bundle.
+      - deploy/unified-app-workers
       - runtime/execution/package.json
       - runtime/execution/package-lock.json
       - runtime/execution/tsconfig.json
@@ -126,6 +130,8 @@ dockers:
     extra_files:
       - engine.yaml
       - entrypoint.sh
+      # Docker build contexts must include the version-matched worker deployment bundle.
+      - deploy/unified-app-workers
       - runtime/execution/package.json
       - runtime/execution/package-lock.json
       - runtime/execution/tsconfig.json
@@ -150,6 +156,8 @@ dockers:
     extra_files:
       - engine.yaml
       - entrypoint.sh
+      # Docker build contexts must include the version-matched worker deployment bundle.
+      - deploy/unified-app-workers
       - runtime/execution/package.json
       - runtime/execution/package-lock.json
       - runtime/execution/tsconfig.json
@@ -186,6 +194,12 @@ archives:
     ids:
       - fused-engine
       - fused-execution-worker
+    # Preserve normal release notices and ship the same deployment bundle as the image.
+    files:
+      - LICENSE*
+      - README*
+      - CHANGELOG*
+      - deploy/unified-app-workers/*
     formats:
       - tar.gz
     name_template: >-
@@ -205,6 +219,12 @@ archives:
     ids:
       - fused-engine-headless
       - fused-execution-worker
+    # Preserve normal release notices and ship the same deployment bundle as the image.
+    files:
+      - LICENSE*
+      - README*
+      - CHANGELOG*
+      - deploy/unified-app-workers/*
     formats:
       - tar.gz
     name_template: >-
@@ -222,6 +242,9 @@ archives:
 release:
   extra_files:
     - glob: agent-release/runtime-*.tar.gz
+    # Standalone assets let operators configure Docker without downloading a native binary archive.
+    - glob: deploy/unified-app-workers/seccomp.json
+    - glob: deploy/unified-app-workers/LICENSE.moby
   # Retrying a release on the same tag (e.g. a CI re-run after a partial
   # failure) re-uploads every asset -- without this, GitHub's API rejects
   # each one with 422 "already_exists" since the previous attempt already

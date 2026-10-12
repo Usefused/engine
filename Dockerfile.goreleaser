@@ -32,6 +32,9 @@ COPY --from=execution-compiler-builder /app/runtime/execution /app/runtime/execu
 COPY engine.yaml /app/engine.yaml
 COPY entrypoint.sh /app/entrypoint.sh
 
+# Keep release images on the same extractable deployment bundle as source-built images.
+COPY deploy/unified-app-workers/ /app/deploy/unified-app-workers/
+
 RUN groupadd --system fused && useradd --system --create-home --gid fused fused && \
     mkdir -p /app/data/sandboxes && \
     chown -R fused:fused /app

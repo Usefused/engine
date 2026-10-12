@@ -61,6 +61,14 @@ fused-cli whoami
 See the [deployment guide](https://usefused.com/docs/deploy-an-engine) for Docker
 and hosted Fused setup.
 
+For Unified Apps in Docker, use the [bundled worker deployment files](deploy/unified-app-workers/README.md).
+Both image variants include the seccomp profile, its license, and a Compose example
+at `/app/deploy/unified-app-workers`; release archives include the same directory.
+Extract the files before launch and apply the profile through Docker's `--security-opt`.
+Set `FUSED_UNIFIED_APP_WORKER_REQUIRED=true` and verify that `/health` reports
+`unified_app_worker_ready: true`. The bundled executable alone does not prove that
+the host permits worker isolation.
+
 ## Create an integration interface
 
 With Fused running, give your application or agent a way to call the

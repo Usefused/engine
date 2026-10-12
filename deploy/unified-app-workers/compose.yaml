@@ -3,7 +3,8 @@ services:
     image: ${FUSED_ENGINE_IMAGE:?Set a pinned Fused Linux Engine image}
     # The image already owns /app/data as fused; a fresh named volume preserves that ownership.
     user: fused
-    entrypoint: ["/sbin/tini", "--", "/app/fused-engine"]
+    # Start directly as fused through the init binary provided by the current image.
+    entrypoint: ["/usr/bin/tini", "--", "/app/fused-engine"]
     command: ["start"]
     restart: unless-stopped
     read_only: true
@@ -33,7 +34,17 @@ services:
         target: /app/engine.yaml
         read_only: true
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/health"]
+      # Node is bundled in both image variants; no optional host or image HTTP utility is required.
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:8081/health')
+          .then(/* A failed readiness status must make Docker mark this container unhealthy. */
+          response => process.exit(Number(!response.ok)))
+          .catch(/* Connection failures also mean the Engine is not ready. */
+          () => process.exit(1))
       interval: 15s
       timeout: 10s
       retries: 3

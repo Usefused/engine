@@ -182,6 +182,9 @@ jobs:
           # The final images must carry the compiler and its native esbuild dependency.
           docker run --rm --entrypoint node fused-engine:test -e "require('node:fs').accessSync('/app/runtime/execution/dist/src/cli.js'); require('/app/runtime/execution/node_modules/esbuild').version"
           docker run --rm --entrypoint node fused-engine:test-headless -e "require('node:fs').accessSync('/app/runtime/execution/dist/src/cli.js'); require('/app/runtime/execution/node_modules/esbuild').version"
+          # Both variants must expose matching host-side profiles before any Engine process starts.
+          bash scripts/test-worker-deployment-bundle.sh fused-engine:test
+          bash scripts/test-worker-deployment-bundle.sh fused-engine:test-headless
 
       - name: GoReleaser config
         uses: goreleaser/goreleaser-action@v5
