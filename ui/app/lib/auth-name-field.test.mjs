@@ -104,5 +104,12 @@ test("static secret rows expose stored keys without fetching or revealing creden
   assert.match(list, /storedSecret: \{ key_name: item\.key_name, key_names: item\.key_names \}/);
   assert.match(list, /<StoredSecretKeys secret=\{entry\.storedSecret\}/);
   assert.match(list, /value: "\*{8}"/);
-  assert.match(queries, /items \{ id bucket_id service_id key_name key_names credential_type/);
+  const projection = queries.match(/secretMetaPage\([^)]*\)\s*\{\s*total\s*items\s*\{([^}]+)\}/);
+  assert.ok(projection, "Secret metadata must have a dedicated paginated query");
+  const fields = new Set(projection[1].trim().split(/\s+/));
+  // Additional display metadata may coexist with the exact stored credential identity.
+  for (const field of ["id", "bucket_id", "service_id", "key_name", "key_names", "credential_type"]) {
+    assert.ok(fields.has(field), `Secret metadata must retain ${field}`);
+  }
+  assert.equal(fields.has("value"), false, "Metadata queries must never request credential values");
 });

@@ -59,6 +59,7 @@ test("keeps aggregate service usage inside Outbound calls as a select option", a
   assert.doesNotMatch(serviceActivity, /No cross-engine usage has been reported/);
 });
 
+// Type filtering must happen before server pagination while details retain exact immutable identities.
 test("reads grouped app families and exact detail versions from the Engine catalogue", async () => {
   const [appIndex, appRoute, mcpDetail, mcpActivity, runtimeStatus] = await Promise.all([
     readFile(appIndexPath, "utf8"),
@@ -68,14 +69,15 @@ test("reads grouped app families and exact detail versions from the Engine catal
     readFile(runtimeStatusPath, "utf8"),
   ]);
   assert.match(appIndex, /\.mcpGraphql<\{ appFamilies: SdkPage/);
-  assert.match(appIndex, /appFamilies\(search: \$search/);
+  assert.match(appIndex, /appFamilies\(kind: \$kind, search: \$search/);
+  assert.match(appIndex, /kind: type,/);
   assert.match(appIndex, /app_id: latest_version_id/);
   assert.match(appIndex, /app_family_id/);
   assert.match(appIndex, /delivery_mode/);
   assert.match(appIndex, /status: latest_status/);
   assert.match(appIndex, /downloads/);
   assert.match(appIndex, /await fetchSdks\(query, page\)/);
-  assert.match(appIndex, /query Applications\(\$search: String!, \$archived: Boolean!, \$limit: Int!, \$offset: Int!\)/);
+  assert.match(appIndex, /query Applications\(\$kind: String!, \$search: String!, \$archived: Boolean!, \$limit: Int!, \$offset: Int!\)/);
   assert.doesNotMatch(appIndex, /apps\(kind: "sdk"/);
   assert.match(appIndex, /<SdkPagination page=\{page\} total=\{total\}/);
   assert.doesNotMatch(appIndex, /artifactSnapshots/);
@@ -99,6 +101,7 @@ test("reads grouped app families and exact detail versions from the Engine catal
   assert.match(runtimeStatus, /Deprecated/);
 });
 
+// Type tabs and archive selection must preserve the same Engine-owned lifecycle routes.
 test("uses only exact Engine app lifecycle and package routes", async () => {
 	const [appIndex, api, appBuilder] = await Promise.all([
 		readFile(appIndexPath, "utf8"),
@@ -111,7 +114,7 @@ test("uses only exact Engine app lifecycle and package routes", async () => {
 	assert.ok(api.includes('archiveFamily: (appFamilyId: string) => req<void>(`/app-families/${appFamilyId}`'));
 	assert.match(appIndex, /archived: state === "archive"/);
 	assert.match(appIndex, /type="checkbox"[\s\S]*checked=\{archived\}/);
-	assert.doesNotMatch(appIndex, /aria-label="App type"|APP_CATALOGUE_TABS/);
+	assert.match(appIndex, /role="tablist" aria-label="App type"/);
 	assert.match(appIndex, /if \(state === "archive"\) return "Search archived apps\.\.\."/);
 	assert.match(appIndex, /placeholder=\{appSearchPlaceholder\(state\)\}/);
 	assert.doesNotMatch(appIndex, /aria-label="App lifecycle"/);
@@ -122,13 +125,15 @@ test("uses only exact Engine app lifecycle and package routes", async () => {
 	assert.doesNotMatch(appBuilder, /upgrade_from|upgradeFrom|lockedSelections|lockedWebhookSelections/);
 });
 
+// SDK and REST share receipts for the selected version without leaking sibling-version activity.
 test("groups generated SDK and direct REST receipts under the same app", async () => {
 	const [overview, requests, api] = await Promise.all([
 		readFile(appOverviewPath, "utf8"),
 		readFile(appRequestsPath, "utf8"),
 		readFile(apiPath, "utf8"),
 	]);
-	assert.match(overview, /getAppExecutionAnalytics\(\{ appId, includeAllVersions \}\)/);
+	assert.match(overview, /getAppExecutionAnalytics\(\{ appId, includeAllVersions: false \}\)/);
+	assert.match(requests, /includeAllVersions: false/);
 	assert.match(requests, /transport: transport === "mcp" \? "mcp" : undefined/);
 	assert.match(api, /transport: "sdk" \| "mcp" \| "rest" \| "webhook"/);
 });

@@ -60,17 +60,17 @@ test("keeps the Registry repo-boundary manifest synchronized when present", (t) 
   }
 });
 
-// Exact totals include the three progressive agent discovery queries alongside source revision and contract reads.
+// Pin the reviewed inventory, including secret-reference lookup and imported-MCP contract reads.
 test("accounts for every current UI GraphQL call and document variant", () => {
   const scan = scanCurrentUI();
   // Exact totals ensure every static query remains represented in schema validation.
-  assert.equal(scan.call_count, 113);
-  assert.equal(scan.calls.length, 113);
-  assert.equal(scan.document_count, 131);
-  assert.equal(scan.documents.length, 131);
-  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "registry").length, 34);
-  assert.equal(scan.documents.filter(({ endpoint }) => endpoint === "engine").length, 97);
-  assert.equal(scan.calls.reduce((count, call) => count + call.document_count, 0), 131);
+  assert.equal(scan.call_count, 115);
+  assert.equal(scan.calls.length, 115);
+  assert.equal(scan.document_count, 133);
+  assert.equal(scan.documents.length, 133);
+  assert.equal(scan.documents.filter(/** Registry documents are validated against its separate schema. */ ({ endpoint }) => endpoint === "registry").length, 35);
+  assert.equal(scan.documents.filter(/** Engine documents retain their own schema-validation boundary. */ ({ endpoint }) => endpoint === "engine").length, 98);
+  assert.equal(scan.calls.reduce(/** Every expanded variant must belong to a scanned call. */ (count, call) => count + call.document_count, 0), 133);
 });
 
 test("resolves imported fragments and expands conditional and map variants", () => {

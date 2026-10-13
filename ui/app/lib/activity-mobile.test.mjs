@@ -16,13 +16,20 @@ function assertResponsivePair(contents, label) {
   assert.match(contents, /hidden overflow-x-auto md:block/, `${label} must retain a desktop table`);
 }
 
+// Responsive invariants survive utility-class reordering and additional desktop alignment.
 test("app Activity uses cards on mobile and tables on wider screens", () => {
   const requests = source("../components/activity/AppRequestsPanel.tsx");
   const overview = source("../components/activity/AppActivityOverview.tsx");
 
   assertResponsivePair(requests, "App receipts");
   assertResponsivePair(overview, "App service usage");
-  assert.match(requests, /grid w-full grid-cols-1 gap-2 sm:flex sm:w-auto/, "Receipt filters must stack within the mobile card width");
+  const filters = requests.match(/className="([^"]*grid w-full grid-cols-1[^"]*)"/);
+  assert.ok(filters, "Receipt filters must stack within the mobile card width");
+  const classes = new Set(filters[1].split(/\s+/));
+  // Every responsive utility is required, regardless of its order in the class list.
+  for (const utility of ["grid", "w-full", "grid-cols-1", "gap-2", "sm:flex", "sm:w-auto"]) {
+    assert.ok(classes.has(utility), `Receipt filters must retain ${utility}`);
+  }
   assert.match(requests, /break-all font-mono text-\[11px\]/, "Provider paths must wrap inside mobile receipts");
 });
 

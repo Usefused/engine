@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { URL } from "node:url";
 
+// Read the production composition to keep detail-route contracts tied to their actual owners.
 function source(relativePath) {
   return readFileSync(new URL(relativePath, import.meta.url), "utf8");
 }
@@ -18,9 +19,10 @@ const activity = source("../routes/integrations.mcp_.$id.analytics.tsx");
 const services = source("../components/apps/AppConnectedServices.tsx");
 const layout = source("../routes/integrations.tsx");
 
+// MCP discovery stays in the shared family catalogue with server-side type filtering.
 test("MCP catalogue shares the Apps family list and opens exact MCP details", () => {
-  assert.doesNotMatch(list, /APP_CATALOGUE_TABS|aria-label="App type"/);
-  assert.match(list, /appFamilies\(search: \$search/);
+  assert.match(list, /role="tablist" aria-label="App type"/);
+  assert.match(list, /appFamilies\(kind: \$kind, search: \$search/);
   assert.match(list, /if \(app\.target_type === "mcp"\) return `\/integrations\/mcp\/\$\{appId\}`/);
   assert.match(list, /delivery_mode/);
   assert.match(list, /deprecateApp\(app_id: \$appId/);
@@ -31,6 +33,7 @@ test("MCP catalogue shares the Apps family list and opens exact MCP details", ()
   assert.doesNotMatch(list, /<McpTransportEndpoints/);
 });
 
+// Copy actions must use the Engine-projected URL while versioned endpoints remain explicit.
 test("MCP details show Engine-projected transports and immutable selected operations", () => {
   assert.match(detail, /app\(app_id: \$appId\)/);
   assert.match(detail, /appServices\(app_id: \$appId\)/);
@@ -40,7 +43,7 @@ test("MCP details show Engine-projected transports and immutable selected operat
   assert.match(detail, /<AppOverviewBody[\s\S]*selections=\{server\.detailed_selections\}/);
   assert.match(detailBody, /<AppConnectedServices selections=\{selections\}/);
   assert.match(detail, /A reusable interface for the services and operations this MCP server exposes\./);
-  assert.match(detail, /Copy server URL/);
+  assert.match(detail, /primaryURL \? <CopyButton value=\{primaryURL\} label="server URL"/);
   assert.match(detail, /versioned_streamable_http/);
   assert.match(detail, /transport_urls \{ versioned_streamable_http versioned_sse \}/);
   assert.match(detail, /<McpVersionTransportEndpoints/);
@@ -68,7 +71,6 @@ test("SDK and MCP details share app identity, navigation, overview, activity, an
   for (const route of [detail, sdkDetail]) {
     assert.match(route, /<AppDetailHeader/);
     assert.match(route, /<AppDetailBackLink/);
-    assert.match(route, /<AppDetailPrimaryAction/);
     assert.match(route, /<AppVersionSwitcher/);
     assert.match(route, /<AppDetailTabs/);
     assert.match(route, /<AppDetailBody>/);
@@ -78,6 +80,9 @@ test("SDK and MCP details share app identity, navigation, overview, activity, an
   assert.match(detailChrome, /export function AppDetailHeader/);
   assert.match(detailChrome, /export function AppDetailBackLink/);
   assert.match(detailChrome, /export function AppDetailPrimaryAction/);
+  // The shared header accepts delivery-specific actions: copy for MCP, download for packages.
+  assert.match(detail, /<CopyButton value=\{primaryURL\} label="server URL"/);
+  assert.match(sdkDetail, /<AppDetailPrimaryAction[\s\S]*label="Download package"/);
   assert.match(detailChrome, /export function AppVersionSwitcher/);
   assert.match(detailChrome, /export function AppDetailTabs/);
   assert.match(detailBody, /export function AppDetailBody/);

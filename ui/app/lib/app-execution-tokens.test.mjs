@@ -54,7 +54,10 @@ test('execution token controls require the exact typed family permission', () =>
     for (const resource_type of ['APP', 'WORKSPACE']) {
       access = { subject_id: 'manager', workspace_id: 'workspace', grants: [{ permission: `app.${kind}.tokens.manage`, resource_type, resource_id: resource_type === 'APP' ? 'family' : 'workspace' }] };
       const html = renderToStaticMarkup(createElement(AppExecutionTokens, { familyID: 'family', kind }));
-      assert.match(html, /Execution tokens/);
+      // Authorized users get the concise launcher; credential controls stay unmounted until opened.
+      const document = JSDOM.fragment(html);
+      assert.equal(document.querySelector('button')?.textContent, 'Tokens');
+      assert.equal(document.querySelector('[role="dialog"]'), null);
       assert.match(html, /aria-haspopup="dialog"/);
       assert.doesNotMatch(html, /<form/);
     }

@@ -2,6 +2,7 @@ import { importedMcpEnabled } from "~/lib/features";
 import { useEffect, useState } from "react";
 import { CheckSquare, Square, ChevronDown, ChevronRight, Search, X } from "lucide-react";
 import { api } from "~/lib/api";
+import { Select } from "~/components/forms/Select";
 import { filterMcpItems, mcpCatalogSections, mcpItemKey, type McpCatalogKind, type McpCatalogItem, type McpCatalogSnapshot } from "~/lib/mcp-catalog";
 
 export type ImportedMcpSelection = { revision_id: string } & Partial<Record<McpCatalogKind, string[]>>;
@@ -97,9 +98,10 @@ function McpCapabilityChoices({ snapshot, value, toggle }: { snapshot: McpCatalo
           <input aria-label="Search MCP capabilities" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search MCP capabilities..." className="w-full rounded-md border border-slate-200 bg-white py-1.5 pl-9 pr-8 text-xs text-slate-800 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
           {query && <button type="button" aria-label="Clear MCP search" onClick={() => setQuery("")} className="absolute right-2 top-2 text-slate-400 hover:text-slate-600"><X className="h-3.5 w-3.5" /></button>}
         </div>
-        <select aria-label="MCP capability type" value={kindFilter} onChange={(event) => setKindFilter(event.target.value as McpCatalogKind | "all")} className="min-w-0 max-w-[40%] rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-600">
+        {/* Preserve native filtering while sharing the app's compact dropdown styling. */}
+        <Select density="compact" aria-label="MCP capability type" value={kindFilter} onChange={/** Keep filtering local to the already-loaded catalog. */ (event) => setKindFilter(event.target.value as McpCatalogKind | "all")} className="min-w-0 max-w-[40%]">
           <option value="all">All types</option>{mcpCatalogSections.map(({ kind, label }) => <option key={kind} value={kind}>{label}</option>)}
-        </select>
+        </Select>
       </div>
       {groups.map(({ kind, label, items }) => <McpCapabilityGroup key={kind} kind={kind} label={label} items={items} selected={current ? value?.[kind] ?? [] : []} toggle={toggle} />)}
       {groups.length === 0 && <p className="p-8 text-center text-sm text-slate-400">No matching capabilities found</p>}
