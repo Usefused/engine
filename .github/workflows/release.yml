@@ -102,6 +102,16 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
+      # GoReleaser hooks build MCP and UI assets; use the declared Node range instead of the runner default.
+      - name: Set up Node for release hooks
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: runtime/mcp/package.json
+          cache: npm
+          cache-dependency-path: |
+            runtime/mcp/package-lock.json
+            ui/package-lock.json
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
