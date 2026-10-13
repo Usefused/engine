@@ -102,7 +102,8 @@ func MountAppExecutionRoute(router chi.Router, server *EngineGRPCServer) {
 
 // handleRESTExecution resolves stable Unified App traffic or an exact SDK before dispatch.
 func (s *EngineGRPCServer) handleRESTExecution(writer http.ResponseWriter, request *http.Request) {
-	appID, requestErr := parseRESTAppID(chi.URLParam(request, "app_id"))
+	// Names resolve to a token-scoped family before the shared ID-based authorization path.
+	appID, requestErr := s.resolveRESTAppReference(request)
 	if requestErr != nil {
 		writeRESTExecutionError(writer, requestErr)
 		return

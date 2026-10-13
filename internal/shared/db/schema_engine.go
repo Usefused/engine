@@ -1649,6 +1649,21 @@ func engineSchemaQueries() []string {
 		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS idempotency_key_hash text;`,
 		// Webhook provenance is retained with the private result; automatic runs carry no caller token.
 		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS source_webhook_event_id text;`,
+		// Scheduled inputs are encrypted; occurrence advancement and result reservation share a transaction.
+		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS source_schedule_id uuid;`,
+		`CREATE TABLE IF NOT EXISTS fused_unified_app_schedules (
+			id uuid PRIMARY KEY, account_id uuid NOT NULL, app_family_id uuid NOT NULL REFERENCES fused_app_families(app_family_id),
+			name text NOT NULL CHECK (octet_length(name) BETWEEN 1 AND 128),
+			cron text NOT NULL DEFAULT '', timezone text NOT NULL, run_at timestamptz,
+			enabled boolean NOT NULL DEFAULT true, revision bigint NOT NULL DEFAULT 1,
+			next_run_at timestamptz, last_execution_id uuid, last_app_id uuid,
+			last_status text NOT NULL DEFAULT '' CHECK(last_status IN ('','running','succeeded','failed','indeterminate')),
+			last_started_at timestamptz, encrypted_dek text NOT NULL, encrypted_input text NOT NULL,
+			created_by uuid NOT NULL, created_at timestamptz NOT NULL DEFAULT NOW(),
+			CHECK ((run_at IS NULL) <> (cron=''))
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_schedules_due ON fused_unified_app_schedules(next_run_at) WHERE enabled AND last_status<>'running';`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_schedules_family ON fused_unified_app_schedules(account_id,app_family_id);`,
 		// Payload-free delivery fences outlive result bodies and survive app promotion or worker restart.
 		`CREATE TABLE IF NOT EXISTS fused_unified_app_webhook_deliveries (
 			account_id uuid NOT NULL,

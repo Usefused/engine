@@ -210,7 +210,7 @@ function combinedSearchPage(workspace: ComponentProps<typeof IntegrationsListTab
   };
 }
 
-// ServicesContent uses one result list during search while preserving optional catalogue browsing.
+// ServicesContent shares progress feedback across workspace and catalogue loads while preserving separate browse results.
 function ServicesContent({ isAuth, view, showCatalog, emptyWorkspace, onToggleCatalog, catalog, workspace }: {
   isAuth: boolean;
   view: ServicesView;
@@ -233,17 +233,16 @@ function ServicesContent({ isAuth, view, showCatalog, emptyWorkspace, onToggleCa
   return (
     <>
       {/* Search always includes both sources; the optional toggle applies only to browsing. */}
-      {!isSearch && <CatalogToggle checked={showCatalog} onChange={onToggleCatalog} />}
+      <CatalogToggle checked={showCatalog} onChange={onToggleCatalog} />
       {/* Imported and activated services remain the first collection on the page. */}
       {!emptyWorkspace && <h2 className="mb-4 text-sm font-semibold text-slate-900">Workspace services</h2>}
-      {/* A search with no matches needs visible feedback; only a new workspace defers its empty state to the catalogue. */}
-      <IntegrationsListTab {...workspace} hideEmptyState={emptyWorkspace && !workspace.query.trim()} searchPlaceholder="Search workspace and catalog" />
-      {/* Catalogue cards are appended without changing the active Workspace navigation state. */}
-      {showCatalog && <section className="mt-6">
+      {/* Browse mode defers a new workspace's empty state to the catalogue; search feedback is handled above. */}
+      <IntegrationsListTab {...workspace} hideEmptyState={emptyWorkspace} searchPlaceholder="Search workspace and catalog" />
+      {/* The workspace list owns progress until its combined load settles, avoiding a second loader during catalogue discovery. */}
+      {showCatalog && !workspace.loading && !workspace.searching && <section className="mt-6">
         <EmptyWorkspaceCatalogIntro visible={emptyWorkspace} />
         {!emptyWorkspace && <div className="mb-4"><h2 className="text-sm font-semibold text-slate-900">Service catalog</h2><p className="mt-1 text-xs text-slate-500">Add public services without displacing what is already in your workspace.</p></div>}
-        {/* Membership loads before catalogue results; avoid flashing a false empty state during that first request. */}
-        <IntegrationsListTab {...catalog} loading={catalog.loading || workspace.loading} showSearch={false} />
+        <IntegrationsListTab {...catalog} showSearch={false} />
       </section>}
     </>
   );

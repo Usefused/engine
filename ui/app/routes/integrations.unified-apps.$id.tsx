@@ -1,11 +1,15 @@
+import { UnifiedAppWebhooks } from "~/components/apps/UnifiedAppWebhooks";
+import { unifiedAppTabs, selectedUnifiedAppTab } from "~/lib/unified-app-tabs";
+import { UnifiedAppSchedules } from "~/components/apps/UnifiedAppSchedules";
 import { AppExecutionEndpoint } from "~/components/apps/AppExecutionEndpoint";
 import { AppExecutionTokens } from "~/components/apps/AppExecutionTokens";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "@remix-run/react";
 import { UnifiedAppContract } from "~/components/apps/UnifiedAppContract";
 import { UnifiedAppUsage } from "~/components/apps/UnifiedAppUsage";
-import { Loader2, Pencil } from "lucide-react";
+import { ArrowUpRight, Loader2, Pencil } from "lucide-react";
 import { api } from "~/lib/api";
+import { serviceDetailPath } from "~/lib/service-navigation";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasResourcePermission, hasWorkspacePermission } from "~/lib/current-actor-access";
 import { AppDetailBackLink, AppDetailHeader, AppDetailTabs } from "~/components/apps/AppDetailChrome";
@@ -17,9 +21,8 @@ import { useToast } from "~/components/Toast";
 
 interface UnifiedApp { app_id: string; app_family_id: string; name: string; description: string; version: string; status: string; kind: string; created_at: string }
 interface AppService { service_id: string; service_name: string; service_slug: string; version: string; endpoint_count: number }
-type DetailTab = "overview" | "analytics" | "requests" | "changes";
 
-/** Groups invocation and token access before the viewed version’s contract, with source editing restricted to family managers. */
+/** Groups app automation and linked service details while restricting private automation and source to family managers. */
 export default function UnifiedAppDetails() {
   const { id: routeID } = useParams();
   const id = String(routeID);
@@ -114,23 +117,22 @@ export default function UnifiedAppDetails() {
   if (!app) return <p role="status" className="flex items-center gap-2 text-slate-500"><Loader2 className="h-4 w-4 animate-spin" />Loading Unified App…</p>;
   const canReadActivity = hasResourcePermission(access, "app.unified_app.read", "APP", app.app_family_id) && hasWorkspacePermission(access, "audit.read");
   const canManage = hasResourcePermission(access, "app.unified_app.manage", "APP", app.app_family_id);
-  const tabs: Array<{ value: DetailTab; label: string }> = [{ value: "overview", label: "Overview" }, { value: "changes", label: "Versions" }];
-  // Execution data has its own permission even when identity and versions are readable.
-  if (canReadActivity) tabs.splice(1, 0, { value: "analytics", label: "Analytics" }, { value: "requests", label: "Requests" });
+  const tabs = unifiedAppTabs(canManage, canReadActivity);
   // Unknown or denied deep links resolve to Overview without mounting unauthorized consumers.
-  const active = selectedTab(tabs, params.get("tab"));
+  const active = selectedUnifiedAppTab(tabs, params.get("tab"));
   return <div className="space-y-6">
     <AppDetailBackLink to="/integrations/sdks?type=unified_app" />
     {/* Private source and successor deployment require management of this exact family. */}
     <AppDetailHeader name={app.name} summary={app.description || "Combine approved services into one typed action for onboarding, fulfillment, or reporting."} status={app.status} version={app.version} createdAt={app.created_at} leadingMetadata={<span className="text-[var(--brand-violet)]">Unified App</span>} action={canManage ? <Link to={`/integrations/unified-apps/new?edit=${encodeURIComponent(id)}`} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"><Pencil className="h-4 w-4" aria-hidden="true" />Edit app</Link> : null} />
     <AppDetailTabs label="Unified App details" active={active} tabs={tabs} onChange={(tab) => setParams({ tab })} />
     {/* Only the selected permission-checked tab mounts its data consumer. */}
-    {active === "overview" && <div className="space-y-6"><UnifiedAppUsage app={app} /><section className="rounded-xl border border-slate-200 bg-white p-5"><div className="flex flex-wrap items-center justify-between gap-3"><h2 className="font-semibold text-slate-900">Execution</h2><AppExecutionTokens familyID={app.app_family_id} kind="unified_app" /></div><p className="mt-2 text-sm text-slate-500">Use this stable app URL with an execution token. Switching traffic changes the version that runs without changing your URL or token.</p><AppExecutionEndpoint appID={app.app_family_id} /></section><UnifiedAppContract key={id} appID={id} version={app.version} /><section className="overflow-hidden rounded-xl border border-slate-200 bg-white"><h2 className="border-b border-slate-100 px-5 py-4 font-semibold">Connected services</h2>{services.map((service) => <div key={service.service_id} className="flex flex-wrap justify-between gap-2 border-b border-slate-100 px-5 py-4 text-sm"><span className="font-medium">{service.service_name}</span><span className="text-slate-500">{service.version} · {service.endpoint_count} operations</span></div>)}</section></div>}
+    {active === "overview" && <div className="space-y-6"><UnifiedAppUsage app={app} /><section className="rounded-xl border border-slate-200 bg-white p-5"><div className="flex flex-wrap items-center justify-between gap-3"><h2 className="font-semibold text-slate-900">Execution</h2><AppExecutionTokens familyID={app.app_family_id} kind="unified_app" /></div><p className="mt-2 text-sm text-slate-500">Use this stable app URL with an execution token. Switching traffic changes the version that runs without changing your URL or token.</p><AppExecutionEndpoint appID={app.app_family_id} appName={app.name} /></section><UnifiedAppContract key={id} appID={id} version={app.version} /><section className="overflow-hidden rounded-xl border border-slate-200 bg-white"><h2 className="border-b border-slate-100 px-5 py-4 font-semibold">Connected services</h2>{/* The whole row is a native link, preserving keyboard navigation and modifier-click behavior. */}{services.map((service) => <Link key={service.service_id} to={serviceDetailPath(service.service_id, service.service_slug)} className="group flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-5 py-4 text-sm transition hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-slate-950"><span className="font-medium text-slate-900 group-hover:text-[var(--brand-violet)]">{service.service_name}</span><span className="inline-flex items-center gap-3 text-slate-500">{service.version} · {service.endpoint_count} operations<ArrowUpRight aria-hidden="true" className="h-4 w-4 shrink-0" /></span></Link>)}</section></div>}
     {active === "analytics" && <AppActivityOverview key={id} appId={id} downloads={null} pendingDriftCount={0} hostedSource services={services} />}
     {active === "requests" && <AppRequestsPanel key={id} appId={id} consumerName={app.name} />}
+    {/* Webhook management follows current traffic even when viewing a retained version. */}
+    {active === "webhooks" && <UnifiedAppWebhooks key={traffic || id} appID={traffic || id} active={Boolean(traffic)} />}
+    {/* Scheduling reuses the current family traffic target even when viewing a retained version. */}
+    {active === "schedules" && <UnifiedAppSchedules key={app.app_family_id} appID={id} />}
     {active === "changes" && <AppVersionSelect versions={versions} current={{ id, version: app.version, created_at: app.created_at }} activeId={traffic} busy={[promoting, deleting].some(Boolean)} canDelete={canManage} onSelect={(next) => navigate(`/integrations/unified-apps/${next}?tab=changes`)} onDelete={deleteVersion} actions={versionActions({ id, version: app.version, created_at: app.created_at })} />}
   </div>;
 }
-
-/** Invalid or unauthorized tab URLs fall back without loading protected activity. */
-function selectedTab(tabs: Array<{ value: DetailTab }>, requested: string | null): DetailTab { return tabs.find((tab) => tab.value === requested)?.value ?? "overview"; }

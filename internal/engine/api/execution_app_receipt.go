@@ -76,6 +76,10 @@ func unifiedAppReceipt(ctx context.Context, record *store.ExecutionResult, spec 
 	if spec.transport == "webhook" {
 		transport = models.EngineExecutionTransportWebhook
 	}
+	// Timed triggers use canonical execution receipts without impersonating an HTTP caller.
+	if spec.transport == "schedule" {
+		transport = models.EngineExecutionTransportSchedule
+	}
 	event := models.EngineExecutionEvent{ID: record.ID, AccountID: record.AccountID, AppFamilyID: record.AppFamilyID, AppID: record.AppID, AppTokenID: record.AppTokenID, AppVersion: record.AppVersion, ExecutionKind: "unified", EndpointName: "execute", Transport: transport, Direction: models.EngineExecutionDirectionOutbound, Status: status, FailureCode: record.ErrorCode, StartedAt: record.CreatedAt, EndedAt: *record.CompletedAt, LatencyMs: record.CompletedAt.Sub(record.CreatedAt).Milliseconds()}
 	spanContext := trace.SpanContextFromContext(ctx)
 	// Disabled tracing must not fabricate all-zero trace IDs in durable history.

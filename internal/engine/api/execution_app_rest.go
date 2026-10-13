@@ -31,6 +31,7 @@ type capabilityExecutionEnvelope struct {
 	Status               string                  `json:"status"`
 	Mode                 string                  `json:"mode"`
 	SourceExecutionID    *uuid.UUID              `json:"sourceExecutionId,omitempty"`
+	SourceScheduleID     *uuid.UUID              `json:"sourceScheduleId,omitempty"`
 	SourceWebhookEventID string                  `json:"sourceWebhookEventId,omitempty"`
 	ReadHandle           string                  `json:"readHandle,omitempty"`
 	Output               json.RawMessage         `json:"output,omitempty"`
@@ -236,6 +237,7 @@ func projectCapabilityExecution(record *store.ExecutionResult, readHandle string
 		Status: record.Status, Mode: record.Mode,
 		SourceExecutionID: record.SourceExecutionID, ReadHandle: readHandle,
 		SourceWebhookEventID: record.SourceWebhookEventID,
+		SourceScheduleID:     record.SourceScheduleID,
 		Output:               record.Output,
 		CreatedAt:            record.CreatedAt, CompletedAt: record.CompletedAt,
 	}

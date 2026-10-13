@@ -48,6 +48,10 @@ func MountConfigRoutes(r chi.Router, configStore store.ConfigRepository, s store
 	// SDK and MCP versions share lifecycle semantics. There is deliberately no
 	// activate/reactivate endpoint: deactivation is an irreversible hard delete.
 	r.Route("/apps/{app_id}", func(r chi.Router) {
+		// Schedule inputs are private management data and never accept execution-token authentication.
+		r.Get("/schedules", UnifiedAppSchedulesHandler(s, masterKey))
+		r.Put("/schedules", UnifiedAppSchedulesHandler(s, masterKey))
+		r.Delete("/schedules/{schedule_id}", UnifiedAppSchedulesHandler(s, masterKey))
 		// Traffic switching selects a retained ready version; it never resurrects a deleted version.
 		r.Get("/traffic", UnifiedAppTrafficHandler(s))
 		r.Post("/promote", UnifiedAppTrafficHandler(s))

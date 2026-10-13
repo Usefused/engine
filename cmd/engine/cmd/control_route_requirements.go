@@ -143,7 +143,7 @@ func (r *storeBackedControlRequirementResolver) resolveDesiredConfigRequirements
 	}
 }
 
-// appAccessRequirements separates ordinary reads, receipt messages, private source, and diagnostics at the persisted family boundary.
+// appAccessRequirements separates ordinary reads, receipt messages, private source and schedules, and diagnostics at the persisted family boundary.
 func (r *storeBackedControlRequirementResolver) appAccessRequirements(ctx context.Context, actor accesscontrol.Actor, params map[string]string, request *http.Request) ([]accesscontrol.Requirement, error) {
 	appID, err := uuid.Parse(params["app_id"])
 	// Malformed immutable identity must not fall back to a broader workspace permission.
@@ -151,8 +151,8 @@ func (r *storeBackedControlRequirementResolver) appAccessRequirements(ctx contex
 		return nil, accesscontrol.ErrPolicyDenied
 	}
 	permission := accesscontrol.PermissionAppManage
-	// Private config includes executable mappings and must not inherit ordinary GET read authority.
-	if request.Method == http.MethodGet && !strings.HasSuffix(request.URL.Path, "/config") {
+	// Private config and saved schedule inputs require management even on GET.
+	if request.Method == http.MethodGet && !strings.HasSuffix(request.URL.Path, "/config") && !strings.HasSuffix(request.URL.Path, "/schedules") {
 		permission = accesscontrol.PermissionAppRead
 	}
 	requirements, err := r.appFamilyRequirement(ctx, actor.AccountID, appID, permission)

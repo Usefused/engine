@@ -11,7 +11,9 @@ Content-Type: application/json
 Idempotency-Key: issue-from-search-42
 ```
 
-The bearer credential is an app-family execution token, not a workspace API key, control-plane credential, provider token, or MCP session token. SDK callers supply the exact version `app_id`. Unified App callers supply `app_family_id`; Fused resolves the persisted traffic target on each request and validates the family token against that version. Unified App version IDs are rejected with `400 app_family_id_required`. Responses use `Cache-Control: no-store`.
+The bearer credential is an app-family execution token, not a workspace API key, control-plane credential, provider token, or MCP session token. SDK callers supply the exact version `app_id`. Unified App callers supply `app_family_id` or a URL-encoded app name; Fused resolves the persisted traffic target on each request and validates the family token against that version. Unified App version IDs are rejected with `400 app_family_id_required`. Responses use `Cache-Control: no-store`.
+
+The UI and CLI advertise name-based Unified App execution URLs by default while retaining UUID identity fields. For example, `POST /v1/apps/billing-checkout/executions` accepts the same body and bearer token as the family-ID URL. Names use Fused’s canonical case-insensitive Unicode normalization and resolve only within the family bound to that token, so another workspace’s same-named app cannot be selected. Encode names as one URL path segment. UUID-shaped references retain ID semantics. Name routes also support result reads, search, rerun, and replay with their existing permissions and read-handle requirements. SDK execution continues to require an exact version ID; a name never guesses an SDK version.
 
 ## Request
 

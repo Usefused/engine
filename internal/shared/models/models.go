@@ -1306,10 +1306,11 @@ type MCPAnalyticsDashboard struct {
 // ─── Engine Execution Audit ──────────────────────────────────────────────────
 
 const (
-	EngineExecutionTransportSDK     = "sdk"
-	EngineExecutionTransportMCP     = "mcp"
-	EngineExecutionTransportREST    = "rest"
-	EngineExecutionTransportWebhook = "webhook"
+	EngineExecutionTransportSDK      = "sdk"
+	EngineExecutionTransportMCP      = "mcp"
+	EngineExecutionTransportREST     = "rest"
+	EngineExecutionTransportWebhook  = "webhook"
+	EngineExecutionTransportSchedule = "schedule"
 
 	EngineExecutionDirectionOutbound = "outbound"
 	EngineExecutionDirectionInbound  = "inbound"

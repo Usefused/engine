@@ -27,9 +27,10 @@ test('workspace search handles partial text, clearing, pagination, history and s
     props = value;
     return createElement('div', { 'data-service-list': value.viewType });
   }
-  // Unused drawers remain inert so the regression focuses on search orchestration.
+  // Shared chrome and unused drawers remain inert so the regression focuses on search orchestration.
   function Hidden() { return null; }
   const dependencies = {
+    '~/components/layout/CataloguePageHeader': { CataloguePageHeader: Hidden },
     '@remix-run/react': { useSearchParams, useNavigate: () => () => {}, useRouteLoaderData: () => ({ isAuth: true }) },
     '~/lib/api': { api: {
       // Registry matches include an enabled service and one available to add; the UI retains membership markers.

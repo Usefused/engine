@@ -28,6 +28,7 @@ type capabilityRunSpec struct {
 	sourceExecutionID  *uuid.UUID
 	idempotencyKeyHash string
 	webhookEventID     string
+	schedule           *store.UnifiedAppSchedule
 }
 
 type admittedCapabilityRun struct {
@@ -185,6 +186,17 @@ func reserveCapabilityRun(ctx context.Context, results store.ExecutionResultStor
 		IdempotencyKeyHash: spec.idempotencyKeyHash, Status: "queued", Input: spec.input,
 		Mode: spec.mode, SourceExecutionID: spec.sourceExecutionID,
 		SourceWebhookEventID: spec.webhookEventID,
+	}
+	// Schedules advance only in the same transaction that durably accepts this occurrence.
+	if spec.schedule != nil {
+		record.SourceScheduleID = &spec.schedule.ID
+		repository, ok := results.(store.UnifiedAppScheduleStore)
+		// Unsupported storage cannot safely own automatic execution.
+		if !ok {
+			return uuid.Nil, "", false, errors.New("schedule store unavailable")
+		}
+		created, err := repository.ReserveScheduledExecution(ctx, *spec.schedule, record)
+		return id, "", created, err
 	}
 	// Automatic deliveries reserve their event and result atomically across replicas and promoted versions.
 	if spec.webhookEventID != "" {

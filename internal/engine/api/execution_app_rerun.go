@@ -24,7 +24,8 @@ type unifiedAppSource struct {
 
 // loadUnifiedAppSource enforces the same app token and read handle for rerun and replay.
 func (s *EngineGRPCServer) loadUnifiedAppSource(ctx context.Context, request *http.Request) (unifiedAppSource, *restExecutionError) {
-	appID, requestErr := parseRESTAppID(chi.URLParam(request, "app_id"))
+	// Names resolve to a token-scoped family before the shared ID-based authorization path.
+	appID, requestErr := s.resolveRESTAppReference(request)
 	if requestErr != nil {
 		return unifiedAppSource{}, requestErr
 	}

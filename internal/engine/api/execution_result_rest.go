@@ -29,6 +29,7 @@ type executionResultView struct {
 	Error                *restExecutionErrorBody `json:"error,omitempty"`
 	Mode                 string                  `json:"mode"`
 	SourceExecutionID    *uuid.UUID              `json:"sourceExecutionId,omitempty"`
+	SourceScheduleID     *uuid.UUID              `json:"sourceScheduleId,omitempty"`
 	SourceWebhookEventID string                  `json:"sourceWebhookEventId,omitempty"`
 	CreatedAt            string                  `json:"createdAt"`
 	CompletedAt          string                  `json:"completedAt,omitempty"`
@@ -51,6 +52,7 @@ func publicExecutionResult(record *store.ExecutionResult) executionResultView {
 		Status: record.Status, Output: record.Output,
 		Mode: record.Mode, SourceExecutionID: record.SourceExecutionID,
 		SourceWebhookEventID: record.SourceWebhookEventID,
+		SourceScheduleID:     record.SourceScheduleID,
 		CreatedAt:            record.CreatedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 	}
 	// A terminal error contains only the bounded public code and message saved by Engine.
@@ -84,7 +86,8 @@ func executionReadHandleDigest(request *http.Request) (string, bool) {
 func (s *EngineGRPCServer) handleExecutionResultGet(writer http.ResponseWriter, request *http.Request) {
 	ctx, span := otel.Tracer("engine").Start(request.Context(), "engine.execution_result.get")
 	defer span.End()
-	appID, requestErr := parseRESTAppID(chi.URLParam(request, "app_id"))
+	// Names resolve to a token-scoped family before the shared ID-based authorization path.
+	appID, requestErr := s.resolveRESTAppReference(request)
 	if requestErr != nil {
 		writeRESTExecutionError(writer, requestErr)
 		return
@@ -193,7 +196,8 @@ func searchablePathsForUnifiedApp(manifest json.RawMessage) ([]string, error) {
 func (s *EngineGRPCServer) handleExecutionResultSearch(writer http.ResponseWriter, request *http.Request) {
 	ctx, span := otel.Tracer("engine").Start(request.Context(), "engine.execution_result.search")
 	defer span.End()
-	appID, requestErr := parseRESTAppID(chi.URLParam(request, "app_id"))
+	// Names resolve to a token-scoped family before the shared ID-based authorization path.
+	appID, requestErr := s.resolveRESTAppReference(request)
 	if requestErr != nil {
 		writeRESTExecutionError(writer, requestErr)
 		return

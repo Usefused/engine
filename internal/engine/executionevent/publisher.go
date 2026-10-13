@@ -186,7 +186,7 @@ func validateAppIdentity(event models.EngineExecutionEvent) error {
 // family, version, and immutable app identity.
 func appTransport(transport string) bool {
 	return transport == models.EngineExecutionTransportSDK || transport == models.EngineExecutionTransportMCP ||
-		transport == models.EngineExecutionTransportREST
+		transport == models.EngineExecutionTransportREST || transport == models.EngineExecutionTransportSchedule
 }
 
 // recordPublish audits delivery using bounded metadata; logical spans never acquire raw error text.

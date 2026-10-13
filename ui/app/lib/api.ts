@@ -1415,6 +1415,15 @@ export const api = {
       req<{ token: string; name: string; expires_at: string | null }>(`/workspace/app-tokens?app_family_id=${encodeURIComponent(familyID)}`, { method: "POST", body: JSON.stringify(input) }),
   },
 
+  schedules: {
+    /** Reads private saved inputs only through Engine's management permission checks. */
+    list: (appID: string) => req<{ schedules: import("./unified-app-schedule").UnifiedAppSchedule[] }>(`/apps/${encodeURIComponent(appID)}/schedules`),
+    /** Saves one reviewed revision; the client ID prevents duplicate schedules after uncertain responses. */
+    save: (appID: string, input: import("./unified-app-schedule").ScheduleInput) => req<{ id: string; saved: boolean }>(`/apps/${encodeURIComponent(appID)}/schedules`, { method: "PUT", body: JSON.stringify(input) }),
+    /** Deletes only the version of the schedule that the manager reviewed. */
+    remove: (appID: string, id: string, revision: number) => req<{ deleted: boolean }>(`/apps/${encodeURIComponent(appID)}/schedules/${encodeURIComponent(id)}?revision=${revision}`, { method: "DELETE" }),
+  },
+
   appConfig: {
     // Read-only schema export respects app read access and never retrieves private source.
     openAPI: (appID: string, operation: string, signal?: AbortSignal) => req<unknown>(`/apps/${encodeURIComponent(appID)}/openapi?operation=${encodeURIComponent(operation)}`, { signal }),

@@ -1,4 +1,14 @@
 {
+  "engines": {
+    "node": "^24.15.0"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "^24.15.0",
+      "onFail": "error"
+    }
+  },
   "name": "@fused/unified-app",
   "version": "0.1.0",
   "private": true,

@@ -13,12 +13,13 @@ import { copyableWebhookURL, type WebhookListing } from "~/lib/webhook-discovery
 /** Gives webhook pages a clear browser identity distinct from service detail routes. */
 export const meta = () => [{ title: "Webhooks - Fused" }];
 
-/** Lists authorized receiving URLs with server filters and the same page controls as the services list. */
+/** Lists authorized receiving URLs with server filters, including a registration search linked from an app. */
 export default function WebhooksPage() {
   const { access, loading: accessLoading } = useCurrentActorAccess();
   const [params, setParams] = useSearchParams();
   const [items, setItems] = useState<WebhookListing[]>([]);
-  const [search, setSearch] = useState(""), [error, setError] = useState("");
+  // App registration links prefill the existing server-side search instead of loading every webhook.
+  const [search, setSearch] = useState(params.get("search") || ""), [error, setError] = useState("");
   const [loading, setLoading] = useState(true), [refresh, setRefresh] = useState(0);
   const selected = params.get("service") || "";
   const [page, setPage] = useState({ filter: "", offset: 0 });

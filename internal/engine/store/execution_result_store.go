@@ -50,6 +50,7 @@ type ExecutionResult struct {
 	ErrorCode            string          `json:"-"`
 	ErrorMessage         string          `json:"-"`
 	SourceExecutionID    *uuid.UUID      `json:"sourceExecutionId,omitempty"`
+	SourceScheduleID     *uuid.UUID      `json:"sourceScheduleId,omitempty"`
 	SourceWebhookEventID string          `json:"sourceWebhookEventId,omitempty"`
 	Mode                 string          `json:"mode"`
 	CreatedAt            time.Time       `json:"createdAt"`
@@ -143,8 +144,12 @@ func validateNewExecutionResult(record ExecutionResult) error {
 
 // validateExecutionTrigger distinguishes Engine-owned events from authenticated caller invocations.
 func validateExecutionTrigger(record ExecutionResult) error {
-	// Only an Engine-owned webhook admission may omit caller-token attribution.
-	if record.AppTokenID == uuid.Nil && record.SourceWebhookEventID == "" {
+	// Only explicit Engine-owned automation may omit caller-token attribution.
+	if record.AppTokenID == uuid.Nil && record.SourceWebhookEventID == "" && record.SourceScheduleID == nil {
+		return ErrExecutionResultInvalid
+	}
+	// A scheduled run cannot impersonate a caller, webhook, rerun, or empty schedule identity.
+	if !validScheduleTrigger(record) {
 		return ErrExecutionResultInvalid
 	}
 	// Event provenance cannot be injected into token-backed calls, reruns, or replay records.
@@ -152,6 +157,15 @@ func validateExecutionTrigger(record ExecutionResult) error {
 		return ErrExecutionResultInvalid
 	}
 	return nil
+}
+
+// validScheduleTrigger keeps scheduled provenance exclusive to Engine-owned live runs.
+func validScheduleTrigger(record ExecutionResult) bool {
+	// Ordinary caller and webhook records have no schedule identity.
+	if record.SourceScheduleID == nil {
+		return true
+	}
+	return *record.SourceScheduleID != uuid.Nil && record.AppTokenID == uuid.Nil && record.SourceWebhookEventID == "" && record.Mode == "live"
 }
 
 // validNewExecutionModeFields binds optional idempotency to a declared execution mode.
@@ -204,10 +218,10 @@ func (s *postgresStore) CreateExecutionResult(ctx context.Context, record Execut
 	}
 	// A new execution owns an empty document; rerun and replay never inherit durable data.
 	_, err = s.db.Exec(ctx, `INSERT INTO fused_unified_app_results
-		(id, account_id, app_family_id, app_id, app_version, app_token_id, read_handle_hash, idempotency_key_hash, status, input, data, source_execution_id, mode, source_webhook_event_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),'queued',$9,'null'::jsonb,$10,$11,NULLIF($12,''))`,
+		(id, account_id, app_family_id, app_id, app_version, app_token_id, read_handle_hash, idempotency_key_hash, status, input, data, source_execution_id, mode, source_webhook_event_id, source_schedule_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),'queued',$9,'null'::jsonb,$10,$11,NULLIF($12,''),$13)`,
 		record.ID, record.AccountID, record.AppFamilyID, record.AppID, record.AppVersion,
-		record.AppTokenID, record.ReadHandleHash, record.IdempotencyKeyHash, input, record.SourceExecutionID, record.Mode, record.SourceWebhookEventID)
+		record.AppTokenID, record.ReadHandleHash, record.IdempotencyKeyHash, input, record.SourceExecutionID, record.Mode, record.SourceWebhookEventID, record.SourceScheduleID)
 	return err
 }
 
@@ -321,7 +335,7 @@ func scanExecutionResult(row pgx.Row) (*ExecutionResult, error) {
 	err := row.Scan(&record.ID, &record.AccountID, &record.AppFamilyID, &record.AppID, &record.AppVersion,
 		&record.AppTokenID, &record.ReadHandleHash, &record.Status,
 		&input, &output, &data, &record.ErrorCode, &record.ErrorMessage,
-		&record.SourceExecutionID, &record.Mode, &record.CreatedAt, &record.UpdatedAt, &record.CompletedAt, &record.ExpiresAt, &record.SourceWebhookEventID)
+		&record.SourceExecutionID, &record.Mode, &record.CreatedAt, &record.UpdatedAt, &record.CompletedAt, &record.ExpiresAt, &record.SourceWebhookEventID, &record.SourceScheduleID)
 	// A partial row cannot be exposed as a valid retained result.
 	if err != nil {
 		return nil, err
@@ -332,10 +346,10 @@ func scanExecutionResult(row pgx.Row) (*ExecutionResult, error) {
 
 const executionResultColumns = `id, account_id, app_family_id, app_id, app_version,
 	app_token_id, read_handle_hash, status, input, output, data, error_code, error_message,
-	source_execution_id, mode, created_at, updated_at, completed_at, expires_at, COALESCE(source_webhook_event_id,'')`
+	source_execution_id, mode, created_at, updated_at, completed_at, expires_at, COALESCE(source_webhook_event_id,''), source_schedule_id`
 
 const executionSearchColumns = `id, app_id, app_version, status, output, data,
-	error_code, error_message, source_execution_id, mode, created_at, completed_at, COALESCE(source_webhook_event_id,'')`
+	error_code, error_message, source_execution_id, mode, created_at, completed_at, COALESCE(source_webhook_event_id,''), source_schedule_id`
 
 // scanExecutionSearchResult omits retained input and handle hashes from multi-row reads.
 func scanExecutionSearchResult(row pgx.Row) (*ExecutionResult, error) {
@@ -343,7 +357,7 @@ func scanExecutionSearchResult(row pgx.Row) (*ExecutionResult, error) {
 	var output, data []byte
 	err := row.Scan(&record.ID, &record.AppID, &record.AppVersion, &record.Status,
 		&output, &data, &record.ErrorCode, &record.ErrorMessage, &record.SourceExecutionID,
-		&record.Mode, &record.CreatedAt, &record.CompletedAt, &record.SourceWebhookEventID)
+		&record.Mode, &record.CreatedAt, &record.CompletedAt, &record.SourceWebhookEventID, &record.SourceScheduleID)
 	// Incomplete search rows must not drop provenance while appearing to be valid execution results.
 	if err != nil {
 		return nil, err

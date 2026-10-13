@@ -90,11 +90,15 @@ var dynamicControlRequirements = map[string]dynamicRequirementKind{
 	// Failure messages use receipt-reader grants resolved against the persisted app family.
 	http.MethodGet + " /apps/{app_id}/executions/{execution_id}/failure": dynamicAppAccess,
 	// Traffic discovery and promotion use the same family boundary and durable control audit.
-	http.MethodGet + " /apps/{app_id}/traffic":      dynamicAppAccess,
-	http.MethodPost + " /apps/{app_id}/promote":     dynamicAppAccess,
-	http.MethodPost + " /apps/{app_id}/undeprecate": dynamicAppAccess,
-	http.MethodDelete + " /apps/{app_id}/":          dynamicAppAccess,
-	http.MethodGet + " /apps/{app_id}/openapi":      dynamicAppAccess,
+	// Schedule management resolves the persisted app family before granting access.
+	http.MethodGet + " /apps/{app_id}/schedules":                  dynamicAppAccess,
+	http.MethodPut + " /apps/{app_id}/schedules":                  dynamicAppAccess,
+	http.MethodDelete + " /apps/{app_id}/schedules/{schedule_id}": dynamicAppAccess,
+	http.MethodGet + " /apps/{app_id}/traffic":                    dynamicAppAccess,
+	http.MethodPost + " /apps/{app_id}/promote":                   dynamicAppAccess,
+	http.MethodPost + " /apps/{app_id}/undeprecate":               dynamicAppAccess,
+	http.MethodDelete + " /apps/{app_id}/":                        dynamicAppAccess,
+	http.MethodGet + " /apps/{app_id}/openapi":                    dynamicAppAccess,
 	// Source export additionally enforces app.manage in its handler.
 	http.MethodGet + " /apps/{app_id}/config":    dynamicAppAccess,
 	http.MethodGet + " /sdks/{app_id}/download":  dynamicAppAccess,
@@ -237,6 +241,10 @@ var controlRESTPolicies = []controlRoutePolicy{
 	// Message-only reads remain subject to app visibility and execution-history authorization.
 	{http.MethodGet, "/apps/{app_id}/executions/{execution_id}/failure", false, nil},
 	// Explicitly admit these routes to authorization and mutation auditing.
+	// Saved input shares private config management authority on every verb.
+	{http.MethodGet, "/apps/{app_id}/schedules", false, nil},
+	{http.MethodPut, "/apps/{app_id}/schedules", false, nil},
+	{http.MethodDelete, "/apps/{app_id}/schedules/{schedule_id}", false, nil},
 	{http.MethodGet, "/apps/{app_id}/traffic", false, nil},
 	{http.MethodPost, "/apps/{app_id}/promote", false, nil},
 	{http.MethodPost, "/apps/{app_id}/undeprecate", false, nil},

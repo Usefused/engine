@@ -1,3 +1,4 @@
+import { AppExecutionEndpoint } from "~/components/apps/AppExecutionEndpoint";
 import type { ChooseDescribeService, DescribeProgress, AppDescription } from "~/lib/app-describe-contract";
 import { FieldLabel } from "~/components/forms/FieldLabel";
 import { AppCredentialWarning } from "~/components/apps/AppCredentialWarning";
@@ -393,7 +394,7 @@ export default function CreateUnifiedApp() {
     {/* Describe shares the same draft state, so its progress remains visible outside the conversation. */}
     {describing && <p role="status" className="flex items-center gap-2 text-sm text-slate-600"><Loader2 className="h-4 w-4 animate-spin" />{progress || "Drafting your Unified App…"}</p>}
     <section className="min-w-0 space-y-6">
-    <fieldset disabled={yamlActive || busy || describing} className="min-w-0"><AppOperationPicker seed={pickerSeed} onChange={selectOperations} onPendingChange={setSelecting} allowWebhooks /></fieldset>
+    <fieldset id="app-service-selection" disabled={yamlActive || busy || describing} className="min-w-0 scroll-mt-6"><AppOperationPicker seed={pickerSeed} onChange={selectOperations} onPendingChange={setSelecting} allowWebhooks /></fieldset>
     {/* Compilation reports progress by its button; other loading stages remain above the form. */}
     {busy && !compiling && <p role="status" className="flex items-center gap-2 text-sm text-slate-600"><Loader2 className="h-4 w-4 animate-spin" />{progress || "Loading template…"}</p>}
     {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</p>}
@@ -457,7 +458,7 @@ export default function CreateUnifiedApp() {
   </div>;
 }
 
-/** Groups the created identity, one-time credential and next step in one completion panel. */
+/** Groups the named execution URL, created identity, and one-time credential in one completion panel. */
 function CreatedUnifiedApp({ result, name, version, credentialWarning }: { result: { app_id: string; app_family_id: string; execution_token?: string }; name: string; version: string; credentialWarning?: ReactNode }) {
   const [copied, setCopied] = useState(false);
 
@@ -472,7 +473,7 @@ function CreatedUnifiedApp({ result, name, version, credentialWarning }: { resul
         <div className="flex items-center gap-2 text-sm font-medium text-emerald-700"><Check className="h-4 w-4" aria-hidden="true" />Your Unified App is ready</div>
         <div className="flex flex-wrap items-center gap-3"><h1 className="text-2xl font-bold text-slate-900">{name}</h1><span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600">v{version}</span></div>
         <p className="text-sm text-slate-500">Your app is deployed. This URL follows the version receiving traffic.</p>
-        <code className="block break-all rounded-lg bg-slate-50 p-3 text-xs">POST /v1/apps/{result.app_family_id}/executions</code>
+        <AppExecutionEndpoint appID={result.app_family_id} appName={name} />
       </header>
       {/* Existing versions can complete without issuing a new credential. */}
       {result.execution_token && <div className="border-t border-slate-200 p-5 sm:p-6">

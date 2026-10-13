@@ -19,6 +19,12 @@ with credentials, access policies, retries, and execution records handled by Fus
 ## Install and start
 
 You need **PostgreSQL 16+** and a **[Fused license key](https://usefused.com/signup)**.
+Native deployments use **Node.js 24.15 or later within the 24.x release line** for
+MCP processes and Unified App compilation; Docker images include this runtime.
+For source builds, run `nvm install` and `nvm use` from this repository before npm
+commands. The checked-in `.nvmrc` selects Node 24, and package runtime requirements
+reject unsupported versions before installing dependencies or running scripts.
+
 Install Fused and the CLI on macOS or Linux:
 
 ```bash
@@ -105,3 +111,11 @@ fused-cli init billing-app --sdk --service billing-api
 
 See the [API import guide](https://usefused.com/docs/workspace/bring-your-own-api)
 for local file imports and other supported formats.
+
+## Scheduled Unified App runs
+
+Create one-time or recurring runs with saved JSON input from a Unified App's
+**Schedules** tab or `fused-cli unified-app schedule`. Schedules persist across
+Engine restarts and use the app's active version and configured credentials.
+See [scheduled runs](docs/unified-app-schedules.md) for timezone behavior,
+CLI examples, permissions, and interruption handling.
