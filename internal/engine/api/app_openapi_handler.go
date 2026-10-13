@@ -163,10 +163,15 @@ func hostedUnifiedAppOpenAPIOperation(ctx context.Context, bundles store.Unified
 	if json.Unmarshal(manifest.InputSchema, &input) != nil || json.Unmarshal(manifest.OutputSchema, &output) != nil || input == nil || output == nil {
 		return nil, unavailableAppOpenAPISchemaError()
 	}
+	properties, err := unifiedAppRequestProperties(ctx, bundles, app, input)
+	// Scope lookup must not conceal runtime routing from the exported contract.
+	if err != nil {
+		return nil, err
+	}
 	return &appOpenAPIOperation{
 		name: "execute", requestSchema: map[string]any{
 			"type": "object", "additionalProperties": false, "required": []string{"operation", "input"},
-			"properties": map[string]any{"operation": map[string]any{"type": "string", "const": "execute"}, "input": input},
+			"properties": properties,
 		},
 		responseSchema: unifiedAppOpenAPIResponseSchema(output),
 	}, nil
@@ -194,6 +199,7 @@ func unifiedAppOpenAPIResponseSchema(output map[string]any) map[string]any {
 	return map[string]any{
 		"type": "object", "required": []string{"executionId", "appId", "version", "status", "mode", "createdAt"},
 		"properties": map[string]any{
+			"bucketId":    map[string]any{"type": "string", "format": "uuid", "description": "Explicit runtime bucket selected for this execution, when present."},
 			"executionId": map[string]any{"type": "string", "format": "uuid"},
 			"appId":       map[string]any{"type": "string", "format": "uuid"},
 			"version":     map[string]any{"type": "string"}, "status": map[string]any{"type": "string"},

@@ -97,11 +97,9 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	if err != nil {
 		return nil, nil, err
 	}
-	// A service's own bucket override takes precedence over the family
-	// default; ResolveAppFamilyServiceBucket's single query already encodes
-	// that override-else-default fallback, so this never needs a second
-	// round trip or a separate override lookup.
-	familyBucket, err := r.db.ResolveAppFamilyServiceBucket(ctx, scope.AppFamilyID, request.ServiceID)
+	// An authorized invocation bucket takes precedence for this run only;
+	// ordinary calls retain the service override then family-default routing.
+	familyBucket, err := resolveUnifiedAppExecutionBucket(ctx, r.db, scope.AppFamilyID, request)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to resolve execution bucket: %w", err)
 	}
@@ -129,13 +127,21 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 	if requestbinding.HasDynamicSource(bindings) {
 		finalCreds["fused_resource_required"] = "true"
 	}
+	// All credential families and injected values use the same already-authorized invocation bucket.
+	return r.resolveBucketCredentialsAndValues(ctx, request, bucketID, selections, bindings, finalCreds)
+}
+
+// resolveBucketCredentialsAndValues keeps connected and static credentials bound to one selected bucket with no fallback.
+func (r *secretResolver) resolveBucketCredentialsAndValues(ctx context.Context, request CredentialRequest, bucketID uuid.UUID, selections []models.SDKSelection, bindings []store.WorkspaceConnectionBinding, finalCreds map[string]any) (map[string]any, []store.BucketValue, error) {
 	// Connected families must prove their application registration before an absent user grant can be diagnosed safely.
 	if err := r.ensureConnectedApplicationCredentials(ctx, bucketID, request.ServiceID, request.Auths, request.Requirements, finalCreds, selections); err != nil {
 		return nil, nil, err
 	}
+	// Static material must come from this bucket even when another bucket has a complete alternative.
 	if err := r.mergeStoredSecrets(ctx, bucketID, request.ServiceID, finalCreds, request.Auths, request.Requirements); err != nil {
 		return nil, nil, err
 	}
+	// Connected-user lookup cannot escape the explicitly selected credential container.
 	if err := r.resolveConnectedAuth(ctx, bucketID, request.ServiceID, request.Auths, request.Requirements, finalCreds); err != nil {
 		return nil, nil, err
 	}
@@ -144,6 +150,7 @@ func (r *secretResolver) ResolveExecutionCredentials(ctx context.Context, reques
 		return nil, nil, err
 	}
 
+	// Bucket values and generic secret references follow the same routing choice as credentials.
 	if err := r.resolveDynamicBucketValues(ctx, bucketID, request.ServiceID, values); err != nil {
 		return nil, nil, err
 	}

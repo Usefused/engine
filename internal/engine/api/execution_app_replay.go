@@ -61,7 +61,7 @@ func (s *EngineGRPCServer) executeCapabilityReplay(ctx context.Context, identity
 	if err != nil {
 		return capabilityExecutionEnvelope{}, newRESTExecutionError(http.StatusConflict, "replay_unavailable", "execution cannot be replayed")
 	}
-	spec := capabilityRunSpec{identity: identity, version: version, bundle: bundle, manifest: manifest, input: source.Input, mode: "replay", sourceExecutionID: &source.ID}
+	spec := capabilityRunSpec{identity: identity, version: version, bundle: bundle, manifest: manifest, input: source.Input, mode: "replay", bucketID: source.BucketID, sourceExecutionID: &source.ID}
 	admitted, requestErr := s.admitCapabilityRun(ctx, spec)
 	if requestErr != nil {
 		return capabilityExecutionEnvelope{}, requestErr

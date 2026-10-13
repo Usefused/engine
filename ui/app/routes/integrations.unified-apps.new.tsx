@@ -1,3 +1,5 @@
+import { UnifiedAppBucketScope } from "~/components/apps/UnifiedAppBucketScope";
+import { runtimeBucketNames } from "~/lib/unified-app-runtime-buckets";
 import { AppExecutionEndpoint } from "~/components/apps/AppExecutionEndpoint";
 import type { ChooseDescribeService, DescribeProgress, AppDescription } from "~/lib/app-describe-contract";
 import { FieldLabel } from "~/components/forms/FieldLabel";
@@ -9,7 +11,6 @@ import { AppServiceAuthFields, type AppAuthSelection } from "~/components/apps/A
 import { unifiedEditorYAML, readUnifiedEditorYAML } from "~/lib/unified-app-yaml";
 import { CreateCredentialButton } from "~/components/buckets/CreateCredentialButton";
 import { useCredentialSetCreation } from "~/components/buckets/useCredentialSetCreation";
-import { Select } from "../components/forms/Select.ts";
 import { AppOperationPicker } from "~/components/apps/AppServiceBuilder";
 import { UnifiedAppCompileAction } from "~/components/apps/UnifiedAppCompileAction";
 import { describeSelectionKey, type AppServicePin } from "~/lib/app-describe-contract";
@@ -403,34 +404,35 @@ export default function CreateUnifiedApp() {
       {/* An interior heading keeps the card border continuous while naming the grouped controls accessibly. */}
       <h2 id="unified-app-setup-heading" className="text-lg font-semibold text-slate-900">Unified App setup</h2>
       <fieldset disabled={yamlActive} className="min-w-0 space-y-6">
-      <label className="block space-y-2 text-sm font-medium">
-        <FieldLabel required>App name</FieldLabel>
-        <input required className={fieldClass} readOnly={Boolean(editID)} value={name} onChange={(event) => { setName(event.target.value); invalidatePlan(); }} />
-      </label>
-      <label className="block space-y-2 text-sm font-medium">
-        <FieldLabel>Description</FieldLabel>
-        <textarea className={fieldClass} maxLength={1024} value={draft.description} onChange={(event) => updateDescription(event.target.value)} />
-      </label>
-      {/* Stack complete fields before the bucket action can wrap and offset the neighboring input. */}
-      <div className="flex flex-wrap gap-4">
-        <label className="min-w-0 flex-[1_1_16rem] space-y-2 text-sm font-medium">
+      {/* Name and version share one row so bucket routing can use the full form width. */}
+      <div className="flex flex-wrap items-end gap-4">
+        <label className="min-w-0 flex-[3_1_16rem] space-y-2 text-sm font-medium">
+          <FieldLabel required>App name</FieldLabel>
+          <input required className={fieldClass} readOnly={Boolean(editID)} value={name} onChange={(event) => { setName(event.target.value); invalidatePlan(); }} />
+        </label>
+        <label className="min-w-0 flex-[1_1_8rem] space-y-2 text-sm font-medium">
           {/* Existing apps require a successor version rather than an overwrite of their saved source. */}
           <FieldLabel required>{editID ? "New version" : "Version"}</FieldLabel>
           <input required className={fieldClass} value={version} onChange={(event) => { setVersion(event.target.value); invalidatePlan(); }} />
         </label>
-        <div className="min-w-0 flex-[1_1_16rem] space-y-2 text-sm font-medium">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            {/* Fill the available header width so Required aligns with the neighboring version badge. */}
-            <label className="min-w-0 flex-1" htmlFor="unified-credential-bucket"><FieldLabel required>Bucket</FieldLabel></label>
-            {/* Immutable successors cannot change the family's credential binding. */}
-            {!editID && credentialCreation.create && <CreateCredentialButton onClick={credentialCreation.create} />}
-          </div>
-          <Select id="unified-credential-bucket" required className={fieldClass} disabled={Boolean(editID)} value={bucket} onChange={(event) => { setBucket(event.target.value); invalidatePlan(); }}>
-            {/* Existing families retain their bucket; new apps choose an authorized selector. */}
-            {editSource ? <option value={editSource.config.bucket}>{editSource.config.bucket}</option> : <option value="">Choose a bucket</option>}
-            {!editSource && buckets.map((item) => <option key={item.resource_id} value={item.resource_id}>{item.display_name}</option>)}
-          </Select>
+      </div>
+      <label className="block space-y-2 text-sm font-medium">
+        <FieldLabel>Description</FieldLabel>
+        <textarea className={fieldClass} maxLength={1024} value={draft.description} onChange={(event) => updateDescription(event.target.value)} />
+      </label>
+      <div className="min-w-0 space-y-2 text-sm font-medium">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <label htmlFor="unified-credential-bucket">Bucket</label>
+          {/* Immutable successors cannot change the family's credential binding. */}
+          {!editID && credentialCreation.create && <CreateCredentialButton onClick={credentialCreation.create} />}
         </div>
+        {/* Runtime routing is a bucket choice; either edit invalidates the reviewed deployment plan. */}
+        <UnifiedAppBucketScope value={runtimeBucketNames(draft.configSettings?.runtime_buckets)} buckets={buckets} bucket={bucket} lockedBucketName={editSource?.config.bucket}
+          onBucketChange={(selected) => { setBucket(selected); invalidatePlan(); }}
+          onChange={(names) => {
+            // Preserve the scope in the shared configuration used by the YAML editor and planner.
+            setDraft({ ...draft, configSettings: { ...draft.configSettings, runtime_buckets: names } }); invalidatePlan();
+          }} />
       </div>
       {/* The worker subscribes through an applied registration; event names alone do not provision ingress. */}
       {draftHasWebhookEvents(draft) && <label className="block space-y-2 text-sm font-medium">

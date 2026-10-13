@@ -6,32 +6,37 @@ import { Select } from "~/components/forms/Select";
 export interface AppAuthSelection { type: string; name: string; ref?: string }
 export interface AppAuthService { key: string; service_id: string; version: string; auth?: AppAuthSelection }
 
-/** Shares exact auth selection across SDK, MCP and Unified App configs without reading credential values. */
+/** Presents provider authentication as compact rows, reserving selectors for actual configuration choices. */
 export function AppServiceAuthFields({ services, disabled, onChange }: { services: AppAuthService[]; disabled?: boolean; onChange: (key: string, auth?: AppAuthSelection) => void }) {
   // Event-only apps have no outbound auth preference to select.
   if (!services.length) return null;
-  return <section className="space-y-3" aria-label="Service authentication">
-    <h3 className="text-sm font-semibold text-slate-900">Service authentication</h3>
-    <p className="text-xs font-normal text-slate-500">Choose the scheme to use from your bucket. Validation checks it against the selected operations.</p>
-    {services.map((service) => <ServiceAuthField key={`${service.key}:${service.service_id}:${service.version}`} service={service} disabled={disabled} onChange={onChange} />)}
+  return <section className="space-y-2" aria-label="Service authentication">
+    <h3 className="text-sm font-medium text-slate-900">Authentication</h3>
+    <div className="divide-y divide-slate-100 rounded-lg border border-slate-200 bg-white">
+      {services.map((service) => <ServiceAuthField key={`${service.key}:${service.service_id}:${service.version}`} service={service} disabled={disabled} onChange={onChange} />)}
+    </div>
+    <p className="text-xs font-normal text-slate-500">Credentials come from the selected bucket.</p>
   </section>;
 }
 
-/** Loads one exact provider version, preserving a saved selection when metadata cannot be fetched. */
+/** Loads exact-version names and schemes without replacing saved authentication when metadata is unavailable. */
 function ServiceAuthField({ service, disabled, onChange }: { service: AppAuthService; disabled?: boolean; onChange: (key: string, auth?: AppAuthSelection) => void }) {
+  const [displayName, setDisplayName] = useState(service.key);
   const [auths, setAuths] = useState<AuthConfig[]>([]);
   const [status, setStatus] = useState("Loading auth schemes…");
   useEffect(() => {
     let active = true;
-    api.graphql<{ service: { current_service_version: string; auth_configs: AuthConfig[] } | null }>(`query AppServiceAuth($id: String!, $version: String!) { service(id: $id, version: $version) { current_service_version auth_configs { name type scheme deprecated } } }`, { id: service.service_id, version: service.version }).then((result) => {
+    api.graphql<{ service: { name: string; current_service_version: string; auth_configs: AuthConfig[] } | null }>(`query AppServiceAuth($id: String!, $version: String!) { service(id: $id, version: $version) { name current_service_version auth_configs { name type scheme deprecated } } }`, { id: service.service_id, version: service.version }).then((result) => {
       // A stale version response must never replace the current selector's options.
       if (!active) return;
       // Registry's fallback version must never supply auth metadata for a different contract.
       if (!result.service || result.service.current_service_version !== service.version) throw new Error("Service version unavailable");
+      // Missing display metadata retains the exact qualified identity rather than guessing a provider name.
+      setDisplayName(result.service.name || service.key);
       setAuths(result.service.auth_configs ?? []); setStatus("");
     }).catch(() => {
       // An unavailable catalogue cannot silently clear a reviewed auth choice.
-      if (active) setStatus("Auth schemes unavailable. Your existing selection is preserved; auth can also be set in config.");
+      if (active) setStatus("Authentication options unavailable. Your saved selection is preserved.");
     });
     return () => { active = false; };
   }, [service.service_id, service.version]);
@@ -43,14 +48,23 @@ function ServiceAuthField({ service, disabled, onChange }: { service: AppAuthSer
     // The empty option lets Engine select a unique compatible credential during planning.
     onChange(service.key, option ? { type: option.type, name: option.name } : undefined);
   }
-  return <label className="block space-y-2 text-sm font-medium">
-    <span className="break-words text-slate-700">{service.key}</span>
-    <Select value={selected} disabled={disabled || Boolean(status)} onChange={(event) => choose(event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm">
-      <option value="">Automatic (available bucket credentials)</option>
-      {/* Keep an unavailable saved scheme visible until the user explicitly replaces it. */}
-      {selected && !options.some((option) => option.key === selected) ? <option value={selected}>{service.auth!.type} · {service.auth!.name} (saved)</option> : null}
-      {options.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}
-    </Select>
-    {status ? <span role="status" className="block text-xs font-normal text-slate-500">{status}</span> : null}
-  </label>;
+  // Automatic is the only choice when the contract has no named schemes and no saved override.
+  const automaticOnly = !selected && !status && options.length === 0;
+  return <div className="space-y-2 px-3 py-3">
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+      <div className="min-w-0 flex-1" title={service.key}>
+        <p className="truncate text-sm font-medium text-slate-700">{displayName}</p>
+        <p className="mt-0.5 text-xs font-normal text-slate-400">Version {service.version}</p>
+      </div>
+      {/* Read-only automatic routing needs a status label rather than a dropdown with no alternatives. */}
+      {automaticOnly ? <span className="rounded-md bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">Automatic</span> : <Select aria-label={`Authentication for ${displayName}`} value={selected} disabled={disabled || Boolean(status)} onChange={(event) => choose(event.target.value)} className="max-w-full rounded-md border-slate-200 bg-white text-xs sm:max-w-64" density="compact">
+        <option value="">Automatic</option>
+        {/* Keep an unavailable saved scheme visible until the user explicitly replaces it. */}
+        {selected && !options.some((option) => option.key === selected) ? <option value={selected}>{service.auth!.type} · {service.auth!.name} (saved)</option> : null}
+        {options.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}
+      </Select>}
+    </div>
+    {/* Loading and failure remain explicit without crowding the normal, settled row. */}
+    {status ? <p role="status" className="text-xs font-normal text-slate-500">{status}</p> : null}
+  </div>;
 }

@@ -40,10 +40,12 @@ type restExecutionRuntime interface {
 }
 
 type restExecutionRequest struct {
-	Operation  string                 `json:"operation"`
-	Input      json.RawMessage        `json:"input"`
-	Selector   *restExecutionSelector `json:"selector,omitempty"`
-	Pagination *restPaginationIntent  `json:"pagination,omitempty"`
+	ExpectedAppID *uuid.UUID             `json:"expected_app_id,omitempty"`
+	BucketID      *uuid.UUID             `json:"bucket_id,omitempty"`
+	Operation     string                 `json:"operation"`
+	Input         json.RawMessage        `json:"input"`
+	Selector      *restExecutionSelector `json:"selector,omitempty"`
+	Pagination    *restPaginationIntent  `json:"pagination,omitempty"`
 }
 
 // restPaginationIntent mirrors the provider-neutral public control without accepting policy-owned limits.
@@ -128,10 +130,15 @@ func (s *EngineGRPCServer) handleRESTExecution(writer http.ResponseWriter, reque
 		return
 	}
 	// Only Unified Apps can publish authored execute; every selected raw operation retains the existing path.
-	if scope.Kind == store.AppKindUnifiedApp && decoded.Operation == "execute" {
+	if isAuthoredUnifiedAppExecution(scope, decoded) {
 		if !s.tryUnifiedAppRun(writer, request, scope, identity, decoded) {
 			writeRESTExecutionError(writer, newRESTExecutionError(http.StatusServiceUnavailable, "bundle_unavailable", "unified app bundle is unavailable"))
 		}
+		return
+	}
+	// Bucket selection is a direct authored-execution capability, never a raw-operation override.
+	if hasUnifiedAppRoutingControls(decoded) {
+		writeRESTExecutionError(writer, newRESTExecutionError(http.StatusBadRequest, "bucket_selection_unsupported", "bucket_id and expected_app_id require a direct Unified App execute request"))
 		return
 	}
 	// Attached hosted capabilities use the same consumer authentication and durable executor.
@@ -232,23 +239,32 @@ func validRESTAppScope(scope *store.AppRuntime, identity auth.RuntimeIdentity, a
 // rejects duplicate or unknown fields before runtime definitions select a kind.
 func decodeRESTExecutionRequest(writer http.ResponseWriter, request *http.Request) (restExecutionRequest, []byte, *restExecutionError) {
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	// The execution envelope has one JSON interpretation regardless of caller transport.
 	if err != nil || mediaType != restExecutionContentType {
 		return restExecutionRequest{}, nil, newRESTExecutionError(http.StatusUnsupportedMediaType, "invalid_request", "Content-Type must be application/json")
 	}
 	raw, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, canonicaljson.MaxInputBytes))
+	// Bound memory before parsing any caller-controlled routing or authored input.
 	if err != nil || len(raw) == 0 {
 		return restExecutionRequest{}, nil, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "request body must be one bounded JSON document")
 	}
 	canonical, err := canonicaljson.Canonicalize(raw)
+	// Ambiguous duplicate fields must not select a different identity across parsers.
 	if err != nil {
 		return restExecutionRequest{}, nil, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "request body must be one bounded JSON document")
 	}
 	var decoded restExecutionRequest
 	decoder := json.NewDecoder(bytes.NewReader(canonical))
 	decoder.DisallowUnknownFields()
+	// Unsupported controls must fail rather than appear to affect execution.
 	if err := decoder.Decode(&decoded); err != nil {
 		return restExecutionRequest{}, nil, newRESTExecutionError(http.StatusBadRequest, "invalid_request", "request body contains unsupported fields")
 	}
+	// A supplied routing control must never collapse to omission and select unrelated credentials.
+	if err := validateUnifiedAppRoutingJSON(canonical); err != nil {
+		return restExecutionRequest{}, nil, err
+	}
+	// Validate business input presence and physical selectors before runtime admission.
 	if err := validateRESTExecutionRequest(decoded); err != nil {
 		return restExecutionRequest{}, nil, err
 	}

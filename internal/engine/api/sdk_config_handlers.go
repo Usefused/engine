@@ -70,6 +70,8 @@ type sdkConfigDocument struct {
 	FusedIntelligentClassifier bool   `json:"fused-intelligent-classifier,omitempty"`
 	Language                   string `json:"language"`
 	Bucket                     string `json:"bucket,omitempty"`
+	// RuntimeBuckets explicitly opts this immutable Unified App into a finite bucket scope.
+	RuntimeBuckets []string `json:"runtime_buckets,omitempty"`
 	// Generate is tri-state on purpose: absent means the historical default of
 	// building a package. Only an explicit false suppresses codegen, leaving a
 	// published app version that is reachable over REST execution and
@@ -172,6 +174,7 @@ func appResolvedBucketRefs(serviceBuckets map[uuid.UUID]store.Bucket) map[uuid.U
 // "one default + N overrides" from becoming N parallel single-bucket code
 // paths.
 type appBucketSet struct {
+	Runtime   []store.Bucket
 	Default   store.Bucket
 	Overrides map[uuid.UUID]store.Bucket
 }
@@ -191,7 +194,12 @@ func (b appBucketSet) forService(serviceID uuid.UUID) store.Bucket {
 func (b appBucketSet) distinct() []store.Bucket {
 	seen := map[uuid.UUID]bool{b.Default.ID: true}
 	out := []store.Bucket{b.Default}
+	candidates := append([]store.Bucket{}, b.Runtime...)
 	for _, bucket := range b.Overrides {
+		candidates = append(candidates, bucket)
+	}
+	for _, bucket := range candidates {
+		// Permission requirements cover each immutable bucket only once.
 		if seen[bucket.ID] {
 			continue
 		}
@@ -205,6 +213,7 @@ func (b appBucketSet) distinct() []store.Bucket {
 // selections used by both SDK and MCP config apply. SDK generation adds its
 // Registry-specific fields separately, while MCP never carries a target.
 type appResolvedPayload struct {
+	RuntimeBuckets []appResolvedBucketRef `json:"runtime_buckets,omitempty"`
 	// UnifiedApps pins attachment identity alongside the reviewed provider selections.
 	UnifiedApps []models.UnifiedAppBinding `json:"unified_apps,omitempty"`
 	AppID       uuid.UUID                  `json:"app_id,omitempty"`
@@ -536,6 +545,10 @@ func rejectRemovedSDKConfigFields(raw json.RawMessage) error {
 
 // validateSDKConfigDocument validates identity, delivery, and selected services before app attachment.
 func validateSDKConfigDocument(doc sdkConfigDocument) error {
+	// Dynamic routing requires explicit bounded scope and cannot leak into other app kinds.
+	if err := validateRuntimeBuckets(doc); err != nil {
+		return err
+	}
 	// Invalid package identity must fail before resolving services or app attachments.
 	if err := validateSDKIdentity(doc); err != nil {
 		return err
@@ -840,6 +853,10 @@ func decodeAppApplyPlan(ctx context.Context, configStore store.ConfigRepository,
 	}
 	// References retain the exact authorized version across delayed applies.
 	if err := verifyUnifiedAppAttachments(ctx, s, doc, payload); err != nil {
+		return sdkConfigDocument{}, appResolvedPayload{}, err
+	}
+	// A renamed or replaced permitted bucket must never inherit an earlier plan grant.
+	if err := verifyRuntimeBucketPlan(ctx, s, doc, payload.RuntimeBuckets); err != nil {
 		return sdkConfigDocument{}, appResolvedPayload{}, err
 	}
 	_, err := validateAppBucketIdentity(ctx, s, doc.Bucket, payload.BucketID)
@@ -1206,12 +1223,12 @@ func appPlanSummary(create, update bool, services []map[string]any, doc sdkConfi
 	if doc.Kind != store.AppKindUnifiedApp.String() {
 		return sdkPlanSummary(create, update, services, sdkConfigGeneratesPackage(doc))
 	}
-	return map[string]any{"create_execution": create, "update_execution": update, "services": services}
+	return map[string]any{"create_execution": create, "update_execution": update, "services": services, "runtime_buckets": doc.RuntimeBuckets}
 }
 
 // resolveSDKPlanDefinition resolves sdk plan definition from immutable app scope before provider dispatch.
 func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, call sdkPlanCall, current *store.ConfigState, bucket store.Bucket, bucketOverrides map[string]store.Bucket, appID uuid.UUID) (sdkPlanDefinition, error) {
-	selections, services, resolvedServices, credentialSources, stateDoc, buckets, err := resolveSDKSelections(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), bucket, bucketOverrides)
+	selections, services, resolvedServices, credentialSources, stateDoc, buckets, err := resolveSDKSelectionsWithRuntimeBuckets(ctx, configStore, s, registryClient, call.apiKey, call.document, previousSDKDocument(current), bucket, bucketOverrides)
 	// Selection/auth admission must precede generation identity binding.
 	if err != nil {
 		return sdkPlanDefinition{}, err
@@ -1247,21 +1264,40 @@ func resolveSDKPlanDefinition(ctx context.Context, configStore store.ConfigRepos
 	}
 	generationRequest := sdkGenerateRequest(call.document, selections, targetBindings, call.defaultEngineURL)
 	payload := resolvedSDKPayload(generationRequest, bucket.ID, appID, noop, buckets.Overrides)
-	// The hosted delivery shares the frozen physical scope; only its server metadata differs.
-	if call.document.MCP != nil {
-		payload.HostedMCP = true
-		payload.Description = strings.TrimSpace(call.document.MCP.Description)
-		payload.FusedIntelligentClassifier = call.document.MCP.FusedIntelligentClassifier
-	}
-	payload.CredentialSourceBindings = credentialSourceBindings
-	payload.ExecutionBundle = artifact
-	// Hosted dependencies are frozen under the same reviewed source hash.
-	payload.UnifiedApps, err = resolveUnifiedAppAttachments(ctx, s, call.accountID, call.document)
+	payload.RuntimeBuckets = runtimeBucketRefs(buckets.Runtime)
+	// Metadata and attachments belong to the same immutable payload as runtime bucket scope.
+	err = completeResolvedAppPayload(ctx, s, call, credentialSourceBindings, artifact, &payload)
 	if err != nil {
 		return sdkPlanDefinition{}, err
 	}
 	resolvedPayload, _ := json.Marshal(payload)
 	return sdkPlanDefinition{services: services, resolvedServices: resolvedServices, desiredState: desiredState, resolvedPayload: resolvedPayload, noop: noop, readiness: readiness, buckets: buckets}, nil
+}
+
+// completeResolvedAppPayload freezes optional hosted metadata and dependency authority together.
+func completeResolvedAppPayload(ctx context.Context, s store.Store, call sdkPlanCall, credentialSources []sdkContractBinding, artifact *executionPlanArtifact, payload *appResolvedPayload) error {
+	// Hosted MCP metadata changes presentation without widening physical selection.
+	if call.document.MCP != nil {
+		payload.HostedMCP = true
+		payload.Description = strings.TrimSpace(call.document.MCP.Description)
+		payload.FusedIntelligentClassifier = call.document.MCP.FusedIntelligentClassifier
+	}
+	payload.CredentialSourceBindings = credentialSources
+	payload.ExecutionBundle = artifact
+	var err error
+	payload.UnifiedApps, err = resolveUnifiedAppAttachments(ctx, s, call.accountID, call.document)
+	return err
+}
+
+// resolveSDKSelectionsWithRuntimeBuckets adds the finite routing scope to shared plan permission requirements.
+func resolveSDKSelectionsWithRuntimeBuckets(ctx context.Context, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, apiKey string, doc, previous sdkConfigDocument, bucket store.Bucket, overrides map[string]store.Bucket) ([]models.SDKSelection, []map[string]any, []sdkResolvedService, []sdkResolvedService, sdkConfigDocument, appBucketSet, error) {
+	selections, summary, services, sources, state, buckets, err := resolveSDKSelections(ctx, configStore, s, registryClient, apiKey, doc, previous, bucket, overrides)
+	// Provider admission must succeed before extra bucket identities can enter the plan.
+	if err != nil {
+		return nil, nil, nil, nil, sdkConfigDocument{}, appBucketSet{}, err
+	}
+	buckets.Runtime, err = resolveRuntimeBuckets(ctx, s, doc)
+	return selections, summary, services, sources, state, buckets, err
 }
 
 // compileAppPlanDeclarations checks hosted code and direct API output against one resolved scope.

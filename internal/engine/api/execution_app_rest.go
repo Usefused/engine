@@ -24,6 +24,7 @@ import (
 )
 
 type capabilityExecutionEnvelope struct {
+	BucketID             *uuid.UUID              `json:"bucketId,omitempty"`
 	ExecutionID          uuid.UUID               `json:"executionId"`
 	AppID                uuid.UUID               `json:"-"`
 	AppFamilyID          uuid.UUID               `json:"appFamilyId"`
@@ -65,13 +66,17 @@ func (s *EngineGRPCServer) tryUnifiedAppRun(writer http.ResponseWriter, request 
 		return true
 	}
 	requestErr = validateUnifiedAppRESTControls(decoded)
+	// A schema-bound client must never run a promoted replacement between selection and dispatch.
+	if requestErr == nil {
+		requestErr = validateUnifiedAppExpectedVersion(decoded.ExpectedAppID, identity.AppID)
+	}
 	if requestErr != nil {
 		writeCapabilityError(writer, span, requestErr)
 		return true
 	}
 	spec := capabilityRunSpec{
 		identity: identity, version: scope.Version, bundle: bundle,
-		manifest: manifest, input: decoded.Input, mode: "live",
+		manifest: manifest, input: decoded.Input, mode: "live", bucketID: decoded.BucketID,
 	}
 	wait, requested, requestErr := capabilityWaitBudget(request)
 	if requestErr != nil {
@@ -112,7 +117,7 @@ func (s *EngineGRPCServer) admitUnifiedAppTraffic(ctx context.Context, appID uui
 func validateUnifiedAppRESTControls(request restExecutionRequest) *restExecutionError {
 	// The authored script owns its selected workspace calls and selectors.
 	if request.Selector != nil || request.Pagination != nil {
-		return newRESTExecutionError(http.StatusBadRequest, "invalid_request", "execute accepts only operation and input")
+		return newRESTExecutionError(http.StatusBadRequest, "invalid_request", "execute accepts only operation, input and optional bucket_id")
 	}
 	return nil
 }
@@ -233,6 +238,7 @@ func capabilityPublicError(code string, failures ...error) string {
 // projectCapabilityExecution returns the authored output and one-time read handle while keeping stored search data private.
 func projectCapabilityExecution(record *store.ExecutionResult, readHandle string) capabilityExecutionEnvelope {
 	projected := capabilityExecutionEnvelope{
+		BucketID:    record.BucketID,
 		ExecutionID: record.ID, AppID: record.AppID, AppFamilyID: record.AppFamilyID, Version: record.AppVersion,
 		Status: record.Status, Mode: record.Mode,
 		SourceExecutionID: record.SourceExecutionID, ReadHandle: readHandle,

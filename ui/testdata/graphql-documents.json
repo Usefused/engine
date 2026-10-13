@@ -706,7 +706,7 @@
       "file": "app/components/apps/AppServiceAuthFields.tsx",
       "call": 1,
       "variant": 1,
-      "document": "query AppServiceAuth($id: String!, $version: String!) { service(id: $id, version: $version) { current_service_version auth_configs { name type scheme deprecated } } }"
+      "document": "query AppServiceAuth($id: String!, $version: String!) { service(id: $id, version: $version) { name current_service_version auth_configs { name type scheme deprecated } } }"
     },
     {
       "endpoint": "registry",

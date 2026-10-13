@@ -1651,6 +1651,8 @@ func engineSchemaQueries() []string {
 		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS source_webhook_event_id text;`,
 		// Scheduled inputs are encrypted; occurrence advancement and result reservation share a transaction.
 		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS source_schedule_id uuid;`,
+		// Retain runtime routing independently of authored input and mutable family defaults.
+		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS runtime_bucket_id uuid;`,
 		`CREATE TABLE IF NOT EXISTS fused_unified_app_schedules (
 			id uuid PRIMARY KEY, account_id uuid NOT NULL, app_family_id uuid NOT NULL REFERENCES fused_app_families(app_family_id),
 			name text NOT NULL CHECK (octet_length(name) BETWEEN 1 AND 128),

@@ -35,6 +35,7 @@ var (
 // ExecutionResult is the durable record for one exact unified app version.
 // Input and read-handle hashes are deliberately omitted from JSON projections.
 type ExecutionResult struct {
+	BucketID             *uuid.UUID      `json:"bucketId,omitempty"`
 	ID                   uuid.UUID       `json:"executionId"`
 	AccountID            uuid.UUID       `json:"-"`
 	AppFamilyID          uuid.UUID       `json:"-"`
@@ -218,10 +219,10 @@ func (s *postgresStore) CreateExecutionResult(ctx context.Context, record Execut
 	}
 	// A new execution owns an empty document; rerun and replay never inherit durable data.
 	_, err = s.db.Exec(ctx, `INSERT INTO fused_unified_app_results
-		(id, account_id, app_family_id, app_id, app_version, app_token_id, read_handle_hash, idempotency_key_hash, status, input, data, source_execution_id, mode, source_webhook_event_id, source_schedule_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),'queued',$9,'null'::jsonb,$10,$11,NULLIF($12,''),$13)`,
+		(id, account_id, app_family_id, app_id, app_version, app_token_id, read_handle_hash, idempotency_key_hash, status, input, data, source_execution_id, mode, source_webhook_event_id, source_schedule_id, runtime_bucket_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),'queued',$9,'null'::jsonb,$10,$11,NULLIF($12,''),$13,$14)`,
 		record.ID, record.AccountID, record.AppFamilyID, record.AppID, record.AppVersion,
-		record.AppTokenID, record.ReadHandleHash, record.IdempotencyKeyHash, input, record.SourceExecutionID, record.Mode, record.SourceWebhookEventID, record.SourceScheduleID)
+		record.AppTokenID, record.ReadHandleHash, record.IdempotencyKeyHash, input, record.SourceExecutionID, record.Mode, record.SourceWebhookEventID, record.SourceScheduleID, record.BucketID)
 	return err
 }
 
@@ -254,11 +255,12 @@ func (s *postgresStore) matchExistingRerun(ctx context.Context, record Execution
 	var existingID uuid.UUID
 	var existingVersion string
 	var existingInput []byte
-	err := s.db.QueryRow(ctx, `SELECT id, app_version, input FROM fused_unified_app_results
+	var existingBucket *uuid.UUID
+	err := s.db.QueryRow(ctx, `SELECT id, app_version, input, runtime_bucket_id FROM fused_unified_app_results
 		WHERE account_id=$1 AND app_id=$2 AND app_token_id=$3 AND mode='rerun'
 			AND source_execution_id=$4 AND idempotency_key_hash=$5`,
 		record.AccountID, record.AppID, record.AppTokenID, record.SourceExecutionID, record.IdempotencyKeyHash).
-		Scan(&existingID, &existingVersion, &existingInput)
+		Scan(&existingID, &existingVersion, &existingInput, &existingBucket)
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -271,7 +273,7 @@ func (s *postgresStore) matchExistingRerun(ctx context.Context, record Execution
 		return uuid.Nil, err
 	}
 	// A reused key may return the first ID only when it still describes the same pinned request.
-	if existingVersion != record.AppVersion || !bytes.Equal(storedInput, input) {
+	if existingVersion != record.AppVersion || !sameRuntimeBucket(existingBucket, record.BucketID) || !bytes.Equal(storedInput, input) {
 		return uuid.Nil, ErrExecutionResultIdempotencyConflict
 	}
 	return existingID, nil
@@ -335,7 +337,7 @@ func scanExecutionResult(row pgx.Row) (*ExecutionResult, error) {
 	err := row.Scan(&record.ID, &record.AccountID, &record.AppFamilyID, &record.AppID, &record.AppVersion,
 		&record.AppTokenID, &record.ReadHandleHash, &record.Status,
 		&input, &output, &data, &record.ErrorCode, &record.ErrorMessage,
-		&record.SourceExecutionID, &record.Mode, &record.CreatedAt, &record.UpdatedAt, &record.CompletedAt, &record.ExpiresAt, &record.SourceWebhookEventID, &record.SourceScheduleID)
+		&record.SourceExecutionID, &record.Mode, &record.CreatedAt, &record.UpdatedAt, &record.CompletedAt, &record.ExpiresAt, &record.SourceWebhookEventID, &record.SourceScheduleID, &record.BucketID)
 	// A partial row cannot be exposed as a valid retained result.
 	if err != nil {
 		return nil, err
@@ -346,10 +348,10 @@ func scanExecutionResult(row pgx.Row) (*ExecutionResult, error) {
 
 const executionResultColumns = `id, account_id, app_family_id, app_id, app_version,
 	app_token_id, read_handle_hash, status, input, output, data, error_code, error_message,
-	source_execution_id, mode, created_at, updated_at, completed_at, expires_at, COALESCE(source_webhook_event_id,''), source_schedule_id`
+	source_execution_id, mode, created_at, updated_at, completed_at, expires_at, COALESCE(source_webhook_event_id,''), source_schedule_id, runtime_bucket_id`
 
 const executionSearchColumns = `id, app_id, app_version, status, output, data,
-	error_code, error_message, source_execution_id, mode, created_at, completed_at, COALESCE(source_webhook_event_id,''), source_schedule_id`
+	error_code, error_message, source_execution_id, mode, created_at, completed_at, COALESCE(source_webhook_event_id,''), source_schedule_id, runtime_bucket_id`
 
 // scanExecutionSearchResult omits retained input and handle hashes from multi-row reads.
 func scanExecutionSearchResult(row pgx.Row) (*ExecutionResult, error) {
@@ -357,7 +359,7 @@ func scanExecutionSearchResult(row pgx.Row) (*ExecutionResult, error) {
 	var output, data []byte
 	err := row.Scan(&record.ID, &record.AppID, &record.AppVersion, &record.Status,
 		&output, &data, &record.ErrorCode, &record.ErrorMessage, &record.SourceExecutionID,
-		&record.Mode, &record.CreatedAt, &record.CompletedAt, &record.SourceWebhookEventID, &record.SourceScheduleID)
+		&record.Mode, &record.CreatedAt, &record.CompletedAt, &record.SourceWebhookEventID, &record.SourceScheduleID, &record.BucketID)
 	// Incomplete search rows must not drop provenance while appearing to be valid execution results.
 	if err != nil {
 		return nil, err

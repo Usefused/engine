@@ -1,7 +1,8 @@
+import type { RuntimeBucket } from "./unified-app-runtime-buckets.ts";
 import { resolveSchemaPointer, schemaPointerTokens } from "./schema-reference.ts";
 
 export type AppSchema = Record<string, unknown> | boolean;
-export type UnifiedAppContract = { input: AppSchema; output: AppSchema };
+export type UnifiedAppContract = { input: AppSchema; output: AppSchema; runtimeBuckets?: RuntimeBucket[] };
 
 /** Accepts boolean schemas as well as object schemas without inventing an empty contract. */
 function isSchema(value: unknown): value is AppSchema {
@@ -42,5 +43,14 @@ export function unifiedAppContract(document: unknown): UnifiedAppContract {
   if (at(request, "properties", "operation", "const") !== "execute" || !isSchema(input) || !isSchema(output)) {
     throw new Error("The app's input and output contract is unavailable.");
   }
-  return { input, output };
+  const ids = at(request, "properties", "bucket_id", "enum");
+  // Static versions omit the selector entirely, preserving existing contract consumers.
+  if (ids === undefined) return { input, output };
+  if (!Array.isArray(ids) || ids.length > 32 || ids.some((id) => typeof id !== "string")) throw new Error("The runtime bucket scope is invalid.");
+  const runtimeBuckets = ids.map((id: string) => {
+    const label = at(request, "properties", "bucket_id", "x-fused-bucket-names", id);
+    // Opaque IDs remain usable when optional display metadata is unavailable.
+    return { id, name: typeof label === "string" ? label : id };
+  });
+  return { input, output, runtimeBuckets };
 }

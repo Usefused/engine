@@ -18,6 +18,7 @@ import (
 )
 
 type capabilityRunSpec struct {
+	bucketID           *uuid.UUID
 	identity           auth.RuntimeIdentity
 	version            string
 	bundle             *store.UnifiedAppBundle
@@ -59,6 +60,8 @@ func (s *EngineGRPCServer) executeCapabilityRun(ctx context.Context, spec capabi
 // runAdmittedCapability owns provider work only after the result reservation is durable.
 func (s *EngineGRPCServer) runAdmittedCapability(ctx context.Context, spec capabilityRunSpec, admitted admittedCapabilityRun) (capabilityExecutionEnvelope, *restExecutionError) {
 	ctx = withUnifiedAppCallRoot(ctx, spec.identity.AppFamilyID)
+	// A request-local binding cannot mutate shared family routing or propagate into child apps.
+	ctx = sandbox.WithUnifiedAppBucket(ctx, spec.identity.AppID, spec.bucketID)
 	// Every terminal authored run shares the canonical Requests and Analytics event path.
 	var recorder *recordingCapabilityHost
 	defer func() { s.publishUnifiedAppReceipt(ctx, spec, admitted.id, recorder) }()
@@ -133,6 +136,30 @@ func (s *EngineGRPCServer) saveUnifiedAppReplayEvidence(ctx context.Context, spe
 
 // admitCapabilityRun validates storage and selected operations before a provider-capable worker starts.
 func (s *EngineGRPCServer) admitCapabilityRun(ctx context.Context, spec capabilityRunSpec) (admittedCapabilityRun, *restExecutionError) {
+	prepared, requestErr := s.prepareCapabilityRun(ctx, spec)
+	// No reservation may precede scope and runtime admission.
+	if requestErr != nil {
+		return admittedCapabilityRun{}, requestErr
+	}
+	results, bindings := prepared.results, prepared.bindings
+	id, handle, created, err := reserveCapabilityRun(ctx, results, spec)
+	// A rejected reservation cannot acquire a cache reference or start provider work.
+	if err != nil {
+		// The same caller key cannot name two different retained inputs or app versions.
+		if errors.Is(err, store.ErrExecutionResultIdempotencyConflict) {
+			return admittedCapabilityRun{}, newRESTExecutionError(http.StatusConflict, "idempotency_conflict", "idempotency key belongs to a different rerun")
+		}
+		return admittedCapabilityRun{}, newRESTExecutionError(http.StatusServiceUnavailable, "result_unavailable", "execution result is unavailable")
+	}
+	return admittedCapabilityRun{results: results, bindings: bindings, id: id, readHandle: handle, created: created}, nil
+}
+
+// prepareCapabilityRun checks live authority and runtime dependencies before reserving durable work.
+func (s *EngineGRPCServer) prepareCapabilityRun(ctx context.Context, spec capabilityRunSpec) (admittedCapabilityRun, *restExecutionError) {
+	// Live database authority is checked even on idempotent retries and before asynchronous acceptance.
+	if err := s.authorizeRuntimeBucket(ctx, spec); err != nil {
+		return admittedCapabilityRun{}, err
+	}
 	results, ok := s.store.(store.ExecutionResultStore)
 	// Missing durable storage or an authored contract prevents unrecorded effects.
 	if !ok || spec.bundle == nil || spec.manifest == nil {
@@ -146,16 +173,7 @@ func (s *EngineGRPCServer) admitCapabilityRun(ctx context.Context, spec capabili
 	if len(bindings) > 0 && (s.runtime == nil || s.restRuntime == nil) {
 		return admittedCapabilityRun{}, newRESTExecutionError(http.StatusServiceUnavailable, "runtime_unavailable", "unified app runtime is unavailable")
 	}
-	id, handle, created, err := reserveCapabilityRun(ctx, results, spec)
-	// A rejected reservation cannot acquire a cache reference or start provider work.
-	if err != nil {
-		// The same caller key cannot name two different retained inputs or app versions.
-		if errors.Is(err, store.ErrExecutionResultIdempotencyConflict) {
-			return admittedCapabilityRun{}, newRESTExecutionError(http.StatusConflict, "idempotency_conflict", "idempotency key belongs to a different rerun")
-		}
-		return admittedCapabilityRun{}, newRESTExecutionError(http.StatusServiceUnavailable, "result_unavailable", "execution result is unavailable")
-	}
-	return admittedCapabilityRun{results: results, bindings: bindings, id: id, readHandle: handle, created: created}, nil
+	return admittedCapabilityRun{results: results, bindings: bindings}, nil
 }
 
 // failCapabilityRuntimeStart preserves the accepted ID when no worker cache can be acquired.
@@ -180,7 +198,8 @@ func reserveCapabilityRun(ctx context.Context, results store.ExecutionResultStor
 		return uuid.Nil, "", false, err
 	}
 	record := store.ExecutionResult{
-		ID: id, AccountID: spec.identity.AccountID, AppFamilyID: spec.identity.AppFamilyID,
+		BucketID: spec.bucketID,
+		ID:       id, AccountID: spec.identity.AccountID, AppFamilyID: spec.identity.AppFamilyID,
 		AppID: spec.identity.AppID, AppVersion: spec.version,
 		AppTokenID: spec.identity.TokenID, ReadHandleHash: readHash,
 		IdempotencyKeyHash: spec.idempotencyKeyHash, Status: "queued", Input: spec.input,

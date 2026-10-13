@@ -88,7 +88,7 @@ func (s *EngineGRPCServer) handleCapabilityRerun(writer http.ResponseWriter, req
 	}
 	result, requestErr := s.executeCapabilityRun(ctx, capabilityRunSpec{
 		identity: source.identity, version: source.scope.Version, bundle: bundle,
-		manifest: manifest, input: source.result.Input, mode: "rerun",
+		manifest: manifest, input: source.result.Input, mode: "rerun", bucketID: source.result.BucketID,
 		sourceExecutionID: &source.result.ID, idempotencyKeyHash: keyHash,
 	})
 	writeCapabilityRun(writer, span, result, requestErr)
