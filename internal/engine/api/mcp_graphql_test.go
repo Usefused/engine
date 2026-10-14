@@ -463,7 +463,7 @@ func TestEngineGraphQLSDKBuckets_UsesLinkedRuntimeBucket(t *testing.T) {
 		workspaceID: workspaceID,
 		workspaceServices: []store.WorkspaceService{{
 			ID: uuid.New(), ServiceID: serviceID,
-			ServiceName: "Linear", Version: "2026-07-21", ServiceVersionID: serviceVersionID, AddedBy: accountID, CreatedAt: now,
+			ServiceName: "Linear", ServiceSlug: "@linear-provider/linear", Version: "2026-07-21", ServiceVersionID: serviceVersionID, AddedBy: accountID, CreatedAt: now,
 		}},
 		workspaceServiceVersions: map[uuid.UUID][]store.WorkspaceServiceVersion{
 			serviceID: {{

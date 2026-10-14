@@ -270,6 +270,7 @@ func (e *workspaceServicePersistenceError) Unwrap() error {
 // GraphQL query for identity and the current version, not the full
 // FetchServiceMetadata catalogue payload. Its exact version ID also avoids a
 // second Registry request for ordinary service additions.
+// Re-adding an active version refreshes verified identity without rewriting its immutable snapshot or pin.
 func verifyAndActivateService(ctx context.Context, s store.Store, verifier ServiceVerifier, call addServiceCall) error {
 	span := trace.SpanFromContext(ctx)
 
@@ -307,8 +308,16 @@ func verifyAndActivateService(ctx context.Context, s store.Store, verifier Servi
 				phase: "activation_state_check", commitState: "not_committed",
 			}
 		}
-		// An already-active immutable version has a previously admitted local snapshot and needs no rewrite.
+		// Active snapshots remain immutable, but legacy service references still need Registry-verified repair.
 		if active {
+			// Production storage supports metadata-only refresh; transitional stores may omit this capability.
+			if writer, ok := s.(store.WorkspaceServiceIdentityWriter); ok {
+				// Do not report successful repair when the canonical reference belongs to a different service.
+				if err := writer.RefreshWorkspaceServiceIdentity(ctx, call.serviceID, serviceVersionID, verifiedSlug, verifiedName); err != nil {
+					recordWorkspaceServiceMutationFailure(span, "failed", "workspace_service_add_failed")
+					return &workspaceServicePersistenceError{cause: err, phase: "service_identity_refresh", commitState: "unknown"}
+				}
+			}
 			span.SetAttributes(attribute.String("outcome", "already_active"))
 			span.SetStatus(codes.Ok, "")
 			return nil

@@ -2504,7 +2504,7 @@ func projectGraphQLBucketConnectSummary(summary *store.BucketConnectSummary) map
 	}
 }
 
-// projectGraphQLWorkspaceServices combines durable membership with optional Registry-owned display metadata.
+// projectGraphQLWorkspaceServices preserves the resolvable local reference alongside optional Registry display metadata.
 func projectGraphQLWorkspaceServices(services []store.WorkspaceService, versions map[uuid.UUID][]store.WorkspaceServiceVersion, metadata map[uuid.UUID]sandbox.ServiceVisibility, authOptions map[uuid.UUID][]map[string]interface{}) []map[string]interface{} {
 	items := make([]map[string]interface{}, 0, len(services))
 	for _, service := range services {
@@ -2528,7 +2528,8 @@ func projectGraphQLWorkspaceServices(services []store.WorkspaceService, versions
 		}
 		// Registry metadata is optional so local membership remains listable during Registry outages.
 		if registryMetadata, ok := metadata[service.ServiceID]; ok {
-			item["service_slug"] = displaySlug(registryMetadata)
+			// Registry enrichment must not advertise a service_slug that local planning cannot resolve.
+			// canonical_ref separately exposes the Registry identity, including any pending local refresh.
 			item["registry_slug"] = registryMetadata.Slug
 			item["description"] = registryMetadata.Description
 			item["icon_url"] = registryMetadata.IconURL
