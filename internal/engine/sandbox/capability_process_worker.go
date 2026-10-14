@@ -16,18 +16,19 @@ import (
 )
 
 type persistentCapabilityWorker struct {
-	command  *exec.Cmd
-	stdin    io.WriteCloser
-	writer   *capabilityFrameWriter
-	cleanup  func()
-	queue    chan struct{}
-	slots    chan struct{}
-	slotCond *sync.Cond
-	closed   chan struct{}
-	once     sync.Once
-	mu       sync.Mutex
-	nextID   uint64
-	pending  map[uint64]*capabilityInvocation
+	command    *exec.Cmd
+	stdin      io.WriteCloser
+	writer     *capabilityFrameWriter
+	cleanup    func()
+	queue      chan struct{}
+	slots      chan struct{}
+	slotCond   *sync.Cond
+	closed     chan struct{}
+	once       sync.Once
+	dispatchMu sync.Mutex
+	mu         sync.Mutex
+	nextID     uint64
+	pending    map[uint64]*capabilityInvocation
 }
 
 type capabilityInvocation struct {
@@ -97,7 +98,7 @@ func startPersistentCapabilityWorker(ctx, lifetime context.Context, bundle []byt
 	return worker, nil
 }
 
-// run reserves one interpreter slot and correlates all frames by request ID.
+// run reserves one interpreter slot and dispatches monotonically ordered IDs while allowing executions to overlap.
 func (worker *persistentCapabilityWorker) run(ctx context.Context, input json.RawMessage, host CapabilityScriptHost, control CapabilityDeterminism, limit int, releaseAdmission func()) (json.RawMessage, error) {
 	// Retain ownership locally until the invocation enters the worker's pending map.
 	transferred := false
@@ -119,11 +120,15 @@ func (worker *persistentCapabilityWorker) run(ctx context.Context, input json.Ra
 		ids: make(map[uint64]struct{}, maxCapabilityHostCalls), ordinals: make(map[int]struct{}, maxCapabilityHostCalls),
 		parallel: make(chan struct{}, maxCapabilityParallel),
 	}
+	// ID assignment and frame delivery must share one order; the child rejects decreasing request IDs.
+	// A separate lock leaves completion and host replies free to progress while a pipe write is blocked.
+	worker.dispatchMu.Lock()
 	worker.mu.Lock()
 	// Failure after a slot is acquired must release it before returning.
 	if worker.isClosedLocked() {
 		worker.releaseSlotLocked()
 		worker.mu.Unlock()
+		worker.dispatchMu.Unlock()
 		return nil, ErrCapabilityWorkerUnavailable
 	}
 	worker.nextID++
@@ -133,8 +138,10 @@ func (worker *persistentCapabilityWorker) run(ctx context.Context, input json.Ra
 	transferred = true
 	worker.mu.Unlock()
 	request := capabilityProcessFrame{Kind: "run", RequestID: id, Input: input, Determinism: control}
+	err := worker.writer.write(request)
+	worker.dispatchMu.Unlock()
 	// A failed dispatch terminates the child before returning its global permit.
-	if err := worker.writer.write(request); err != nil {
+	if err != nil {
 		worker.stop()
 		return nil, ErrCapabilityWorkerUnavailable
 	}
