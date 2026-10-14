@@ -295,7 +295,7 @@ func TestCapabilityAdmissionAcrossResidentFamilies(t *testing.T) {
 // TestCapabilityAdmissionResolvedYAMLIsNotOverriddenAgain proves the exact loader policy reaches the scheduler.
 func TestCapabilityAdmissionResolvedYAMLIsNotOverriddenAgain(t *testing.T) {
 	t.Setenv("FUSED_UNIFIED_APP_MAX_CONCURRENCY", "9")
-	manager := NewCapabilityWorkerManagerWithConfig(config.UnifiedAppAdmissionConfig{MaxConcurrency: 2, QueueCapacity: 19, QueueTimeoutSeconds: 7})
+	manager := NewCapabilityWorkerManagerWithConfig(config.UnifiedAppAdmissionConfig{MaxWorkerConcurrency: 4, MaxConcurrency: 2, QueueCapacity: 19, QueueTimeoutSeconds: 7})
 	defer manager.Close()
 	// An environment change after config resolution cannot replace the reviewed runtime settings.
 	if manager.admissionErr != nil || manager.admission.limit != 2 || manager.admission.capacity != 19 || manager.admission.wait != 7*time.Second {

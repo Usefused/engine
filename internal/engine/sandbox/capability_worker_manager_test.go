@@ -298,7 +298,7 @@ func TestCapabilityWorkerPlanConcurrencyNormalizesBounds(t *testing.T) {
 	}
 	for _, value := range values {
 		// The tested process ceiling remains authoritative even if Registry sends a larger value.
-		if got := effectiveCapabilityWorkerConcurrency(value.limit); got != value.want {
+		if got := effectiveCapabilityWorkerConcurrency(value.limit, 4); got != value.want {
 			t.Errorf("%s concurrency = %d, want %d", value.name, got, value.want)
 		}
 	}
@@ -400,6 +400,21 @@ func waitCapabilityLoading(t *testing.T, ctx context.Context, manager *Capabilit
 		case <-ctx.Done():
 			t.Fatal("warm did not reserve family")
 		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+// TestCapabilityWorkerHigherPlanConcurrency bounds each plan by the configured worker while retaining old-bundle defaults.
+func TestCapabilityWorkerHigherPlanConcurrency(t *testing.T) {
+	for _, test := range []struct {
+		plan           *int
+		capacity, want int
+	}{
+		{intPointer(16), 32, 16}, {intPointer(64), 32, 32}, {intPointer(0), 32, 0}, {nil, 32, 4}, {intPointer(-1), 32, 4},
+	} {
+		// Plan changes may increase or reduce occupancy without requiring a new worker process.
+		if got := effectiveCapabilityWorkerConcurrency(test.plan, test.capacity); got != test.want {
+			t.Fatalf("capacity=%d got=%d want=%d", test.capacity, got, test.want)
 		}
 	}
 }

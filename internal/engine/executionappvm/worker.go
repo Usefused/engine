@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"syscall"
 
+	"github.com/Usefused/engine/internal/shared/workerlimits"
 	"github.com/dop251/goja"
 )
 
@@ -25,18 +26,16 @@ type processHost struct {
 	nextID    atomic.Uint64
 }
 
-// Four VMs leave room under the 128 MiB data cap for the worker and host-call buffers.
-const maxWorkerRequests = 4
-
 // WorkerIsolationDeniedExitCode distinguishes host policy rejection before authored code from a worker crash.
 const WorkerIsolationDeniedExitCode = 77
 
 type loadedWorker struct {
-	program *goja.Program
-	writer  *frameWriter
-	mutex   sync.Mutex
-	active  map[uint64]*loadedRequest
-	lastID  uint64
+	program  *goja.Program
+	writer   *frameWriter
+	mutex    sync.Mutex
+	active   map[uint64]*loadedRequest
+	lastID   uint64
+	capacity int
 }
 
 type loadedRequest struct {
@@ -106,14 +105,19 @@ func loadCapabilityProgram(load Frame) (*goja.Program, error) {
 
 // runLoadedWorker compiles one immutable version after confinement and reuses its bytecode for bounded requests.
 func runLoadedWorker(scanner *bufio.Scanner, writer *frameWriter, load Frame) int {
+	capacity, err := loadedWorkerCapacity(load.WorkerConcurrency)
+	// Reject invalid bootstrap capacity before compiling or inspecting authored code.
+	if err != nil {
+		return 1
+	}
 	program, err := loadCapabilityProgram(load)
 	// A version becomes resident only after its compiled declarations pass inspection.
 	if err != nil {
 		return 1
 	}
-	worker := &loadedWorker{program: program, writer: writer, active: make(map[uint64]*loadedRequest)}
+	worker := &loadedWorker{program: program, writer: writer, capacity: capacity, active: make(map[uint64]*loadedRequest)}
 	// Acknowledgment follows compilation and inspection; no request can observe a partially loaded program.
-	if writer.write(Frame{Kind: "loaded"}) != nil {
+	if writer.write(Frame{Kind: "loaded", WorkerConcurrency: &capacity}) != nil {
 		return 1
 	}
 	for scanner.Scan() {
@@ -130,6 +134,19 @@ func runLoadedWorker(scanner *bufio.Scanner, writer *frameWriter, load Frame) in
 		return 1
 	}
 	return 0
+}
+
+// loadedWorkerCapacity retains old-parent defaults while bounding an explicit deployment setting independently in the child.
+func loadedWorkerCapacity(configured *int) (int, error) {
+	// Older parents omit this field; omission must not become unlimited execution.
+	if configured == nil {
+		return workerlimits.DefaultConcurrency, nil
+	}
+	// A plan may disable execution, but a resident worker must have a positive finite capacity.
+	if *configured < 1 || *configured > workerlimits.MaxConcurrency {
+		return 0, errors.New("capability worker capacity is invalid")
+	}
+	return *configured, nil
 }
 
 // handle routes one parent frame without sharing invocation state between requests.
@@ -152,7 +169,7 @@ func (worker *loadedWorker) start(frame Frame) error {
 	worker.mutex.Lock()
 	defer worker.mutex.Unlock()
 	// Increasing IDs prevent late replies from a finished execution entering a later one.
-	if frame.RequestID <= worker.lastID || frame.RequestID == 0 || len(frame.Bundle) != 0 || len(worker.active) >= maxWorkerRequests {
+	if frame.RequestID <= worker.lastID || frame.RequestID == 0 || len(frame.Bundle) != 0 || len(worker.active) >= worker.capacity {
 		return errors.New("capability worker protocol failed")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), WallTime)
@@ -341,20 +358,21 @@ func (host *processHost) DBSet(ctx context.Context, data json.RawMessage) error 
 
 // Frame is the bounded JSON protocol shared with the trusted Engine parent.
 type Frame struct {
-	Phases       []PhaseTiming    `json:"phases,omitempty"`
-	Kind         string           `json:"kind"`
-	RequestID    uint64           `json:"requestId,omitempty"`
-	ID           uint64           `json:"id,omitempty"`
-	Ordinal      int              `json:"ordinal,omitempty"`
-	Method       string           `json:"method,omitempty"`
-	Bundle       []byte           `json:"bundle,omitempty"`
-	Input        json.RawMessage  `json:"input,omitempty"`
-	Payload      json.RawMessage  `json:"payload,omitempty"`
-	Value        json.RawMessage  `json:"value,omitempty"`
-	Diagnostic   *DiagnosticError `json:"diagnostic,omitempty"`
-	Error        string           `json:"error,omitempty"`
-	ErrorMessage string           `json:"errorMessage,omitempty"`
-	Determinism  Determinism      `json:"determinism,omitempty"`
+	WorkerConcurrency *int             `json:"workerConcurrency,omitempty"`
+	Phases            []PhaseTiming    `json:"phases,omitempty"`
+	Kind              string           `json:"kind"`
+	RequestID         uint64           `json:"requestId,omitempty"`
+	ID                uint64           `json:"id,omitempty"`
+	Ordinal           int              `json:"ordinal,omitempty"`
+	Method            string           `json:"method,omitempty"`
+	Bundle            []byte           `json:"bundle,omitempty"`
+	Input             json.RawMessage  `json:"input,omitempty"`
+	Payload           json.RawMessage  `json:"payload,omitempty"`
+	Value             json.RawMessage  `json:"value,omitempty"`
+	Diagnostic        *DiagnosticError `json:"diagnostic,omitempty"`
+	Error             string           `json:"error,omitempty"`
+	ErrorMessage      string           `json:"errorMessage,omitempty"`
+	Determinism       Determinism      `json:"determinism,omitempty"`
 }
 
 const maxFrameBytes = 5 << 20

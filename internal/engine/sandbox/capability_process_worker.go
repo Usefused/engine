@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/Usefused/engine/internal/shared/workerlimits"
 )
 
 type persistentCapabilityWorker struct {
@@ -43,8 +45,8 @@ type capabilityInvocationResult struct {
 	err    error
 }
 
-// startPersistentCapabilityWorker launches a confined process and validates its one loaded bundle.
-func startPersistentCapabilityWorker(ctx, lifetime context.Context, bundle []byte) (*persistentCapabilityWorker, error) {
+// startPersistentCapabilityWorker pins the same deployment capacity in the parent slots and the confined child's load handshake.
+func startPersistentCapabilityWorker(ctx, lifetime context.Context, bundle []byte, capacity int) (*persistentCapabilityWorker, error) {
 	command, cleanup, err := capabilityWorkerCommand(lifetime)
 	if err != nil {
 		return nil, ErrCapabilityWorkerUnavailable
@@ -67,13 +69,14 @@ func startPersistentCapabilityWorker(ctx, lifetime context.Context, bundle []byt
 	}
 	worker := &persistentCapabilityWorker{
 		command: command, stdin: stdin, writer: &capabilityFrameWriter{encoder: json.NewEncoder(stdin)}, cleanup: cleanup,
-		queue: make(chan struct{}, capabilityWorkerQueueLimit), slots: make(chan struct{}, capabilityWorkerCapacity),
+		queue: make(chan struct{}, workerlimits.Occupancy(capacity)), slots: make(chan struct{}, capacity),
 		closed: make(chan struct{}), pending: make(map[uint64]*capabilityInvocation),
 	}
 	worker.slotCond = sync.NewCond(&worker.mu)
 	ready := make(chan error, 1)
 	go worker.readLoop(capabilityFrameScanner(stdout), ready)
-	if err := worker.writer.write(capabilityProcessFrame{Kind: "load", Bundle: bundle}); err != nil {
+	// The child must acknowledge its capacity before any invocation can be admitted.
+	if err := worker.writer.write(capabilityProcessFrame{Kind: "load", Bundle: bundle, WorkerConcurrency: &capacity}); err != nil {
 		worker.stop()
 		return nil, ErrCapabilityWorkerUnavailable
 	}
@@ -158,7 +161,7 @@ func (worker *persistentCapabilityWorker) admit(ctx context.Context, limit int) 
 	return nil
 }
 
-// reserveSlot waits for the plan's per-app ceiling within the fixed process safety capacity.
+// reserveSlot waits for the live plan ceiling within the configured process capacity.
 func (worker *persistentCapabilityWorker) reserveSlot(ctx context.Context, limit int) error {
 	worker.mu.Lock()
 	defer worker.mu.Unlock()
@@ -177,7 +180,7 @@ func (worker *persistentCapabilityWorker) reserveSlot(ctx context.Context, limit
 			return ErrCapabilityWorkerUnavailable
 		}
 		// The mutex makes occupancy checks and slot claims atomic across competing requests.
-		if len(worker.slots) < limit {
+		if len(worker.slots) < min(limit, cap(worker.slots)) {
 			worker.slots <- struct{}{}
 			return nil
 		}
@@ -213,8 +216,8 @@ func (worker *persistentCapabilityWorker) readLoop(scanner *bufio.Scanner, ready
 		return
 	}
 	loaded, err := decodeCapabilityFrame(scanner.Bytes())
-	// No invocation may start unless the child acknowledged its exact resident bundle.
-	if err != nil || loaded.Kind != "loaded" || loaded.RequestID != 0 {
+	// An older or mismatched worker must fail at startup rather than crash on its fifth invocation.
+	if err != nil || loaded.Kind != "loaded" || loaded.RequestID != 0 || loaded.WorkerConcurrency == nil || *loaded.WorkerConcurrency != cap(worker.slots) {
 		ready <- ErrCapabilityWorkerUnavailable
 		worker.stop()
 		return

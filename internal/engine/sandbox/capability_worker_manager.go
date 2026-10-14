@@ -11,13 +11,14 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/shared/config"
+	"github.com/Usefused/engine/internal/shared/workerlimits"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
 const capabilityWorkerIdleTime = 30 * time.Second
-const capabilityWorkerCapacity = 4
+const capabilityWorkerCapacity = workerlimits.DefaultConcurrency
 const capabilityWorkerQueueLimit = 32
 
 // ErrCapabilityWorkerOverloaded lets callers distinguish a full per-family queue from app failure.
@@ -79,17 +80,17 @@ func newCapabilityWorkerManager(gate *capabilityAdmission, err error) *Capabilit
 // Run executes one request in the loaded family worker with request-local authority and a fresh JavaScript realm.
 func (manager *CapabilityWorkerManager) Run(ctx context.Context, familyID, appID string, bundle []byte, input json.RawMessage, host CapabilityScriptHost, control CapabilityDeterminism, keepWarm bool, planConcurrency *int) (json.RawMessage, error) {
 	// Invalid authority or replay inputs never start or reuse a resident sandbox.
-	if familyID == "" || appID == "" || host == nil || len(input) > maxCapabilityInputBytes || !json.Valid(input) || !control.Valid() {
+	if !validCapabilityInvocation(familyID, appID, input, host, control) {
 		return nil, errors.New("capability invocation is invalid")
 	}
-	limit := effectiveCapabilityWorkerConcurrency(planConcurrency)
+	// Configuration failure must be reported before dereferencing the unavailable admission policy.
+	if manager.admissionErr != nil {
+		return nil, manager.admissionErr
+	}
+	limit := effectiveCapabilityWorkerConcurrency(planConcurrency, manager.admission.workerCapacity)
 	// A zero plan limit must not start authored code or consume a worker slot.
 	if limit == 0 {
 		return nil, ErrCapabilityWorkerConcurrencyDisabled
-	}
-	// Deployment admission precedes cold worker creation, bounding startup and execution together.
-	if manager.admissionErr != nil {
-		return nil, manager.admissionErr
 	}
 	release, err := manager.admission.acquireInvocation(ctx, manager.ctx, familyID, limit)
 	// Queue rejection must not create or acquire an app worker.
@@ -111,13 +112,18 @@ func (manager *CapabilityWorkerManager) Run(ctx context.Context, familyID, appID
 	return entry.worker.run(ctx, input, host, control, limit, release)
 }
 
-// effectiveCapabilityWorkerConcurrency applies the plan while preserving the process safety ceiling.
-func effectiveCapabilityWorkerConcurrency(planConcurrency *int) int {
-	// Older Registry bundles and unlimited legacy values use the process's tested capacity.
-	if planConcurrency == nil || *planConcurrency < 0 || *planConcurrency > capabilityWorkerCapacity {
-		return capabilityWorkerCapacity
+// validCapabilityInvocation keeps request authority and replay validation independent of admission accounting.
+func validCapabilityInvocation(familyID, appID string, input json.RawMessage, host CapabilityScriptHost, control CapabilityDeterminism) bool {
+	return familyID != "" && appID != "" && host != nil && len(input) <= maxCapabilityInputBytes && json.Valid(input) && control.Valid()
+}
+
+// effectiveCapabilityWorkerConcurrency applies plan changes within the operator's configured process ceiling.
+func effectiveCapabilityWorkerConcurrency(planConcurrency *int, capacity int) int {
+	// Old bundles retain their four-slot allowance even when an operator raises deployment capacity.
+	if planConcurrency == nil || *planConcurrency < 0 {
+		return min(workerlimits.DefaultConcurrency, capacity)
 	}
-	return *planConcurrency
+	return min(*planConcurrency, capacity)
 }
 
 // Warm validates and loads one exact app version without creating an execution record.
@@ -279,6 +285,10 @@ func (manager *CapabilityWorkerManager) reuseEntryLocked(entry *capabilityWorker
 
 // loadEntryLocked reserves family capacity atomically, then starts the child outside the global registry lock.
 func (manager *CapabilityWorkerManager) loadEntryLocked(ctx context.Context, familyID, appID string, bundle []byte, digest [32]byte, keepWarm bool) (*capabilityWorkerEntry, error) {
+	// Warm-up also needs validated capacity, even when it runs without an invocation admission.
+	if manager.admissionErr != nil {
+		return nil, manager.admissionErr
+	}
 	limit := entitlement.LiveEntitlement.Load().MaxUnifiedAppFamilies
 	// Registry owns account policy; explicit zero blocks and negative/missing limits remain unlimited.
 	if limit != nil && *limit >= 0 && len(manager.entries) >= *limit {
@@ -288,7 +298,7 @@ func (manager *CapabilityWorkerManager) loadEntryLocked(ctx context.Context, fam
 	manager.entries[familyID] = entry
 	manager.mu.Unlock()
 	start := time.Now()
-	worker, err := startPersistentCapabilityWorker(ctx, manager.ctx, bundle)
+	worker, err := startPersistentCapabilityWorker(ctx, manager.ctx, bundle, manager.admission.workerCapacity)
 	manager.mu.Lock()
 	// Shutdown or a failed process start removes the reservation before waking other family callers.
 	if err != nil || manager.closed {

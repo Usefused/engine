@@ -22,6 +22,7 @@ services:
     environment:
       FUSED_UNIFIED_APP_WORKER_REQUIRED: "true"
       # Unset process overrides preserve engine.yaml rather than replacing it with Compose defaults.
+      FUSED_UNIFIED_APP_MAX_WORKER_CONCURRENCY:
       FUSED_UNIFIED_APP_MAX_CONCURRENCY:
       FUSED_UNIFIED_APP_QUEUE_CAPACITY:
       FUSED_UNIFIED_APP_QUEUE_TIMEOUT_SECONDS:

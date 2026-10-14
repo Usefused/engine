@@ -5,18 +5,21 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+
+	"github.com/Usefused/engine/internal/shared/workerlimits"
 )
 
 // UnifiedAppAdmissionConfig is deployment policy shared by every hosted app on an Engine.
 type UnifiedAppAdmissionConfig struct {
-	MaxConcurrency      int `yaml:"max_concurrency"`
-	QueueCapacity       int `yaml:"queue_capacity"`
-	QueueTimeoutSeconds int `yaml:"queue_timeout_seconds"`
+	MaxConcurrency       int `yaml:"max_concurrency"`
+	MaxWorkerConcurrency int `yaml:"max_worker_concurrency"`
+	QueueCapacity        int `yaml:"queue_capacity"`
+	QueueTimeoutSeconds  int `yaml:"queue_timeout_seconds"`
 }
 
 // DefaultUnifiedAppAdmissionConfig leaves scheduler headroom while bounding queued requests and their lifetime.
 func DefaultUnifiedAppAdmissionConfig() UnifiedAppAdmissionConfig {
-	return UnifiedAppAdmissionConfig{MaxConcurrency: max(1, runtime.GOMAXPROCS(0)-1), QueueCapacity: 256, QueueTimeoutSeconds: 5}
+	return UnifiedAppAdmissionConfig{MaxConcurrency: max(1, runtime.GOMAXPROCS(0)-1), MaxWorkerConcurrency: workerlimits.DefaultConcurrency, QueueCapacity: 256, QueueTimeoutSeconds: 5}
 }
 
 // ResolveUnifiedAppAdmission applies explicit process overrides after YAML and validates the final policy.
@@ -26,6 +29,7 @@ func ResolveUnifiedAppAdmission(policy UnifiedAppAdmissionConfig) (UnifiedAppAdm
 		value *int
 	}{
 		{"FUSED_UNIFIED_APP_MAX_CONCURRENCY", &policy.MaxConcurrency},
+		{"FUSED_UNIFIED_APP_MAX_WORKER_CONCURRENCY", &policy.MaxWorkerConcurrency},
 		{"FUSED_UNIFIED_APP_QUEUE_CAPACITY", &policy.QueueCapacity},
 		{"FUSED_UNIFIED_APP_QUEUE_TIMEOUT_SECONDS", &policy.QueueTimeoutSeconds},
 	}
@@ -52,6 +56,7 @@ func (policy UnifiedAppAdmissionConfig) Validate() error {
 		value, maximum int
 	}{
 		{"max_concurrency", policy.MaxConcurrency, 1024},
+		{"max_worker_concurrency", policy.MaxWorkerConcurrency, workerlimits.MaxConcurrency},
 		{"queue_capacity", policy.QueueCapacity, 65536},
 		{"queue_timeout_seconds", policy.QueueTimeoutSeconds, 300},
 	}

@@ -176,7 +176,7 @@ on a generic checked-in example that could drift from the selected schemas.
 
 Inline-source planning type-checks and bundles TypeScript in Node without evaluating authored code. Fused inspects declarations and runs Unified Apps in its OS-confined Goja worker. Local manifest/client generation invokes `fused-engine inspect-unified-app-bundle`. There is no fallback to Node VM or unconfined in-process evaluation.
 
-One persistent worker process serves each app family on each Fused instance. The confined worker compiles its immutable JavaScript bundle once at load time and reuses that program until the version retires. Each invocation receives a fresh Goja runtime, including fresh module state and globals; no runtime objects or host callbacks are cached. Cached executions report zero compilation duration in the existing phase metadata. Up to four invocations run concurrently per family, further limited by the account's `MaxUnifiedAppConcurrency`. A bounded 32-entry admission gate includes running and waiting requests; saturation rejects new requests. Different families run concurrently. Provider/database calls within each invocation are limited to four active calls and 32 total calls. Fused retains authorization and credentials outside the child. Promotion drains the old version before replacing its process. No Docker container is launched per app or per request.
+One persistent worker process serves each app family on each Fused instance. The confined worker compiles its immutable JavaScript bundle once at load time and reuses that program until the version retires. Each invocation receives a fresh Goja runtime, including fresh module state and globals; no runtime objects or host callbacks are cached. Cached executions report zero compilation duration in the existing phase metadata. Each family supports the configured `engine.unified_apps.max_worker_concurrency` (default 4), further limited by the account's `MaxUnifiedAppConcurrency` and the Engine-wide execution budget. Its bounded admission gate allows the configured worker capacity plus 28 running-or-waiting requests (32 total at the default); saturation rejects new requests. Different families run concurrently. Provider/database calls within each invocation are limited to four active calls and 32 total calls. Fused retains authorization and credentials outside the child. Promotion drains the old version before replacing its process. No Docker container is launched per app or per request.
 
 Resident family admission follows the live `MaxUnifiedAppFamilies` account entitlement. Explicit zero denies new families; negative/missing limits remain unlimited. Family startup occurs outside the manager's global mutex so an unrelated family can continue executing. Two compiler pipelines and four transient inspection/direct-execution workers are admitted concurrently. Compiler diagnostics are bounded to 64 KiB. Account limits are not memory reservations; deployment-level memory, CPU, and process limits remain necessary.
 
@@ -205,6 +205,7 @@ Configure these in `engine.yaml`:
 engine:
   unified_apps:
     max_concurrency: 1
+    max_worker_concurrency: 4
     queue_capacity: 256
     queue_timeout_seconds: 5
 ```
@@ -220,12 +221,13 @@ Equivalent environment overrides:
 | Setting | Default | Allowed range |
 | --- | --- | --- |
 | `FUSED_UNIFIED_APP_MAX_CONCURRENCY` | `max(1, GOMAXPROCS - 1)` | 1–1024 |
+| `FUSED_UNIFIED_APP_MAX_WORKER_CONCURRENCY` | 4 per app worker | 1–1024 |
 | `FUSED_UNIFIED_APP_QUEUE_CAPACITY` | 256 waiting requests | 1–65536 |
 | `FUSED_UNIFIED_APP_QUEUE_TIMEOUT_SECONDS` | 5 seconds | 1–300 |
 
 Invalid overrides fail startup. Changes require restarting Fused. Queued
 families receive turns in round-robin order; requests within a family remain FIFO.
-Each family retains its existing 32-request running-plus-waiting bound. Queue
+Each family has a running-plus-waiting bound of configured worker capacity plus 28 (32 by default). Queue
 waits respect caller cancellation and Fused shutdown. A disconnected caller's
 running slot is retained until its worker completes or is terminated, preventing
 abandoned work from bypassing the budget. Cold worker startup for an invocation
@@ -259,3 +261,21 @@ slug and bucket name, for example
 Immutable IDs remain available in structured credential errors and are used as a
 fallback when readable metadata is unavailable or ambiguous. Replay preserves the
 same credential failure seen by the live app.
+
+
+### Higher per-plan concurrency
+
+Set `max_unified_app_concurrency` on each Registry plan (0–1024; zero disables execution, `-1` is invalid). Existing defaults remain Dev 2 and Scale-Up/Enterprise 4. Then size the Engine independently, for example:
+
+```yaml
+engine:
+  unified_apps:
+    max_concurrency: 32
+    max_worker_concurrency: 16
+    queue_capacity: 256
+    queue_timeout_seconds: 5
+```
+
+With this deployment, a plan allowance of 8 permits eight concurrent executions per app; an allowance of 24 is capped at 16 per worker. All apps together share the 32-execution Engine budget. Plan updates arrive through the existing entitlement heartbeat; deployment capacity changes require an Engine restart. Higher concurrency requires upgrading both Registry and Engine, including the matching execution-worker binary. The child acknowledges its configured capacity before traffic is admitted.
+
+The per-worker Linux memory cap remains 128 MiB, and CPU, execution deadlines, and per-invocation host-call limits remain enforced. Raising concurrency shares that same memory budget among more interpreters; it does not reserve more memory or guarantee throughput. Validate the chosen capacity against your app's memory use and deployment resources.

@@ -8,7 +8,7 @@ import (
 // TestConfigureUnifiedAppAdmissionBeforeUse ensures startup passes one immutable policy to the shared executor.
 func TestConfigureUnifiedAppAdmissionBeforeUse(t *testing.T) {
 	server := &EngineGRPCServer{}
-	policy := config.UnifiedAppAdmissionConfig{MaxConcurrency: 2, QueueCapacity: 7, QueueTimeoutSeconds: 3}
+	policy := config.UnifiedAppAdmissionConfig{MaxWorkerConcurrency: 4, MaxConcurrency: 2, QueueCapacity: 7, QueueTimeoutSeconds: 3}
 	// A validated startup policy is accepted before any lazy initialization.
 	if err := server.ConfigureUnifiedAppAdmission(policy); err != nil {
 		t.Fatal(err)

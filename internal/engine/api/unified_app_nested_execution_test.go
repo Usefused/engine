@@ -45,7 +45,7 @@ func newNestedAppServer(t *testing.T) (*EngineGRPCServer, *attachedExecutionFixt
 	}
 	server.store = fixture
 	// Two interpreter slots allow a synchronous child while retaining the waiting parent.
-	if err := server.ConfigureUnifiedAppAdmission(config.UnifiedAppAdmissionConfig{MaxConcurrency: 2, QueueCapacity: 16, QueueTimeoutSeconds: 1}); err != nil {
+	if err := server.ConfigureUnifiedAppAdmission(config.UnifiedAppAdmissionConfig{MaxWorkerConcurrency: 4, MaxConcurrency: 2, QueueCapacity: 16, QueueTimeoutSeconds: 1}); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(server.capabilityWorkerManager().Close)

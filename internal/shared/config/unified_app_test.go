@@ -25,7 +25,7 @@ func TestUnifiedAppYAMLDefaultsAndPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := UnifiedAppAdmissionConfig{3, 256, 5}
+	expected := UnifiedAppAdmissionConfig{MaxConcurrency: 3, MaxWorkerConcurrency: 4, QueueCapacity: 256, QueueTimeoutSeconds: 5}
 	if cfg.Engine.UnifiedApps != expected {
 		t.Fatalf("got %+v", cfg.Engine.UnifiedApps)
 	}
@@ -35,7 +35,7 @@ func TestUnifiedAppYAMLDefaultsAndPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected = UnifiedAppAdmissionConfig{2, 99, 8}
+	expected = UnifiedAppAdmissionConfig{MaxConcurrency: 2, MaxWorkerConcurrency: 4, QueueCapacity: 99, QueueTimeoutSeconds: 8}
 	if cfg.Engine.UnifiedApps != expected {
 		t.Fatalf("got %+v", cfg.Engine.UnifiedApps)
 	}
@@ -45,6 +45,7 @@ func TestUnifiedAppYAMLDefaultsAndPrecedence(t *testing.T) {
 func TestUnifiedAppYAMLValidation(t *testing.T) {
 	for _, body := range []string{
 		"max_concurrency: 0", "max_concurrency: -1", "max_concurrency: 1025", "max_concurrency: many",
+		"max_worker_concurrency: 0", "max_worker_concurrency: -1", "max_worker_concurrency: 1025",
 		"queue_capacity: 0", "queue_capacity: 65537", "queue_timeout_seconds: 0", "queue_timeout_seconds: 301",
 	} {
 		_, err := loadAdmissionYAML(t, "engine:\n  unified_apps:\n    "+body+"\n")
@@ -57,7 +58,7 @@ func TestUnifiedAppYAMLValidation(t *testing.T) {
 
 // TestUnifiedAppEnvironmentValidation confirms malformed and empty overrides never fall back silently.
 func TestUnifiedAppEnvironmentValidation(t *testing.T) {
-	for _, name := range []string{"FUSED_UNIFIED_APP_MAX_CONCURRENCY", "FUSED_UNIFIED_APP_QUEUE_CAPACITY", "FUSED_UNIFIED_APP_QUEUE_TIMEOUT_SECONDS"} {
+	for _, name := range []string{"FUSED_UNIFIED_APP_MAX_WORKER_CONCURRENCY", "FUSED_UNIFIED_APP_MAX_CONCURRENCY", "FUSED_UNIFIED_APP_QUEUE_CAPACITY", "FUSED_UNIFIED_APP_QUEUE_TIMEOUT_SECONDS"} {
 		t.Run(name, func(t *testing.T) {
 			for _, value := range []string{"", "many", "0", "-1"} {
 				t.Setenv(name, value)
@@ -80,5 +81,20 @@ func TestUnifiedAppAbsentYAMLUsesCPUAwareDefaults(t *testing.T) {
 	}
 	if cfg.Engine.UnifiedApps != DefaultUnifiedAppAdmissionConfig() {
 		t.Fatalf("unexpected defaults: %+v", cfg.Engine.UnifiedApps)
+	}
+}
+
+// TestUnifiedAppWorkerCapacityConfiguration verifies YAML, export and environment all reach the per-worker limit.
+func TestUnifiedAppWorkerCapacityConfiguration(t *testing.T) {
+	cfg, err := loadAdmissionYAML(t, "engine:\n  unified_apps:\n    max_worker_concurrency: 16\n")
+	// Higher capacity is explicit; the deployment-wide budget remains an independent setting.
+	if err != nil || cfg.Engine.UnifiedApps.MaxWorkerConcurrency != 16 {
+		t.Fatalf("worker capacity load: %v", err)
+	}
+	t.Setenv("FUSED_UNIFIED_APP_MAX_WORKER_CONCURRENCY", "32")
+	cfg, err = loadAdmissionYAML(t, "engine:\n  unified_apps:\n    max_worker_concurrency: 16\n")
+	// Environment overrides must win without changing the mounted YAML.
+	if err != nil || cfg.Engine.UnifiedApps.MaxWorkerConcurrency != 32 {
+		t.Fatalf("worker capacity override: %v", err)
 	}
 }

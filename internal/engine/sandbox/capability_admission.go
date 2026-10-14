@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/shared/config"
+	"github.com/Usefused/engine/internal/shared/workerlimits"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -21,6 +22,7 @@ var ErrCapabilityAdmissionConfig = errors.New("invalid unified app admission con
 type capabilityAdmission struct {
 	mu                              sync.Mutex
 	limit, capacity, active, queued int
+	workerCapacity                  int
 	wait                            time.Duration
 	running                         map[string]int
 	families                        []string
@@ -50,12 +52,14 @@ func capabilityAdmissionFromConfig(policy config.UnifiedAppAdmissionConfig) (*ca
 	if err := policy.Validate(); err != nil {
 		return nil, ErrCapabilityAdmissionConfig
 	}
-	return newCapabilityAdmission(policy.MaxConcurrency, policy.QueueCapacity, time.Duration(policy.QueueTimeoutSeconds)*time.Second), nil
+	gate := newCapabilityAdmission(policy.MaxConcurrency, policy.QueueCapacity, time.Duration(policy.QueueTimeoutSeconds)*time.Second)
+	gate.workerCapacity = policy.MaxWorkerConcurrency
+	return gate, nil
 }
 
 // newCapabilityAdmission also permits deterministic small budgets in scheduler tests.
 func newCapabilityAdmission(limit, capacity int, wait time.Duration) *capabilityAdmission {
-	return &capabilityAdmission{limit: limit, capacity: capacity, wait: wait, running: make(map[string]int), queues: make(map[string][]*capabilityWaiter)}
+	return &capabilityAdmission{limit: limit, capacity: capacity, workerCapacity: workerlimits.DefaultConcurrency, wait: wait, running: make(map[string]int), queues: make(map[string][]*capabilityWaiter)}
 }
 
 // acquire returns an idempotent lease held until the child actually completes or is reaped.
@@ -69,7 +73,7 @@ func (gate *capabilityAdmission) acquire(ctx, lifetime context.Context, family s
 		return nil, context.Canceled
 	}
 	// Per-family occupancy includes active and queued work, preserving the existing family bound.
-	if gate.queued >= gate.capacity || gate.running[family]+len(gate.queues[family]) >= capabilityWorkerQueueLimit {
+	if gate.queued >= gate.capacity || gate.running[family]+len(gate.queues[family]) >= workerlimits.Occupancy(gate.workerCapacity) {
 		gate.mu.Unlock()
 		return nil, ErrCapabilityAdmissionFull
 	}
@@ -94,6 +98,11 @@ func (gate *capabilityAdmission) acquire(ctx, lifetime context.Context, family s
 	case <-timer.C:
 		err = ErrCapabilityAdmissionTimeout
 	}
+	return gate.settleWaiter(ctx, lifetime, waiter, err)
+}
+
+// settleWaiter resolves cancellation races before transferring a granted permit to the execution lifecycle.
+func (gate *capabilityAdmission) settleWaiter(ctx, lifetime context.Context, waiter *capabilityWaiter, err error) (func(), error) {
 	gate.mu.Lock()
 	// A racing cancellation must return a granted slot rather than leaking or starting abandoned work.
 	if err == nil {
@@ -114,7 +123,7 @@ func (gate *capabilityAdmission) acquire(ctx, lifetime context.Context, family s
 	return sync.OnceFunc(func() {
 		gate.mu.Lock()
 		defer gate.mu.Unlock()
-		gate.releaseLocked(family)
+		gate.releaseLocked(waiter.family)
 		gate.dispatchLocked()
 	}), nil
 }

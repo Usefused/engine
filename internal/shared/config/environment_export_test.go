@@ -43,6 +43,7 @@ observability:
 engine:
   unified_apps:
     max_concurrency: 2
+    max_worker_concurrency: 16
 `)
 	// Config inspection itself must remain free from process mutation.
 	if err != nil {
@@ -61,7 +62,7 @@ engine:
 		"FUSED_ENGINE_HTTP_PORT": "9010", "NATS_URL": "nats://localhost:4222", "FUSED_NATS_RATE_LIMIT_REPLICAS": "3",
 		"NATS_CREDS_FILE": "/run/secrets/nats.creds", "NATS_TLS_SERVER_NAME": "nats.example", "FUSED_ENGINE_ENVIRONMENT": "staging",
 		"OTEL_SERVICE_NAME": "custom-engine", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
-		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://traces:4318/v1/traces", "FUSED_UNIFIED_APP_MAX_CONCURRENCY": "2",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://traces:4318/v1/traces", "FUSED_UNIFIED_APP_MAX_CONCURRENCY": "2", "FUSED_UNIFIED_APP_MAX_WORKER_CONCURRENCY": "16",
 	} {
 		// Existing os.Getenv consumers must observe the exact declared deployment setting.
 		if got := os.Getenv(name); got != want {

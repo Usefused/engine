@@ -105,9 +105,10 @@ Standard OTel headers, TLS, and other exporter environment options continue to w
 
 ## Unified Apps
 
-The existing `engine.unified_apps.max_concurrency`, `queue_capacity`, and
+The existing `engine.unified_apps.max_concurrency`, `max_worker_concurrency`, `queue_capacity`, and
 `queue_timeout_seconds` fields also publish to their corresponding
-`FUSED_UNIFIED_APP_MAX_CONCURRENCY`, `FUSED_UNIFIED_APP_QUEUE_CAPACITY`, and
+`FUSED_UNIFIED_APP_MAX_CONCURRENCY`, `FUSED_UNIFIED_APP_MAX_WORKER_CONCURRENCY`,
+`FUSED_UNIFIED_APP_QUEUE_CAPACITY`, and
 `FUSED_UNIFIED_APP_QUEUE_TIMEOUT_SECONDS` variables. Their existing validation
 and environment precedence remain unchanged, including rejection of explicitly
 empty admission overrides.
