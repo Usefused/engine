@@ -8,6 +8,8 @@ import (
 type mutationAuditEvidenceKey struct{}
 
 type mutationAuditEvidence struct {
+	secretExportRecorded        atomic.Bool
+	secretExportable            atomic.Bool
 	unchanged                   atomic.Bool
 	rolledBack                  atomic.Bool
 	cancelled                   atomic.Bool
@@ -21,6 +23,8 @@ type mutationAuditEvidence struct {
 }
 
 type MutationAuditEvidence struct {
+	SecretExportRecorded   bool
+	SecretExportable       bool
 	Unchanged              bool
 	RolledBack             bool
 	Cancelled              bool
@@ -96,6 +100,7 @@ func MutationAuditEvidenceFromContext(ctx context.Context) (MutationAuditEvidenc
 		return MutationAuditEvidence{}, false
 	}
 	return MutationAuditEvidence{
+		SecretExportRecorded: evidence.secretExportRecorded.Load(), SecretExportable: evidence.secretExportable.Load(),
 		Unchanged: evidence.unchanged.Load(), RolledBack: evidence.rolledBack.Load(), Cancelled: evidence.cancelled.Load(),
 		ConnectBrandingChanges: ConnectBrandingAuditChanges{
 			Present:     evidence.connectBrandingRecorded.Load(),
@@ -111,4 +116,13 @@ func MutationAuditEvidenceFromContext(ctx context.Context) (MutationAuditEvidenc
 func mutationAuditEvidenceFromContext(ctx context.Context) (*mutationAuditEvidence, bool) {
 	evidence, ok := ctx.Value(mutationAuditEvidenceKey{}).(*mutationAuditEvidence)
 	return evidence, ok && evidence != nil
+}
+
+// MarkSecretExportPolicy records only the opt-in boolean, never the credential name or value.
+func MarkSecretExportPolicy(ctx context.Context, exportable bool) {
+	// Only the canonical middleware may supply the audit evidence container.
+	if evidence, ok := mutationAuditEvidenceFromContext(ctx); ok {
+		evidence.secretExportable.Store(exportable)
+		evidence.secretExportRecorded.Store(true)
+	}
 }

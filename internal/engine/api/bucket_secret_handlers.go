@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/secretref"
 	"github.com/go-chi/chi/v5"
@@ -21,9 +22,10 @@ import (
 // BucketSecretUpsertPayload carries only user-chosen generic secret metadata;
 // bucket identity remains authoritative in the request path.
 type BucketSecretUpsertPayload struct {
-	KeyName   string     `json:"key_name"`
-	Value     string     `json:"value"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	Exportable bool       `json:"exportable"`
+	KeyName    string     `json:"key_name"`
+	Value      string     `json:"value"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 }
 
 // UpsertBucketSecretHandler encrypts one service-independent secret in the
@@ -88,6 +90,7 @@ func UpsertBucketSecretHandler(s store.Store, masterKey []byte) http.HandlerFunc
 			return
 		}
 		secret.ExpiresAt = payload.ExpiresAt
+		secret.Exportable = payload.Exportable
 		// Unclassified store failures retain an unknown commit outcome to prevent unsafe blind retries.
 		if err := s.UpsertSecret(ctx, secret); err != nil {
 			slog.ErrorContext(ctx, "failed to upsert bucket secret", slog.Any("error", err))
@@ -95,6 +98,7 @@ func UpsertBucketSecretHandler(s store.Store, masterKey []byte) http.HandlerFunc
 			return
 		}
 
+		accesscontrol.MarkSecretExportPolicy(ctx, payload.Exportable)
 		span.SetAttributes(attribute.String("bucket_id", bucketID.String()), attribute.String("outcome", "upserted"))
 		w.WriteHeader(http.StatusNoContent)
 	}

@@ -75,6 +75,7 @@ test("serializes hidden secret key names from backend auth options", () => {
     keyName: "Authorization",
     credentialType: "bearer",
     value: "token",
+    exportable: false,
     expiresAt: undefined,
   }]);
   assert.equal(serializeSecretPayloads(validSecret, authOption("api_key", ["value"], { credential_type: "apiKey", key_name: "X-API-Key" }))[0].keyName, "X-API-Key");
@@ -124,10 +125,12 @@ test("serializes oauth/oidc client pairs as a credential_family payload", () => 
   assert.equal(secretIsCredentialFamily("basic"), false);
 });
 
+// Generic writes expose a private default without introducing a service identity.
 test("serializes a generic bucket secret without a service_id", () => {
   assert.deepEqual(serializeBucketSecretPayload({ ...validBucketSecret, keyName: " api-key " }), {
     keyName: "api-key",
     value: "stored-value",
+    exportable: false,
     expiresAt: undefined,
   });
 });

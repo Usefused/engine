@@ -10,6 +10,7 @@ import (
 
 	"log/slog"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/mtlsauth"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/credentialkeys"
@@ -19,6 +20,7 @@ import (
 )
 
 type SecretUpsertPayload struct {
+	Exportable     bool      `json:"exportable"`
 	ServiceID      uuid.UUID `json:"service_id"`
 	KeyName        string    `json:"key_name"`
 	CredentialType string    `json:"credential_type"`
@@ -67,14 +69,8 @@ func UpsertSecretHandler(s store.Store, masterKey []byte) http.HandlerFunc {
 			return
 		}
 
-		// Expired-at-write credentials can never become usable and are rejected early.
-		if payload.ExpiresAt != nil && payload.ExpiresAt.Before(time.Now()) {
-			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_secret_expiry", "expires_at must be in the future.", "Choose a future RFC3339 expiry or omit expires_at.", "secret_upsert", "", "not_committed", "")
-			return
-		}
-		// Paired credentials must use the atomic bulk endpoint to avoid partial state.
-		if credentialTypeRequiresPair(payload.CredentialType) {
-			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "paired_credentials_required", "Paired credentials must be saved together.", "Use the paired credential fields in one secret-set command.", "secret_upsert", "", "not_committed", "")
+		// Validate all single-value admission rules before bucket lookup or encryption.
+		if !validateSingleSecretRequest(w, r.Context(), payload) {
 			return
 		}
 
@@ -109,6 +105,7 @@ func UpsertSecretHandler(s store.Store, masterKey []byte) http.HandlerFunc {
 			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "secret_save_failed", "The Engine could not save the secret.", "Inspect current secret metadata before retrying, and use the request or trace ID to check Engine logs.", "secret_upsert", "", "unknown", "")
 			return
 		}
+		accesscontrol.MarkSecretExportPolicy(ctx, payload.Exportable)
 		span.SetAttributes(attribute.String("outcome", "upserted"))
 
 		w.WriteHeader(http.StatusNoContent)
@@ -281,11 +278,9 @@ func decodeSecretBulkUpsertPayload(r *http.Request) (SecretBulkUpsertPayload, er
 // encryption work and before the store transaction is opened.
 func validateSecretBulkPayload(payloads []SecretUpsertPayload, now time.Time) error {
 	for _, payload := range payloads {
-		if payload.ServiceID == uuid.Nil || strings.TrimSpace(payload.KeyName) == "" || secretValueMissing(payload) {
-			return errors.New("service_id, key_name, and value are required")
-		}
-		if payload.ExpiresAt != nil && payload.ExpiresAt.Before(now) {
-			return errors.New("expires_at must be in the future")
+		// Every row must pass the same export and identity rules before encryption begins.
+		if err := validateSecretPayload(payload, now); err != nil {
+			return err
 		}
 	}
 	if err := validateBulkBasicPairs(payloads); err != nil {
@@ -500,6 +495,10 @@ func buildEncryptedSecrets(bucketID uuid.UUID, payloads []SecretUpsertPayload, m
 // stores and validates against the public credential type vocabulary.
 func canonicalSecretCredentialType(value string) string {
 	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "-", "_"))
+	// Historical UI writes use the OpenAPI apiKey spelling; preserve their API-key semantics.
+	if normalized == "apikey" {
+		return "api_key"
+	}
 	if normalized == "mutualtls" || normalized == "mutual_tls" {
 		return "mtls"
 	}
@@ -541,8 +540,9 @@ func defaultBucketID(ctx context.Context, s store.Store) (uuid.UUID, error) {
 	return uuid.Nil, errors.New("no default bucket found")
 }
 
+// buildEncryptedSecret keeps plaintext out of storage and replaces export policy with the value.
 func buildEncryptedSecret(bucketID uuid.UUID, payload SecretUpsertPayload, masterKey []byte) (store.WorkspaceSecret, error) {
-	// Secrets are write-only in Engine reads, so the handler encrypts once at
+	// Ordinary reads expose metadata only, so the handler encrypts once at
 	// the boundary and Store never receives plaintext credential material.
 	wrappedDEK, dek, err := store.WrapDEK(masterKey)
 	if err != nil {
@@ -557,7 +557,8 @@ func buildEncryptedSecret(bucketID uuid.UUID, payload SecretUpsertPayload, maste
 			BucketID:       bucketID,
 			ServiceID:      payload.ServiceID,
 			KeyName:        payload.KeyName,
-			CredentialType: payload.CredentialType,
+			CredentialType: canonicalSecretCredentialType(payload.CredentialType),
+			Exportable:     payload.Exportable,
 			ExpiresAt:      payload.ExpiresAt,
 		},
 		EncryptedDEK:   wrappedDEK,
@@ -627,4 +628,42 @@ func DeleteSecretHandler(s store.Store) http.HandlerFunc {
 
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// validateSingleSecretRequest rejects unsupported export policy and paired writes before any credential mutation.
+func validateSingleSecretRequest(w http.ResponseWriter, ctx context.Context, payload SecretUpsertPayload) bool {
+	// Expired-at-write credentials can never become usable and are rejected early.
+	if payload.ExpiresAt != nil && payload.ExpiresAt.Before(time.Now()) {
+		writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_secret_expiry", "expires_at must be in the future.", "Choose a future RFC3339 expiry or omit expires_at.", "secret_upsert", "", "not_committed", "")
+		return false
+	}
+	// Export is opt-in and limited to user-supplied API keys on the provider route.
+	if payload.Exportable && canonicalSecretCredentialType(payload.CredentialType) != "api_key" {
+		http.Error(w, "only API keys can be exportable", http.StatusBadRequest)
+		return false
+	}
+	// Paired credentials must use the atomic bulk endpoint to avoid partial state.
+	if credentialTypeRequiresPair(payload.CredentialType) {
+		writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "paired_credentials_required", "Paired credentials must be saved together.", "Use the paired credential fields in one secret-set command.", "secret_upsert", "", "not_committed", "")
+		return false
+	}
+
+	return true
+}
+
+// validateSecretPayload checks one bulk row without admitting unsupported secret export families.
+func validateSecretPayload(payload SecretUpsertPayload, now time.Time) error {
+	// Bulk writes cannot opt paired credentials or OAuth material into retrieval.
+	if payload.Exportable && canonicalSecretCredentialType(payload.CredentialType) != "api_key" {
+		return errors.New("only API keys can be exportable")
+	}
+	// Required identity and value prevent ambiguous credential writes.
+	if payload.ServiceID == uuid.Nil || strings.TrimSpace(payload.KeyName) == "" || secretValueMissing(payload) {
+		return errors.New("service_id, key_name, and value are required")
+	}
+	// Expired-at-write rows cannot enter an otherwise valid bulk family.
+	if payload.ExpiresAt != nil && payload.ExpiresAt.Before(now) {
+		return errors.New("expires_at must be in the future")
+	}
+	return nil
 }

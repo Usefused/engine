@@ -21,7 +21,7 @@ export function FocusedBucketSecret({bucketID,name,canManage,saving,onSave,onClo
   // A deep link cannot create a missing variable or bypass credential management authority.
   if(!entry || !canManage || saving || !value)return;
   setError("");
-  try{await onSave({keyName:name,value,expiresAt:entry.expires_at||undefined});setValue("");setSaved(true);}
+  try{await onSave({keyName:name,value,exportable:entry.exportable === true,expiresAt:entry.expires_at||undefined});setValue("");setSaved(true);}
   catch(cause){setError(String(cause));}
  }
  return <section className="m-4 space-y-3 rounded-lg border border-violet-200 bg-violet-50/40 p-4"><div className="flex items-center justify-between gap-3"><h3 className="break-all font-mono text-sm font-semibold text-slate-900">{name}</h3><button type="button" onClick={onClose} className="text-xs text-slate-500">Close</button></div>

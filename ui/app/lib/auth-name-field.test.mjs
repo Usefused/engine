@@ -101,7 +101,7 @@ test("static storage metadata remains honest when keys are absent or contain mar
 test("static secret rows expose stored keys without fetching or revealing credentials", () => {
   const list = readFileSync(new URL("../components/buckets/BucketEntryList.tsx", import.meta.url), "utf8");
   const queries = readFileSync(new URL("./buckets.ts", import.meta.url), "utf8");
-  assert.match(list, /storedSecret: \{ key_name: item\.key_name, key_names: item\.key_names \}/);
+  assert.match(list, /storedSecret: item/);
   assert.match(list, /<StoredSecretKeys secret=\{entry\.storedSecret\}/);
   assert.match(list, /value: "\*{8}"/);
   const projection = queries.match(/secretMetaPage\([^)]*\)\s*\{\s*total\s*items\s*\{([^}]+)\}/);

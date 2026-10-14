@@ -1245,6 +1245,7 @@ const workspaceConnectionProfileSelection = `
 `;
 
 export interface SecretMeta {
+  exportable?: boolean;
   service_name?: string | null;
   service_slug?: string | null;  id: string;
   workspace_id?: string;
@@ -2005,6 +2006,7 @@ export const api = {
         method: "DELETE",
       }),
 
+    /** Stores explicit retrieval policy together with an API key. */
     upsertSecret: (payload: {
       bucketId: string;
       serviceId: string;
@@ -2012,6 +2014,7 @@ export const api = {
       credentialType: string;
       value: string;
       expiresAt?: string;
+      exportable?: boolean;
     }) =>
       req<void>("/workspace/secrets", {
         method: "PUT",
@@ -2022,6 +2025,7 @@ export const api = {
           credential_type: payload.credentialType,
           value: payload.value,
           expires_at: payload.expiresAt || undefined,
+          exportable: payload.exportable === true,
         }),
       }),
 
@@ -2061,6 +2065,7 @@ export const api = {
       keyName: string;
       value: string;
       expiresAt?: string;
+      exportable?: boolean;
     }) =>
       req<void>(
         `/workspace/buckets/${encodeURIComponent(payload.bucketId)}/secrets`,
@@ -2070,16 +2075,27 @@ export const api = {
             key_name: payload.keyName,
             value: payload.value,
             expires_at: payload.expiresAt || undefined,
+            exportable: payload.exportable === true,
           }),
         }
       ),
 
+    /** Retrieves plaintext only on explicit user action; never uses a shared metadata cache. */
+    revealBucketSecret: (bucketId: string, secretId: string, signal?: AbortSignal) =>
+      req<{ value: string }>(`/workspace/buckets/${encodeURIComponent(bucketId)}/secrets/${encodeURIComponent(secretId)}/reveal`, { method: "POST", cache: "no-store", redirect: "error", signal }),
+
+    /** Updates retrieval policy without reading or replacing credential material. */
+    setSecretExportable: (bucketId: string, secretId: string, exportable: boolean) =>
+      req<void>(`/workspace/buckets/${encodeURIComponent(bucketId)}/secrets/${encodeURIComponent(secretId)}/exportable`, { method: "PUT", body: JSON.stringify({ exportable }) }),
+
+    /** Bulk writes preserve per-key retrieval consent and leave paired credentials private. */
     upsertSecrets: (payload: {
       bucketId: string;
       secrets: Array<{
         serviceId: string;
         keyName: string;
         credentialType: string;
+        exportable?: boolean;
         value: string;
         expiresAt?: string;
       }>;
@@ -2095,6 +2111,7 @@ export const api = {
               service_id: secret.serviceId,
               key_name: secret.keyName,
               credential_type: secret.credentialType,
+              exportable: secret.exportable === true,
               value: secret.value,
               expires_at: secret.expiresAt || undefined,
             })),

@@ -203,6 +203,12 @@ var controlRESTPolicies = []controlRoutePolicy{
 		pathRequirement(accesscontrol.PermissionBucketManage, accesscontrol.ResourceBucket, "bucket_id"),
 	}},
 	// Generic secret mutation is independently authorized against the explicit bucket resource.
+	{http.MethodPost, "/workspace/buckets/{bucket_id}/secrets/{secret_id}/reveal", false, []routeRequirement{
+		pathRequirement(accesscontrol.PermissionCredentialsReveal, accesscontrol.ResourceBucket, "bucket_id"),
+	}},
+	{http.MethodPut, "/workspace/buckets/{bucket_id}/secrets/{secret_id}/exportable", false, []routeRequirement{
+		pathRequirement(accesscontrol.PermissionCredentialsManage, accesscontrol.ResourceBucket, "bucket_id"),
+	}},
 	{http.MethodPut, "/workspace/buckets/{bucket_id}/secrets", false, []routeRequirement{
 		pathRequirement(accesscontrol.PermissionCredentialsManage, accesscontrol.ResourceBucket, "bucket_id"),
 	}},
@@ -453,9 +459,9 @@ func authorizeControlRequirements(w http.ResponseWriter, r *http.Request, record
 	return false
 }
 
+// serveAuthorizedControlRequest holds secret disclosures until their final audit is durable.
 func serveAuthorizedControlRequest(w http.ResponseWriter, r *http.Request, next http.Handler, recorder accesscontrol.AuditRecorder, actor accesscontrol.Actor, requirements []accesscontrol.Requirement, policy string) {
-	mutation := isControlMutation(r.Method)
-	sensitiveRead := !mutation && requiresSensitiveReadAudit(requirements)
+	mutation, sensitiveRead := controlRequestAuditMode(r, requirements)
 	authorizedRequest := requestWithControlAuditEvidence(r, requirements, mutation)
 	if !mutation && !sensitiveRead {
 		next.ServeHTTP(w, authorizedRequest)
@@ -623,6 +629,7 @@ func applyMutationAuditEvidence(ctx context.Context, event *accesscontrol.AuditE
 		return
 	}
 	applyConnectBrandingAuditEvidence(event, evidence.ConnectBrandingChanges)
+	applySecretExportAuditEvidence(event, evidence)
 	if event.Outcome == accesscontrol.AuditFailed && evidence.Cancelled {
 		event.Outcome = accesscontrol.AuditCancelled
 		event.ReasonCode = "request_cancelled"

@@ -63,6 +63,7 @@ export type BucketEntryKind = "secret" | "value" | "bucket_secret";
 export type BucketDetailTab = "secrets" | "env" | "connected-users";
 
 export type SecretFormPayload = {
+  exportable?: boolean;
   serviceId: string;
   keyName: string;
   credentialType: string;
@@ -86,6 +87,7 @@ export type CredentialFamilyFormPayload = {
 // credential (e.g. for ${bucket.secrets.<key>} references) rather than a
 // per-service credential.
 export type BucketSecretFormPayload = {
+  exportable?: boolean;
   keyName: string;
   value: string;
   expiresAt?: string;
@@ -194,7 +196,7 @@ function readBucketSecrets(
       `query($bucketId: String!, $limit: Int!, $offset: Int!) {
         secretMetaPage(bucket_id: $bucketId, limit: $limit, offset: $offset) {
           total
-          items { id bucket_id service_id service_name service_slug key_name key_names credential_type last_used_at expires_at created_at updated_at }
+          items { id bucket_id service_id service_name service_slug key_name key_names credential_type exportable last_used_at expires_at created_at updated_at }
         }
       }`,
       { bucketId, limit: page.limit, offset: page.offset }

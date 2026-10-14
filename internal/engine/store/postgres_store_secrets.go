@@ -13,8 +13,8 @@ import (
 
 const upsertSecretSQL = `
 	INSERT INTO fused_workspace_secrets
-	(bucket_id, service_id, key_name, credential_type, encrypted_dek, encrypted_value, expires_at)
-	SELECT b.id, $2, $3, $4, $5, $6, $7
+	(bucket_id, service_id, key_name, credential_type, encrypted_dek, encrypted_value, expires_at, exportable)
+	SELECT b.id, $2, $3, $4, $5, $6, $7, $8
 	FROM fused_buckets b
 	WHERE b.id = $1
 	ON CONFLICT ON CONSTRAINT uq_workspace_secrets
@@ -23,6 +23,7 @@ const upsertSecretSQL = `
 		encrypted_dek = EXCLUDED.encrypted_dek,
 		encrypted_value = EXCLUDED.encrypted_value,
 		expires_at = EXCLUDED.expires_at,
+		exportable = EXCLUDED.exportable,
 		updated_at = NOW()
 `
 
@@ -35,13 +36,14 @@ const upsertSecretsSQL = `
 			credential_type text,
 			encrypted_dek text,
 			encrypted_value text,
-			expires_at timestamptz
+			expires_at timestamptz,
+			exportable boolean
 		)
 	), inserted AS (
 		INSERT INTO fused_workspace_secrets
-		(bucket_id, service_id, key_name, credential_type, encrypted_dek, encrypted_value, expires_at)
+		(bucket_id, service_id, key_name, credential_type, encrypted_dek, encrypted_value, expires_at, exportable)
 		SELECT bucket.id, input.service_id, input.key_name, input.credential_type,
-		       input.encrypted_dek, input.encrypted_value, input.expires_at
+		       input.encrypted_dek, input.encrypted_value, input.expires_at, input.exportable
 		FROM input
 		JOIN fused_buckets bucket ON bucket.id = input.bucket_id
 		ON CONFLICT ON CONSTRAINT uq_workspace_secrets
@@ -50,6 +52,7 @@ const upsertSecretsSQL = `
 			encrypted_dek = EXCLUDED.encrypted_dek,
 			encrypted_value = EXCLUDED.encrypted_value,
 			expires_at = EXCLUDED.expires_at,
+			exportable = EXCLUDED.exportable,
 			updated_at = NOW()
 		RETURNING 1
 	)
@@ -57,6 +60,7 @@ const upsertSecretsSQL = `
 `
 
 type bulkSecretInput struct {
+	Exportable     bool       `json:"exportable"`
 	BucketID       uuid.UUID  `json:"bucket_id"`
 	ServiceID      uuid.UUID  `json:"service_id"`
 	KeyName        string     `json:"key_name"`
@@ -66,6 +70,7 @@ type bulkSecretInput struct {
 	ExpiresAt      *time.Time `json:"expires_at"`
 }
 
+// UpsertSecret replaces the value and its export policy together.
 func (s *postgresStore) UpsertSecret(ctx context.Context, secret WorkspaceSecret) error {
 	return execUpsertSecret(ctx, s.db, secret)
 }
@@ -127,7 +132,7 @@ func execUpsertSecrets(ctx context.Context, exec secretBatchExec, secrets []Work
 		payload = append(payload, bulkSecretInput{
 			BucketID: secret.BucketID, ServiceID: secret.ServiceID, KeyName: secret.KeyName,
 			CredentialType: secret.CredentialType, EncryptedDEK: secret.EncryptedDEK,
-			EncryptedValue: secret.EncryptedValue, ExpiresAt: secret.ExpiresAt,
+			EncryptedValue: secret.EncryptedValue, ExpiresAt: secret.ExpiresAt, Exportable: secret.Exportable,
 		})
 	}
 	encoded, err := json.Marshal(payload)
@@ -152,10 +157,12 @@ func execUpsertSecrets(ctx context.Context, exec secretBatchExec, secrets []Work
 func execUpsertSecret(ctx context.Context, exec secretExec, secret WorkspaceSecret) error {
 	// Bucket ownership is authoritative. Callers do not get to supply a
 	// duplicate workspace identity that could disagree with the singleton Engine.
-	tag, err := exec.Exec(ctx, upsertSecretSQL, secret.BucketID, secret.ServiceID, secret.KeyName, secret.CredentialType, secret.EncryptedDEK, secret.EncryptedValue, secret.ExpiresAt)
+	tag, err := exec.Exec(ctx, upsertSecretSQL, secret.BucketID, secret.ServiceID, secret.KeyName, secret.CredentialType, secret.EncryptedDEK, secret.EncryptedValue, secret.ExpiresAt, secret.Exportable)
+	// Storage failures must not be reported as a successful replacement.
 	if err != nil {
 		return err
 	}
+	// A missing bucket must not silently discard a credential write.
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("%w: %s", ErrBucketNotFound, secret.BucketID)
 	}

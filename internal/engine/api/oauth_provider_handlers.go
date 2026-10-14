@@ -307,6 +307,7 @@ var oauthScopeDescriptions = map[string]string{
 	"bucket.values.read":            "Read bucket values",
 	"bucket.use":                    "Use buckets",
 	"bucket.manage":                 "Manage buckets",
+	"credentials.reveal":            "Retrieve exportable secrets",
 	"credentials.metadata.read":     "View credential metadata",
 	"credentials.manage":            "Manage credentials",
 	"connection.read":               "View connections",

@@ -1132,9 +1132,10 @@ func idempotentExecutionInsertArgs(exec *models.IdempotentExecution) []any {
 	}
 }
 
+// ListSecretMeta projects export policy without loading credential values.
 func (s *postgresStore) ListSecretMeta(ctx context.Context, bucketID uuid.UUID) ([]WorkspaceSecretMeta, error) {
 	query := `
-		SELECT id,  bucket_id, service_id, key_name, credential_type, last_used_at, expires_at, created_at, updated_at
+		SELECT id,  bucket_id, service_id, key_name, credential_type, last_used_at, expires_at, created_at, updated_at, exportable
 		FROM fused_workspace_secrets
 		WHERE bucket_id = $1
 	`
@@ -1272,6 +1273,7 @@ func (s *postgresStore) GetAppBucketCredentialPresence(ctx context.Context, buck
 	return presence, rows.Err()
 }
 
+// ListSecretMetaPage projects export policy without loading credential values.
 func (s *postgresStore) ListSecretMetaPage(ctx context.Context, bucketID uuid.UUID, limit, offset int) ([]WorkspaceSecretMeta, int, error) {
 	const credentialRows = `
 		SELECT *, CASE
@@ -1296,7 +1298,7 @@ func (s *postgresStore) ListSecretMetaPage(ctx context.Context, bucketID uuid.UU
 		WITH credential_rows AS (` + credentialRows + `)
 		SELECT (ARRAY_AGG(id ORDER BY id))[1],  bucket_id, service_id, family_key,
 		       credential_type, MAX(last_used_at), MIN(expires_at), MIN(created_at), MAX(updated_at),
-		       ARRAY_AGG(key_name ORDER BY key_name)
+		       ARRAY_AGG(key_name ORDER BY key_name), BOOL_AND(exportable)
 		FROM credential_rows
 		GROUP BY  bucket_id, service_id, family_key, credential_type
 		ORDER BY MAX(updated_at) DESC, family_key ASC
@@ -1311,13 +1313,14 @@ func (s *postgresStore) ListSecretMetaPage(ctx context.Context, bucketID uuid.UU
 	return metas, total, err
 }
 
+// collectSecretCredentialMetas projects export policy without loading credential values.
 func collectSecretCredentialMetas(rows pgx.Rows) ([]WorkspaceSecretMeta, error) {
 	var metas []WorkspaceSecretMeta
 	for rows.Next() {
 		var meta WorkspaceSecretMeta
 		if err := rows.Scan(
 			&meta.ID, &meta.BucketID, &meta.ServiceID, &meta.KeyName, &meta.CredentialType,
-			&meta.LastUsedAt, &meta.ExpiresAt, &meta.CreatedAt, &meta.UpdatedAt, &meta.KeyNames,
+			&meta.LastUsedAt, &meta.ExpiresAt, &meta.CreatedAt, &meta.UpdatedAt, &meta.KeyNames, &meta.Exportable,
 		); err != nil {
 			return nil, err
 		}
@@ -1326,13 +1329,14 @@ func collectSecretCredentialMetas(rows pgx.Rows) ([]WorkspaceSecretMeta, error) 
 	return metas, rows.Err()
 }
 
+// collectSecretMetas projects export policy without loading credential values.
 func collectSecretMetas(rows pgx.Rows) ([]WorkspaceSecretMeta, error) {
 	var metas []WorkspaceSecretMeta
 	for rows.Next() {
 		var meta WorkspaceSecretMeta
 		if err := rows.Scan(
 			&meta.ID, &meta.BucketID, &meta.ServiceID, &meta.KeyName, &meta.CredentialType,
-			&meta.LastUsedAt, &meta.ExpiresAt, &meta.CreatedAt, &meta.UpdatedAt,
+			&meta.LastUsedAt, &meta.ExpiresAt, &meta.CreatedAt, &meta.UpdatedAt, &meta.Exportable,
 		); err != nil {
 			return nil, err
 		}

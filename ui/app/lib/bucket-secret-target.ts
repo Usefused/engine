@@ -6,7 +6,7 @@ export async function readNamedBucketSecret(bucketID: string, key: string): Prom
   for(let offset=0;offset<10000;offset+=limit){
     const {secretMetaPage:page}=await api.mcpGraphql<{secretMetaPage:GraphQLPage<SecretMeta>}>(`query NamedBucketSecretPage($bucketId: String!, $limit: Int!, $offset: Int!) {
       secretMetaPage(bucket_id:$bucketId,limit:$limit,offset:$offset) {
-        total items { id bucket_id service_id key_name key_names credential_type expires_at }
+        total items { id bucket_id service_id key_name key_names credential_type exportable expires_at }
       }
     }`,{bucketId:bucketID,limit,offset});
     const found=page.items.find((item)=>item.credential_type==="bucket_secret" && item.key_name===`secret:${key}`);

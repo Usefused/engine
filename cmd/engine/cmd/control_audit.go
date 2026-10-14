@@ -243,6 +243,7 @@ func recordAuditPersistenceFailure(ctx context.Context, errorType string, err er
 	span.SetStatus(codes.Error, "audit persistence failed")
 }
 
+// newControlAuditEvent records identity and outcome while excluding credential material.
 func newControlAuditEvent(r *http.Request, actor accesscontrol.Actor, action, path string, requirements []accesscontrol.Requirement, outcome accesscontrol.AuditOutcome, status int, reason string) accesscontrol.AuditEvent {
 	event := accesscontrol.AuditEvent{
 		ID:             uuid.New(),
@@ -250,6 +251,10 @@ func newControlAuditEvent(r *http.Request, actor accesscontrol.Actor, action, pa
 		Action: action, RequestID: middleware.GetReqID(r.Context()), Method: r.Method,
 		Path: path, Outcome: outcome, StatusCode: status, ReasonCode: reason,
 		Metadata: map[string]any{"requirements": len(requirements), "authorization_revision": actor.Authorization.Revision},
+	}
+	// Only a parsed UUID may identify a secret; names and values never enter audit metadata.
+	if secretID, err := auditSecretID(r.URL.Path, path); err == nil {
+		event.Metadata["secret_id"] = secretID.String()
 	}
 	if spanContext := trace.SpanContextFromContext(r.Context()); spanContext.IsValid() {
 		event.TraceID = spanContext.TraceID().String()

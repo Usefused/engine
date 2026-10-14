@@ -189,6 +189,18 @@ export function BucketEntryComposer({
           setValue={setValue}
           setBucketSecret={setBucketSecret}
         />
+        {/* Retrieval opt-in is offered only for the supported credential families. */}
+        {(kind === "bucket_secret" || (kind === "secret" && selectedAuthOption?.auth_type === "api_key")) && (
+          <label className="flex items-start gap-2 text-xs text-slate-600">
+            <input type="checkbox" disabled={saving} checked={(kind === "bucket_secret" ? bucketSecret.exportable : secret.exportable) === true}
+              onChange={/** Preserve independent opt-in state for generic and provider forms. */ (event) => {
+                // Generic secrets and provider keys have separate form state.
+                if (kind === "bucket_secret") setBucketSecret({ ...bucketSecret, exportable: event.target.checked });
+                else setSecret({ ...secret, exportable: event.target.checked });
+              }} />
+            <span>Allow secret retrieval<br /><span className="text-slate-400">Callers with reveal permission can use this key outside Fused.</span></span>
+          </label>
+        )}
         {/* Env values are resolved live and never expire; only secrets do. */}
         {kind !== "value" && (
           <ExpiryInput

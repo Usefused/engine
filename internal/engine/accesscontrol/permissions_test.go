@@ -18,9 +18,9 @@ func TestPermissionCatalogueContainsUniqueValidNames(t *testing.T) {
 		}
 		seen[permission] = struct{}{}
 	}
-	// Private diagnostics add a separate grant without broadening ordinary read access.
-	if len(permissions) != 48 {
-		t.Fatalf("permission catalogue contains %d entries, want 48", len(permissions))
+	// Secret retrieval adds a separate grant without broadening use or management access.
+	if len(permissions) != 49 {
+		t.Fatalf("permission catalogue contains %d entries, want 49", len(permissions))
 	}
 }
 

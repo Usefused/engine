@@ -7,6 +7,7 @@ import type {
 type BucketEntryKind = "secret" | "value" | "bucket_secret";
 
 export type SecretFormPayload = {
+  exportable?: boolean;
   serviceId: string;
   keyName: string;
   credentialType: string;
@@ -22,6 +23,7 @@ export type ValueFormPayload = {
 };
 
 export type SecretEntryForm = {
+  exportable?: boolean;
   serviceId: string;
   credentialType: string;
   value: string;
@@ -44,6 +46,7 @@ export type ValueEntryForm = {
 // A bucket secret has no service selection or credential-type qualifier, so
 // it gets its own minimal form shape instead of reusing SecretEntryForm.
 export type BucketSecretEntryForm = {
+  exportable?: boolean;
   keyName: string;
   value: string;
   expiresAt: string;
@@ -55,6 +58,7 @@ export function validateEntry(kind: BucketEntryKind, secret: SecretEntryForm, va
   return validateValue(value);
 }
 
+/** Only API-key selections may carry explicit retrieval consent into provider writes. */
 export function serializeSecretPayloads(form: SecretEntryForm, authOption: ServiceAuthOption): SecretFormPayload[] {
   if (authOption.auth_type === "basic") return pairedSecretPayloads(form, authOption, [
     ["username", form.username],
@@ -69,6 +73,7 @@ export function serializeSecretPayloads(form: SecretEntryForm, authOption: Servi
     keyName: authOption.key_name,
     credentialType: authOption.credential_type,
     value: form.value,
+    exportable: authOption.auth_type === "api_key" && form.exportable === true,
     expiresAt: serializedExpiry(form),
   }];
 }
@@ -97,9 +102,11 @@ export function serializeCredentialFamilyPayload(form: SecretEntryForm, authOpti
   };
 }
 
+/** Generic secrets default to private unless the user explicitly permits retrieval. */
 export function serializeBucketSecretPayload(form: BucketSecretEntryForm): BucketSecretFormPayload {
   return {
     keyName: form.keyName.trim(),
+    exportable: form.exportable === true,
     value: form.value,
     expiresAt: form.expiresAt ? new Date(form.expiresAt).toISOString() : undefined,
   };

@@ -1070,7 +1070,7 @@
       "file": "app/lib/bucket-secret-target.ts",
       "call": 1,
       "variant": 1,
-      "document": "query NamedBucketSecretPage($bucketId: String!, $limit: Int!, $offset: Int!) {\n      secretMetaPage(bucket_id:$bucketId,limit:$limit,offset:$offset) {\n        total items { id bucket_id service_id key_name key_names credential_type expires_at }\n      }\n    }"
+      "document": "query NamedBucketSecretPage($bucketId: String!, $limit: Int!, $offset: Int!) {\n      secretMetaPage(bucket_id:$bucketId,limit:$limit,offset:$offset) {\n        total items { id bucket_id service_id key_name key_names credential_type exportable expires_at }\n      }\n    }"
     },
     {
       "endpoint": "engine",
@@ -1098,7 +1098,7 @@
       "file": "app/lib/buckets.ts",
       "call": 4,
       "variant": 1,
-      "document": "query($bucketId: String!, $limit: Int!, $offset: Int!) {\n        secretMetaPage(bucket_id: $bucketId, limit: $limit, offset: $offset) {\n          total\n          items { id bucket_id service_id service_name service_slug key_name key_names credential_type last_used_at expires_at created_at updated_at }\n        }\n      }"
+      "document": "query($bucketId: String!, $limit: Int!, $offset: Int!) {\n        secretMetaPage(bucket_id: $bucketId, limit: $limit, offset: $offset) {\n          total\n          items { id bucket_id service_id service_name service_slug key_name key_names credential_type exportable last_used_at expires_at created_at updated_at }\n        }\n      }"
     },
     {
       "endpoint": "engine",

@@ -190,6 +190,8 @@ var allowedAuditMetadata = map[string]struct{}{
 	"changed":                {},
 	"user_id":                {},
 	"credential_id":          {},
+	"exportable":             {},
+	"secret_id":              {},
 	"membership_role":        {},
 	"created_user":           {},
 	// Hosted-connect branding records only fixed field-change facts; the

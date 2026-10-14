@@ -501,6 +501,7 @@ var workspaceNotificationInboxGraphQLType = graphql.NewObject(graphql.ObjectConf
 var secretMetaGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "SecretMeta",
 	Fields: graphql.Fields{
+		"exportable":      &graphql.Field{Type: graphql.Boolean},
 		"id":              &graphql.Field{Type: graphql.String},
 		"bucket_id":       &graphql.Field{Type: graphql.String},
 		"service_id":      &graphql.Field{Type: graphql.String},
@@ -527,6 +528,7 @@ var secretMetaPageGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 var secretUpsertGraphQLInput = graphql.NewInputObject(graphql.InputObjectConfig{
 	Name: "SecretUpsertInput",
 	Fields: graphql.InputObjectConfigFieldMap{
+		"exportable":      &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
 		"service_id":      &graphql.InputObjectFieldConfig{Type: graphql.NewNonNull(graphql.String)},
 		"key_name":        &graphql.InputObjectFieldConfig{Type: graphql.NewNonNull(graphql.String)},
 		"credential_type": &graphql.InputObjectFieldConfig{Type: graphql.NewNonNull(graphql.String)},
@@ -2336,7 +2338,9 @@ func secretPayloadFromGraphQLInput(item interface{}) (SecretUpsertPayload, error
 	if err != nil {
 		return SecretUpsertPayload{}, errors.New("invalid expires_at")
 	}
+	exportable, _ := raw["exportable"].(bool)
 	return SecretUpsertPayload{
+		Exportable:     exportable,
 		ServiceID:      serviceID,
 		KeyName:        strings.TrimSpace(fmt.Sprint(raw["key_name"])),
 		CredentialType: strings.TrimSpace(fmt.Sprint(raw["credential_type"])),
@@ -3097,14 +3101,14 @@ func projectGraphQLBucketValues(values []store.BucketValue) []map[string]interfa
 }
 
 // projectGraphQLSecretMetas keeps secret projections metadata-only by design;
-// values remain write-only in Engine storage.
+// plaintext is available only through the separately authorized reveal route.
 func projectGraphQLSecretMetas(secrets []store.WorkspaceSecretMeta) []map[string]interface{} {
 	items := make([]map[string]interface{}, 0, len(secrets))
 	for _, secret := range secrets {
 		items = append(items, map[string]interface{}{
 			"id":        secret.ID.String(),
 			"bucket_id": secret.BucketID.String(), "service_id": secret.ServiceID.String(),
-			"key_name": secret.KeyName, "key_names": secret.KeyNames, "credential_type": secret.CredentialType,
+			"key_name": secret.KeyName, "key_names": secret.KeyNames, "credential_type": secret.CredentialType, "exportable": secret.Exportable,
 			"last_used_at": formatOptionalTime(secret.LastUsedAt), "expires_at": formatOptionalTime(secret.ExpiresAt),
 			"created_at": formatGraphQLTime(secret.CreatedAt), "updated_at": formatGraphQLTime(secret.UpdatedAt),
 		})

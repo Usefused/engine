@@ -89,6 +89,7 @@ type BucketDetailsPermissions = {
   readServices: boolean;
   manageBucket: boolean;
   manageCredentials: boolean;
+  revealCredentials: boolean;
   manageValues: boolean;
   manageConnections: boolean;
 };
@@ -258,6 +259,8 @@ function BucketTabPanel(props: BucketDetailsPanelProps) {
       page={props.activeTab === "secrets" ? props.secretPage : props.valuePage}
       pageSize={props.pageSize}
       onRemoveSecret={props.onRemoveSecret}
+      canReveal={props.permissions.revealCredentials}
+      onSecretPolicyChanged={/** Reload only metadata after a policy change. */ () => props.bucket && props.onRefresh(props.bucket.id)}
       onRemoveValue={props.onRemoveValue}
       onPageChange={
         props.activeTab === "secrets"

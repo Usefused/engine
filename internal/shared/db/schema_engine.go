@@ -1981,6 +1981,8 @@ func engineSchemaQueries() []string {
 		`CREATE INDEX IF NOT EXISTS idx_fused_mcp_sessions_cursor
 			ON fused_mcp_sessions(app_id, started_at DESC, id DESC);`,
 	}
+	// Existing credentials remain private until an administrator explicitly opts in.
+	queries = append(queries, `ALTER TABLE fused_workspace_secrets ADD COLUMN IF NOT EXISTS exportable boolean NOT NULL DEFAULT false;`)
 	queries = append(queries, oauthProviderSchemaQueries()...)
 	queries = append(queries, managedAuthBrokerSchemaQueries()...)
 	return queries

@@ -22,6 +22,7 @@ const (
 	PermissionBucketManage            Permission = "bucket.manage"
 	PermissionCredentialsMetadataRead Permission = "credentials.metadata.read"
 	PermissionCredentialsManage       Permission = "credentials.manage"
+	PermissionCredentialsReveal       Permission = "credentials.reveal"
 	PermissionConnectionRead          Permission = "connection.read"
 	PermissionConnectionManage        Permission = "connection.manage"
 	// Generic app actions are internal dispatch templates, never grantable OAuth scopes.
@@ -83,6 +84,7 @@ var (
 		PermissionBucketManage,
 		PermissionCredentialsMetadataRead,
 		PermissionCredentialsManage,
+		PermissionCredentialsReveal,
 		PermissionConnectionRead,
 		PermissionConnectionManage,
 		PermissionAppSDKRead,

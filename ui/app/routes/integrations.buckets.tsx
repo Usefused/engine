@@ -139,6 +139,7 @@ export default function BucketsPage() {
     "BUCKET",
     selectedBucketId
   );
+  const canRevealCredentials = hasResourcePermission(access, "credentials.reveal", "BUCKET", selectedBucketId);
   const canManageConnections = hasResourcePermission(
     access,
     "connection.manage",
@@ -593,6 +594,7 @@ export default function BucketsPage() {
           readServices: contentAccess.services,
           manageBucket: canManageBucket,
           manageCredentials: canManageCredentials,
+          revealCredentials: canRevealCredentials,
           manageValues: contentAccess.values && canManageBucket,
           manageConnections: canManageConnections,
         }}

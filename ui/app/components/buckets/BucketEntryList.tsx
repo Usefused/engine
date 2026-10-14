@@ -1,3 +1,4 @@
+import { BucketSecretAccess } from "~/components/buckets/BucketSecretAccess";
 import { Copy } from "lucide-react";
 import { type ActivatedService, type BucketValue, type SecretMeta } from "~/lib/api";
 import { bucketSecretIdentity } from "~/lib/bucket-service-identity";
@@ -20,6 +21,8 @@ type BucketEntryListProps = {
   onRemoveValue: (item: BucketValue) => void;
   onPageChange: (page: number) => void;
   canRemove?: boolean;
+  canReveal?: boolean;
+  onSecretPolicyChanged?: () => void;
 };
 
 type EntryRowModel = {
@@ -28,7 +31,7 @@ type EntryRowModel = {
   name: string;
   detail: string;
   value: string;
-  storedSecret?: Pick<SecretMeta, "key_name" | "key_names">;
+  storedSecret?: SecretMeta;
   onRemove: () => void;
 };
 
@@ -46,6 +49,8 @@ export function BucketEntryList({
   onRemoveValue,
   onPageChange,
   canRemove = true,
+  canReveal = false,
+  onSecretPolicyChanged,
 }: BucketEntryListProps) {
   if (loading)
     return (
@@ -81,7 +86,7 @@ export function BucketEntryList({
     <div>
       <div className="divide-y divide-slate-100">
         {entries.map((entry) => (
-          <EntryRow key={entry.id} entry={entry} canRemove={canRemove} />
+          <EntryRow key={entry.id} entry={entry} canRemove={canRemove} canReveal={canReveal} onSecretPolicyChanged={onSecretPolicyChanged} />
         ))}
       </div>
       <BucketPagination
@@ -129,7 +134,7 @@ function secretEntry(
         ? identity.detail
         : `${identity.detail} · expires ${expiry}`,
     value: "********",
-    storedSecret: { key_name: item.key_name, key_names: item.key_names },
+    storedSecret: item,
     onRemove: () => onRemove(item),
   };
 }
@@ -150,7 +155,7 @@ function valueEntry(
 }
 
 /** Shows masked secrets and separates authorized row options from the removal request. */
-function EntryRow({ entry, canRemove }: { entry: EntryRowModel; canRemove: boolean }) {
+function EntryRow({ entry, canRemove, canReveal, onSecretPolicyChanged }: { entry: EntryRowModel; canRemove: boolean; canReveal: boolean; onSecretPolicyChanged?: () => void }) {
   const actions = bucketEntryActions(entry.kind, entry.value, canRemove);
   return (
     <div className={entryRowGridClass(entry.kind)}>
@@ -168,7 +173,8 @@ function EntryRow({ entry, canRemove }: { entry: EntryRowModel; canRemove: boole
           {entry.storedSecret && <StoredSecretKeys secret={entry.storedSecret} />}
         </div>
       </div>
-      <EntryValue entry={entry} />
+      {/* Eligible secrets expose policy and retrieval only through an explicit, permission-gated dialog. */}
+      {entry.storedSecret ? <BucketSecretAccess key={`${entry.storedSecret.id}-${canRemove}-${canReveal}-${entry.storedSecret.exportable}`} secret={entry.storedSecret} canManage={canRemove} canReveal={canReveal} onChanged={onSecretPolicyChanged} /> : <EntryValue entry={entry} />}
       <div className="flex items-center gap-1">
         {/* Only visible environment values may be copied; secret placeholders are not credentials. */}
         {actions.canCopy && (

@@ -630,6 +630,7 @@ type WorkspaceExecutionPolicyStore interface {
 }
 
 type WorkspaceSecretMeta struct {
+	Exportable     bool
 	ID             uuid.UUID
 	BucketID       uuid.UUID
 	ServiceID      uuid.UUID
@@ -982,6 +983,10 @@ type Store interface {
 	ListBucketValuePage(ctx context.Context, bucketID uuid.UUID, limit, offset int) ([]BucketValue, int, error)
 	ListBucketValuesForBuckets(ctx context.Context, bucketIDs []uuid.UUID) ([]BucketValue, error)
 	DeleteBucketValue(ctx context.Context, bucketID uuid.UUID, serviceID uuid.UUID, keyName string) error
+
+	// Reveal reads bypass runtime caches so policy revocation is effective on the next request.
+	GetExportableSecret(ctx context.Context, bucketID, secretID uuid.UUID) (*WorkspaceSecret, error)
+	SetSecretExportable(ctx context.Context, bucketID, secretID uuid.UUID, exportable bool) (bool, error)
 
 	// Workspace Secret methods
 	UpsertSecret(ctx context.Context, secret WorkspaceSecret) error
