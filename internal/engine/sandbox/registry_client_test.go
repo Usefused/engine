@@ -842,7 +842,7 @@ func TestVerifyServiceExists_ReturnsNameAndCurrentVersion(t *testing.T) {
 	versionID := uuid.New()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{"service":{"id":"` + svcID.String() + `","name":"Test Service","slug":"test/test-service","current_service_version":"2023-01-01","service_versions":[{"id":"` + versionID.String() + `","name":"2023-01-01"}]}}}`))
+		w.Write([]byte(`{"data":{"service":{"id":"` + svcID.String() + `","name":"Test Service","slug":"test-service","canonical_ref":"@test/test-service","current_service_version":"2023-01-01","service_versions":[{"id":"` + versionID.String() + `","name":"2023-01-01"}]}}}`))
 	}))
 	defer ts.Close()
 	t.Setenv("FUSED_ENV", "development")
@@ -855,8 +855,9 @@ func TestVerifyServiceExists_ReturnsNameAndCurrentVersion(t *testing.T) {
 	if name != "Test Service" {
 		t.Errorf("expected name %q, got %q", "Test Service", name)
 	}
-	if slug != "test/test-service" {
-		t.Errorf("expected slug %q, got %q", "test/test-service", slug)
+	// The persisted reference includes its provider rather than a shared bare slug.
+	if slug != "@test/test-service" {
+		t.Errorf("expected slug %q, got %q", "@test/test-service", slug)
 	}
 	if currentVersionTag != "2023-01-01" {
 		t.Errorf("expected current_service_version %q, got %q", "2023-01-01", currentVersionTag)

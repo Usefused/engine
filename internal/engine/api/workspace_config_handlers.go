@@ -290,13 +290,15 @@ type workspaceDesiredBucketSecret struct {
 }
 
 type workspaceDesiredService struct {
-	Key             string
-	ServiceID       uuid.UUID
-	ServiceName     string
-	Public          *bool
-	Versions        []string
-	VersionIDs      map[string]uuid.UUID
-	ExecutionPolicy *workspaceExecutionPolicy
+	// ServiceReference carries Registry-verified identity through the network-free apply transaction.
+	ServiceReference string
+	Key              string
+	ServiceID        uuid.UUID
+	ServiceName      string
+	Public           *bool
+	Versions         []string
+	VersionIDs       map[string]uuid.UUID
+	ExecutionPolicy  *workspaceExecutionPolicy
 	// VersionPolicies is normalized from each workspaceConfigServiceVersion
 	// entry's own Public/ExecutionPolicy override (present only when that
 	// version set either one), with VersionID resolved the same way
@@ -3255,6 +3257,7 @@ func applyWorkspaceConfig(
 	return applied, nil
 }
 
+// upsertDesiredWorkspaceServices persists Registry-verified references so authored aliases cannot collapse provider identities.
 func upsertDesiredWorkspaceServices(
 	ctx context.Context,
 	s store.Store,
@@ -3269,13 +3272,15 @@ func upsertDesiredWorkspaceServices(
 	// webhook (see the loop body below and plans/plan-webhook-kind.md).
 	var applied []appliedWorkspaceWebhook
 	for _, svc := range sortedDesiredServices(desired) {
-		serviceName, err := verifiedWorkspaceServiceName(ctx, verifier, svc, apiKey)
+		serviceName, serviceRef, err := verifiedWorkspaceServiceMetadata(ctx, verifier, svc, apiKey)
+		// No membership write may proceed without authoritative service metadata.
 		if err != nil {
 			return nil, err
 		}
 
 		firstVersion := svc.Versions[0]
-		if err := s.AddWorkspaceServiceVersion(ctx, svc.ServiceID, workspaceServiceSlug(svc.Key), firstVersion, svc.VersionIDs[firstVersion], serviceName, accountID); err != nil {
+		// The verified canonical reference must survive UUID keys and provider-qualified YAML keys alike.
+		if err := s.AddWorkspaceServiceVersion(ctx, svc.ServiceID, serviceRef, firstVersion, svc.VersionIDs[firstVersion], serviceName, accountID); err != nil {
 			return nil, err
 		}
 
@@ -3286,6 +3291,7 @@ func upsertDesiredWorkspaceServices(
 		svcSpan.End()
 
 		for _, version := range svc.Versions[1:] {
+			// Version enablement failures must not report an incomplete desired set as applied.
 			if err := s.EnableWorkspaceServiceVersion(ctx, svc.ServiceID, version, svc.VersionIDs[version], accountID); err != nil {
 				return nil, err
 			}
@@ -3311,19 +3317,12 @@ func upsertDesiredWorkspaceServices(
 	return applied, nil
 }
 
+// workspaceServiceSlug preserves qualified references for callers without Registry verification; UUIDs carry no slug metadata.
 func workspaceServiceSlug(key string) string {
 	key = strings.TrimSpace(key)
+	// An opaque identity is not a human-readable service alias.
 	if _, err := uuid.Parse(key); err == nil {
 		return ""
-	}
-	// Provider qualification is Registry routing metadata. Engine is scoped to
-	// one Registry account, so persisting only the verified bare slug keeps the
-	// local lookup stable without importing cross-account identity semantics.
-	if strings.HasPrefix(key, "@") {
-		parts := strings.SplitN(key, "/", 2)
-		if len(parts) == 2 {
-			return strings.TrimSpace(parts[1])
-		}
 	}
 	return key
 }
@@ -5155,21 +5154,30 @@ func parseWorkspacePlanActions(raw json.RawMessage) (map[string]workspacePlanAct
 	return out, nil
 }
 
-func verifiedWorkspaceServiceName(ctx context.Context, verifier ServiceVerifier, svc workspaceDesiredService, apiKey string) (string, error) {
+// verifiedWorkspaceServiceMetadata uses one existing verification call for both display metadata and provider identity.
+func verifiedWorkspaceServiceMetadata(ctx context.Context, verifier ServiceVerifier, svc workspaceDesiredService, apiKey string) (string, string, error) {
+	// Offline callers retain their exact authored reference without stripping its namespace.
 	if verifier == nil {
-		return svc.ServiceName, nil
-	}
-	name, _, _, _, err := verifier.VerifyServiceExists(ctx, svc.ServiceID, apiKey)
-	if err != nil {
-		if errors.Is(err, sandbox.ErrServiceNotFound) {
-			return "", fmt.Errorf("service %s not found: %w", svc.ServiceID, err)
+		// Preflighted metadata remains authoritative when the transaction deliberately has no network verifier.
+		if svc.ServiceReference != "" {
+			return svc.ServiceName, svc.ServiceReference, nil
 		}
-		return "", fmt.Errorf("verify service %s: %w", svc.ServiceID, err)
+		return svc.ServiceName, workspaceServiceSlug(svc.Key), nil
 	}
+	name, reference, _, _, err := verifier.VerifyServiceExists(ctx, svc.ServiceID, apiKey)
+	// Verification failures must prevent membership writes rather than trusting an authored alias.
+	if err != nil {
+		// Authoritative absence remains distinguishable from Registry transport failures.
+		if errors.Is(err, sandbox.ErrServiceNotFound) {
+			return "", "", fmt.Errorf("service %s not found: %w", svc.ServiceID, err)
+		}
+		return "", "", fmt.Errorf("verify service %s: %w", svc.ServiceID, err)
+	}
+	// Keep authored display names only when Registry omits one; the reference always comes from verification.
 	if name != "" {
-		return name, nil
+		return name, reference, nil
 	}
-	return svc.ServiceName, nil
+	return svc.ServiceName, reference, nil
 }
 
 func managedResourcesAfterApply(desired workspaceDesiredState, previousManaged map[uuid.UUID]workspaceManagedService) workspaceManagedResources {

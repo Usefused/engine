@@ -459,6 +459,7 @@ var ErrServiceNotFound = errors.New("service not found in registry")
 // The API-key argument is retained at this service boundary because callers
 // also use it for local authorization. HTTPRegistryClient.do always replaces
 // it with FUSED_LICENSE_KEY before the request crosses into Registry.
+// The returned service reference is canonical (@provider/slug), suitable for workspace persistence.
 func (c *HTTPRegistryClient) VerifyServiceExists(ctx context.Context, serviceID uuid.UUID, apiKey string) (string, string, string, uuid.UUID, error) {
 	req, err := c.buildVerifyServiceRequest(ctx, serviceID, apiKey)
 	if err != nil {
@@ -479,6 +480,7 @@ func (c *HTTPRegistryClient) VerifyServiceExists(ctx context.Context, serviceID 
 	return decodeVerifyServiceResponse(resp)
 }
 
+// buildVerifyServiceRequest retrieves the provider-qualified identity needed for collision-free workspace membership.
 func (c *HTTPRegistryClient) buildVerifyServiceRequest(ctx context.Context, serviceID uuid.UUID, apiKey string) (*http.Request, error) {
 	query := `
 		query VerifyService($id: String!) {
@@ -486,6 +488,7 @@ func (c *HTTPRegistryClient) buildVerifyServiceRequest(ctx context.Context, serv
 				id
 				name
 				slug
+				canonical_ref
 				current_service_version
 				service_versions {
 					id
@@ -499,11 +502,13 @@ func (c *HTTPRegistryClient) buildVerifyServiceRequest(ctx context.Context, serv
 		Variables: map[string]interface{}{"id": serviceID.String()},
 	}
 	b, err := json.Marshal(reqBody)
+	// Encoding failure must not send a partial verification request.
 	if err != nil {
 		return nil, fmt.Errorf("VerifyServiceExists: failed to marshal query: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(b))
+	// Invalid Registry endpoints cannot provide authoritative service metadata.
 	if err != nil {
 		return nil, fmt.Errorf("VerifyServiceExists: failed to create request: %w", err)
 	}
@@ -513,6 +518,7 @@ func (c *HTTPRegistryClient) buildVerifyServiceRequest(ctx context.Context, serv
 	return req, nil
 }
 
+// decodeVerifyServiceResponse preserves the verified provider namespace alongside the exact current version.
 func decodeVerifyServiceResponse(resp *http.Response) (string, string, string, uuid.UUID, error) {
 	var gr struct {
 		Data struct {
@@ -520,6 +526,7 @@ func decodeVerifyServiceResponse(resp *http.Response) (string, string, string, u
 				ID                    string `json:"id"`
 				Name                  string `json:"name"`
 				Slug                  string `json:"slug"`
+				CanonicalRef          string `json:"canonical_ref"`
 				CurrentServiceVersion string `json:"current_service_version"`
 				ServiceVersions       []struct {
 					ID   string `json:"id"`
@@ -531,25 +538,35 @@ func decodeVerifyServiceResponse(resp *http.Response) (string, string, string, u
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
+	// Malformed responses cannot establish workspace membership.
 	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
 		return "", "", "", uuid.Nil, fmt.Errorf("VerifyServiceExists: failed to decode response: %w", err)
 	}
+	// A GraphQL failure is not proof that the requested service exists.
 	if len(gr.Errors) > 0 {
 		return "", "", "", uuid.Nil, fmt.Errorf("VerifyServiceExists: graphql error: %s", gr.Errors[0].Message)
 	}
+	// Invisible and absent services share the same fail-closed result.
 	if gr.Data.Service == nil {
 		return "", "", "", uuid.Nil, ErrServiceNotFound
 	}
+	reference, err := registryWorkspaceServiceReference(gr.Data.Service.Slug, gr.Data.Service.CanonicalRef)
+	// Never collapse a verified service back into the account-ambiguous bare slug.
+	if err != nil {
+		return "", "", "", uuid.Nil, err
+	}
 	for _, v := range gr.Data.Service.ServiceVersions {
+		// Only the explicitly declared current version can supply the activation pin.
 		if v.Name == gr.Data.Service.CurrentServiceVersion {
 			vid, err := uuid.Parse(v.ID)
+			// Invalid immutable identity cannot become an unpinned activation.
 			if err != nil {
 				return "", "", "", uuid.Nil, fmt.Errorf("VerifyServiceExists: invalid service_version_id: %w", err)
 			}
-			return gr.Data.Service.Name, gr.Data.Service.Slug, gr.Data.Service.CurrentServiceVersion, vid, nil
+			return gr.Data.Service.Name, reference, gr.Data.Service.CurrentServiceVersion, vid, nil
 		}
 	}
-	return gr.Data.Service.Name, gr.Data.Service.Slug, gr.Data.Service.CurrentServiceVersion, uuid.Nil, nil
+	return gr.Data.Service.Name, reference, gr.Data.Service.CurrentServiceVersion, uuid.Nil, nil
 }
 
 type registryServiceVersionEnvelope struct {

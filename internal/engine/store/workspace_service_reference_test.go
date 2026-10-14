@@ -5,9 +5,10 @@ import (
 	"testing"
 )
 
+// TestListWorkspaceServicesQueryNormalizesProviderQualifiedReferencesInSQL keeps batch filtering aware of canonical suffixes.
 func TestListWorkspaceServicesQueryNormalizesProviderQualifiedReferencesInSQL(t *testing.T) {
 	query, args := listWorkspaceServicesQuery([]string{"@acme/github"})
-	for _, fragment := range []string{"unnest($1::text[])", "split_part(input.key, '/', 2)", "s.service_slug"} {
+	for _, fragment := range []string{"unnest($1::text[])", "split_part(s.service_slug, '/', 2)", "s.service_slug"} {
 		if !strings.Contains(query, fragment) {
 			t.Fatalf("query missing %q: %s", fragment, query)
 		}
@@ -17,6 +18,7 @@ func TestListWorkspaceServicesQueryNormalizesProviderQualifiedReferencesInSQL(t 
 	}
 }
 
+// TestAppTokenBindingReusesWorkspaceServiceReferenceSemantics keeps token identity consistent with workspace resolution.
 func TestAppTokenBindingReusesWorkspaceServiceReferenceSemantics(t *testing.T) {
 	// Token issuance must resolve every repeated binding inside its transaction
 	// without inventing a narrower slug grammar than workspace service commands.
@@ -24,7 +26,7 @@ func TestAppTokenBindingReusesWorkspaceServiceReferenceSemantics(t *testing.T) {
 	if !strings.Contains(insertAppTokenBindingsSQL, wantResolver) {
 		t.Fatal("app token binding query does not reuse workspace service resolution")
 	}
-	for _, fragment := range []string{"SELECT DISTINCT key", "input.key LIKE '@%/%'", "split_part(input.key, '/', 2)", "priority_matches = 1"} {
+	for _, fragment := range []string{"SELECT DISTINCT key", "input.key NOT LIKE '@%'", "split_part(service.service_slug, '/', 2)", "priority_matches = 1"} {
 		if !strings.Contains(insertAppTokenBindingsSQL, fragment) {
 			t.Fatalf("app token binding query missing %q", fragment)
 		}

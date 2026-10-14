@@ -61,11 +61,10 @@ const resolveAuthorizedAppScaffoldSelectionsSQL = `
 			WHERE ($4 OR services.service_id = ANY($5::uuid[]))
 			  AND (
 				COALESCE(services.service_slug, '') = requested.service_key
-				OR COALESCE(services.service_name, '') = requested.service_key
-				OR (
-					requested.service_key LIKE '@%/%'
-					AND COALESCE(services.service_slug, '') = split_part(requested.service_key, '/', 2)
-				)
+				-- An explicit provider never falls through to another account's bare alias or display name.
+				OR (requested.service_key NOT LIKE '@%' AND (
+					services.service_name = requested.service_key
+					OR (services.service_slug LIKE '@%/%' AND split_part(services.service_slug, '/', 2) = requested.service_key)))
 			  )
 		) candidate ON TRUE
 		GROUP BY requested.selection_index, requested.service_key

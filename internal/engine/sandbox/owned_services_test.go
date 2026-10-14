@@ -175,6 +175,7 @@ func assertSingleOwnedContractRead(t *testing.T, registry *ownedServiceRegistryS
 	}
 }
 
+// TestFetchOwnedServicesUsesLicensedAccountAndCurrentVersion preserves provider identity alongside the licensed current-version pin.
 func TestFetchOwnedServicesUsesLicensedAccountAndCurrentVersion(t *testing.T) {
 	serviceID := uuid.New()
 	versionID := uuid.New()
@@ -183,7 +184,7 @@ func TestFetchOwnedServicesUsesLicensedAccountAndCurrentVersion(t *testing.T) {
 		authenticated = r.Header.Get("Authorization") == "Bearer license" && r.Header.Get("X-API-Key") == "license"
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"services":{"data":[` +
-			`{"id":"` + serviceID.String() + `","name":"Jira","slug":"jira","current_service_version":"1.0","service_versions":[{"id":"` + versionID.String() + `","name":"1.0"}]},` +
+			`{"id":"` + serviceID.String() + `","name":"Jira","slug":"jira","canonical_ref":"@atlassian/jira","current_service_version":"1.0","service_versions":[{"id":"` + versionID.String() + `","name":"1.0"}]},` +
 			`{"id":"` + uuid.NewString() + `","name":"Draft","slug":"draft","current_service_version":"","service_versions":[]}` +
 			`],"total":2,"page":1,"limit":100}}}`))
 	}))
@@ -201,7 +202,8 @@ func TestFetchOwnedServicesUsesLicensedAccountAndCurrentVersion(t *testing.T) {
 		t.Fatalf("services = %#v", services)
 	}
 	service := services[0]
-	if service.ServiceID != serviceID || service.ServiceVersionID != versionID || service.Version != "1.0" || service.Slug != "jira" {
+	// Recovery must carry the owning provider through activation without changing the immutable version.
+	if service.ServiceID != serviceID || service.ServiceVersionID != versionID || service.Version != "1.0" || service.Slug != "@atlassian/jira" {
 		t.Fatalf("service = %#v", service)
 	}
 }

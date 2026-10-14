@@ -134,10 +134,17 @@ WHERE (subject_id = $1 OR email_normalized = lower($2)) AND $3
 ORDER BY (subject_id = $1) DESC LIMIT 1`
 
 const resolveServiceReferenceSQL = `
-SELECT service_id FROM fused_workspace_services
-WHERE (service_id = $1 OR lower(service_slug) = lower($2))
-	AND ($3 OR service_id = ANY($4::uuid[]))
-ORDER BY (service_id = $1) DESC LIMIT 1`
+WITH candidates AS (
+    SELECT service_id, CASE WHEN service_id = $1 THEN 0 WHEN lower(service_slug) = lower($2) THEN 1 ELSE 2 END AS priority
+    FROM fused_workspace_services
+    WHERE (service_id = $1 OR lower(service_slug) = lower($2)
+        OR ($2 NOT LIKE '@%' AND service_slug LIKE '@%/%' AND lower(split_part(service_slug, '/', 2)) = lower($2)))
+        AND ($3 OR service_id = ANY($4::uuid[]))
+), ranked AS (
+    -- UUID and exact references outrank aliases; ambiguous aliases never select an arbitrary authorization target.
+    SELECT *, min(priority) OVER () AS best_priority, count(*) OVER (PARTITION BY priority) AS matches FROM candidates
+)
+SELECT service_id FROM ranked WHERE priority = best_priority AND matches = 1`
 
 const resolveBucketReferenceSQL = `
 SELECT id FROM fused_buckets

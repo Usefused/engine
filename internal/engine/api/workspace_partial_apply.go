@@ -241,12 +241,13 @@ func workspaceServiceSubset(desired workspaceDesiredState, ids map[uuid.UUID]boo
 // applyWorkspaceServiceStep prepares network-dependent facts first, then commits all related local writes with their receipt.
 func applyWorkspaceServiceStep(ctx context.Context, progress store.WorkspaceApplyProgressStore, s store.Store, verifier ServiceVerifier, call workspaceApplyCall, plan *store.ConfigPlan, desired workspaceDesiredState, removableIDs []uuid.UUID, step store.WorkspaceApplyStep) error {
 	for id, svc := range desired.Services {
-		name, err := verifiedWorkspaceServiceName(ctx, verifier, svc, call.apiKey)
+		name, reference, err := verifiedWorkspaceServiceMetadata(ctx, verifier, svc, call.apiKey)
 		// A Registry read failure cannot leave half an activated service.
 		if err != nil {
 			return err
 		}
 		svc.ServiceName = name
+		svc.ServiceReference = reference
 		desired.Services[id] = svc
 	}
 	profiles, err := prepareWorkspaceProfilePlan(ctx, s, verifier, call.apiKey, desired, call.profileMats)
@@ -281,7 +282,7 @@ func applyWorkspaceServiceStep(ctx context.Context, progress store.WorkspaceAppl
 		if err := reconcileWorkspaceProfilePlan(txCtx, txStore, profiles); err != nil {
 			return nil, err
 		}
-		// Names were verified before the transaction; membership failures roll back the whole service.
+		// Names and canonical references were verified before the transaction; membership failures roll back the whole service.
 		if _, err := upsertDesiredWorkspaceServices(txCtx, txStore, nil, call.apiKey, call.accountID, desired); err != nil {
 			return nil, err
 		}

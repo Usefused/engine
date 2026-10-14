@@ -1358,6 +1358,7 @@ func TestWorkspaceConfigPlanHandler_ResolvesServiceSlugsInOneBatch(t *testing.T)
 	}
 }
 
+// TestWorkspaceServiceSlugPersistsLocalIdentity prevents namespace loss in offline workspace metadata.
 func TestWorkspaceServiceSlugPersistsLocalIdentity(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1365,7 +1366,7 @@ func TestWorkspaceServiceSlugPersistsLocalIdentity(t *testing.T) {
 		want string
 	}{
 		{name: "bare", key: "github", want: "github"},
-		{name: "provider qualified", key: "@acme/github", want: "github"},
+		{name: "provider qualified", key: "@acme/github", want: "@acme/github"},
 		{name: "uuid identity", key: "11111111-1111-4111-8111-111111111111", want: ""},
 		{name: "trimmed", key: "  github  ", want: "github"},
 	}
@@ -2429,11 +2430,13 @@ type serviceVisibilityUpdate struct {
 	Public    bool
 }
 
+// VerifyServiceExists models authoritative provider identity independently of authored workspace keys.
 func (m *mockRegistryClient) VerifyServiceExists(_ context.Context, serviceID uuid.UUID, _ string) (string, string, string, uuid.UUID, error) {
+	// Preserve explicit display-name fixtures while keeping each service reference unique.
 	if m.name != "" {
-		return m.name, "test/test-service", "2026-07-01", uuid.New(), nil
+		return m.name, "@test/" + serviceID.String(), "2026-07-01", uuid.New(), nil
 	}
-	return "test", "test/test-service", "2026-07-01", uuid.New(), nil
+	return "test", "@test/" + serviceID.String(), "2026-07-01", uuid.New(), nil
 }
 
 func (m *mockRegistryClient) FetchServiceVisibility(_ context.Context, serviceIDs []uuid.UUID, _ string) (map[uuid.UUID]sandbox.ServiceVisibility, error) {

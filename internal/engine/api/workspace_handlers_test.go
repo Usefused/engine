@@ -599,6 +599,7 @@ func anonymousExecutionAuthContracts(selections []sandbox.ServiceVersionExecutio
 	return contracts
 }
 
+// VerifyServiceExists returns a distinct canonical reference for each verified service identity.
 func (m *mockVerifier) VerifyServiceExists(ctx context.Context, serviceID uuid.UUID, apiKey string) (string, string, string, uuid.UUID, error) {
 	m.verifyCalls++
 	m.gotService = serviceID
@@ -618,7 +619,7 @@ func (m *mockVerifier) VerifyServiceExists(ctx context.Context, serviceID uuid.U
 	if serviceVersionID == uuid.Nil {
 		serviceVersionID = uuid.New()
 	}
-	return name, "test/test-service", currentVersionTag, serviceVersionID, nil
+	return name, "@test/" + serviceID.String(), currentVersionTag, serviceVersionID, nil
 }
 
 // FetchServiceVersionRevisions records when activation needs a historical version lookup.

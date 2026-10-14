@@ -8,6 +8,8 @@ ui/build/
 ui/.cache/
 ui-build/
 scripts/**.sql
+# Keep the reviewed provider-reference repair available to hosted operators.
+!scripts/repair-workspace-service-references.sql
 runtime/mcp/node_modules/
 runtime/execution/node_modules/
 

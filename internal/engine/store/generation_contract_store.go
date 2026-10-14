@@ -120,7 +120,11 @@ func (s *postgresStore) ResolveGenerationServiceIDsByKeys(ctx context.Context, k
 	return result, rows.Err()
 }
 
-var generationServiceIdentitySQL = `WITH resolved AS (` + resolveWorkspaceServiceIDsByKeysSQL + `), proof AS (
+// Legacy bare rows remain candidates only here: the proof stage below rejects the wrong provider or requests a refresh.
+var generationServiceCandidatesSQL = workspaceServiceResolutionWithMatchSQL(`unnest($1::text[]) AS input(key)`, true,
+	`(`+workspaceServiceSlugReferenceMatchSQL+` OR (input.key LIKE '@%/%' AND service.service_slug = split_part(input.key, '/', 2)))`)
+
+var generationServiceIdentitySQL = `WITH resolved AS (` + generationServiceCandidatesSQL + `), proof AS (
 	SELECT resolved.key, resolved.service_id, service.service_slug,
 	 COALESCE(BOOL_OR(NULLIF(snapshot.service_metadata#>>'{provider,handle}', '') IS NOT NULL),false) AS known_provider,
 	 COALESCE(BOOL_OR(lower(snapshot.service_metadata#>>'{provider,handle}') = lower(substring(split_part(resolved.key,'/',1) FROM 2))),false) AS provider_matches

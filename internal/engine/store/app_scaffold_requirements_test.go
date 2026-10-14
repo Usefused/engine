@@ -145,7 +145,7 @@ func TestPostgresStoreResolvesAuthorizedAppScaffoldSelections(t *testing.T) {
 	enabledBy := uuid.New()
 	defer cleanupAppScaffoldServices(t, ctx, pool, allowedService, deniedService)
 	// Two active services prove the SQL scope filters before exact version resolution.
-	if err := repository.AddWorkspaceServiceVersion(ctx, allowedService, allowedSlug, "v1", allowedVersion, "Sendbird Scaffold Test", enabledBy); err != nil {
+	if err := repository.AddWorkspaceServiceVersion(ctx, allowedService, "@provider/"+allowedSlug, "v1", allowedVersion, "Sendbird Scaffold Test", enabledBy); err != nil {
 		t.Fatalf("add allowed service: %v", err)
 	}
 	if err := repository.AddWorkspaceServiceVersion(ctx, deniedService, deniedSlug, "v1", deniedVersion, "Denied Scaffold Test", enabledBy); err != nil {

@@ -69,11 +69,12 @@ func TestWorkspaceServiceVersionByIDQueryUsesExactPinnedTuple(t *testing.T) {
 	}
 }
 
+// TestAuthorizedWorkspaceServiceFilterSupportsCLIReferences preserves bare aliases for canonical stored references.
 func TestAuthorizedWorkspaceServiceFilterSupportsCLIReferences(t *testing.T) {
 	for _, fragment := range []string{
 		"s.service_name",
 		"s.service_slug",
-		"split_part(requested.name, '/', 2)",
+		"split_part(s.service_slug, '/', 2)",
 	} {
 		if !strings.Contains(authorizedWorkspaceServicesWhereSQL, fragment) {
 			t.Fatalf("authorized workspace-service filter must contain %q: %s", fragment, authorizedWorkspaceServicesWhereSQL)

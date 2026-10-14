@@ -214,14 +214,12 @@ func (s *postgresStore) ListAuthorizedWorkspaceServices(ctx context.Context, sco
 }
 
 // workspaceServiceSlugReferenceMatchSQL is the Engine's canonical matcher for
-// public service slugs. Provider qualification is normalized only after first
-// checking an exact stored slug, so an exact workspace identity always wins.
+// public service slugs. Qualified references match only that provider; bare
+// aliases may match a canonical suffix only when the ranked resolver finds one identity.
 const workspaceServiceSlugReferenceMatchSQL = `(
 	service.service_slug = input.key
-	OR service.service_slug = CASE
-		WHEN input.key LIKE '@%/%' THEN split_part(input.key, '/', 2)
-		ELSE input.key
-	END
+	OR (input.key NOT LIKE '@%' AND service.service_slug LIKE '@%/%'
+	    AND split_part(service.service_slug, '/', 2) = input.key)
 )`
 
 const workspaceServiceSlugReferencePrioritySQL = `CASE
@@ -234,13 +232,19 @@ END`
 // because its public field is explicitly service_slug; workspace lookup keeps
 // them for interactive compatibility without allowing a name to shadow a slug.
 func workspaceServiceResolutionSQL(inputRelation string, includeDisplayNames bool) string {
-	matchSQL := workspaceServiceSlugReferenceMatchSQL
+	return workspaceServiceResolutionWithMatchSQL(inputRelation, includeDisplayNames, workspaceServiceSlugReferenceMatchSQL)
+}
+
+// workspaceServiceResolutionWithMatchSQL shares ambiguity handling while generation separately admits legacy candidates for provider-proof validation.
+func workspaceServiceResolutionWithMatchSQL(inputRelation string, includeDisplayNames bool, matchSQL string) string {
+	slugMatchSQL := matchSQL
 	prioritySQL := workspaceServiceSlugReferencePrioritySQL
+	// Display names remain interactive aliases but cannot impersonate a provider-qualified reference.
 	if includeDisplayNames {
-		matchSQL = `(` + matchSQL + ` OR service.service_name = input.key)`
+		matchSQL = `(` + matchSQL + ` OR (input.key NOT LIKE '@%' AND service.service_name = input.key))`
 		prioritySQL = `CASE
 			WHEN service.service_slug = input.key THEN 0
-			WHEN ` + workspaceServiceSlugReferenceMatchSQL + ` THEN 1
+			WHEN ` + slugMatchSQL + ` THEN 1
 			ELSE 2
 		END`
 	}
@@ -425,15 +429,16 @@ func (s *postgresStore) searchAuthorizedWorkspaceServicesPage(ctx context.Contex
 // Why: CLI commands address services by Registry slug, while the Admin UI can
 // filter using the display name. Keeping both exact matches in SQL avoids a
 // false "not enabled" result without loading the workspace into Go memory.
+// Explicit namespaces constrain the listing; only unqualified inputs can match names or canonical suffixes.
 const authorizedWorkspaceServicesWhereSQL = `WHERE ($1 OR s.service_id = ANY($2::uuid[]))
 	AND (
 		COALESCE(cardinality($3::text[]), 0) = 0
-		OR COALESCE(s.service_name, '') = ANY($3::text[])
-		OR COALESCE(s.service_slug, '') = ANY($3::text[])
 		OR EXISTS (
 			SELECT 1 FROM unnest($3::text[]) AS requested(name)
-			WHERE requested.name LIKE '@%/%'
-			  AND COALESCE(s.service_slug, '') = split_part(requested.name, '/', 2)
+			WHERE s.service_slug = requested.name
+			   OR (requested.name NOT LIKE '@%' AND (
+			       s.service_name = requested.name
+			       OR (s.service_slug LIKE '@%/%' AND split_part(s.service_slug, '/', 2) = requested.name)))
 		)
 	)`
 
@@ -594,6 +599,7 @@ func (s *postgresStore) GetLatestWorkspaceServiceVersionIDByWorkspace(
 	return versionID, nil
 }
 
+// upsertWorkspaceService preserves exact service identity and classifies only the known slug collision for recovery.
 func upsertWorkspaceService(
 	ctx context.Context,
 	db workspaceServiceWriter,
@@ -603,6 +609,11 @@ func upsertWorkspaceService(
 	addedBy uuid.UUID,
 ) error {
 	_, err := db.Exec(ctx, upsertWorkspaceServiceSQL, serviceID, serviceSlug, serviceName, addedBy)
+	var postgresError *pgconn.PgError
+	// A competing service slug is recoverable at startup; unrelated constraints and database failures are not.
+	if errors.As(err, &postgresError) && postgresError.Code == "23505" && postgresError.ConstraintName == "uq_fused_workspace_services_slug_ci" {
+		return fmt.Errorf("%w: %w", ErrWorkspaceServiceSlugConflict, err)
+	}
 	return err
 }
 
@@ -678,21 +689,18 @@ func deleteWorkspaceServiceIfNoVersions(
 	return err
 }
 
+// listWorkspaceServicesQuery lists bare aliases across providers but never strips an explicitly selected namespace.
 func listWorkspaceServicesQuery(names []string) (string, []any) {
 	query := listWorkspaceServicesSQL
 	var args []any
+	// Unfiltered listing keeps all services; explicit references constrain identity within SQL.
 	if len(names) > 0 {
-		// Registry references may be account-qualified while this singleton
-		// workspace stores the verified bare slug. Normalize each requested key
-		// inside the one SQL query so authorization cannot drift or become N+1.
 		query += ` WHERE EXISTS (
 			SELECT 1 FROM unnest($1::text[]) AS input(key)
-			WHERE COALESCE(s.service_name, '') = input.key
-			   OR COALESCE(s.service_slug, '') = input.key
-			   OR COALESCE(s.service_slug, '') = CASE
-				 WHEN input.key LIKE '@%/%' THEN split_part(input.key, '/', 2)
-				 ELSE input.key
-			   END
+			WHERE s.service_slug = input.key
+			   OR (input.key NOT LIKE '@%' AND (
+			       s.service_name = input.key
+			       OR (s.service_slug LIKE '@%/%' AND split_part(s.service_slug, '/', 2) = input.key)))
 		)`
 		args = append(args, names)
 	}
@@ -882,6 +890,9 @@ const workspaceServiceVersionsMissingContractSnapshotsSQL = `
 	LIMIT $1`
 
 var ErrWorkspaceServiceNotFound = errors.New("workspace service not found")
+
+// ErrWorkspaceServiceSlugConflict leaves the existing slug owner authoritative until an explicit repair.
+var ErrWorkspaceServiceSlugConflict = errors.New("workspace service slug is already assigned to another service")
 
 var ErrWorkspaceServiceVersionNotFound = errors.New("workspace service version not found")
 

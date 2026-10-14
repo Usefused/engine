@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Usefused/engine/internal/shared/signaturepolicy"
@@ -317,8 +318,10 @@ const selectWorkspaceWebhookBySlugSQL = `SELECT
 // selectWorkspaceWebhookByServiceAndLabelSQL is the predictable-default
 // ingress variant: same columns plus the workspace-service join needed to
 // translate a human service slug into the service_id the webhook row is keyed
-// on. The lower() match keeps lookup case-insensitive like the slug index.
-const selectWorkspaceWebhookByServiceAndLabelSQL = `SELECT
+// on. Bare aliases require one service, while an explicit provider never falls through.
+// Normalize stored values too so legacy mixed-case ingress references remain case-insensitive.
+var selectWorkspaceWebhookByServiceAndLabelSQL = `WITH resolved_service AS (` +
+	strings.ReplaceAll(workspaceServiceResolutionSQL(`(SELECT lower($1::text) AS key) input`, false), "service.service_slug", "lower(service.service_slug)") + `) SELECT
 		w.id, w.service_id, w.service_version_id,
 		w.label, w.slug,
 		w.auth_type, w.auth_location, w.auth_key_name,
@@ -330,7 +333,7 @@ const selectWorkspaceWebhookByServiceAndLabelSQL = `SELECT
 	FROM fused_workspace_webhooks w
 	CROSS JOIN fused_workspaces
 	JOIN fused_workspace_services svc ON svc.service_id = w.service_id
-	WHERE lower(svc.service_slug) = lower($1) AND w.label = $2`
+	WHERE svc.service_id = (SELECT service_id FROM resolved_service) AND w.label = $2`
 
 // upsertWorkspaceWebhooksSQL expands one JSON parameter inside PostgreSQL,
 // preserving immutable ownership; rows owned by a different config are

@@ -79,7 +79,7 @@ func newOwnedRecoveryHTTPRegistry(t *testing.T, versions []store.WorkspaceServic
 func ownedRecoveryPageFixture(versions []store.WorkspaceServiceVersion) map[string]any {
 	rows := make([]map[string]any, 0, len(versions))
 	for _, version := range versions {
-		rows = append(rows, map[string]any{"id": version.ServiceID, "name": "Recovery", "slug": version.ServiceID.String(),
+		rows = append(rows, map[string]any{"id": version.ServiceID, "name": "Recovery", "slug": version.ServiceID.String(), "canonical_ref": "@recovery/" + version.ServiceID.String(),
 			"current_service_version": version.Version, "service_versions": []map[string]any{{"id": version.ServiceVersionID, "name": version.Version}}})
 	}
 	return map[string]any{"data": map[string]any{"services": map[string]any{"data": rows, "page": 1, "limit": 100, "total": len(rows)}}}

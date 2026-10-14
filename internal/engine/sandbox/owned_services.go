@@ -32,6 +32,7 @@ type ownedServicesPage struct {
 		ID                    string `json:"id"`
 		Name                  string `json:"name"`
 		Slug                  string `json:"slug"`
+		CanonicalRef          string `json:"canonical_ref"`
 		CurrentServiceVersion string `json:"current_service_version"`
 		ServiceVersions       []struct {
 			ID   string `json:"id"`
@@ -50,11 +51,13 @@ func (c *HTTPRegistryClient) FetchOwnedServices(ctx context.Context) ([]OwnedReg
 	services := make([]OwnedRegistryService, 0)
 	for page := 1; ; page++ {
 		result, err := c.fetchOwnedServicesPage(ctx, page)
+		// Discovery failures cannot be treated as an empty account catalogue.
 		if err != nil {
 			return nil, err
 		}
 		for _, service := range result.Data {
 			serviceID, err := uuid.Parse(service.ID)
+			// Recovery must keep the Registry's opaque identity rather than guessing from a slug.
 			if err != nil {
 				return nil, fmt.Errorf("FetchOwnedServices: invalid service id %q: %w", service.ID, err)
 			}
@@ -64,14 +67,20 @@ func (c *HTTPRegistryClient) FetchOwnedServices(ctx context.Context) ([]OwnedReg
 			if service.CurrentServiceVersion == "" || versionID == uuid.Nil {
 				continue
 			}
+			reference, err := registryWorkspaceServiceReference(service.Slug, service.CanonicalRef)
+			// Owned and consumed services use the same provider-qualified namespace in Engine storage.
+			if err != nil {
+				return nil, fmt.Errorf("FetchOwnedServices: service %s: %w", serviceID, err)
+			}
 			services = append(services, OwnedRegistryService{
 				ServiceID:        serviceID,
 				Name:             service.Name,
-				Slug:             service.Slug,
+				Slug:             reference,
 				Version:          service.CurrentServiceVersion,
 				ServiceVersionID: versionID,
 			})
 		}
+		// Stop only when the declared page range or an empty page proves discovery is complete.
 		if result.Page*result.Limit >= result.Total || len(result.Data) == 0 {
 			break
 		}
@@ -79,6 +88,7 @@ func (c *HTTPRegistryClient) FetchOwnedServices(ctx context.Context) ([]OwnedReg
 	return services, nil
 }
 
+// fetchOwnedServicesPage includes canonical references so startup cannot recreate bare-slug collisions.
 func (c *HTTPRegistryClient) fetchOwnedServicesPage(ctx context.Context, page int) (ownedServicesPage, error) {
 	req, err := c.newGraphQLRequest(ctx, graphqlQuery{
 		Query: `
@@ -88,6 +98,7 @@ func (c *HTTPRegistryClient) fetchOwnedServicesPage(ctx context.Context, page in
 						id
 						name
 						slug
+						canonical_ref
 						current_service_version
 						service_versions { id name }
 					}
@@ -99,14 +110,17 @@ func (c *HTTPRegistryClient) fetchOwnedServicesPage(ctx context.Context, page in
 		`,
 		Variables: map[string]interface{}{"page": page, "limit": ownedServicesPageLimit},
 	})
+	// A failed request construction cannot become a partial discovery page.
 	if err != nil {
 		return ownedServicesPage{}, fmt.Errorf("FetchOwnedServices: create request: %w", err)
 	}
 	response, err := c.do(req)
+	// Transport errors do not authorize recovery from incomplete metadata.
 	if err != nil {
 		return ownedServicesPage{}, fmt.Errorf("FetchOwnedServices: request failed: %w", err)
 	}
 	defer response.Body.Close()
+	// Only a successful Registry response can describe the account's owned services.
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
 		return ownedServicesPage{}, fmt.Errorf("FetchOwnedServices: registry returned %d: %s", response.StatusCode, string(body))
@@ -119,9 +133,11 @@ func (c *HTTPRegistryClient) fetchOwnedServicesPage(ctx context.Context, page in
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
+	// Reject malformed responses before trusting any service identities.
 	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
 		return ownedServicesPage{}, fmt.Errorf("FetchOwnedServices: decode response: %w", err)
 	}
+	// GraphQL errors invalidate even a partially populated page.
 	if len(decoded.Errors) > 0 {
 		return ownedServicesPage{}, fmt.Errorf("FetchOwnedServices: graphql error: %s", decoded.Errors[0].Message)
 	}
@@ -148,7 +164,7 @@ func ReconcileOwnedServices(ctx context.Context, workspace store.Store, registry
 	defer span.End()
 	result, err := reconcileOwnedServices(ctx, workspace, registry, accountID, apiKey)
 	outcome := "complete"
-	// Deferred contracts must remain visible even though the control plane can safely start.
+	// Deferred contracts and slug conflicts must remain visible even though the control plane can safely start.
 	if len(result.Deferred) > 0 {
 		outcome = "partial"
 	}
@@ -161,6 +177,13 @@ func ReconcileOwnedServices(ctx context.Context, workspace store.Store, registry
 		attribute.Int("service.activated_count", boundedPassiveCount(result.Activated)),
 		attribute.Int("service.deferred_count", boundedPassiveCount(len(result.Deferred))))
 	for _, failure := range result.Deferred {
+		// A slug collision needs identity repair, not contract re-import or replacement of existing pins.
+		if errors.Is(failure.cause, store.ErrWorkspaceServiceSlugConflict) {
+			slog.WarnContext(ctx, "Owned service recovery deferred; another workspace service owns this slug; resolve the slug conflict before adding the exact version",
+				"service_id", failure.ServiceID, "service_version_id", failure.ServiceVersionID,
+				"failure_code", "workspace_service_slug_conflict")
+			continue
+		}
 		slog.WarnContext(ctx, "Owned service recovery deferred; repair the Registry contract, then add the exact version to the workspace",
 			"service_id", failure.ServiceID, "service_version_id", failure.ServiceVersionID,
 			"blocking_service_version_id", failure.BlockingVersionID, "failure_code", "runtime_contract_rejected")
@@ -168,7 +191,7 @@ func ReconcileOwnedServices(ctx context.Context, workspace store.Store, registry
 	return result, err
 }
 
-// reconcileOwnedServices isolates validated content failures without changing identity or persistence policy.
+// reconcileOwnedServices isolates validated content and slug conflicts without changing existing service identities or pins.
 func reconcileOwnedServices(ctx context.Context, workspace store.Store, registry ownedServiceRegistry, accountID uuid.UUID, apiKey string) (OwnedServiceReconcileResult, error) {
 	result := OwnedServiceReconcileResult{}
 	owned, err := registry.FetchOwnedServices(ctx)
@@ -219,7 +242,9 @@ func reconcileOwnedServices(ctx context.Context, workspace store.Store, registry
 	if err := validateOwnedRecoverySet(missing, snapshots, result.Deferred); err != nil {
 		return result, err
 	}
-	result.Activated, err = restoreOwnedSnapshots(ctx, workspace, snapshotStore, missing, snapshots, accountID)
+	var activationFailures []OwnedServiceRejection
+	result.Activated, activationFailures, err = restoreOwnedSnapshots(ctx, workspace, snapshotStore, missing, snapshots, accountID)
+	result.Deferred = append(result.Deferred, activationFailures...)
 	return result, err
 }
 
@@ -279,25 +304,31 @@ func missingOwnedServices(ctx context.Context, persistence store.OwnedServiceRec
 	return missing, nil
 }
 
-// restoreOwnedSnapshots writes each independently admitted service; rejected versions never reach storage or activation.
-func restoreOwnedSnapshots(ctx context.Context, workspace store.Store, persistence store.OwnedServiceRecoveryStore, missing []OwnedRegistryService, snapshots []store.ServiceContractSnapshot, accountID uuid.UUID) (int, error) {
+// restoreOwnedSnapshots activates admitted services while leaving colliding identities inactive and existing pins untouched.
+func restoreOwnedSnapshots(ctx context.Context, workspace store.Store, persistence store.OwnedServiceRecoveryStore, missing []OwnedRegistryService, snapshots []store.ServiceContractSnapshot, accountID uuid.UUID) (int, []OwnedServiceRejection, error) {
 	byVersion := make(map[uuid.UUID]OwnedRegistryService, len(missing))
 	for _, service := range missing {
 		byVersion[service.ServiceVersionID] = service
 	}
 	activated := 0
+	var deferred []OwnedServiceRejection
 	for _, snapshot := range snapshots {
 		// validateOwnedRecoverySet admitted the complete tuple set before any writes began.
 		service := byVersion[snapshot.ServiceVersionID]
 		// Persistence failure is not a content rejection and must remain visible to startup.
 		if _, err := persistence.UpsertServiceContractSnapshot(ctx, snapshot); err != nil {
-			return activated, fmt.Errorf("store owned service %s runtime contract: %w", service.ServiceID, err)
+			return activated, deferred, fmt.Errorf("store owned service %s runtime contract: %w", service.ServiceID, err)
 		}
 		// Membership is created only after canonical snapshot validation and persistence succeed.
 		if err := workspace.AddWorkspaceServiceVersion(ctx, service.ServiceID, service.Slug, service.Version, service.ServiceVersionID, service.Name, accountID); err != nil {
-			return activated, fmt.Errorf("activate owned service %s: %w", service.ServiceID, err)
+			// Only the typed slug conflict is safe to defer: the membership transaction rolled back without changing its owner.
+			if errors.Is(err, store.ErrWorkspaceServiceSlugConflict) {
+				deferred = append(deferred, OwnedServiceRejection{ServiceID: service.ServiceID, ServiceVersionID: service.ServiceVersionID, cause: err})
+				continue
+			}
+			return activated, deferred, fmt.Errorf("activate owned service %s: %w", service.ServiceID, err)
 		}
 		activated++
 	}
-	return activated, nil
+	return activated, deferred, nil
 }
