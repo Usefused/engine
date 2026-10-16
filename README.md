@@ -2,9 +2,9 @@
 
 # Fused
 
-Fused is an integration gateway for applications and AI agents. Connect to
-internal and external services through typed SDKs, a direct API, or MCP servers,
-with credentials, access policies, retries, and execution records handled by Fused.
+**The simplification of integration.**
+
+Build and deliver integrations faster, from a single service call to complex workflows for your applications and agents. Connect to internal and external services through typed SDKs, a direct API, or MCP servers, with credentials, access policies, retries, and execution records handled by Fused.
 
 **[Documentation](https://usefused.com/docs)** ·
 [Quickstart](https://usefused.com/docs/quickstart) ·
