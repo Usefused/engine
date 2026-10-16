@@ -165,8 +165,12 @@ export default function IntegrationsListTab({
 
 type IntegrationSearchProps = Pick<
   IntegrationsListTabProps,
-  "query" | "setQuery" | "handleSearch" | "handleClear" | "searching" | "isAuth" | "viewType"
-> & { placeholder?: string };
+  "query" | "setQuery" | "handleSearch" | "handleClear" | "searching" | "isAuth"
+> & {
+  // The parent resolves its optional view to catalog before rendering this internal component.
+  viewType: NonNullable<IntegrationsListTabProps["viewType"]>;
+  placeholder?: string;
+};
 
 // IntegrationSearch isolates search-state decisions from list rendering so
 // asynchronous feedback cannot make the row component harder to reason about.

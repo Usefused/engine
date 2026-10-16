@@ -187,14 +187,18 @@ export default function ExtractionWizard({ sessionId, reviewOnly = false, onClos
 
   const reviewReceipt = reviewableDiscoveryReceipt(snapshot);
 
+  // Bind each asynchronous review fetch to the non-null snapshot and receipt admitted by this effect.
   useEffect(() => {
     let cancelled = false;
+    // Review requests require both identities; clear stale presentation while neither is available.
     if (!snapshot || !reviewReceipt) {
       setReviewSummary(null);
       setReviewSummaryLoading(false);
       setReviewSummaryError("");
       return () => { cancelled = true; };
     }
+    const requestedSnapshot = snapshot;
+    const requestedReceipt = reviewReceipt;
     setReviewSummary(null);
     setReviewSummaryLoading(true);
     setReviewSummaryError("");
@@ -222,9 +226,11 @@ export default function ExtractionWizard({ sessionId, reviewOnly = false, onClos
     // loadReviewSummary accepts only a response bound to the currently displayed public receipt.
     async function loadReviewSummary() {
       try {
-        const summary = await api.integrations.getDiscoveryReviewSummary(sessionId, reviewReceipt);
+        const summary = await api.integrations.getDiscoveryReviewSummary(sessionId, requestedReceipt);
+        // A superseded effect must not publish its response into the current review.
         if (cancelled) return;
-        if (!reviewSummaryMatchesSnapshot(summary, snapshot)) {
+        // Match the exact snapshot captured for this request before accepting its summary.
+        if (!reviewSummaryMatchesSnapshot(summary, requestedSnapshot)) {
           setReviewSummaryError("The contract summary did not match the current review receipt. Reload the discovery run.");
           return;
         }

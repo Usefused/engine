@@ -8,6 +8,15 @@ import { createRoot } from 'react-dom/client';
 import { JSDOM } from 'jsdom';
 const require = createRequire(import.meta.url);
 
+// Load the shared diagnostic boundary so route imports resolve without replacing its behavior.
+function loadImportDiagnostics() {
+  const source = readFileSync(new URL('../components/ImportDiagnostics.tsx', import.meta.url), 'utf8');
+  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+  const exports = {};
+  new Function('require', 'exports', compiled)(require, exports);
+  return exports;
+}
+
 // Exercise route effects and URL changes with only presentation and remote transport replaced.
 test('workspace search handles partial text, clearing, pagination, history and stale responses', async () => {
   const dom = new JSDOM('<div id="root"></div>');
@@ -30,6 +39,7 @@ test('workspace search handles partial text, clearing, pagination, history and s
   // Shared chrome and unused drawers remain inert so the regression focuses on search orchestration.
   function Hidden() { return null; }
   const dependencies = {
+    '~/components/ImportDiagnostics': loadImportDiagnostics(),
     '~/components/layout/CataloguePageHeader': { CataloguePageHeader: Hidden },
     '@remix-run/react': { useSearchParams, useNavigate: () => () => {}, useRouteLoaderData: () => ({ isAuth: true }) },
     '~/lib/api': { api: {
