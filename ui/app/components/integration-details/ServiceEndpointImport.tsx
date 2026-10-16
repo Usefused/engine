@@ -1,6 +1,7 @@
+import { ImportDiagnostics, ImportRepairMode, importErrorDiagnostics } from "~/components/ImportDiagnostics";
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { useBeforeUnload, useBlocker } from "@remix-run/react";
-import { api, type Service, type SpecificationImportPlan, type SpecificationImportStatus } from "~/lib/api";
+import { api, type Service, type SpecificationImportPlan, type SpecificationImportDiagnostic, type SpecificationImportStatus } from "~/lib/api";
 import { webhookApplyNeedsStatus } from "~/lib/webhook-editor-import";
 
 const fieldClass = "w-full rounded-md border border-slate-300 px-3 py-2 text-sm";
@@ -20,6 +21,8 @@ function endpointImportCommitted(status: SpecificationImportStatus, serviceID: s
 
 /** Owns import review, commit recovery, and navigation protection independently of presentation. */
 export function useEndpointImport({ service, version, onClose, onSaved }: ImportProps) {
+  const [repairMode, setRepairMode] = useState<"safe" | "report_only">("safe");
+  const [diagnostics, setDiagnostics] = useState<SpecificationImportDiagnostic[]>([]);
   const [source, setSource] = useState("");
   const [url, setURL] = useState("");
   const [plan, setPlan] = useState<SpecificationImportPlan | null>(null);
@@ -45,15 +48,15 @@ export function useEndpointImport({ service, version, onClose, onSaved }: Import
     event.preventDefault();
     // A pinned service slug is necessary for the existing Registry import lookup.
     if (!service.slug || busy || uncertain) return;
-    setBusy(true); setError("");
+    setBusy(true); setError(""); setDiagnostics([]);
     try {
       // Exactly one input source avoids ambiguous URL-versus-upload precedence.
       const input = source.trim() ? { source_content: source } : { source_url: url.trim() };
-      const next = await api.integrations.planImport({ name: service.name, slug: service.slug, version, target_type: "endpoints", ...input });
+      const next = await api.integrations.planImport({ name: service.name, slug: service.slug, version, target_type: "endpoints", repair_mode: repairMode, ...input });
       // An older or incompatible planner cannot redirect an existing-service action into creation.
       if (!matchesEndpointPlan(next, service.id, version)) throw new Error("The import does not target this service's endpoints and selected version. Reload before importing.");
       setPlan(next);
-    } catch (failure) { setError(String((failure as Error).message)); }
+    } catch (failure) { setError(String((failure as Error).message)); setDiagnostics(importErrorDiagnostics(failure)); }
     finally { setBusy(false); }
   }
 
@@ -103,7 +106,7 @@ export function useEndpointImport({ service, version, onClose, onSaved }: Import
     finally { setBusy(false); }
   }
 
-  return { source, setSource, url, setURL, plan, setPlan, busy, uncertain, error, confirmClose, setConfirmClose, blocker, close, review, apply, checkStatus, loadFile };
+  return { repairMode, setRepairMode, diagnostics, source, setSource, url, setURL, plan, setPlan, busy, uncertain, error, confirmClose, setConfirmClose, blocker, close, review, apply, checkStatus, loadFile };
 }
 
 type Editor = ReturnType<typeof useEndpointImport>;
@@ -126,6 +129,7 @@ export function ServiceEndpointImport(props: ImportProps) {
       <p className="mb-5 text-sm text-slate-600">Import a complete specification for this version. Review additions, changes, and removals before applying.</p>
       {/* Errors preserve the source and receipt so retry or status recovery remains deliberate. */}
       {editor.error && <p role="alert" className="mb-4 rounded-md bg-red-50 p-3 text-sm text-red-700">{editor.error}</p>}
+      <ImportDiagnostics diagnostics={editor.diagnostics} />
       <EndpointImportSource editor={editor} service={service} />
       {/* Unknown commits can be inspected, but neither replayed nor silently dismissed. */}
       {editor.uncertain && <button type="button" className="mt-4 text-sm font-medium text-slate-950" disabled={editor.busy} onClick={editor.checkStatus}>Check import status</button>}
@@ -139,8 +143,9 @@ export function ServiceEndpointImport(props: ImportProps) {
 function EndpointImportSource({ editor, service }: { editor: Editor; service: Service }) {
   const { plan, busy, uncertain } = editor;
   // A reviewed plan locks source editing until the owner explicitly returns to authoring.
-  if (plan) return <div className="space-y-5"><p className="text-sm">{plan.diff.added} added · {plan.diff.changed} changed · {plan.diff.removed} removed</p><div className="flex gap-3"><button className={buttonClass} disabled={busy || uncertain} onClick={editor.apply}>Import endpoints</button><button type="button" disabled={busy || uncertain} onClick={() => editor.setPlan(null)} className="text-sm text-slate-600">Change source</button></div></div>;
+  if (plan) return <div className="space-y-5"><ImportDiagnostics diagnostics={plan.diagnostics} /><p className="text-sm">{plan.diff.added} added · {plan.diff.changed} changed · {plan.diff.removed} removed</p><div className="flex gap-3"><button className={buttonClass} disabled={busy || uncertain} onClick={editor.apply}>Import endpoints</button><button type="button" disabled={busy || uncertain} onClick={() => editor.setPlan(null)} className="text-sm text-slate-600">Change source</button></div></div>;
   return <form onSubmit={editor.review} className="space-y-4"><fieldset disabled={busy || uncertain} className="space-y-4">
+    <ImportRepairMode value={editor.repairMode} onChange={editor.setRepairMode} />
     <label className="block space-y-1 text-sm"><span>Specification URL</span><input type="url" className={fieldClass} value={editor.url} disabled={!!editor.source} onChange={(event) => editor.setURL(event.target.value)} placeholder="https://api.example.com/openapi.json" /></label>
     <label className="block space-y-1 text-sm"><span>Upload specification</span><input type="file" accept=".json,.yaml,.yml,.graphql" className={fieldClass} onChange={(event) => void editor.loadFile(event.target.files?.[0])} /></label>
     <label className="block space-y-1 text-sm"><span>Or paste a specification</span><textarea className={`${fieldClass} font-mono`} rows={10} value={editor.source} onChange={(event) => { editor.setSource(event.target.value); editor.setURL(""); }} /></label>

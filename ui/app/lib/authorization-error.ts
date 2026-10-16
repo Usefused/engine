@@ -83,7 +83,11 @@ export function normalizeAPIErrorPayload(input: unknown): APIErrorPayload {
       category: asString(engineError.category),
       retryable: asBoolean(engineError.retryable),
       // Reject scalar details rather than exposing them as trusted metadata.
-      details: isRecord(engineError.details) ? engineError.details : undefined,
+      details: {
+        ...(isRecord(engineError.details) ? engineError.details : {}),
+        // Import review diagnostics remain escaped display data, never an authorization decision.
+        ...(Array.isArray(engineError.diagnostics) ? { diagnostics: engineError.diagnostics } : {}),
+      },
       // Canonical authorization envelopes nest missing grants here; retain them for resource-specific recovery.
       missing: normalizeMissingRequirements(isRecord(engineError.details) ? engineError.details.missing : undefined),
       remediation: asString(engineError.remediation),

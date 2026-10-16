@@ -1,3 +1,4 @@
+import { ImportDiagnostics } from "~/components/ImportDiagnostics";
 import DiscoveryReviewSummaryPanel from "~/components/DiscoveryReviewSummaryPanel";
 import { useEffect, useRef, useState } from "react";
 import { api, type Service } from "~/lib/api";
@@ -119,6 +120,7 @@ export function AgentServiceImport({ service, version, onSaved }: { service: Ser
         {uncertain && <p role="status" className="rounded-lg bg-amber-50 p-3 text-amber-900">The import may have been applied. Check its status before continuing.</p>}
         {/* Website imports expose the source-derived event catalogue before the user saves it. */}
         {review.discovery && <DiscoveryReviewSummaryPanel summary={review.discovery} surface="webhooks" embedded loading={false} error="" />}
+        <ImportDiagnostics diagnostics={review.plan.diagnostics} />
         {/* Replacement semantics must remain visible even when a request was phrased as adding one operation. */}
         {review.plan.diff.removed > 0 && <p className="rounded-lg bg-amber-50 p-3 text-amber-900">This import removes existing definitions. To keep them, discard this plan and include them in the source.</p>}
         <p className="text-xs leading-relaxed text-slate-500">Updates this version’s {review.plan.target_type} definitions. Receiving URLs and credentials stay unchanged.</p>

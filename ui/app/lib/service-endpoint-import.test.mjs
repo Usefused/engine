@@ -7,6 +7,15 @@ import * as importContract from "./webhook-editor-import.ts";
 
 const require = createRequire(import.meta.url);
 
+// Resolve the real presentation component so controller fixtures keep their production dependency graph.
+function loadImportDiagnostics() {
+ const source = readFileSync(new URL("../components/ImportDiagnostics.tsx", import.meta.url), "utf8");
+ const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+ const exports = {};
+ new Function("exports", "require", output)(exports, require);
+ return exports;
+}
+
 // Exercise production controller decisions with persistent state and synthetic network boundaries.
 function harness(overrides = {}) {
   const slots = [];
@@ -15,6 +24,7 @@ function harness(overrides = {}) {
   const calls = [];
   const plan = { plan_id: "review-id", review_hash: "review-hash", service_id: "service", target_version: "v1", target_type: "endpoints", action: "update_version", is_new_service: false };
   const modules = {
+ "~/components/ImportDiagnostics": loadImportDiagnostics(),
     react: {
       // Rerenders keep state and receipt identity while exposing the latest callbacks.
       useState(initial) {
@@ -86,7 +96,7 @@ test("endpoint import rejects a mismatched reviewed destination", async () => {
 test("endpoint import applies the exact reviewed receipt", async () => {
   const fixture = harness();
   await fixture.render().review(submitEvent());
-  assert.deepEqual(fixture.calls[0].input, { name: "Example", slug: "example", version: "v1", target_type: "endpoints", source_content: '{"openapi":"3.1.0"}' });
+  assert.deepEqual(fixture.calls[0].input, { name: "Example", slug: "example", version: "v1", target_type: "endpoints", repair_mode: "safe", source_content: '{"openapi":"3.1.0"}' });
   await fixture.render().apply();
   assert.deepEqual(fixture.calls[1].args, ["review-id", "review-hash"]);
   assert.equal(fixture.saves(), 1);

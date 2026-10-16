@@ -1,3 +1,5 @@
+import { importErrorDiagnostics } from "~/components/ImportDiagnostics";
+import type { SpecificationImportDiagnostic } from "~/lib/api";
 import { useEffect, useState } from "react";
 import { api, type Service, type ServiceWebhookEditorSource, type SpecificationImportPlan } from "~/lib/api";
 import { APIRequestError } from "~/lib/authorization-error";
@@ -24,6 +26,8 @@ export function useWebhookEditor(service: Service, version: string, onSaved: () 
   const [draft, setDraft] = useState<WebhookEditorDraft | null>(null);
   const [plan, setPlan] = useState<SpecificationImportPlan | null>(null);
   const [pendingFile, setPendingFile] = useState<{ draft: WebhookEditorDraft; plan: SpecificationImportPlan } | null>(null);
+  const [repairMode, setRepairMode] = useState<"safe" | "report_only">("safe");
+  const [repairDiagnostics, setRepairDiagnostics] = useState<SpecificationImportDiagnostic[]>([]);
   const [busy, setBusy] = useState(true);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState("");
@@ -71,6 +75,7 @@ export function useWebhookEditor(service: Service, version: string, onSaved: () 
   // Pre-mutation errors can offer reconciliation, while uncertain apply errors must retain their status receipt.
   function recordFailure(failure: unknown, canReconcile = true) {
     setError(webhookEditorError(failure));
+    setRepairDiagnostics(importErrorDiagnostics(failure));
     // Recognize both planner and apply codes without guessing from human-readable wording.
     if (canReconcile && failure instanceof APIRequestError && webhookTargetChanged(failure.code)) markTargetChanged();
   }
@@ -102,7 +107,8 @@ export function useWebhookEditor(service: Service, version: string, onSaved: () 
   async function requestPlan(source: string) {
     // A failed initial read cannot accidentally become an empty-catalogue replacement.
     if (!baseline) throw new Error("Reload the complete webhook draft before reviewing.");
-    const reviewed = await api.integrations.planImport(webhookImportInput(service, version, baseline, source));
+    setRepairDiagnostics([]);
+    const reviewed = await api.integrations.planImport({ ...webhookImportInput(service, version, baseline, source), repair_mode: repairMode });
     assertWebhookPlanTarget(reviewed, baseline, version);
     return reviewed;
   }
@@ -178,5 +184,12 @@ export function useWebhookEditor(service: Service, version: string, onSaved: () 
     } finally { setBusy(false); }
   }
 
-  return { draft, plan, pendingFile, busy, dirty, error, uncertain, staleTarget, latest, retainedSource, baselineRevision: baseline?.revision, change, markDirty, review, importFile, acceptFile, cancelFile: () => setPendingFile(null), save, checkStatus, loadLatest, startFromLatest };
+  // Policy changes invalidate both builder and uploaded-file reviews before another apply can be offered.
+  function changeRepairMode(mode: "safe" | "report_only") {
+    // Unresolved commits and stale targets must retain their exact receipt.
+    if (busy || uncertain || staleTarget) return;
+    setRepairMode(mode); setPlan(null); setPendingFile(null); setRepairDiagnostics([]);
+  }
+
+  return { repairMode, changeRepairMode, repairDiagnostics, draft, plan, pendingFile, busy, dirty, error, uncertain, staleTarget, latest, retainedSource, baselineRevision: baseline?.revision, change, markDirty, review, importFile, acceptFile, cancelFile: () => setPendingFile(null), save, checkStatus, loadLatest, startFromLatest };
 }

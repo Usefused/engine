@@ -617,7 +617,19 @@ export interface WebhookIdentifier {
   method: string;
 }
 
+export interface SpecificationImportDiagnostic {
+ severity: string;
+ code: string;
+ message: string;
+ pointer?: string;
+ disposition?: string;
+ correction?: { rule: string; version: string; before_hash: string; after_hash: string };
+}
+
+export type ImportRepairMode = "safe" | "report_only";
+
 export interface SpecificationImportPlan {
+  repair_mode?: ImportRepairMode;
   plan_id: string;
   source_hash: string;
   review_hash: string;
@@ -632,7 +644,7 @@ export interface SpecificationImportPlan {
   webhook_draft?: { source_content: string };
   expected_target?: SpecificationImportTarget;
   usage?: { workspaces: unknown[] };
-  diagnostics?: unknown;
+  diagnostics?: SpecificationImportDiagnostic[];
   diff: {
     added: number;
     changed: number;
@@ -1457,7 +1469,8 @@ export const api = {
     updateDetails: (id: string, details: { name: string; description: string }) =>
       req<void>(`/integrations/${encodeURIComponent(id)}/details`, { method: "PATCH", body: JSON.stringify(details) }),
     // Builder and uploaded-source reviews share Registry's authoritative parser and receipt.
-    planImport: (input: {
+    planImport: async (input: {
+      repair_mode?: ImportRepairMode;
       name: string;
       slug?: string;
       version?: string;
@@ -1467,11 +1480,12 @@ export const api = {
       destination_version?: string;
       expected_target?: SpecificationImportTarget;
       include_webhook_draft?: boolean;
-    }) =>
-      req<SpecificationImportPlan>("/integrations/import/plan", {
-        method: "POST",
-        body: JSON.stringify(input),
-      }),
+    }) => {
+      const plan = await req<SpecificationImportPlan>("/integrations/import/plan", { method: "POST", body: JSON.stringify(input) });
+      // An older server must explicitly acknowledge report-only before the UI offers Apply.
+      if (input.repair_mode === "report_only" && plan.repair_mode !== "report_only") throw new Error("The Registry did not acknowledge report-only mode. Upgrade the Registry and review again.");
+      return plan;
+    },
 
     // Only the reviewed source may cross the existing import mutation boundary.
     applyImport: (planId: string, reviewHash: string) =>

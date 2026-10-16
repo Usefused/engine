@@ -30,6 +30,8 @@ function loadModule(path, modules) {
     if (name === "~/components/forms/FieldLabel") return { FieldLabel };
     // The API client uses the real ESM catalog route helper inside this CommonJS test wrapper.
     if (name === "./mcp-catalog.ts") return mcpCatalog;
+    // Import review uses the actual diagnostics renderer rather than a presentation stub.
+    if (name === "~/components/ImportDiagnostics") return loadModule("../components/ImportDiagnostics.tsx", {});
     // Existing fixtures take precedence over installed dependencies.
     return modules[name] ?? require(name);
   };

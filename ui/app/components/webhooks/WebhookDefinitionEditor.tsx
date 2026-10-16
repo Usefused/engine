@@ -1,3 +1,4 @@
+import { ImportDiagnostics, ImportRepairMode } from "~/components/ImportDiagnostics";
 import { Upload, X } from "lucide-react";
 import { useEffect, useId, useRef, useState, type ChangeEvent } from "react";
 import { useBeforeUnload, useBlocker } from "@remix-run/react";
@@ -47,6 +48,8 @@ export function WebhookDefinitionEditor({ service, version, onClose, onSaved }: 
         <WebhookConflictRecovery editor={editor} onStartLatest={startLatest} />
         {editor.retainedSource && <RetainedWebhookDraft source={editor.retainedSource} label="Your retained draft before reloading" />}
         {editor.busy && <p role="status" className="text-sm text-slate-500">Processing webhook definition…</p>}
+        <ImportRepairMode value={editor.repairMode} onChange={editor.changeRepairMode} disabled={editor.busy || editor.uncertain || editor.staleTarget || !!editor.plan || !!editor.pendingFile} />
+        <ImportDiagnostics diagnostics={editor.repairDiagnostics} />
         <EditorDraftForm editor={editor} onInvalid={invalidChanged} />
         {editor.pendingFile && <section className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-4"><h3 className="font-semibold">Replace draft with imported webhooks?</h3><p className="text-sm">This replaces the complete event catalogue and shared webhook settings. Nothing has been saved.</p><WebhookPlanReview plan={editor.pendingFile.plan} /><div className="flex gap-4"><button type="button" disabled={editor.busy} onClick={() => { editor.acceptFile(); setInvalid(false); }} className="text-sm font-semibold text-slate-950">Use imported definition</button><button type="button" onClick={editor.cancelFile} className="text-sm">Keep current draft</button></div></section>}
         {editor.plan && <WebhookPlanReview plan={editor.plan} />}
@@ -137,7 +140,7 @@ function OpenAPIInput({ editor }: { editor: Editor }) {
 
 // The review is the server receipt, including removals and dependent workspace warnings.
 function WebhookPlanReview({ plan }: { plan: SpecificationImportPlan }) {
-  return <section aria-label="Webhook change review" className="space-y-2 rounded-lg border border-slate-200 p-3 text-sm"><h3 className="font-semibold">Review changes</h3><p>Destination: {plan.name} · {plan.target_version}</p><p>{plan.diff.added} added · {plan.diff.changed} changed · {plan.diff.removed} removed</p><ReviewNames label="Changed events" names={plan.diff.changed_names} /><ReviewNames label="Removed events" names={plan.diff.removed_names} />{plan.diff.settings_changed && <p className="font-medium text-amber-800">Shared webhook settings will change.</p>}<p className="text-slate-500">This review includes the draft's event extraction and verification settings. Saving does not configure receiving URLs or change bucket credentials.</p>{plan.usage && <p className="text-amber-800">{plan.usage.workspaces.length} workspace(s) rely on this service version.</p>}{Boolean(plan.diagnostics) && <details><summary className="cursor-pointer">Import diagnostics</summary><pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(plan.diagnostics, null, 2)}</pre></details>}</section>;
+  return <section aria-label="Webhook change review" className="space-y-2 rounded-lg border border-slate-200 p-3 text-sm"><h3 className="font-semibold">Review changes</h3><p>Destination: {plan.name} · {plan.target_version}</p><p>{plan.diff.added} added · {plan.diff.changed} changed · {plan.diff.removed} removed</p><ReviewNames label="Changed events" names={plan.diff.changed_names} /><ReviewNames label="Removed events" names={plan.diff.removed_names} />{plan.diff.settings_changed && <p className="font-medium text-amber-800">Shared webhook settings will change.</p>}<p className="text-slate-500">This review includes the draft's event extraction and verification settings. Saving does not configure receiving URLs or change bucket credentials.</p>{plan.usage && <p className="text-amber-800">{plan.usage.workspaces.length} workspace(s) rely on this service version.</p>}<ImportDiagnostics diagnostics={plan.diagnostics} /></section>;
 }
 
 // Explicit names make destructive catalogue removals visible without expanding every full operation.

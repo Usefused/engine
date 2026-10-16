@@ -1,3 +1,4 @@
+import { ImportDiagnostics } from "~/components/ImportDiagnostics";
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useNavigate } from "@remix-run/react";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
@@ -481,7 +482,7 @@ function ProposalReview({ proposals, selected, setSelected, submitting, onDecisi
 function DiscoveryPlan({ snapshot, summary, summaryLoading, summaryError, submitting, reviewOnly, onApply }: { snapshot: DiscoverySnapshot; summary: DiscoveryReviewSummary | null; summaryLoading: boolean; summaryError: string; submitting: boolean; reviewOnly: boolean; onApply: () => void }) {
   const plan = snapshot.payload?.plan;
   if (!plan) return <DiscoveryLoading message="Loading the reviewed import plan..." />;
-  return <div className="space-y-6"><ReviewHeading title="Import plan ready" description="Discovery has handed off an immutable plan without changing the service catalog." /><DiscoveryReviewSummaryPanel summary={summary} loading={summaryLoading} error={summaryError} /><div className="rounded-xl border border-emerald-200 bg-emerald-50 p-5"><ReceiptRow label="Plan ID" value={plan.plan_id} /><ReceiptRow label="Review hash" value={plan.review_hash} /></div><DiscoveryPlanAction reviewOnly={reviewOnly} summaryReady={Boolean(summary)} submitting={submitting} onApply={onApply} /></div>;
+  return <div className="space-y-6"><ReviewHeading title="Import plan ready" description="Discovery has handed off an immutable plan without changing the service catalog." /><ImportDiagnostics diagnostics={snapshot.payload?.import_plan?.diagnostics} /><DiscoveryReviewSummaryPanel summary={summary} loading={summaryLoading} error={summaryError} /><div className="rounded-xl border border-emerald-200 bg-emerald-50 p-5"><ReceiptRow label="Plan ID" value={plan.plan_id} /><ReceiptRow label="Review hash" value={plan.review_hash} /></div><DiscoveryPlanAction reviewOnly={reviewOnly} summaryReady={Boolean(summary)} submitting={submitting} onApply={onApply} /></div>;
 }
 
 // DiscoveryPlanAction prevents browser apply for CLI-owned handoffs while retaining the ordinary UI action.

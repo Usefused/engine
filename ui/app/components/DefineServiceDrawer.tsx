@@ -1,9 +1,13 @@
+import { ImportDiagnostics, ImportRepairMode } from "~/components/ImportDiagnostics";
 import { FieldLabel } from "~/components/forms/FieldLabel";
 import { UploadCloud } from "lucide-react";
 import type { FormEvent } from "react";
-import type { SpecificationImportPlan } from "~/lib/api";
+import type { SpecificationImportPlan, SpecificationImportDiagnostic } from "~/lib/api";
 
 export interface DefineServiceDrawerProps {
+  repairMode?: "safe" | "report_only";
+  setRepairMode?: (mode: "safe" | "report_only") => void;
+  repairDiagnostics?: SpecificationImportDiagnostic[];
   isAuth: boolean;
   /** Backdrop click / X button -- just hides the drawer, keeps form state. */
   onClose: () => void;
@@ -42,6 +46,7 @@ export interface DefineServiceDrawerProps {
 // parent route), just pulled out of integrations._index.tsx so that route
 // isn't carrying ~300 lines of drawer JSX inline.
 export function DefineServiceDrawer({
+  repairMode, setRepairMode, repairDiagnostics,
   isAuth,
   onClose,
   onCancel,
@@ -161,9 +166,13 @@ export function DefineServiceDrawer({
                 />
               </div>
             )}
+            {/* The policy is editable only before review so an existing receipt cannot change meaning. */}
+            {importMethod === "openapi" && setRepairMode && <ImportRepairMode value={repairMode} onChange={setRepairMode} disabled={starting || !!importPlan} />}
+            <ImportDiagnostics diagnostics={repairDiagnostics} />
             <div>
               {importPlan ? (
                 <div className="space-y-4">
+                  <ImportDiagnostics diagnostics={importPlan.diagnostics} />
                   <div className="border-y border-slate-200 py-4 space-y-3">
                     <div className="grid grid-cols-3 gap-3 pt-1 text-center">
                       <div><div className="text-lg font-semibold text-emerald-700">{importPlan.diff.added}</div><div className="text-xs text-slate-500">Added</div></div>

@@ -1,3 +1,5 @@
+import { importErrorDiagnostics } from "~/components/ImportDiagnostics";
+import type { SpecificationImportDiagnostic } from "~/lib/api";
 import { Layers, Plus } from "lucide-react";
 import { CataloguePageHeader, catalogueActionClassName } from "~/components/layout/CataloguePageHeader";
 import { useState, useEffect, useRef, useCallback, type ComponentProps, type FormEvent } from "react";
@@ -24,7 +26,7 @@ import {
 } from "~/lib/discovery-navigation";
 
 type ImportSource = { url?: string; content?: string };
-type ImportIdentity = { name: string; slug?: string; version?: string };
+type ImportIdentity = { repair_mode?: "safe" | "report_only"; name: string; slug?: string; version?: string };
 type ServicesView = "workspace" | "pending";
 type CatalogPage = {
   data: Service[];
@@ -332,6 +334,8 @@ export default function IntegrationsIndex() {
   const [newContent, setNewContent] = useState("");
   const [fileName, setFileName] = useState("");
   const [starting, setStarting] = useState(false);
+  const [repairMode, setRepairMode] = useState<"safe" | "report_only">("safe");
+  const [repairDiagnostics, setRepairDiagnostics] = useState<SpecificationImportDiagnostic[]>([]);
   const [startError, setStartError] = useState("");
 
   const [importPlan, setImportPlan] = useState<SpecificationImportPlan | null>(null);
@@ -490,6 +494,7 @@ export default function IntegrationsIndex() {
     runSearch("");
   }
 
+  // A fresh review clears prior diagnostics before submitting the selected repair policy.
   async function handleStart(e: FormEvent) {
     e.preventDefault();
     if (starting) return;
@@ -497,6 +502,7 @@ export default function IntegrationsIndex() {
     if (!canStartImport(importMethod, sourceType, newName, newVersion, source, requireVersion)) return;
     setStarting(true);
     setStartError("");
+    setRepairDiagnostics([]);
     try {
       if (importMethod === "openapi") {
         await handleSpecificationImport(source);
@@ -505,14 +511,17 @@ export default function IntegrationsIndex() {
       }
     } catch (e: unknown) {
       setStartError(e instanceof Error ? e.message : "Failed to start");
+      setRepairDiagnostics(importErrorDiagnostics(e));
     } finally {
       setStarting(false);
     }
   }
 
+  // The immutable plan retains the policy reviewed with this source.
   async function handleSpecificationImport(source: ImportSource) {
     if (!importPlan) {
       const plan = await createSpecificationPlan(source, {
+        repair_mode: repairMode,
         name: newName.trim(),
         slug: newSlug.trim() || undefined,
         version: newVersion.trim() || undefined,
@@ -655,7 +664,7 @@ export default function IntegrationsIndex() {
             setFileName("");
             setStartError("");
           },
-          importPlan, newName, setNewName, isSlugManuallyEdited, setIsSlugManuallyEdited, newSlug, setNewSlug,
+          repairMode, setRepairMode, repairDiagnostics, importPlan, newName, setNewName, isSlugManuallyEdited, setIsSlugManuallyEdited, newSlug, setNewSlug,
           requireVersion, setRequireVersion, importMethod, setImportMethod, newVersion, setNewVersion, sourceType,
           setSourceType, newUrl, setNewUrl, newContent, setNewContent, fileName, setFileName, starting, startError,
           setStartError, handleStart, handleChangeImportSource,

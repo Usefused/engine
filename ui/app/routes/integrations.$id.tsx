@@ -164,8 +164,15 @@ function resolveProviderVersion(
   return target;
 }
 
+/** Source refreshes expose the same correction review as newly imported services. */
 function importPlanConfirmation(plan: SpecificationImportPlan): string {
-  return `${plan.action} ${plan.target_version}: ${plan.diff.added} added, ${plan.diff.changed} changed, ${plan.diff.removed} removed. Apply this import?`;
+  // Explain each correction in the text confirmation used by source refreshes.
+  const notes = (plan.diagnostics ?? []).map(function describeCorrection(item) {
+    // Incomplete schemas remain limitations even when the rest of the import is usable.
+    const label = item.disposition === "incomplete" ? "Unspecified" : item.correction ? "Corrected" : "Review note";
+    return `${label}: ${item.message}\nSource: ${item.pointer ?? "document"}`;
+  });
+  return [`${plan.action} ${plan.target_version}: ${plan.diff.added} added, ${plan.diff.changed} changed, ${plan.diff.removed} removed.`, ...notes, "Apply this import?"].join("\n\n");
 }
 
 function isUUID(value?: string): boolean {
