@@ -1,3 +1,4 @@
+import { createBucketContentCache } from "~/lib/bucket-content-cache";
 import { hasAnyAppPermission } from "~/lib/current-actor-access";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams, type MetaFunction } from "@remix-run/react";
@@ -29,6 +30,8 @@ import {
   readWorkspaceServices,
   type BucketContentState,
   type BucketDetailTab,
+  type BucketSection,
+  type BucketContentSection,
   type BucketEntryKind,
   type BucketSecretFormPayload,
   type CredentialFamilyFormPayload,
@@ -103,7 +106,17 @@ export default function BucketsPage() {
     null
   );
   const contentRequestID = useRef(0);
+  const [contentRevision, setContentRevision] = useState(0);
   const activeTab = bucketTabFromSearch(searchParams);
+  const [sectionSelection, setSectionSelection] = useState<{ bucketId: string; section: BucketSection }>({ bucketId: "", section: "credentials" });
+  // A different bucket starts with credentials without inheriting a previous drawer's usage tab.
+  const section = sectionSelection.bucketId === selectedBucketId ? sectionSelection.section : "credentials";
+  const contentSection: BucketContentSection = section === "credentials" ? activeTab : section;
+  // Each authorization snapshot owns its cache, including plaintext environment values.
+  const contentCache = useMemo(/** Access changes retire the previous cache and its pending reads. */ () => createBucketContentCache(readBucketContents), [access]);
+  const serviceCache = useMemo(/** Service metadata is reused only within the same authorization snapshot. */ () => ({ pending: null as Promise<ActivatedService[]> | null }), [access]);
+  /** Selects a usage view while keeping pagination and credential subtab state intact. */
+  const selectSection = (next: BucketSection) => setSectionSelection({ bucketId: selectedBucketId, section: next });
   const contentAccess = useMemo(
     () => ({
       // The value field is additionally protected at workspace scope, so a
@@ -207,7 +220,9 @@ export default function BucketsPage() {
     ]
   );
 
+  /** Opens a bucket without carrying an unfinished write into a different credential target. */
   const selectBucket = (bucketId: string) => {
+    setEntryModalKind(null);
     // Bucket selection lives in the URL so SDK detail links and refreshes open
     // the same admin context without introducing another client-side store.
     setSelectedBucketOverride(null);
@@ -228,13 +243,16 @@ export default function BucketsPage() {
     });
   };
 
+  /** Keeps credential subtab navigation bookmarkable without discarding cached sections. */
   const selectTab = (tab: BucketDetailTab) => {
     setSearchParams(bucketTabSearchParams(searchParams, tab), {
       replace: true,
     });
   };
 
+  /** Reveals the matching credential tab while preserving cached usage lists. */
   const addEntry = (kind: BucketEntryKind) => {
+    selectSection("credentials");
     // Bucket secrets render alongside service secrets in the "secrets" tab.
     selectTab(kind === "value" ? "env" : "secrets");
     setEntryModalKind(kind);
@@ -272,36 +290,38 @@ export default function BucketsPage() {
       .finally(() => setLoadingBuckets(false));
   };
 
-  /** Loads authorized detail sections without issuing known-denied fields. */
+  const contentSetters: BucketContentSetters = {
+    setBucketValues, setBucketValueTotal, setSecretMetas, setSecretMetaTotal,
+    setAuthConnections, setAuthConnectionTotal, setBucketSDKs, setBucketSDKTotal,
+    setBucketServices, setBucketServiceTotal, setConnectionServices, setConnectSummary,
+  };
+
+  /** Reads just the selected view, reusing cached pages and ignoring superseded responses. */
   const loadContents = (bucketId: string) => {
+    // Authorization must settle before admitting any cache lookup or network request.
     if (accessLoading) return;
     const requestID = ++contentRequestID.current;
     setLoadingContents(true);
-    readBucketContents(bucketId, contentPages, contentAccess)
-      .then((state) => {
+    contentCache.read(bucketId, contentPages, contentAccess, contentSection)
+      .then(/** A late response may populate its cache but must not replace the active view. */ (state) => {
         if (requestID !== contentRequestID.current) return;
-        applyBucketContents(state, {
-          setBucketValues,
-          setBucketValueTotal,
-          setSecretMetas,
-          setSecretMetaTotal,
-          setAuthConnections,
-          setAuthConnectionTotal,
-          setBucketSDKs,
-          setBucketSDKTotal,
-          setBucketServices,
-          setBucketServiceTotal,
-          setConnectionServices,
-          setConnectSummary,
-        });
+        applyBucketContents(state, contentSetters);
       })
-      .catch((err) => {
-        if (requestID === contentRequestID.current)
-          toast.error(errorMessage(err, "Failed to load bucket"));
+      .catch(/** Errors belong only to the bucket view still requesting the data. */ (err) => {
+        if (requestID === contentRequestID.current) toast.error(errorMessage(err, "Failed to load bucket"));
       })
-      .finally(() => {
+      .finally(/** An earlier request cannot clear a newer view's loading state. */ () => {
         if (requestID === contentRequestID.current) setLoadingContents(false);
       });
+  };
+
+  /** Explicit refresh and completed writes invalidate all affected counts and cached pages. */
+  const refreshContents = (bucketId: string) => {
+    contentCache.invalidate(bucketId);
+    contentRequestID.current++;
+    clearBucketContents(contentSetters);
+    // The next render reloads the current view, even if navigation changed during the write.
+    setContentRevision(/** Trigger a fresh read without capturing a stale tab in an async save callback. */ (revision) => revision + 1);
   };
 
   /** Loads the exact selected bucket independently of the visible list page. */
@@ -313,34 +333,41 @@ export default function BucketsPage() {
       );
   };
 
-  /** Loads service labels only when the actor may enumerate services. */
-  const loadServices = () => {
-    if (!contentAccess.services) {
-      setServices([]);
-      return;
-    }
-    readWorkspaceServices()
-      .then(setServices)
-      .catch((err) =>
-        toast.error(errorMessage(err, "Failed to load workspace services"))
-      );
-  };
-
+  /** Refreshes summaries after a successful write and reloads only the current section. */
   const reloadBucketState = (bucketId: string) => {
     loadBucketList();
-    loadContents(bucketId);
+    loadSelectedBucket(bucketId);
+    refreshContents(bucketId);
   };
+
+  // Visible state cannot carry values between buckets or authorization snapshots.
+  useEffect(/** Retires old responses before the selected view starts loading. */ () => {
+    contentRequestID.current++;
+    clearBucketContents(contentSetters);
+  }, [selectedBucketId, access]);
+
+  // Metadata from an earlier actor must not survive a permission refresh.
+  useEffect(/** Clear the service snapshot while the new access-scoped cache loads on demand. */ () => { setServices([]); }, [access]);
 
   useEffect(() => {
     loadBucketList();
   }, [page]);
 
-  // Service labels are optional and must not trigger a forbidden collection read.
-  useEffect(() => {
-    loadServices();
-  }, [contentAccess.services]);
+  // Full auth metadata is needed only for service interactions, not when opening the bucket list.
+  useEffect(/** Lazily shares metadata between visited views and composers without repeating the request. */ () => {
+    let current = true;
+    // No service permission means neither a cached label nor a network request may be exposed.
+    if (!contentAccess.services) { setServices([]); return; }
+    // Generic secrets and metadata rows already have their own labels and need no service catalogue.
+    if (!selectedBucketId || !(section === "services" || (section === "credentials" && (activeTab === "connected-users" || entryModalKind === "secret" || entryModalKind === "value")))) return;
+    // A rejected lookup is removed so an explicit revisit can try again.
+    serviceCache.pending ??= readWorkspaceServices().catch(/** Keep failures retryable without retaining a rejected promise. */ (error) => { serviceCache.pending = null; throw error; });
+    serviceCache.pending.then(/** Navigation may abandon the view before its metadata returns. */ (items) => { if (current) setServices(items); })
+      .catch(/** Surface errors only in the view that requested the service catalogue. */ (error) => { if (current) toast.error(errorMessage(error, "Failed to load workspace services")); });
+    return /** Retire this subscription while retaining the shared request for later use. */ () => { current = false; };
+  }, [selectedBucketId, section, activeTab, entryModalKind, contentAccess.services, serviceCache]);
 
-  // Keeps the selected drawer synchronized after paging or access changes.
+  // Loads only the requested tab/page; revisits reuse the authorization-scoped cache.
   useEffect(() => {
     syncSelectedBucket(
       selectedBucket,
@@ -361,7 +388,7 @@ export default function BucketsPage() {
       setConnectionServices,
       setConnectSummary
     );
-  }, [selectedBucket?.id, selectedBucketId, contentPages, contentAccess, accessLoading]);
+  }, [selectedBucket?.id, selectedBucketId, contentPages, contentAccess, accessLoading, contentSection, contentCache, contentRevision]);
 
   useEffect(
     () =>
@@ -543,13 +570,15 @@ export default function BucketsPage() {
         connectionServices={connectionServices}
         connectSummary={connectSummary}
         services={services}
+        section={section}
+        onSectionChange={selectSection}
         activeTab={activeTab}
         loading={loadingContents}
         saving={saving}
         deletingConnectionId={deletingConnectionId}
         entryKind={entryModalKind}
         onClose={clearSelectedBucket}
-        onRefresh={loadContents}
+        onRefresh={reloadBucketState}
         onDeleteBucket={deleteSelectedBucket}
         onTabChange={selectTab}
         onAddEntry={addEntry}
@@ -647,31 +676,36 @@ type BucketContentSetters = {
   setConnectSummary: (summary: BucketConnectSummary | null) => void;
 };
 
-function applyBucketContents(
-  state: BucketContentState,
-  setters: BucketContentSetters
-) {
-  const values = state.bucketValues ?? [];
-  const secrets = state.secretMetas ?? [];
-  const connections = state.authConnections ?? [];
-  setters.setBucketValues(values);
-  setters.setBucketValueTotal(
-    totalOrLength(state.bucketValueTotal, values.length)
-  );
-  setters.setSecretMetas(secrets);
-  setters.setSecretMetaTotal(
-    totalOrLength(state.secretMetaTotal, secrets.length)
-  );
-  setters.setAuthConnections(connections);
-  setters.setAuthConnectionTotal(
-    totalOrLength(state.authConnectionTotal, connections.length)
-  );
-  setters.setBucketSDKs(state.bucketSDKs ?? []);
-  setters.setBucketSDKTotal(state.bucketSDKTotal ?? 0);
-  setters.setBucketServices(state.bucketServices ?? []);
-  setters.setBucketServiceTotal(state.bucketServiceTotal ?? 0);
-  setters.setConnectionServices(state.connectionServices ?? []);
-  setters.setConnectSummary(state.connectSummary ?? null);
+/** Applies only returned sections so a newly visited tab cannot erase earlier data. */
+function applyBucketContents(state: BucketContentState, setters: BucketContentSetters) {
+  // Omitted fields represent sections not requested, rather than empty results.
+  if (state.bucketValues !== undefined) {
+    setters.setBucketValues(state.bucketValues);
+    setters.setBucketValueTotal(totalOrLength(state.bucketValueTotal, state.bucketValues.length));
+  }
+  if (state.secretMetas !== undefined) {
+    setters.setSecretMetas(state.secretMetas);
+    setters.setSecretMetaTotal(totalOrLength(state.secretMetaTotal, state.secretMetas.length));
+  }
+  if (state.authConnections !== undefined) {
+    setters.setAuthConnections(state.authConnections);
+    setters.setAuthConnectionTotal(totalOrLength(state.authConnectionTotal, state.authConnections.length));
+  }
+  if (state.bucketSDKs !== undefined) {
+    setters.setBucketSDKs(state.bucketSDKs);
+    setters.setBucketSDKTotal(totalOrLength(state.bucketSDKTotal, state.bucketSDKs.length));
+  }
+  if (state.bucketServices !== undefined) {
+    setters.setBucketServices(state.bucketServices);
+    setters.setBucketServiceTotal(totalOrLength(state.bucketServiceTotal, state.bucketServices.length));
+  }
+  if (state.connectionServices !== undefined) setters.setConnectionServices(state.connectionServices);
+  if (state.connectSummary !== undefined) setters.setConnectSummary(state.connectSummary);
+}
+
+/** Clears visible snapshots after navigation, authorization changes, or invalidation. */
+function clearBucketContents(setters: BucketContentSetters) {
+  applyBucketContents({ bucketValues: [], secretMetas: [], authConnections: [], bucketSDKs: [], bucketServices: [], connectionServices: [], connectSummary: null }, setters);
 }
 
 function totalOrLength(total: number | undefined, length: number): number {
@@ -747,7 +781,8 @@ function deleteBucketPrompt(
   bucket: BucketSummary,
   summary: BucketConnectSummary | null
 ): string {
-  const connectedUsers = summary?.connected_user_count || 0;
+  // The bucket summary supplies the warning even before Connected users has been visited.
+  const connectedUsers = summary?.connected_user_count ?? bucket.connected_user_count ?? 0;
   const usage =
     connectedUsers > 0
       ? ` This will also delete ${connectedUsers} connected user${

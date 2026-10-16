@@ -61,6 +61,8 @@ export type SDKBucketState = {
 
 export type BucketEntryKind = "secret" | "value" | "bucket_secret";
 export type BucketDetailTab = "secrets" | "env" | "connected-users";
+export type BucketSection = "credentials" | "apps" | "services";
+export type BucketContentSection = BucketDetailTab | "apps" | "services";
 
 export type SecretFormPayload = {
   exportable?: boolean;
@@ -128,29 +130,33 @@ function readBucketSummaries(
     }));
 }
 
-/** Loads only credential-set sections the current actor is authorized to read. */
+/** Loads only the visible section, with each field still gated by its existing permission. */
 export function readBucketContents(
   bucketId: string,
   pages: BucketContentPages,
-  access: BucketContentAccess
+  access: BucketContentAccess,
+  section: BucketContentSection
 ): Promise<BucketContentState> {
-  // These are a fixed set of independent page reads, not row-driven fan-out;
-  // separating them prevents one protected section from invalidating all data.
   const reads: Promise<BucketContentState>[] = [];
-  if (access.values) reads.push(readBucketValues(bucketId, pages.values));
-  if (access.secrets) reads.push(readBucketSecrets(bucketId, pages.secrets));
-  if (access.connections) {
-    reads.push(readBucketConnections(bucketId, pages.connections));
-    reads.push(readBucketConnectSummary(bucketId));
-  }
-  // Service visibility is independent from connection visibility, so the
-  // connected-user filter must never make an otherwise permitted read fail.
-  if (access.connections && access.services) {
-    reads.push(readBucketConnectionServices(bucketId, pages.connectionServices));
-  }
-  if (access.apps) reads.push(readBucketApps(bucketId, pages.sdks));
-  if (access.services) reads.push(readBucketServices(bucketId, pages));
-  return Promise.all(reads).then((states) => Object.assign({}, ...states));
+  // Credential tabs fetch independently; opening secrets must not retrieve plaintext values or users.
+  if (section === "env" && access.values) reads.push(readBucketValues(bucketId, pages.values));
+  if (section === "secrets" && access.secrets) reads.push(readBucketSecrets(bucketId, pages.secrets));
+  // Connected-user queries share a view but retain independent field permissions.
+  if (section === "connected-users") reads.push(...readConnectedUserContents(bucketId, pages, access));
+  // Usage lists are independent of credential reads and of each other.
+  if (section === "apps" && access.apps) reads.push(readBucketApps(bucketId, pages.sdks));
+  if (section === "services" && access.services) reads.push(readBucketServices(bucketId, pages));
+  return Promise.all(reads).then(/** Combine the bounded queries for this view without requesting other sections. */ (states) => Object.assign({}, ...states));
+}
+
+/** Adds connection metadata and optional service filters only after connection-read admission. */
+function readConnectedUserContents(bucketId: string, pages: BucketContentPages, access: BucketContentAccess): Promise<BucketContentState>[] {
+  // Denied connection access must not trigger either aggregates or service-filter reads.
+  if (!access.connections) return [];
+  const reads = [readBucketConnections(bucketId, pages.connections), readBucketConnectSummary(bucketId)];
+  // Reading connections does not grant permission to enumerate services.
+  if (access.services) reads.push(readBucketConnectionServices(bucketId, pages.connectionServices));
+  return reads;
 }
 
 /** Loads one aggregate credential-set summary. */

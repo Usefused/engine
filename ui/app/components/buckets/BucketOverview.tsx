@@ -31,7 +31,7 @@ type BucketOverviewProps = {
   showServices: boolean;
 };
 
-/** Renders related resources with account consent scoped to each listed service. */
+/** Gives the selected usage list the drawer width, with account consent scoped to each service. */
 export function BucketOverview({
   bucket,
   sdks,
@@ -50,9 +50,10 @@ export function BucketOverview({
   showServices,
 }: BucketOverviewProps) {
   return (
-    <section className="grid gap-4 border-b border-slate-100 px-6 py-4 lg:grid-cols-2">
+    <section className="grid gap-4 border-b border-slate-100 px-6 py-4">
+      {/* Preserve app visibility checks when switching usage sections. */}
       {showApps && <OverviewList
-        title="Apps using this set"
+        title="Apps using this bucket"
         total={sdkTotal}
         empty="No apps use this bucket yet."
         page={sdkPage}
@@ -63,8 +64,9 @@ export function BucketOverview({
           <SDKRow key={sdk.id} sdk={sdk} />
         ))}
       </OverviewList>}
+      {/* Preserve service visibility checks independently from app access. */}
       {showServices && <OverviewList
-        title="Services using this set"
+        title="Services using this bucket"
         total={serviceTotal}
         empty={serviceEmptyText(serviceSearch)}
         page={servicePage}
@@ -77,7 +79,7 @@ export function BucketOverview({
             placeholder="All services"
             options={bucketServiceOptions(services, workspaceServices)}
             search={serviceSearch}
-            className="w-64"
+            className="min-w-0 w-full sm:w-64"
             hideLabel
             allowAll
             allLabel="All services"
@@ -98,7 +100,7 @@ export function BucketOverview({
   );
 }
 
-/** Leaves header menus free to overlap neighboring sections while keeping row contents inside the card. */
+/** Allows narrow filters to shrink within their card without clipping expanded menus. */
 function OverviewList({
   title,
   total,
@@ -120,12 +122,15 @@ function OverviewList({
 }) {
   return (
     // Clipping the whole card cuts off the service selector's menu below its header.
-    <div className="rounded-lg border border-slate-200">
+    <div className="min-w-0 rounded-lg border border-slate-200">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
         <h3 className="text-sm font-semibold text-slate-900">{title}</h3>
-        <div className="flex items-center gap-3">
+        <div className={`flex min-w-0 max-w-full items-center gap-3 ${
+          // Only headers with a filter need a full mobile row; a count stays beside its title.
+          actions ? "w-full sm:w-auto" : "shrink-0"
+        }`}>
           {actions}
-          <span className="text-xs text-slate-500">{total}</span>
+          <span className="shrink-0 text-xs text-slate-500">{total}</span>
         </div>
       </div>
       <div className="divide-y divide-slate-100 overflow-hidden rounded-b-lg">

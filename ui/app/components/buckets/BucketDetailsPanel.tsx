@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { RefreshCw, ShieldCheck, Trash2, Users, X } from "lucide-react";
 import {
   type ActivatedService,
@@ -19,6 +20,7 @@ import { BucketEntryList } from "~/components/buckets/BucketEntryList";
 import { BucketOverview } from "~/components/buckets/BucketOverview";
 import {
   type BucketDetailTab,
+  type BucketSection,
   type BucketEntryKind,
   type BucketSecretFormPayload,
   type CredentialFamilyFormPayload,
@@ -41,6 +43,8 @@ type BucketDetailsPanelProps = {
   connectionServices: BucketServiceSummary[];
   connectSummary: BucketConnectSummary | null;
   services: ActivatedService[];
+  section: BucketSection;
+  onSectionChange: (section: BucketSection) => void;
   activeTab: BucketDetailTab;
   loading: boolean;
   saving: boolean;
@@ -94,53 +98,137 @@ type BucketDetailsPermissions = {
   manageConnections: boolean;
 };
 
-/** Sizes the bucket drawer to its workspace pane so an open assistant cannot clip its left edge. */
+type SelectedBucketDetailsProps = BucketDetailsPanelProps & { bucket: BucketSummary };
+
+/** Resets drawer navigation and form focus when a different bucket is opened. */
 export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
-  const [params, setParams] = useSearchParams();
-  // A selected bucket is required before any credential or connection control can target it.
+  // No credential controls may render without an explicit bucket target.
   if (!props.bucket) return null;
+  return <BucketDetailsContent key={props.bucket.id} {...props} bucket={props.bucket} />;
+}
+
+/** Keeps resource usage separate from credential editing, with actions and navigation always visible. */
+function BucketDetailsContent(props: SelectedBucketDetailsProps) {
+  const [params] = useSearchParams();
+  const { section, onSectionChange } = props;
+  const [focusRequest, setFocusRequest] = useState(0);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
+  const focusedSecret = params.get("secret");
+
+  // A new secret deep link must reveal its editor even if a usage tab was open.
+  useEffect(() => {
+    if (focusedSecret) onSectionChange("credentials");
+  }, [focusedSecret]);
+
+  // Each section starts in view rather than inheriting another section's long scroll position.
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+  }, [section, focusedSecret]);
+
+  // Repeated Add clicks also reveal the existing draft without discarding its values.
+  useEffect(() => {
+    if (!props.entryKind || section !== "credentials") return;
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    composerRef.current?.querySelector<HTMLElement>("[data-bucket-entry-composer] :is(input, select, button):not([disabled])")?.focus({ preventScroll: true });
+  }, [props.entryKind, focusRequest]);
+
+  /** Routes every creation action to its visible editor while retaining route-owned save state. */
+  function addEntry(kind: BucketEntryKind) {
+    onSectionChange("credentials");
+    setFocusRequest(/** Give repeated clicks a new focus request even when the kind is unchanged. */ (request) => request + 1);
+    props.onAddEntry(kind);
+  }
 
   return (
     <>
-      <div
-        className="fixed inset-0 z-40 bg-slate-900/20 transition-opacity"
-        onClick={props.onClose}
-      />
+      <div className="fixed inset-0 z-40 bg-slate-900/20 transition-opacity" onClick={props.onClose} />
       <aside data-fused-detail-sidebar className="fixed inset-y-0 right-0 z-50 flex w-full flex-col overflow-hidden border-l border-slate-200 bg-white shadow-2xl transition-transform md:w-[calc(100%-4rem)] md:max-w-[940px] xl:max-w-[1080px]">
-        <BucketDetailsHeader
-          bucket={props.bucket}
-          loading={props.loading}
-          saving={props.saving}
-          onClose={props.onClose}
-          onRefresh={props.onRefresh}
-          onDeleteBucket={props.onDeleteBucket}
-          onAddEntry={props.onAddEntry}
-          permissions={props.permissions}
-        />
-        {/* One bounded scroll owner keeps expanded forms and lower credential tabs reachable together. */}
-        <div role="region" aria-label="Bucket contents" tabIndex={0} className="min-h-0 flex-1 overflow-y-auto overscroll-contain focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-400">
-        <div className="px-6"><ConnectReturnStatus result={params.get("fused_connect")} /></div>
-        {props.permissions.readConnections && <BucketConnectUsage summary={props.connectSummary} />}
-        {(props.permissions.readApps || props.permissions.readServices) && <BucketOverview
-          bucket={props.bucket}
-          sdks={props.bucketSDKs}
-          sdkTotal={props.bucketSDKTotal}
-          services={props.bucketServices}
-          workspaceServices={props.services}
-          serviceTotal={props.bucketServiceTotal}
-          sdkPage={props.sdkPage}
-          servicePage={props.servicePage}
-          serviceSearch={props.serviceSearch}
-          pageSize={props.overviewPageSize}
-          onSDKPageChange={props.onSDKPageChange}
-          onServicePageChange={props.onServicePageChange}
-          onServiceSearchChange={props.onServiceSearchChange}
-          showApps={props.permissions.readApps}
-          showServices={props.permissions.readServices}
-        />}
-        {/* Deep links reveal only a named metadata entry; the existing credential permission controls writes. */}
-        {params.get("secret") && props.permissions.readSecrets && <FocusedBucketSecret key={`${props.bucket.id}:${params.get("secret")}`} bucketID={props.bucket.id} name={params.get("secret")!} canManage={props.permissions.manageCredentials} saving={props.saving} onSave={props.onSaveBucketSecret} onClose={() => { const next=new URLSearchParams(params);next.delete("secret");setParams(next,{replace:true}); }} />}
-        {(props.permissions.manageCredentials || props.permissions.manageValues) && <BucketEntryComposer
+        <BucketDetailsHeader {...props} onAddEntry={addEntry} />
+        <BucketSectionTabs section={section} onChange={onSectionChange} permissions={props.permissions} />
+        {/* Only the selected section scrolls; the header and main tabs stay within reach. */}
+        <div ref={scrollRef} role="region" aria-label="Bucket contents" tabIndex={0} className="min-h-0 flex-1 overflow-y-auto overscroll-contain focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-400">
+          <div className="px-6"><ConnectReturnStatus result={params.get("fused_connect")} /></div>
+          {/* Hiding preserves unsaved credentials while users inspect related apps or services. */}
+          <div role="tabpanel" id="bucket-panel-credentials" aria-labelledby="bucket-section-credentials" hidden={section !== "credentials"}>
+            <div ref={composerRef}><BucketCredentialsContent {...props} /></div>
+          </div>
+          {/* Usage lists keep their existing read permissions and never displace the editor. */}
+          {section !== "credentials" && <div role="tabpanel" id={`bucket-panel-${section}`} aria-labelledby={`bucket-section-${section}`}>
+            {props.loading ? <p role="status" className="px-6 py-10 text-sm text-slate-500">Loading bucket usage…</p> : <BucketOverview
+              bucket={props.bucket}
+              sdks={props.bucketSDKs}
+              sdkTotal={props.bucketSDKTotal}
+              services={props.bucketServices}
+              workspaceServices={props.services}
+              serviceTotal={props.bucketServiceTotal}
+              sdkPage={props.sdkPage}
+              servicePage={props.servicePage}
+              serviceSearch={props.serviceSearch}
+              pageSize={props.overviewPageSize}
+              onSDKPageChange={props.onSDKPageChange}
+              onServicePageChange={props.onServicePageChange}
+              onServiceSearchChange={props.onServiceSearchChange}
+              showApps={section === "apps" && props.permissions.readApps}
+              showServices={section === "services" && props.permissions.readServices}
+            />}
+          </div>}
+        </div>
+      </aside>
+    </>
+  );
+}
+
+/** Provides keyboard-accessible navigation between editing and the two usage lists. */
+function BucketSectionTabs({ section, onChange, permissions }: {
+  section: BucketSection;
+  onChange: (section: BucketSection) => void;
+  permissions: BucketDetailsPermissions;
+}) {
+  const tabs: Array<{ key: BucketSection; label: string }> = [
+    { key: "credentials", label: "Credentials" },
+    // Usage tabs must not expose lists that the caller cannot read.
+    ...(permissions.readApps ? [{ key: "apps" as const, label: "Apps" }] : []),
+    ...(permissions.readServices ? [{ key: "services" as const, label: "Services" }] : []),
+  ];
+  /** Matches standard tab keyboard behavior, including wraparound and first/last shortcuts. */
+  function navigate(event: KeyboardEvent<HTMLDivElement>) {
+    const current = tabs.findIndex(/** Match the currently selected tab before moving focus. */ (tab) => tab.key === section);
+    const destinations: Record<string, number> = { ArrowRight: (current + 1) % tabs.length, ArrowLeft: (current + tabs.length - 1) % tabs.length, Home: 0, End: tabs.length - 1 };
+    // Unrelated keys retain their native behavior, including Tab to enter the panel.
+    if (!(event.key in destinations)) return;
+    event.preventDefault();
+    const next = tabs[destinations[event.key]].key;
+    onChange(next);
+    event.currentTarget.querySelector<HTMLButtonElement>(`#bucket-section-${next}`)?.focus();
+  }
+  return <div role="tablist" aria-label="Bucket sections" onKeyDown={navigate} className="fused-tabs-scroll shrink-0 gap-1 border-b border-slate-200 bg-white px-4 sm:px-6">
+    {tabs.map(/** Associate each tab with its panel for keyboard and screen-reader navigation. */ (tab) => <button
+      key={tab.key} id={`bucket-section-${tab.key}`} role="tab" type="button"
+      aria-selected={section === tab.key} aria-controls={`bucket-panel-${tab.key}`}
+      // Only the active tab participates in the page's Tab sequence; arrow keys reach its siblings.
+      tabIndex={section === tab.key ? 0 : -1}
+      onClick={/** Select the destination without changing route-owned credential state. */ () => onChange(tab.key)}
+      className={`min-h-11 whitespace-nowrap border-b-2 px-4 py-3 text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-inset ${
+        // The underline identifies selection without relying on color alone.
+        section === tab.key ? "border-slate-900 text-slate-900" : "border-transparent text-slate-500 hover:text-slate-800"
+      }`}
+    >{tab.label}</button>)}
+  </div>;
+}
+
+/** Keeps credential creation ahead of lists and retains the existing secret, value, and user controls. */
+function BucketCredentialsContent(props: SelectedBucketDetailsProps) {
+  const [params, setParams] = useSearchParams();
+  /** Dismisses only the focused-secret link while retaining the selected bucket and credential tab. */
+  function closeFocusedSecret() {
+    const next = new URLSearchParams(params);
+    next.delete("secret");
+    setParams(next, { replace: true });
+  }
+  return <>
+        {/* Entry writes remain gated by the existing credential/value management grants. */}
+        {(props.permissions.manageCredentials || props.permissions.manageValues) && <div data-bucket-entry-composer><BucketEntryComposer
           kind={props.entryKind}
           saving={props.saving}
           services={props.services}
@@ -150,7 +238,10 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
           onSaveCredentialFamily={props.onSaveCredentialFamily}
           onSaveValue={props.onSaveValue}
           onSaveBucketSecret={props.onSaveBucketSecret}
-        />}
+        /></div>}
+        {/* Deep links reveal only a named metadata entry; the existing credential permission controls writes. */}
+        {params.get("secret") && props.permissions.readSecrets && <FocusedBucketSecret key={`${props.bucket.id}:${params.get("secret")}`} bucketID={props.bucket.id} name={params.get("secret")!} canManage={props.permissions.manageCredentials} saving={props.saving} onSave={props.onSaveBucketSecret} onClose={closeFocusedSecret} />}
+
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-6 py-3">
           <span className="text-sm font-medium text-slate-700">
             Credentials and values
@@ -159,19 +250,19 @@ export function BucketDetailsPanel(props: BucketDetailsPanelProps) {
             activeTab={props.activeTab}
             secretCount={props.bucket.secret_count}
             valueCount={props.bucket.value_count}
+            // Summary counts remain accurate before the Connected users tab has been loaded.
             connectedUserCount={
-              props.connectSummary?.connected_user_count ||
-              props.connections.length
+              props.connectSummary?.connected_user_count ??
+              props.bucket.connected_user_count
             }
             onTabChange={props.onTabChange}
             permissions={props.permissions}
           />
         </div>
+        {/* Connection usage remains visible below the editor rather than pushing creation off screen. */}
+        {props.activeTab === "connected-users" && props.permissions.readConnections && <BucketConnectUsage summary={props.connectSummary} />}
         <BucketTabPanel {...props} />
-        </div>
-      </aside>
-    </>
-  );
+  </>;
 }
 
 /** Keeps readable credential sections in one scrollable strip without shrinking their labels. */
@@ -294,7 +385,7 @@ type BucketDetailsHeaderProps = {
   permissions: BucketDetailsPermissions;
 };
 
-/** Keeps authorized bucket actions visible while the separate content region scrolls. */
+/** Keeps actions visible and anchors dismissal beside the title when mobile actions wrap. */
 function BucketDetailsHeader({
   bucket,
   loading,
@@ -307,8 +398,8 @@ function BucketDetailsHeader({
 }: BucketDetailsHeaderProps) {
   const deleteDisabledReason = bucketDeleteDisabledReason(bucket, saving);
   return (
-    <div className="z-10 flex shrink-0 flex-col items-stretch justify-between gap-3 border-b border-slate-100 bg-white/90 px-4 py-4 backdrop-blur sm:flex-row sm:items-center sm:px-6 sm:py-5">
-      <div className="min-w-0">
+    <div className="relative z-10 flex shrink-0 flex-col items-stretch justify-between gap-3 border-b border-slate-100 bg-white/90 px-4 py-4 backdrop-blur sm:flex-row sm:items-center sm:px-6 sm:py-5">
+      <div className="min-w-0 pr-10 sm:pr-0">
         <div className="flex min-w-0 items-center gap-2">
           <h2 className="truncate text-lg font-semibold text-slate-900">
             {bucket.name}
@@ -360,7 +451,7 @@ function BucketDetailsHeader({
         <button
           type="button"
           onClick={onClose}
-          className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+          className="absolute right-3 top-3 inline-flex h-10 w-10 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 sm:static"
           aria-label="Close credential details"
           title="Close"
         >

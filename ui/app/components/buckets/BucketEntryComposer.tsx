@@ -1,7 +1,7 @@
 import { FieldLabel } from "~/components/forms/FieldLabel";
 import { Select } from "../forms/Select.ts";
-import { type FormEvent, useEffect, useState } from "react";
-import { Check, X } from "lucide-react";
+import { type Dispatch, type FormEvent, type SetStateAction, useEffect, useState } from "react";
+import { Check } from "lucide-react";
 import { type ActivatedService } from "~/lib/api";
 import type { ServiceAuthOption } from "~/lib/service-auth";
 import { BucketServiceSelect } from "~/components/buckets/BucketServiceSelect";
@@ -14,7 +14,6 @@ import {
 } from "~/lib/buckets";
 import {
   type BucketSecretEntryForm,
-  secretHasTwoFields,
   secretIsCredentialFamily,
   serializeBucketSecretPayload,
   serializeCredentialFamilyPayload,
@@ -65,7 +64,7 @@ const emptyBucketSecret: BucketSecretEntryForm = {
   expiresAt: "",
 };
 
-/** Wraps complete credential fields within the bucket panel while preserving explicit save actions. */
+/** Keeps credential fields responsive and places explicit save/cancel actions below the form. */
 export function BucketEntryComposer({
   kind,
   saving,
@@ -152,10 +151,10 @@ export function BucketEntryComposer({
   };
 
   return (
-    <form onSubmit={submit} className="border-b border-slate-100 px-6 py-4">
-      {/* Size columns from the panel so required labels and paired secrets remain readable beside the bucket sidebar. */}
+    <form onSubmit={submit} className="@container border-b border-slate-100 px-6 py-4">
+      {/* Use the form width, not the browser width: one column on phones and at most two in a wide drawer. */}
       <div
-        className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,14rem),1fr))] items-end gap-2"
+        className="grid grid-cols-1 items-end gap-4 @min-[30rem]:grid-cols-2"
       >
         {kind !== "bucket_secret" && (
           <ComposerServiceSelect
@@ -189,60 +188,80 @@ export function BucketEntryComposer({
           setValue={setValue}
           setBucketSecret={setBucketSecret}
         />
-        {/* Retrieval opt-in is offered only for the supported credential families. */}
-        {(kind === "bucket_secret" || (kind === "secret" && selectedAuthOption?.auth_type === "api_key")) && (
-          <label className="flex items-start gap-2 text-xs text-slate-600">
-            <input type="checkbox" disabled={saving} checked={(kind === "bucket_secret" ? bucketSecret.exportable : secret.exportable) === true}
-              onChange={/** Preserve independent opt-in state for generic and provider forms. */ (event) => {
-                // Generic secrets and provider keys have separate form state.
-                if (kind === "bucket_secret") setBucketSecret({ ...bucketSecret, exportable: event.target.checked });
-                else setSecret({ ...secret, exportable: event.target.checked });
-              }} />
-            <span>Allow secret retrieval<br /><span className="text-slate-400">Callers with reveal permission can use this key outside Fused.</span></span>
-          </label>
-        )}
-        {/* Env values are resolved live and never expire; only secrets do. */}
-        {kind !== "value" && (
-          <ExpiryInput
-            value={kind === "bucket_secret" ? bucketSecret.expiresAt : secret.expiresAt}
-            onChange={(nextExpiresAt) =>
-              kind === "bucket_secret"
-                ? setBucketSecret((prev) => ({ ...prev, expiresAt: nextExpiresAt }))
-                : setSecret((prev) => ({ ...prev, expiresAt: nextExpiresAt }))
-            }
-          />
-        )}
-        {/* Save and Cancel are grouped into one grid cell so they always sit
-            side-by-side, even when the grid collapses to a single column
-            below the "lg" breakpoint -- otherwise each button would land in
-            its own full-width row and appear disconnected from the other. */}
-        <div className="flex items-center gap-1">
-          <button
-            type="submit"
-            disabled={saving || (kind !== "bucket_secret" && services.length === 0)}
-            className="inline-flex h-[38px] w-[32px] items-center justify-center text-slate-950 hover:text-slate-950 disabled:opacity-40"
-            aria-label={`Save ${composerKindLabel(kind)}`}
-            title="Save"
-          >
-            <Check className="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={saving}
-            className="inline-flex h-[38px] w-[32px] items-center justify-center text-slate-500 hover:text-slate-700 disabled:opacity-40"
-            aria-label="Cancel entry"
-            title="Cancel"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+        <BucketSecretOptions kind={kind} authType={selectedAuthOption?.auth_type} secret={secret} bucketSecret={bucketSecret} setSecret={setSecret} setBucketSecret={setBucketSecret} saving={saving} />
       </div>
+      {/* Validation stays adjacent to the actions so a failed save explains how to proceed. */}
       {error && (
-        <p className="mt-2 text-xs font-medium text-red-600">{error}</p>
+        <p role="alert" className="mt-3 text-xs font-medium text-red-600">{error}</p>
       )}
+      <BucketEntryActions kind={kind} saving={saving} hasServices={services.length > 0} onCancel={onCancel} />
     </form>
   );
+}
+
+/** Keeps labeled actions below every field, independent of the responsive field grid. */
+function BucketEntryActions({ kind, saving, hasServices, onCancel }: {
+  kind: BucketEntryKind;
+  saving: boolean;
+  hasServices: boolean;
+  onCancel: () => void;
+}) {
+  return <>
+      {/* A separate action row stays below all fields at every drawer width. */}
+      <div className="mt-4 flex flex-wrap items-center justify-end gap-2 border-t border-slate-100 pt-4">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={saving}
+          className="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+          aria-label="Cancel entry"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          // Service-scoped entries require an available service; generic secrets do not.
+          disabled={saving || (kind !== "bucket_secret" && !hasServices)}
+          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-40"
+          aria-label={`Save ${composerKindLabel(kind)}`}
+        >
+          <Check className="h-4 w-4" aria-hidden="true" />
+          {/* Pending feedback prevents repeated submissions while retaining the action's purpose. */}
+          {saving ? "Saving…" : `Save ${composerKindLabel(kind)}`}
+        </button>
+      </div>
+  </>;
+}
+
+/** Keeps optional retrieval and expiry settings together without mixing them into form actions. */
+function BucketSecretOptions({ kind, authType, secret, bucketSecret, setSecret, setBucketSecret, saving }: {
+  kind: BucketEntryKind;
+  authType?: string;
+  secret: SecretEntryForm;
+  bucketSecret: BucketSecretEntryForm;
+  setSecret: Dispatch<SetStateAction<SecretEntryForm>>;
+  setBucketSecret: Dispatch<SetStateAction<BucketSecretEntryForm>>;
+  saving: boolean;
+}) {
+  // Environment values are resolved live and have neither expiry nor secret retrieval policy.
+  if (kind === "value") return null;
+  // Generic and provider secrets retain independent drafts when the creation kind changes.
+  const current = kind === "bucket_secret" ? bucketSecret : secret;
+  /** Updates only the active credential draft while preserving the remaining fields. */
+  function update(patch: { exportable?: boolean; expiresAt?: string }) {
+    // Service-independent credentials must never overwrite provider credential state.
+    if (kind === "bucket_secret") setBucketSecret(/** Merge the optional setting without clearing typed values. */ (previous) => ({ ...previous, ...patch }));
+    else setSecret(/** Preserve provider selection and all authentication fields. */ (previous) => ({ ...previous, ...patch }));
+  }
+  return <>
+    {/* Retrieval opt-in is supported only by generic secrets and provider API keys. */}
+    {(kind === "bucket_secret" || authType === "api_key") && <label className="flex items-start gap-2 text-xs text-slate-600">
+      <input type="checkbox" disabled={saving} checked={current.exportable === true}
+        onChange={/** Apply the explicit retrieval choice only to this draft. */ (event) => update({ exportable: event.target.checked })} />
+      <span>Allow secret retrieval<br /><span className="text-slate-400">Callers with reveal permission can use this key outside Fused.</span></span>
+    </label>}
+    <ExpiryInput value={current.expiresAt} onChange={/** Retain optional expiration without changing the credential's value. */ (expiresAt) => update({ expiresAt })} />
+  </>;
 }
 
 /**
