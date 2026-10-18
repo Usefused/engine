@@ -342,12 +342,12 @@ function buildSandboxGlobals(
   return {
     call: boundCall,
     session: {
-      // Invocation-local counts avoid cross-call attribution when several tools run concurrently.
+      // Admit one explicit key before reading state or attributing retained-result access to this invocation.
       get: (...args: unknown[]) => {
         invocation.assertActive();
         // Rejecting before the read prevents a misleading root result and keeps audit counts exact.
         if (args.length !== 1 || typeof args[0] !== "string") {
-          throw new Error("MCP_SESSION_GET_ARGUMENTS_INVALID: session.get accepts exactly one string key; use session.page(ref, {path, fields, offset}) for array paths or project session.get(ref) in JavaScript.");
+          throw new Error("MCP_SESSION_GET_ARGUMENTS_INVALID: use session.get(key) with exactly one string key previously stored by session.set(key, value), or a returned result_ref. session.get() does not list keys, and stateHandle is not a stored-value key. Use Object.keys(session.get(key)) for an object's keys or session.page(ref, {path, fields, offset}) for retained arrays.");
         }
         return session.get(args[0], access);
       },

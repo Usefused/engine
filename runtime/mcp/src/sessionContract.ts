@@ -94,9 +94,14 @@ export const SESSION_CONTRACT_METADATA = Object.freeze({
   ]),
 });
 
+/** Keeps helper semantics identical in the tool description and initialization instructions. */
+export const SESSION_USAGE_RULE =
+  'Session helpers are synchronous. Store: session.set("post", value); later read: return session.get("post"). session.get(key) requires exactly one string: a stored key or a returned result_ref; a missing stored key returns undefined. It does not list keys. Inspect a known object with Object.keys(session.get(key)). session.page(ref, {path, fields, offset}) accepts only retained result_ref values, not keys from session.set. Inline results are not saved automatically; save only values needed later. State is temporary, not durable storage.';
+
 /** Repeats the safety-critical contract in model-visible text because clients may hide initialize metadata. */
 export const SESSION_AGENT_RULE =
-  "The MCP client has already attached every execute call to one active client-owned session. Never invent, request, or pass a session ID. Use execute for session.get, session.set, and session.page; their state exists only on this MCP connection. Follow recovery_action and execute_request exactly: complete client-presented provider authentication, correct arguments, adjust a result projection, run the supplied stored-result request, let the client reconnect, or do not replay an unknown outcome. A new connection cannot read prior state or result_ref values.";
+  "The MCP client has already attached execute to one client-owned session. Never invent, request, or pass a session ID. " + SESSION_USAGE_RULE +
+  " Follow recovery_action and execute_request exactly. A new connection cannot read prior state or result_ref values.";
 
 export interface SessionToolRequest {
   tool: "execute";
@@ -156,9 +161,13 @@ export function inspectionScript(reference: string, root: unknown, outputBudgetB
   return `return {recovery_action:"adjust_result_projection",execute_request:"adjust_projection",provider_execution:"complete",automatic_replay:false,type:typeof session.get(${JSON.stringify(reference)})};`;
 }
 
-/** Maps trusted runtime codes to the smallest safe model recovery contract. */
+/** Maps runtime codes to recovery candidates; the execute boundary checks prior calls before allowing correction. */
 export function recoveryForError(message: string): ModelRecovery {
   const code = modelVisibleExecuteErrorCode(message);
+  // A malformed local read has not dispatched a provider; the caller must still account for earlier script work.
+  if (code === "MCP_SESSION_GET_ARGUMENTS_INVALID") {
+    return recovery("correct_execute_arguments", "correct_arguments", "not_started");
+  }
   // Local physical option validation finishes before its bridge call and is safe to reformat when invocation history agrees.
   if (CORRECTABLE_PHYSICAL_PAGINATION_CODES.has(code)) {
     return recovery("correct_execute_arguments", "correct_arguments", "not_started");
@@ -172,7 +181,7 @@ export function recoveryForError(message: string): ModelRecovery {
     return recovery("do_not_replay", "do_not_replay", "complete");
   }
   // Output and retained-navigation failures require a new session-only projection, not provider replay.
-  if (code.startsWith("MCP_RESULT_") || ["MCP_SESSION_GET_ARGUMENTS_INVALID", "MCP_OUTPUT_SERIALIZATION_FAILED", "MCP_EXECUTE_RESULT_LIMIT_EXCEEDED", "MCP_EXECUTE_VISIBLE_OUTPUT_LIMIT_EXCEEDED", "MCP_EXECUTE_ERROR_OUTPUT_LIMIT_EXCEEDED"].includes(code)) {
+  if (code.startsWith("MCP_RESULT_") || ["MCP_OUTPUT_SERIALIZATION_FAILED", "MCP_EXECUTE_RESULT_LIMIT_EXCEEDED", "MCP_EXECUTE_VISIBLE_OUTPUT_LIMIT_EXCEEDED", "MCP_EXECUTE_ERROR_OUTPUT_LIMIT_EXCEEDED"].includes(code)) {
     return recovery("adjust_result_projection", "adjust_projection", "complete");
   }
   // Only the outer output-budget guard is known to reject before the VM can dispatch a provider call.

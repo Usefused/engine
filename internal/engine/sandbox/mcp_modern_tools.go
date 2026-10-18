@@ -24,7 +24,9 @@ const (
 	mcpModernStateMetadataKey       = "com.usefused/state"
 	mcpModernStateHandlePrefix      = "fused-state:"
 	mcpModernInternalInitializeID   = `"fused-modern-initialize"`
-	mcpModernExecuteToolDescription = "Run TypeScript that invokes only operations discovered with search_docs through await call(). Pass stateHandle only when continuing session.get, session.set, session.page, or a retained-result next_request from an earlier execute result; omit it for independent work. Follow structured recovery exactly and never replay provider mutations after an unknown outcome."
+	// Both modern discovery surfaces teach the same key/ref/handle distinction before agents attempt a state read.
+	mcpModernSessionInstructions = `Session helpers are synchronous. Store: session.set("post", value); later read: return session.get("post"). session.get(key) requires exactly one string: a stored key or a returned result_ref; a missing stored key returns undefined. It does not list keys. Inspect a known object with Object.keys(session.get(key)). session.page(ref, {path, fields, offset}) accepts only retained result_ref values, not keys from session.set. Inline results are not saved automatically; save only values needed later. State is temporary, not durable storage. Pass the exact returned stateHandle as an execute argument when continuing that state; omit it for independent work. stateHandle is not a stored-value key or result_ref. An unavailable handle cannot recover earlier state; never replay provider mutations to reconstruct it.`
+	mcpModernExecuteToolDescription = "Run TypeScript ending with return. Discover provider operations with search_docs first; call only execution_ready=true operations through await call(). Session-only reads need no search_docs call. " + mcpModernSessionInstructions + " Follow structured recovery and supplied next_request exactly; never replay a provider call after an unknown outcome."
 )
 
 var mcpModernToolHandles = struct {
@@ -425,7 +427,7 @@ func adaptMCPModernToolList(result map[string]any) error {
 		}
 		properties[mcpModernStateHandleArgument] = map[string]any{
 			"type": "string", "maxLength": 128,
-			"description": "Exact state handle returned by an earlier execute call. Supply it only for session state or retained-result continuation.",
+			"description": "Exact state handle returned by an earlier execute call. Supply it only for session state or retained-result continuation. It selects the state context, not the string key or result_ref required by session.get(key).",
 		}
 		tool["description"] = mcpModernExecuteToolDescription
 		tool["outputSchema"] = map[string]any{

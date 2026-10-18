@@ -206,12 +206,18 @@ func decodeMCPModernResult(t *testing.T, response *httptest.ResponseRecorder) ma
 	return envelope.Result
 }
 
-// TestMCPModernDiscoveryAndResources proves the stateless surface advertises, lists, and reads only selected event resources.
+// TestMCPModernDiscoveryAndResources verifies server guidance alongside the selected stateless resource capabilities.
 func TestMCPModernDiscoveryAndResources(t *testing.T) {
 	fixture := installMCPModernFixture(t)
 	discovery := httptest.NewRecorder()
 	fixture.router.ServeHTTP(discovery, newMCPModernRequest(t, fixture, 1, "server/discover", nil))
 	discovered := decodeMCPModernResult(t, discovery)
+	instructions, _ := discovered["instructions"].(string)
+	assertMCPSessionUsageGuidance(t, instructions)
+	// Discovery preserves the authored purpose while adding the explicit handle contract without excessive prompt overhead.
+	if !strings.HasPrefix(instructions, "Exercise the MCP transport contract.") || !strings.Contains(instructions, "stateHandle is not a stored-value key or result_ref") || !strings.Contains(instructions, "Session-only reads need no search_docs call") || len(instructions) > 1500 {
+		t.Fatalf("modern server instructions = %q", instructions)
+	}
 	capabilities, _ := discovered["capabilities"].(map[string]any)
 	resources, _ := capabilities["resources"].(map[string]any)
 	tools, _ := capabilities["tools"].(map[string]any)
@@ -269,8 +275,16 @@ func TestMCPModernToolsAndExplicitStateEndToEnd(t *testing.T) {
 	fixture.router.ServeHTTP(listedResponse, newMCPModernRequest(t, fixture, 21, "tools/list", nil))
 	listed := decodeMCPModernResult(t, listedResponse)
 	tools, _ := listed["tools"].([]any)
-	// The modern catalogue must expose both established tools and describe execute's explicit state input.
-	if len(tools) != 2 || !strings.Contains(listedResponse.Body.String(), `"stateHandle"`) || strings.Contains(listedResponse.Body.String(), `"com.usefused/session"`) || listedResponse.Header().Get(mcpSessionIDHeader) != "" {
+	for _, rawTool := range tools {
+		tool := rawTool.(map[string]any)
+		// Only the execute descriptor owns session helpers; search guidance remains focused on discovery.
+		if tool["name"] == "execute" {
+			description, _ := tool["description"].(string)
+			assertMCPSessionUsageGuidance(t, description)
+		}
+	}
+	// Modern discovery must distinguish the session continuation handle from the required stored-value key.
+	if len(tools) != 2 || !strings.Contains(listedResponse.Body.String(), `"stateHandle"`) || !strings.Contains(listedResponse.Body.String(), "session.get(key) requires exactly one string") || !strings.Contains(listedResponse.Body.String(), "stateHandle is not a stored-value key") || strings.Contains(listedResponse.Body.String(), `"com.usefused/session"`) || listedResponse.Header().Get(mcpSessionIDHeader) != "" {
 		t.Fatalf("modern tools/list = headers:%v body:%s", listedResponse.Header(), listedResponse.Body.String())
 	}
 	activeBeforeSearch := activeMCPSessionCount()
@@ -321,6 +335,15 @@ func TestMCPModernToolsAndExplicitStateEndToEnd(t *testing.T) {
 	// A rejected continuation returns the already-owned handle because validation failure cannot invalidate earlier state.
 	if rejectedContinuation.Code != http.StatusOK || !strings.Contains(rejectedContinuation.Body.String(), `"isError":true`) || !strings.Contains(rejectedContinuation.Body.String(), handle) {
 		t.Fatalf("rejected modern continuation = status:%d body:%s", rejectedContinuation.Code, rejectedContinuation.Body.String())
+	}
+
+	invalidRead := httptest.NewRecorder()
+	fixture.router.ServeHTTP(invalidRead, newMCPModernRequest(t, fixture, 26, "tools/call", map[string]any{
+		"name": "execute", "arguments": map[string]any{"stateHandle": handle, "script": `return { keys: await session.get() };`},
+	}))
+	// A bad read is correctable without claiming provider completion or discarding the existing state.
+	if invalidRead.Code != http.StatusOK || !strings.Contains(invalidRead.Body.String(), "MCP_SESSION_GET_ARGUMENTS_INVALID") || !strings.Contains(invalidRead.Body.String(), `\"execute_request\":\"correct_arguments\"`) || !strings.Contains(invalidRead.Body.String(), `\"provider_execution\":\"not_started\"`) || !strings.Contains(invalidRead.Body.String(), handle) {
+		t.Fatalf("invalid modern session read = status:%d body:%s", invalidRead.Code, invalidRead.Body.String())
 	}
 
 	secondResponse := httptest.NewRecorder()

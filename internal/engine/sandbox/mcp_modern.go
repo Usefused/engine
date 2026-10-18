@@ -282,7 +282,7 @@ func admitMCPModernApp(ctx context.Context, routeID, token string) (*mcpModernAd
 	return &mcpModernAdmission{target: target, identity: identity, server: server, resources: resources}, http.StatusOK, nil
 }
 
-// handleMCPModernDiscover advertises the unified stateless tool and selected event-resource capabilities.
+// handleMCPModernDiscover advertises admitted capabilities and teaches state use alongside the authored server purpose.
 func handleMCPModernDiscover(ctx context.Context, w http.ResponseWriter, request mcpJSONRPCRequest, admission *mcpModernAdmission) {
 	capabilities := map[string]any{"tools": map[string]any{}}
 	// Imported capabilities are advertised only after exact app and token admission.
@@ -300,10 +300,11 @@ func handleMCPModernDiscover(ctx context.Context, w http.ResponseWriter, request
 	if len(admission.resources) > 0 {
 		capabilities["resources"] = map[string]any{"subscribe": true}
 	}
+	// The app summary describes its purpose; script guidance also belongs in discovery for hosts that foreground server instructions.
 	writeMCPModernResult(w, request.ID, map[string]any{
 		"supportedVersions": []string{mcpModernProtocolVersion},
 		"capabilities":      capabilities,
-		"instructions":      admission.server.Description,
+		"instructions":      admission.server.Description + "\n\nFor script-based execute: " + mcpModernExecuteToolDescription,
 		"ttlMs":             mcpModernResourceCacheTTL,
 		"cacheScope":        "private",
 	}, admission.server)

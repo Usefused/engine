@@ -30,6 +30,20 @@ describe("model-visible MCP guidance", () => {
     expect(EXECUTE_ARGUMENT_DESCRIPTIONS.script).toContain("Never pass a session ID");
   });
 
+  // Either model-visible surface must teach correct state use without requiring another documentation call.
+  it.each([EXECUTE_TOOL_DESCRIPTION, MCP_SERVER_INSTRUCTIONS])("explains named keys and retained references in each guidance surface", (guidance) => {
+    expect(guidance).toContain("Session helpers are synchronous");
+    expect(guidance).toContain('session.set("post", value); later read: return session.get("post")');
+    expect(guidance).toContain("session.get(key) requires exactly one string");
+    expect(guidance).toContain("returned result_ref");
+    expect(guidance).toContain("missing stored key returns undefined");
+    expect(guidance).toContain("does not list keys");
+    expect(guidance).toContain("Object.keys(session.get(key))");
+    expect(guidance).toContain("accepts only retained result_ref values, not keys from session.set");
+    expect(guidance).toContain("Inline results are not saved automatically");
+    expect(guidance).toContain("not durable storage");
+  });
+
   // Initialization remains the one concise source of cross-tool policy and recovery rules.
   it("keeps server instructions bounded and safety-complete", () => {
     expect(MCP_SERVER_INSTRUCTIONS.length).toBeLessThanOrEqual(3_500);

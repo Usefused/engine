@@ -319,6 +319,32 @@ describe("runExecute -- call() wiring", () => {
     expect(outcome.access).toEqual({ retained_reads: 0, unavailable_reads: 0 });
   });
 
+  /** Invalid reads are argument mistakes, not evidence that a provider operation completed. */
+  it.each(['session.get()', 'session.get(undefined)', 'session.get(42)', 'session.get("key", {})'])("corrects %s before any provider call", async (read) => {
+    const callImpl = vi.fn();
+    const outcome = await runExecute(`return { keys: await ${read} };`, testCallOptions, new SessionState(), undefined, callImpl);
+    expect(errorValue(outcome)).toMatchObject({
+      code: "MCP_SESSION_GET_ARGUMENTS_INVALID", recovery_action: "correct_execute_arguments",
+      execute_request: "correct_arguments", provider_execution: "not_started", automatic_replay: false,
+    });
+    expect(callImpl).not.toHaveBeenCalled();
+    expect(outcome.access).toEqual({ retained_reads: 0, unavailable_reads: 0 });
+  });
+
+  /** Correcting a later session read must not replay an earlier or concurrent provider mutation. */
+  it.each([
+    'await call("write", {}); return session.get();',
+    'const pending = call("write", {}); return session.get();',
+  ])("preserves replay safety when a provider call precedes an invalid read: %s", async (script) => {
+    const callImpl = vi.fn().mockResolvedValue({ ok: true });
+    const outcome = await runExecute(script, testCallOptions, new SessionState(), undefined, callImpl);
+    expect(errorValue(outcome)).toMatchObject({
+      code: "MCP_SESSION_GET_ARGUMENTS_INVALID", recovery_action: "do_not_replay",
+      execute_request: "do_not_replay", provider_execution: "unknown", automatic_replay: false,
+    });
+    expect(callImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("enforces the call-count cap", async () => {
     const callImpl = vi.fn().mockResolvedValue({ ok: true });
     const limits: ExecuteLimits = { timeoutMs: 5000, maxCalls: 2 };

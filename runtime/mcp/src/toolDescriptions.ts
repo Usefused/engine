@@ -17,17 +17,17 @@ export const EXECUTE_TOOL_DESCRIPTION =
 
 export const EXECUTE_ARGUMENT_DESCRIPTIONS = {
   outputBudgetBytes: "Visible JSON byte budget for this execution and retained-result continuations.",
-  script: "TypeScript ending with return. Invoke operations through await call(); current-session state helpers are session.get, session.set, and session.page. Never pass a session ID.",
+  script: "TypeScript ending with return. Invoke operations through await call(); use session.get(key), session.set(key, value), or session.page(ref, options) for stored state. Never pass a session ID.",
 } as const;
 
 export const MCP_SERVER_INSTRUCTIONS = [
   "This server exposes exactly two tools: search_docs and execute.",
   SESSION_AGENT_RULE,
-  "Use search_docs before execute. Query with one concise intent; use no arguments only to browse, exact operationId for known detail, and the returned next_action when execution_ready=false.",
+  "Use search_docs before provider calls, not session-only reads. Query with one concise intent; use no arguments only to browse, exact operationId for known detail, and the returned next_action when execution_ready=false.",
   "Inside execute, route provider calls only through await call(). The Engine supplies authentication, connected-user identity, and resource routing; never invent or pass credentials, auth selectors, fused_end_user_ref, or fused_resource_id in call params.",
   "Calls use the returned flat params_schema. Use pagination options only when exact operationId detail permits them. Never reuse policy across operations.",
   "Await every call and end with return. Execution limits cover calls, delays, and serialization. A timeout or unknown outcome does not undo accepted provider actions; never replay mutations automatically.",
   "Use decodeBase64/encodeBase64 for UTF-8 and atob for standard-base64 binary. Node Buffer, fetch, require, and process are unavailable.",
   "Follow structured recovery exactly. Run supplied next_request unchanged; provider_execution=complete means do not repeat the provider call. A new connection cannot read retained results from an earlier session.",
-  "Return only needed fields. Use session.page for retained arrays and session.get for narrower inspection; adjust the projection instead of replaying a completed provider operation.",
+  "Return only needed fields. For retained arrays, follow next_request and nextOffset until complete; do not repeat the provider call to retrieve another stored page.",
 ].join(" ");
