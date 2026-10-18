@@ -528,7 +528,7 @@ func publishStableURLTestVersion(t *testing.T, ctx context.Context, runtimeStore
 	return appID
 }
 
-// assertMCPStreamableEndToEndInitialize verifies child negotiation and returns the transport-owned headers for later requests.
+// assertMCPStreamableEndToEndInitialize verifies negotiation and client-owned state guidance before returning transport headers.
 func assertMCPStreamableEndToEndInitialize(t *testing.T, response *httptest.ResponseRecorder) (string, string) {
 	t.Helper()
 	sessionID, protocolVersion := response.Header().Get(mcpSessionIDHeader), response.Header().Get(mcpProtocolVersionHeader)
@@ -536,7 +536,14 @@ func assertMCPStreamableEndToEndInitialize(t *testing.T, response *httptest.Resp
 	if sessionID == "" || protocolVersion != "2025-03-26" {
 		t.Fatalf("initialize returned invalid headers: status:%d headers:%v body:%s", response.Code, response.Header(), response.Body.String())
 	}
-	assertMCPStreamableEndToEndResponse(t, response, http.StatusOK, "initialize", "already attached every execute call")
+	// Assert the session contract's promises rather than the superseded introductory wording.
+	assertMCPStreamableEndToEndResponse(t, response, http.StatusOK, "initialize",
+		"one client-owned session",
+		"Never invent, request, or pass a session ID",
+		"Session helpers are synchronous",
+		"session.get(key) requires exactly one string",
+		"Follow recovery_action and execute_request exactly",
+	)
 	return sessionID, protocolVersion
 }
 
