@@ -1,0 +1,375 @@
+{
+  "label": "baseline-22",
+  "variant": "baseline",
+  "seed": 22,
+  "task": "As of 2026-10-23, create reminder drafts for all open invoices overdue before that date, except customers who opted out of contact. Do not send messages. Report the invoice and draft IDs created, the skipped invoice IDs, and any uncertain outcomes.",
+  "baselineRevision": "172d638007d5ba2843d2125738cb711319dbdb8a",
+  "startedAt": "2026-10-23T12:12:09.813Z",
+  "finishedAt": "2026-10-23T12:12:42.925Z",
+  "host": {
+    "model": "gpt-6-astra",
+    "reasoningEffort": "high",
+    "instructionSources": [],
+    "environments": []
+  },
+  "publicContract": {
+    "instructions": "This server exposes exactly two tools: search_docs and execute. The MCP client has already attached execute to one client-owned session. Never invent, request, or pass a session ID. Session helpers are synchronous. Store: session.set(\"post\", value); later read: return session.get(\"post\"). session.get(key) requires exactly one string: a stored key or a returned result_ref; a missing stored key returns undefined. It does not list keys. Inspect a known object with Object.keys(session.get(key)). session.page(ref, {path, fields, offset}) accepts only retained result_ref values, not keys from session.set. Inline results are not saved automatically; save only values needed later. State is temporary, not durable storage. Follow recovery_action and execute_request exactly. A new connection cannot read prior state or result_ref values. Use search_docs before provider calls, not session-only reads. Query with one concise intent; use no arguments only to browse, exact operationId for known detail, and the returned next_action when execution_ready=false. Inside execute, route provider calls only through await call(). The Engine supplies authentication, connected-user identity, and resource routing; never invent or pass credentials, auth selectors, fused_end_user_ref, or fused_resource_id in call params. Calls use the returned flat params_schema. Use pagination options only when exact operationId detail permits them. Never reuse policy across operations. Await every call and end with return. Execution limits cover calls, delays, and serialization. A timeout or unknown outcome does not undo accepted provider actions; never replay mutations automatically. Use decodeBase64/encodeBase64 for UTF-8 and atob for standard-base64 binary. Node Buffer, fetch, require, and process are unavailable. Follow structured recovery exactly. Run supplied next_request unchanged; provider_execution=complete means do not repeat the provider call. A new connection cannot read retained results from an earlier session. Return only needed fields. For retained arrays, follow next_request and nextOffset until complete; do not repeat the provider call to retrieve another stored page.",
+    "tools": [
+      {
+        "name": "search_docs",
+        "title": "Search available operations",
+        "description": "Find callable operations. Use query for ranked intent search, no arguments to browse, operationId for exact detail, and operationId plus section for lazy detail. Execute only when execution_ready=true; otherwise run next_action. For physical operations, params_schema is the flat call() object. Follow that operation's pagination guidance.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "maxLength": 512,
+              "description": "Concise natural-language intent for ranked operation search."
+            },
+            "operationId": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "Exact public operation ID for detail or section retrieval."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5,
+              "description": "Maximum ranked results; defaults to 3."
+            },
+            "section": {
+              "description": "Exact advertised section. Use params_schema for the flat physical call shape and definitions with schemaPath for shared references."
+            },
+            "schemaPath": {
+              "type": "string",
+              "maxLength": 2048,
+              "description": "Optional RFC 6901 JSON Pointer within the selected section."
+            }
+          },
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "execution": {
+          "taskSupport": "forbidden"
+        }
+      },
+      {
+        "name": "execute",
+        "title": "Execute a script",
+        "description": "The MCP client has already attached execute to one client-owned session. Never invent, request, or pass a session ID. Session helpers are synchronous. Store: session.set(\"post\", value); later read: return session.get(\"post\"). session.get(key) requires exactly one string: a stored key or a returned result_ref; a missing stored key returns undefined. It does not list keys. Inspect a known object with Object.keys(session.get(key)). session.page(ref, {path, fields, offset}) accepts only retained result_ref values, not keys from session.set. Inline results are not saved automatically; save only values needed later. State is temporary, not durable storage. Follow recovery_action and execute_request exactly. A new connection cannot read prior state or result_ref values. Run TypeScript that invokes only operations discovered with execution_ready=true through await call(). Calls follow params_schema. Follow exact pagination guidance, await every call, and return the final value. A timeout or unknown outcome does not prove a mutation failed; never replay it automatically.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "outputBudgetBytes": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65536,
+              "description": "Visible JSON byte budget for this execution and retained-result continuations."
+            },
+            "script": {
+              "type": "string",
+              "description": "TypeScript ending with return. Invoke operations through await call(); use session.get(key), session.set(key, value), or session.page(ref, options) for stored state. Never pass a session ID."
+            }
+          },
+          "required": [
+            "script"
+          ],
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "execution": {
+          "taskSupport": "forbidden"
+        },
+        "_meta": {
+          "com.usefused/session": {
+            "schema_version": 1,
+            "transport_session": "client_managed",
+            "session_id_input": false,
+            "script_scope": "current_mcp_connection",
+            "script_apis": [
+              "session.get",
+              "session.set",
+              "session.page"
+            ],
+            "result_ttl_ms": 300000,
+            "automatic_execute_replay": false,
+            "recovery_actions": [
+              "complete_authentication",
+              "continue_stored_result",
+              "correct_execute_arguments",
+              "adjust_result_projection",
+              "reinitialize_connection",
+              "do_not_replay"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "calls": [
+    {
+      "tool": "search_docs",
+      "arguments": {
+        "query": "find invoices and create invoice reminder drafts",
+        "limit": 2
+      },
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"mode\":\"query\",\"operations\":[{\"operation_id\":\"billing.create_reminder_draft\",\"method\":\"POST\",\"description\":\"Create a reminder draft for an invoice. This does not send a message. Every successful call creates a new draft.\",\"path\":\"/billing.create_reminder_draft\",\"pagination\":{\"supported\":false,\"usage\":\"This operation has no Engine pagination contract. Use call(\\\"billing.create_reminder_draft\\\", params) without a pagination option. A pagination bound documented for another operation must not be reused here.\"},\"schema_status\":{\"complete\":false,\"included_sections\":[\"params_schema\"],\"available_sections\":[\"params_schema\",\"parameters\",\"request\",\"response:200\"]},\"execution_ready\":true,\"params_schema\":{\"type\":\"object\",\"properties\":{\"invoiceId\":{\"type\":\"string\"},\"to\":{\"type\":\"string\",\"format\":\"email\"},\"amountCents\":{\"type\":\"integer\"},\"currency\":{\"type\":\"string\"}},\"required\":[\"invoiceId\",\"to\",\"amountCents\",\"currency\"],\"additionalProperties\":false}},{\"operation_id\":\"billing.list_reminder_drafts\",\"method\":\"POST\",\"description\":\"Read existing reminder drafts, optionally filtered by invoice ID. Use {} to list all drafts.\",\"path\":\"/billing.list_reminder_drafts\",\"pagination\":{\"supported\":false,\"usage\":\"This operation has no Engine pagination contract. Use call(\\\"billing.list_reminder_drafts\\\", params) without a pagination option. A pagination bound documented for another operation must not be reused here.\"},\"schema_status\":{\"complete\":false,\"included_sections\":[\"params_schema\"],\"available_sections\":[\"params_schema\",\"parameters\",\"request\",\"response:200\"]},\"execution_ready\":true,\"params_schema\":{\"type\":\"object\",\"properties\":{\"invoiceId\":{\"type\":\"string\"}},\"required\":[],\"additionalProperties\":false}}],\"total\":4,\"truncated\":true}"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "tool": "search_docs",
+      "arguments": {
+        "query": "list invoices customer contact opted out",
+        "limit": 2
+      },
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"mode\":\"query\",\"operations\":[{\"operation_id\":\"billing.list_invoices\",\"method\":\"POST\",\"description\":\"List all invoices, including paid and open invoices. Returns an array.\",\"path\":\"/billing.list_invoices\",\"pagination\":{\"supported\":false,\"usage\":\"This operation has no Engine pagination contract. Use call(\\\"billing.list_invoices\\\", params) without a pagination option. A pagination bound documented for another operation must not be reused here.\"},\"schema_status\":{\"complete\":false,\"included_sections\":[\"params_schema\"],\"available_sections\":[\"params_schema\",\"parameters\",\"request\",\"response:200\"]},\"execution_ready\":true,\"params_schema\":{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}},{\"operation_id\":\"billing.get_customer\",\"method\":\"POST\",\"description\":\"Read a customer by ID, including email and the doNotContact preference.\",\"path\":\"/billing.get_customer\",\"pagination\":{\"supported\":false,\"usage\":\"This operation has no Engine pagination contract. Use call(\\\"billing.get_customer\\\", params) without a pagination option. A pagination bound documented for another operation must not be reused here.\"},\"schema_status\":{\"complete\":false,\"included_sections\":[\"params_schema\"],\"available_sections\":[\"params_schema\",\"parameters\",\"request\",\"response:200\"]},\"execution_ready\":true,\"params_schema\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"],\"additionalProperties\":false}}],\"total\":4,\"truncated\":true}"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "tool": "execute",
+      "arguments": {
+        "script": "const invoices = await call(\"billing.list_invoices\", {}); session.set(\"invoices\", invoices); return invoices;"
+      },
+      "result": {
+        "_meta": {
+          "com.usefused/execute": {
+            "delivery": "inline",
+            "output_budget_bytes": 16384,
+            "execution_outcome": "completed",
+            "retained_reads": 0,
+            "unavailable_reads": 0
+          }
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "[{\"id\":\"inv-22-a\",\"customerId\":\"cus-22-a\",\"status\":\"open\",\"dueDate\":\"2026-10-01\",\"amountCents\":1222,\"currency\":\"usd\"},{\"id\":\"inv-22-b\",\"customerId\":\"cus-22-b\",\"status\":\"paid\",\"dueDate\":\"2026-10-01\",\"amountCents\":3400,\"currency\":\"usd\"},{\"id\":\"inv-22-c\",\"customerId\":\"cus-22-c\",\"status\":\"open\",\"dueDate\":\"2026-10-02\",\"amountCents\":5600,\"currency\":\"usd\"},{\"id\":\"inv-22-d\",\"customerId\":\"cus-22-d\",\"status\":\"open\",\"dueDate\":\"2026-11-01\",\"amountCents\":7800,\"currency\":\"usd\"},{\"id\":\"inv-22-e\",\"customerId\":\"cus-22-e\",\"status\":\"open\",\"dueDate\":\"2026-10-03\",\"amountCents\":9122,\"currency\":\"usd\"},{\"id\":\"inv-22-f\",\"customerId\":\"cus-22-f\",\"status\":\"open\",\"dueDate\":\"2026-10-04\",\"amountCents\":2300,\"currency\":\"usd\"},{\"id\":\"inv-22-g\",\"customerId\":\"cus-22-g\",\"status\":\"open\",\"dueDate\":\"2026-10-23\",\"amountCents\":700,\"currency\":\"usd\"}]"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "tool": "execute",
+      "arguments": {
+        "script": "const invoices = session.get(\"invoices\").filter(i => i.status === \"open\" && i.dueDate < \"2026-10-23\"); session.set(\"eligibleInvoices\", invoices); const customers = []; for (const i of invoices) { const c = await call(\"billing.get_customer\", {id: i.customerId}); customers.push(c); session.set(\"customer:\" + i.customerId, c); } return customers;"
+      },
+      "result": {
+        "_meta": {
+          "com.usefused/execute": {
+            "delivery": "inline",
+            "output_budget_bytes": 16384,
+            "execution_outcome": "completed",
+            "retained_reads": 0,
+            "unavailable_reads": 0
+          }
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "[{\"id\":\"cus-22-a\",\"email\":\"cus-22-a@example.com\",\"doNotContact\":false},{\"id\":\"cus-22-c\",\"email\":\"cus-22-c@example.com\",\"doNotContact\":true},{\"id\":\"cus-22-e\",\"email\":\"cus-22-e@example.com\",\"doNotContact\":false},{\"id\":\"cus-22-f\",\"email\":\"cus-22-f@example.com\",\"doNotContact\":false}]"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "tool": "execute",
+      "arguments": {
+        "script": "const i = session.get(\"eligibleInvoices\").find(i => i.id === \"inv-22-a\"); const c = session.get(\"customer:\" + i.customerId); const draft = await call(\"billing.create_reminder_draft\", {invoiceId: i.id, to: c.email, amountCents: i.amountCents, currency: i.currency}); session.set(\"draft:inv-22-a\", draft); return draft;"
+      },
+      "result": {
+        "_meta": {
+          "com.usefused/execute": {
+            "delivery": "inline",
+            "output_budget_bytes": 16384,
+            "execution_outcome": "completed",
+            "retained_reads": 0,
+            "unavailable_reads": 0
+          }
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"id\":\"draft-22-1\",\"invoiceId\":\"inv-22-a\",\"to\":\"cus-22-a@example.com\",\"amountCents\":1222,\"currency\":\"usd\"}"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "tool": "execute",
+      "arguments": {
+        "script": "const i = session.get(\"eligibleInvoices\").find(i => i.id === \"inv-22-e\"); const c = session.get(\"customer:\" + i.customerId); const draft = await call(\"billing.create_reminder_draft\", {invoiceId: i.id, to: c.email, amountCents: i.amountCents, currency: i.currency}); session.set(\"draft:inv-22-e\", draft); return draft;"
+      },
+      "result": {
+        "_meta": {
+          "com.usefused/execute": {
+            "delivery": "inline",
+            "output_budget_bytes": 16384,
+            "execution_outcome": "completed",
+            "retained_reads": 0,
+            "unavailable_reads": 0
+          }
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"id\":\"draft-22-2\",\"invoiceId\":\"inv-22-e\",\"to\":\"cus-22-e@example.com\",\"amountCents\":9122,\"currency\":\"usd\"}"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "tool": "execute",
+      "arguments": {
+        "script": "const i = session.get(\"eligibleInvoices\").find(i => i.id === \"inv-22-f\"); const c = session.get(\"customer:\" + i.customerId); const draft = await call(\"billing.create_reminder_draft\", {invoiceId: i.id, to: c.email, amountCents: i.amountCents, currency: i.currency}); session.set(\"draft:inv-22-f\", draft); return draft;"
+      },
+      "result": {
+        "_meta": {
+          "com.usefused/execute": {
+            "delivery": "inline",
+            "output_budget_bytes": 16384,
+            "execution_outcome": "completed",
+            "retained_reads": 0,
+            "unavailable_reads": 0
+          }
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"id\":\"draft-22-3\",\"invoiceId\":\"inv-22-f\",\"to\":\"cus-22-f@example.com\",\"amountCents\":2300,\"currency\":\"usd\"}"
+          }
+        ],
+        "isError": false
+      }
+    }
+  ],
+  "providerCalls": [
+    {
+      "operationId": "billing.list_invoices",
+      "params": {}
+    },
+    {
+      "operationId": "billing.get_customer",
+      "params": {
+        "id": "cus-22-a"
+      }
+    },
+    {
+      "operationId": "billing.get_customer",
+      "params": {
+        "id": "cus-22-c"
+      }
+    },
+    {
+      "operationId": "billing.get_customer",
+      "params": {
+        "id": "cus-22-e"
+      }
+    },
+    {
+      "operationId": "billing.get_customer",
+      "params": {
+        "id": "cus-22-f"
+      }
+    },
+    {
+      "operationId": "billing.create_reminder_draft",
+      "params": {
+        "invoiceId": "inv-22-a",
+        "to": "cus-22-a@example.com",
+        "amountCents": 1222,
+        "currency": "usd"
+      }
+    },
+    {
+      "operationId": "billing.create_reminder_draft",
+      "params": {
+        "invoiceId": "inv-22-e",
+        "to": "cus-22-e@example.com",
+        "amountCents": 9122,
+        "currency": "usd"
+      }
+    },
+    {
+      "operationId": "billing.create_reminder_draft",
+      "params": {
+        "invoiceId": "inv-22-f",
+        "to": "cus-22-f@example.com",
+        "amountCents": 2300,
+        "currency": "usd"
+      }
+    }
+  ],
+  "drafts": [
+    {
+      "id": "draft-22-1",
+      "invoiceId": "inv-22-a",
+      "to": "cus-22-a@example.com",
+      "amountCents": 1222,
+      "currency": "usd"
+    },
+    {
+      "id": "draft-22-2",
+      "invoiceId": "inv-22-e",
+      "to": "cus-22-e@example.com",
+      "amountCents": 9122,
+      "currency": "usd"
+    },
+    {
+      "id": "draft-22-3",
+      "invoiceId": "inv-22-f",
+      "to": "cus-22-f@example.com",
+      "amountCents": 2300,
+      "currency": "usd"
+    }
+  ],
+  "grade": {
+    "complete": true,
+    "exclusionsRespected": true,
+    "duplicateWrites": 0,
+    "faultInjected": false
+  },
+  "usage": {
+    "total": {
+      "totalTokens": 67141,
+      "inputTokens": 66475,
+      "cachedInputTokens": 48000,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 666,
+      "reasoningOutputTokens": 0
+    },
+    "last": {
+      "totalTokens": 9199,
+      "inputTokens": 9064,
+      "cachedInputTokens": 8704,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 135,
+      "reasoningOutputTokens": 0
+    },
+    "modelContextWindow": 258400
+  },
+  "success": true,
+  "unexpectedRequests": [],
+  "hostErrors": [],
+  "status": "completed",
+  "finalAnswer": "Created reminder drafts as of **2026-10-23**:\n\n| Invoice ID | Draft ID |\n|---|---|\n| inv-22-a | draft-22-1 |\n| inv-22-e | draft-22-2 |\n| inv-22-f | draft-22-3 |\n\nSkipped:\n- **inv-22-b** \u2014 paid.\n- **inv-22-c** \u2014 customer opted out of contact.\n- **inv-22-d** \u2014 due after the cutoff.\n- **inv-22-g** \u2014 due on the cutoff, not before it.\n\n**Uncertain outcomes:** None. **No messages sent.**",
+  "finalReportIdsComplete": true
+}

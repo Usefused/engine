@@ -25,6 +25,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/applifecycle"
 	"github.com/Usefused/engine/internal/engine/entitlement"
+	"github.com/Usefused/engine/internal/engine/mcpskill"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 
@@ -240,6 +241,8 @@ type appResolvedPayload struct {
 	ContractBindings           []sdkContractBinding               `json:"contract_bindings,omitempty"`
 	CredentialSourceBindings   []sdkContractBinding               `json:"credential_source_bindings,omitempty"`
 	ExecutionBundle            *executionPlanArtifact             `json:"execution_bundle,omitempty"`
+	// MCPSkill pins the served Agent Skill's scope and optional AI prose to the reviewed MCP plan.
+	MCPSkill *mcpskill.Snapshot `json:"mcp_skill,omitempty"`
 }
 
 type sdkPlanCall struct {

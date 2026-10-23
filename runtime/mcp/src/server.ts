@@ -3,12 +3,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SEARCH_DOCS_DEFINITION, EXECUTE_DEFINITION } from "./toolDefinitions.js";
 import { loadFixture } from "./fixture.js";
+import { registerGuidance } from "./guidance.js";
 import {
   DocumentationSection,
   searchDocs,
 } from "./searchDocs.js";
 import { callClientOptionsFromEnv, remoteSearch } from "./callClient.js";
-import { DEFAULT_EXECUTE_LIMITS, runExecute, SessionState } from "./sandbox.js";
+import { DEFAULT_EXECUTE_LIMITS, SessionState } from "./sandbox.js";
+import { runExecuteRequest } from "./executeRequest.js";
 import {
   DOCUMENTATION_OUTPUT_POLICY,
   serializeBoundedJson,
@@ -18,7 +20,7 @@ import {
   MCP_SERVER_INSTRUCTIONS,
 } from "./toolDescriptions.js";
 
-/** Starts one process-scoped MCP session with bounded tool outputs. */
+/** Starts one process-scoped MCP session with bounded tools and optional shared workflow guidance. */
 function main(): void {
   const fixturePath = process.env.FUSED_FIXTURE_PATH;
   // A session without its immutable fixture cannot safely expose either MCP tool.
@@ -63,10 +65,9 @@ function main(): void {
   server.registerTool(
     "execute",
     EXECUTE_DEFINITION,
-    // The sandbox returns only trusted, already-bounded text, so the handler
-    // cannot accidentally serialize user-controlled objects outside its deadline.
+    // Both execution modes share admission, authorization, deadlines and bounded result delivery.
     async (args, extra) => {
-      const output = await runExecute(args.script, callOptions, session, { ...DEFAULT_EXECUTE_LIMITS, outputBudgetBytes: args.outputBudgetBytes }, undefined, extra.signal);
+      const output = await runExecuteRequest(args, callOptions, session, DEFAULT_EXECUTE_LIMITS, undefined, extra.signal);
       // URL mode keeps browser consent in the MCP host instead of exposing a navigation instruction to the model.
       if (output.authAction) {
         throw mcpAuthElicitationError(output.authAction);
@@ -79,6 +80,7 @@ function main(): void {
   );
 
   const transport = new StdioServerTransport();
+  registerGuidance(server);
   void server.connect(transport);
 }
 

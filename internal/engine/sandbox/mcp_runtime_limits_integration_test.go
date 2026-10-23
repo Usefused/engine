@@ -237,7 +237,7 @@ func assertMCPRuntimePaginatedGuidance(t *testing.T, got mcpRuntimePaginationGui
 func assertMCPRuntimePaginatedUsage(t *testing.T, usage string) {
 	t.Helper()
 	// The public instruction must permit only the exact two-argument call until exact lookup, without hinting at hidden bound syntax.
-	if !strings.Contains(usage, `operationId "users.list"`) || !strings.Contains(usage, `call("users.list", params)`) || !strings.Contains(usage, "must not be reused") || strings.Contains(usage, "third") || strings.Contains(usage, "maxPages") || strings.Contains(usage, "engine_max_pages") {
+	if !strings.Contains(usage, "exact operationId detail") || !strings.Contains(usage, "Execute now without options") || strings.Contains(usage, "third") || strings.Contains(usage, "maxPages") || strings.Contains(usage, "engine_max_pages") {
 		t.Fatalf("ranked paginated list usage = %q", usage)
 	}
 }
@@ -276,7 +276,7 @@ func assertMCPRuntimeUnpaginatedGuidance(t *testing.T, got mcpRuntimePaginationG
 		t.Fatalf("non-paginated get guidance = %+v", got)
 	}
 	// The public instruction must explain the one-request behavior to a fresh agent.
-	if !strings.Contains(got.Usage, "does not traverse provider pages") {
+	if !strings.Contains(got.Usage, "One provider request") || !strings.Contains(got.Usage, "Omit pagination options") {
 		t.Fatalf("non-paginated get usage = %q", got.Usage)
 	}
 }
@@ -284,13 +284,13 @@ func assertMCPRuntimeUnpaginatedGuidance(t *testing.T, got mcpRuntimePaginationG
 // assertMCPRuntimeInitializeContract checks state examples and safety guidance on the actual initialization response.
 func assertMCPRuntimeInitializeContract(t *testing.T, initialized mcpRuntimeLimitResponse) {
 	t.Helper()
-	// Initialize instructions are useful to capable hosts, while tools/list repeats the critical agent-facing rule.
-	if initialized.Result.ProtocolVersion != "2025-03-26" || !strings.Contains(initialized.Result.Instructions, "already attached execute") || !strings.Contains(initialized.Result.Instructions, "Follow recovery_action and execute_request exactly") {
+	// Initialization owns the session boundary and concise recovery policy.
+	if initialized.Result.ProtocolVersion != "2025-03-26" || !strings.Contains(initialized.Result.Instructions, "client owns the session") || !strings.Contains(initialized.Result.Instructions, "recovery_action") {
 		t.Fatalf("initialize omitted session contract: %+v", initialized.Result)
 	}
-	assertMCPSessionUsageGuidance(t, initialized.Result.Instructions)
+	assertMCPExecutionGuidance(t, initialized.Result.Instructions)
 	// Fresh agents must defer to per-operation discovery instead of assuming every GET accepts a bound.
-	if !strings.Contains(initialized.Result.Instructions, "exact operationId detail") || !strings.Contains(initialized.Result.Instructions, "Never reuse") {
+	if !strings.Contains(initialized.Result.Instructions, "exact operationId detail") {
 		t.Fatal("initialize omitted operation-specific pagination guidance")
 	}
 	// Server identity must explain the app's business capability without leaking operation-level discovery into initialization.
@@ -299,7 +299,7 @@ func assertMCPRuntimeInitializeContract(t *testing.T, initialized mcpRuntimeLimi
 	}
 }
 
-// assertMCPRuntimeExecuteContract checks state examples and script-session metadata on the provider-capable tool.
+// assertMCPRuntimeExecuteContract checks synchronous script helpers and client-owned metadata on the execution tool.
 func assertMCPRuntimeExecuteContract(t *testing.T, listed mcpRuntimeLimitResponse) {
 	t.Helper()
 	for _, tool := range listed.Result.Tools {
@@ -308,10 +308,14 @@ func assertMCPRuntimeExecuteContract(t *testing.T, listed mcpRuntimeLimitRespons
 			continue
 		}
 		contract := tool.Meta["com.usefused/session"]
-		assertMCPSessionUsageGuidance(t, tool.Description)
+		// A stale embedded Node build must not diverge from modern transport's shared source.
+		if tool.Description != mcpGuidance.ExecuteDescription {
+			t.Fatalf("bundled execute guidance differs from shared source: %q", tool.Description)
+		}
+		assertMCPExecutionGuidance(t, tool.Description)
 		scriptDescription := tool.InputSchema.Properties["script"].Description
-		// Tool-level guidance owns discovery and pagination policy, while the argument keeps only its session boundary.
-		if !strings.Contains(tool.Description, "Never invent") || !strings.Contains(tool.Description, "execution_ready=true") || !strings.Contains(tool.Description, "exact pagination guidance") || !strings.Contains(scriptDescription, "Never pass a session ID") || contract["transport_session"] != "client_managed" || contract["session_id_input"] != false || contract["script_scope"] != "current_mcp_connection" || contract["automatic_execute_replay"] != false {
+		// Helper semantics live on the argument; initialization separately verifies the no-session-ID instruction.
+		if !strings.Contains(tool.Description, "operationId and params") || !strings.Contains(tool.Description, "unknown outcome") || !strings.Contains(scriptDescription, "Session helpers are synchronous") || contract["transport_session"] != "client_managed" || contract["session_id_input"] != false || contract["script_scope"] != "current_mcp_connection" || contract["automatic_execute_replay"] != false {
 			t.Fatalf("execute session contract = description:%q metadata:%+v", tool.Description, contract)
 		}
 		return
@@ -319,14 +323,11 @@ func assertMCPRuntimeExecuteContract(t *testing.T, listed mcpRuntimeLimitRespons
 	t.Fatal("execute tool was not advertised")
 }
 
-// assertMCPSessionUsageGuidance keeps both transports' public prompts aligned with the same helper semantics.
-func assertMCPSessionUsageGuidance(t *testing.T, guidance string) {
+// assertMCPExecutionGuidance keeps composition and replay policy consistent without duplicating every argument description.
+func assertMCPExecutionGuidance(t *testing.T, guidance string) {
 	t.Helper()
 	for _, required := range []string{
-		"Session helpers are synchronous", `session.set("post", value); later read: return session.get("post")`,
-		"session.get(key) requires exactly one string", "missing stored key returns undefined", "does not list keys",
-		"Object.keys(session.get(key))", "accepts only retained result_ref values, not keys from session.set",
-		"Inline results are not saved automatically", "not durable storage",
+		"operationId", "params", "script", "reconcile", "next_request", "unknown outcome",
 	} {
 		// Missing semantics at the wire boundary can make agents invent unsupported overloads or repeat provider work.
 		if !strings.Contains(guidance, required) {

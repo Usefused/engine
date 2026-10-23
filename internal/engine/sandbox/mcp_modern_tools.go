@@ -18,15 +18,20 @@ import (
 )
 
 const (
-	mcpModernToolTransport          = "modern_state_handle"
-	mcpModernChildProtocolVersion   = "2025-11-25"
-	mcpModernStateHandleArgument    = "stateHandle"
-	mcpModernStateMetadataKey       = "com.usefused/state"
-	mcpModernStateHandlePrefix      = "fused-state:"
-	mcpModernInternalInitializeID   = `"fused-modern-initialize"`
-	// Both modern discovery surfaces teach the same key/ref/handle distinction before agents attempt a state read.
-	mcpModernSessionInstructions = `Session helpers are synchronous. Store: session.set("post", value); later read: return session.get("post"). session.get(key) requires exactly one string: a stored key or a returned result_ref; a missing stored key returns undefined. It does not list keys. Inspect a known object with Object.keys(session.get(key)). session.page(ref, {path, fields, offset}) accepts only retained result_ref values, not keys from session.set. Inline results are not saved automatically; save only values needed later. State is temporary, not durable storage. Pass the exact returned stateHandle as an execute argument when continuing that state; omit it for independent work. stateHandle is not a stored-value key or result_ref. An unavailable handle cannot recover earlier state; never replay provider mutations to reconstruct it.`
-	mcpModernExecuteToolDescription = "Run TypeScript ending with return. Discover provider operations with search_docs first; call only execution_ready=true operations through await call(). Session-only reads need no search_docs call. " + mcpModernSessionInstructions + " Follow structured recovery and supplied next_request exactly; never replay a provider call after an unknown outcome."
+	mcpModernToolTransport        = "modern_state_handle"
+	mcpModernChildProtocolVersion = "2025-11-25"
+	mcpModernStateHandleArgument  = "stateHandle"
+	mcpModernStateMetadataKey     = "com.usefused/state"
+	mcpModernStateHandlePrefix    = "fused-state:"
+	mcpModernInternalInitializeID = `"fused-modern-initialize"`
+	// Modern clients explicitly carry state; neither a key nor a result reference can replace the handle.
+	mcpModernSessionInstructions = "Pass the returned stateHandle only to continue saved state or next_request. It is not a session.get key. Omit it for independent work; unavailable state cannot be reconstructed by replaying provider calls."
+)
+
+// Modern transport adds only its explicit state contract to the shared server-owned guidance.
+var (
+	mcpModernExecuteToolDescription = mcpGuidance.ExecuteDescription + " " + mcpModernSessionInstructions
+	mcpModernTwoToolInstructions    = mcpGuidance.Instructions + " Read saved data with script: return session.get(key). Session-only reads need no search_docs call. " + mcpModernSessionInstructions
 )
 
 var mcpModernToolHandles = struct {
@@ -78,14 +83,19 @@ func handleMCPModernToolsList(ctx context.Context, span trace.Span, w http.Respo
 		return
 	}
 	// Consumer attachments extend the same execute tool without a second MCP runtime.
-	if err := appendAttachedMCPTools(ctx, result, admission); err != nil { writeMCPModernError(w, request.ID, -32603, "MCP attachment catalogue unavailable", http.StatusServiceUnavailable, nil); return }
+	if err := appendAttachedMCPTools(ctx, result, admission); err != nil {
+		writeMCPModernError(w, request.ID, -32603, "MCP attachment catalogue unavailable", http.StatusServiceUnavailable, nil)
+		return
+	}
 	writeMCPModernResult(w, request.ID, result, admission.server)
 }
 
 // handleMCPModernToolsCall executes one tool and retains sandbox state only behind an explicit token-bound handle.
 func handleMCPModernToolsCall(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, routeID, token string, request mcpJSONRPCRequest, admission *mcpModernAdmission) {
 	// Attached aliases must be admitted before the physical script decoder.
-	if handleAttachedMCPCall(ctx, w, r, request, admission) { return }
+	if handleAttachedMCPCall(ctx, w, r, request, admission) {
+		return
+	}
 	// An authored execute request uses the durable Unified App command before legacy child admission.
 	if handleMCPHostedCapabilityCall(ctx, w, r, request, admission) {
 		return
@@ -398,7 +408,7 @@ func resolveMCPModernToolHandle(handle, routeID string, admission *mcpModernAdmi
 	return sess
 }
 
-// adaptMCPModernToolList adds the explicit state contract to execute without changing the compatibility child.
+// adaptMCPModernToolList preserves the shared execution modes and appends only transport-specific state guidance.
 func adaptMCPModernToolList(result map[string]any) error {
 	tools, ok := result["tools"].([]any)
 	// A successful child catalogue must retain the standard list shape.
@@ -427,9 +437,10 @@ func adaptMCPModernToolList(result map[string]any) error {
 		}
 		properties[mcpModernStateHandleArgument] = map[string]any{
 			"type": "string", "maxLength": 128,
-			"description": "Exact state handle returned by an earlier execute call. Supply it only for session state or retained-result continuation. It selects the state context, not the string key or result_ref required by session.get(key).",
+			"description": "Returned stateHandle for saved-state reads or next_request. Omit for independent calls.",
 		}
-		tool["description"] = mcpModernExecuteToolDescription
+		description, _ := tool["description"].(string)
+		tool["description"] = description + " " + mcpModernSessionInstructions
 		tool["outputSchema"] = map[string]any{
 			"type": "object", "properties": map[string]any{mcpModernStateHandleArgument: map[string]any{"type": "string"}},
 			"required": []string{mcpModernStateHandleArgument}, "additionalProperties": false,

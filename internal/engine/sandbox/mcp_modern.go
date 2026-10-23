@@ -282,9 +282,9 @@ func admitMCPModernApp(ctx context.Context, routeID, token string) (*mcpModernAd
 	return &mcpModernAdmission{target: target, identity: identity, server: server, resources: resources}, http.StatusOK, nil
 }
 
-// handleMCPModernDiscover advertises admitted capabilities and teaches state use alongside the authored server purpose.
+// handleMCPModernDiscover advertises admitted capabilities and built-in guidance alongside the authored server purpose.
 func handleMCPModernDiscover(ctx context.Context, w http.ResponseWriter, request mcpJSONRPCRequest, admission *mcpModernAdmission) {
-	capabilities := map[string]any{"tools": map[string]any{}}
+	capabilities := map[string]any{"tools": map[string]any{}, "prompts": map[string]any{}, "resources": map[string]any{}}
 	// Imported capabilities are advertised only after exact app and token admission.
 	if adapter := importedMCPAdapter(); adapter != nil {
 		selections, err := adapter.ImportedMCPScope(ctx, admission.identity)
@@ -296,7 +296,7 @@ func handleMCPModernDiscover(ctx context.Context, w http.ResponseWriter, request
 			capabilities[key] = value
 		}
 	}
-	// Resource capability is absent for operation-only versions instead of advertising an unusable empty namespace.
+	// Only webhook-bearing versions add subscription support to the always-readable guide resource.
 	if len(admission.resources) > 0 {
 		capabilities["resources"] = map[string]any{"subscribe": true}
 	}
@@ -304,7 +304,7 @@ func handleMCPModernDiscover(ctx context.Context, w http.ResponseWriter, request
 	writeMCPModernResult(w, request.ID, map[string]any{
 		"supportedVersions": []string{mcpModernProtocolVersion},
 		"capabilities":      capabilities,
-		"instructions":      admission.server.Description + "\n\nFor script-based execute: " + mcpModernExecuteToolDescription,
+		"instructions":      admission.server.Description + "\n\n" + mcpModernTwoToolInstructions,
 		"ttlMs":             mcpModernResourceCacheTTL,
 		"cacheScope":        "private",
 	}, admission.server)

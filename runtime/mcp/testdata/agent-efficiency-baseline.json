@@ -1,0 +1,273 @@
+{
+  "revision": "172d638",
+  "tokenizer": "o200k_base",
+  "notes": "Frozen public context from the previous release. Debug trace reproduces the posted inspection workflow; it is not an optimal-agent baseline.",
+  "operations": [
+    {
+      "operation_id": "posts",
+      "service_id": "blog",
+      "name": "List posts",
+      "description": "List blog posts.",
+      "method": "GET",
+      "path": "/posts",
+      "pagination": {
+        "supported": false,
+        "caller_bound_supported": false
+      },
+      "parameters": [],
+      "responses": {
+        "200": {
+          "description": "Blog posts",
+          "representations": [
+            {
+              "media_type": "application/json",
+              "schema": {
+                "dialect": "https://json-schema.org/draft/2020-12/schema",
+                "content_hash": "synthetic",
+                "raw": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string"
+                      },
+                      "content": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "projection": {
+                  "type": "array"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "posts": [
+    {
+      "id": "post-1",
+      "title": "Unified Apps",
+      "status": "published",
+      "content": "Full first article."
+    },
+    {
+      "id": "post-2",
+      "title": "Billing support",
+      "status": "draft",
+      "content": "Full second article."
+    }
+  ],
+  "instructions": "This server exposes exactly two tools: search_docs and execute. The MCP client has already attached execute to one client-owned session. Never invent, request, or pass a session ID. Session helpers are synchronous. Store: session.set(\"post\", value); later read: return session.get(\"post\"). session.get(key) requires exactly one string: a stored key or a returned result_ref; a missing stored key returns undefined. It does not list keys. Inspect a known object with Object.keys(session.get(key)). session.page(ref, {path, fields, offset}) accepts only retained result_ref values, not keys from session.set. Inline results are not saved automatically; save only values needed later. State is temporary, not durable storage. Follow recovery_action and execute_request exactly. A new connection cannot read prior state or result_ref values. Use search_docs before provider calls, not session-only reads. Query with one concise intent; use no arguments only to browse, exact operationId for known detail, and the returned next_action when execution_ready=false. Inside execute, route provider calls only through await call(). The Engine supplies authentication, connected-user identity, and resource routing; never invent or pass credentials, auth selectors, fused_end_user_ref, or fused_resource_id in call params. Calls use the returned flat params_schema. Use pagination options only when exact operationId detail permits them. Never reuse policy across operations. Await every call and end with return. Execution limits cover calls, delays, and serialization. A timeout or unknown outcome does not undo accepted provider actions; never replay mutations automatically. Use decodeBase64/encodeBase64 for UTF-8 and atob for standard-base64 binary. Node Buffer, fetch, require, and process are unavailable. Follow structured recovery exactly. Run supplied next_request unchanged; provider_execution=complete means do not repeat the provider call. A new connection cannot read retained results from an earlier session. Return only needed fields. For retained arrays, follow next_request and nextOffset until complete; do not repeat the provider call to retrieve another stored page.",
+  "tools": {
+    "tools": [
+      {
+        "title": "Search available operations",
+        "description": "Find callable operations. Use query for ranked intent search, no arguments to browse, operationId for exact detail, and operationId plus section for lazy detail. Execute only when execution_ready=true; otherwise run next_action. For physical operations, params_schema is the flat call() object. Follow that operation's pagination guidance.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "maxLength": 512,
+              "description": "Concise natural-language intent for ranked operation search."
+            },
+            "operationId": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "Exact public operation ID for detail or section retrieval."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5,
+              "description": "Maximum ranked results; defaults to 3."
+            },
+            "section": {
+              "description": "Exact advertised section. Use params_schema for the flat physical call shape and definitions with schemaPath for shared references."
+            },
+            "schemaPath": {
+              "type": "string",
+              "maxLength": 2048,
+              "description": "Optional RFC 6901 JSON Pointer within the selected section."
+            }
+          },
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "name": "search_docs"
+      },
+      {
+        "title": "Execute a script",
+        "description": "The MCP client has already attached execute to one client-owned session. Never invent, request, or pass a session ID. Session helpers are synchronous. Store: session.set(\"post\", value); later read: return session.get(\"post\"). session.get(key) requires exactly one string: a stored key or a returned result_ref; a missing stored key returns undefined. It does not list keys. Inspect a known object with Object.keys(session.get(key)). session.page(ref, {path, fields, offset}) accepts only retained result_ref values, not keys from session.set. Inline results are not saved automatically; save only values needed later. State is temporary, not durable storage. Follow recovery_action and execute_request exactly. A new connection cannot read prior state or result_ref values. Run TypeScript that invokes only operations discovered with execution_ready=true through await call(). Calls follow params_schema. Follow exact pagination guidance, await every call, and return the final value. A timeout or unknown outcome does not prove a mutation failed; never replay it automatically.",
+        "_meta": {
+          "com.usefused/session": {
+            "schema_version": 1,
+            "transport_session": "client_managed",
+            "session_id_input": false,
+            "script_scope": "current_mcp_connection",
+            "script_apis": [
+              "session.get",
+              "session.set",
+              "session.page"
+            ],
+            "result_ttl_ms": 300000,
+            "automatic_execute_replay": false,
+            "recovery_actions": [
+              "complete_authentication",
+              "continue_stored_result",
+              "correct_execute_arguments",
+              "adjust_result_projection",
+              "reinitialize_connection",
+              "do_not_replay"
+            ]
+          }
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "outputBudgetBytes": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65536,
+              "description": "Visible JSON byte budget for this execution and retained-result continuations."
+            },
+            "script": {
+              "type": "string",
+              "description": "TypeScript ending with return. Invoke operations through await call(); use session.get(key), session.set(key, value), or session.page(ref, options) for stored state. Never pass a session ID."
+            }
+          },
+          "required": [
+            "script"
+          ],
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "name": "execute"
+      }
+    ]
+  },
+  "query": {
+    "mode": "query",
+    "operations": [
+      {
+        "operation_id": "posts",
+        "method": "GET",
+        "description": "List blog posts.",
+        "path": "/posts",
+        "pagination": {
+          "supported": false,
+          "usage": "This GET operation has no Engine pagination contract, so each call(\"posts\", params) makes one provider request and does not traverse provider pages. Only when this operation's documentation explicitly identifies a page input, continuation output, and stop condition, pass the page input in params, await the two-argument call(), read the continuation from its result, and repeat until the documented stop condition. Never infer page, cursor, or offset semantics from names. Each page counts toward execute's call and time limits. Use call(\"posts\", params) without a pagination option. A pagination bound documented for another operation must not be reused here."
+        },
+        "schema_status": {
+          "complete": false,
+          "included_sections": [
+            "params_schema"
+          ],
+          "available_sections": [
+            "params_schema",
+            "parameters",
+            "request",
+            "response:200"
+          ]
+        },
+        "execution_ready": true,
+        "params_schema": {
+          "type": "object",
+          "description": "Pass endpoint parameters and request-body fields together in this single flat params object.",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    ],
+    "total": 1,
+    "truncated": false
+  },
+  "exact": {
+    "mode": "operationId",
+    "operation": {
+      "operation_id": "posts",
+      "method": "GET",
+      "description": "List blog posts.",
+      "path": "/posts",
+      "pagination": {
+        "supported": false,
+        "caller_bound_supported": false,
+        "usage": "This GET operation has no Engine pagination contract, so each call(\"posts\", params) makes one provider request and does not traverse provider pages. Only when this operation's documentation explicitly identifies a page input, continuation output, and stop condition, pass the page input in params, await the two-argument call(), read the continuation from its result, and repeat until the documented stop condition. Never infer page, cursor, or offset semantics from names. Each page counts toward execute's call and time limits. Use call(\"posts\", params) without a pagination option. A pagination bound documented for another operation must not be reused here."
+      },
+      "schema_status": {
+        "complete": true,
+        "included_sections": [
+          "params_schema",
+          "parameters",
+          "request",
+          "response:200"
+        ],
+        "available_sections": [
+          "params_schema",
+          "parameters",
+          "request",
+          "response:200"
+        ]
+      },
+      "execution_ready": true,
+      "params_schema": {
+        "type": "object",
+        "description": "Pass endpoint parameters and request-body fields together in this single flat params object.",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "parameters": [],
+      "request_content": null,
+      "responses": {
+        "200": {
+          "description": "Blog posts",
+          "representations": [
+            {
+              "media_type": "application/json",
+              "schema": {
+                "dialect": "https://json-schema.org/draft/2020-12/schema",
+                "content_hash": "synthetic",
+                "raw": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string"
+                      },
+                      "content": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "projection": {
+                  "type": "array"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

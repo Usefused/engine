@@ -33,9 +33,10 @@ describe("shared schema documentation", () => {
       schema_status: { complete: false, available_sections: ["params_schema", "parameters", "request", "definitions"] },
       execution_ready: true,
       params_schema: { properties: { label: { type: "string" } } },
-      request_content: { representations: [{ schema: { raw: { $ref: "#/$defs/Payload" } } }] },
     }});
     expect(JSON.stringify(result)).not.toContain('"Payload":');
+    // The original reference remains intact in lazy request documentation.
+    expect(searchDocs(sharedFixture(), { operationId: "createItem", section: "request" })).toMatchObject({ value: { representations: [{ schema: { raw: { $ref: "#/$defs/Payload" } } }] } });
   });
 
   // Existing exact section/JSON Pointer retrieval is enough; no extra tool or schema copy is needed.

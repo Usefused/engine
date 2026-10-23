@@ -70,11 +70,13 @@ export interface CanonicalParamsSchema {
 interface ExecutionReadiness {
   execution_ready: boolean;
   next_action?: DocumentationNextAction;
+  execute_example?: { operationId: string; params: Record<string, never> };
 }
 
 /** Physical callable detail preserves the reviewed request and response contracts. */
 export interface OperationDetail extends OperationSummary, ExecutionReadiness {
   pagination: PaginationGuidance;
+  response_summary?: { status: string; type: string; fields?: string[]; fields_truncated?: true };
   params_schema?: CanonicalParamsSchema;
   parameters?: FixtureParameter[];
   request_content?: FixtureRequestContent | null;
@@ -133,11 +135,12 @@ interface SearchCandidate {
   search_aliases: string[];
   score: number;
   sections: DocumentationSectionValue[];
+  response_summary?: OperationDetail["response_summary"];
 }
 
 const MAX_DESCRIPTION_BYTES = 512;
 const MAX_CHILD_PATHS = 32;
-const MANUAL_GET_PAGINATION_USAGE = "Only when this operation's documentation explicitly identifies a page input, continuation output, and stop condition, pass the page input in params, await the two-argument call(), read the continuation from its result, and repeat until the documented stop condition. Never infer page, cursor, or offset semantics from names. Each page counts toward execute's call and time limits.";
+const MANUAL_GET_PAGINATION_USAGE = "Manual paging requires documented page input, continuation and stop condition; never infer them from names.";
 
 /** Routes exact, lazy, intent, and list requests without changing call authorization. */
 export function searchDocs(fixture: Fixture, args: SearchDocsArgs, classifiedNames?: string[]): SearchDocsResult {
@@ -218,7 +221,7 @@ function queryOperations(fixture: Fixture, query: string, limit: number, classif
   };
 }
 
-/** Resolves an exact callable and packs as many whole sections as the semantic budget admits. */
+/** Resolves an exact callable with its input schema and leaves duplicate raw documentation to section lookup. */
 function resolveOperationDetail(fixture: Fixture, operationId: string): SearchDocsResult {
   const candidate = exactCandidate(fixture, operationId);
   // Exact lookup never falls back to fuzzy matching because call() uses the same identity invariant.
@@ -242,7 +245,7 @@ function packSections(
   total: number,
 ): OperationDetail[] {
   let packed = operations;
-  const attempts = sectionPackingOrder(candidates, mode);
+  const attempts = sectionPackingOrder(candidates);
   for (const { index, section } of attempts) {
     const trial = replaceAt(packed, index, includeSection(packed[index], section));
     // Budget checks include the actual mode wrapper because its metadata also consumes UTF-8 bytes.
@@ -257,15 +260,15 @@ function packSections(
   return packed.map(finalizeStatus);
 }
 
-/** Packs only call construction for ranked search while exact detail retains every public section. */
-function sectionPackingOrder(candidates: SearchCandidate[], mode: "query" | "operationId"): Array<{ index: number; section: DocumentationSectionValue }> {
+/** Sends each callable schema once; raw request and response documents stay available through named sections. */
+function sectionPackingOrder(candidates: SearchCandidate[]): Array<{ index: number; section: DocumentationSectionValue }> {
   const attempts: Array<{ index: number; section: DocumentationSectionValue }> = [];
   const rankedCallSections = new Set<DocumentationSection>(["params_schema"]);
   for (const priority of [0, 1, 2]) {
     for (let index = 0; index < candidates.length; index++) {
       for (const section of candidates[index].sections) {
-        // Ranked results avoid duplicating raw request and response documentation already represented by the call shape.
-        if (mode === "query" && !rankedCallSections.has(section.name)) {
+        // Both modes avoid duplicating parameters and body fields already represented by params_schema.
+        if (!rankedCallSections.has(section.name)) {
           continue;
         }
         // Only the active phase is appended, preserving authored order within equal priorities.
@@ -348,7 +351,12 @@ function withExecutionReadiness(operation: OperationDetail): OperationDetail {
       },
     } as OperationDetail;
   }
-  return { ...withoutPriorAction, execution_ready: true } as OperationDetail;
+  // Empty-input examples are executable without inventing required identifiers or provider values.
+  const schema = operation.params_schema;
+  const example = schema?.type === "object" && schema.additionalProperties === false && Object.keys(schema.properties ?? {}).length === 0 && (schema.required ?? []).length === 0
+    && Object.keys(schema).every(key => ["type", "description", "properties", "required", "additionalProperties"].includes(key))
+    ? { execute_example: { operationId: operation.operation_id, params: {} } } : {};
+  return { ...withoutPriorAction, ...example, execution_ready: true } as OperationDetail;
 }
 
 /** Retrieves one safe public section or JSON Pointer subtree without returning partial values. */
@@ -446,6 +454,7 @@ function toPhysicalCandidate(operation: FixtureOperation, fixture: Fixture): Sea
   const paramsSchema = canonicalParamsSchema(operation, fixture);
   return {
     summary,
+    response_summary: responseSummary(operation, fixture),
     detail_metadata: { path: operation.path, pagination, query_pagination: queryPaginationGuidance(operation, pagination) },
     search_aliases: [operation.name],
     score: 0,
@@ -477,6 +486,26 @@ function toPhysicalCandidate(operation: FixtureOperation, fixture: Fixture): Sea
       ...definitionSections(operation, fixture),
     ],
   };
+}
+
+/** Shows declared response shape without copying full schemas or guessing across ambiguous success representations. */
+function responseSummary(operation: FixtureOperation, fixture: Fixture): OperationDetail["response_summary"] {
+  const statuses = Object.keys(operation.responses).filter(status => /^2\d\d$/.test(status));
+  // Multiple success contracts require the caller to choose a response section instead of receiving a guessed shape.
+  if (statuses.length !== 1) return undefined;
+  const status = statuses[0];
+  const representations = operation.responses[status].representations;
+  // Legacy catalogues can omit representations; absent or multiple entries provide no unambiguous shape.
+  if (!Array.isArray(representations) || representations.length !== 1) return undefined;
+  const schema = resolvedJsonSchema(representations[0].schema, operation.service_version_id, fixture);
+  // Unresolved references and unions remain available in the full section without a misleading simplified type.
+  if (!isSchemaObject(schema) || typeof schema.type !== "string" || !["array", "object", "string", "number", "integer", "boolean", "null"].includes(schema.type) || schema.oneOf || schema.anyOf || schema.allOf) return undefined;
+  // Array item fields help agents project rows without first issuing a result-shape probe.
+  const row = schema.type === "array" ? schema.items : schema;
+  const properties = isSchemaObject(row) && isSchemaObject(row.properties) ? row.properties : {};
+  const names = Object.keys(properties);
+  const fields = names.filter(name => Buffer.byteLength(name, "utf8") <= 128).slice(0, 12);
+  return { status, type: schema.type, fields, ...(names.length > fields.length ? { fields_truncated: true as const } : {}) };
 }
 
 /** Builds one compact flat call schema from endpoint parameters and the selected request representation. */
@@ -700,15 +729,11 @@ function projectionToJsonSchema(projection: FixtureSchemaProjection): Record<str
 /** Converts the effective fixture policy into one stable, provider-neutral call instruction. */
 function paginationGuidance(operation: FixtureOperation): ExactPaginationGuidance {
   const pagination = operation.pagination;
-  const operationId = JSON.stringify(operation.operation_id);
-  const unboundedCall = `call(${operationId}, params)`;
   // Unsupported operations need manual-provider guidance without exposing a decorative Engine bound.
   if (!pagination.supported) {
-    // GET is the only generic manual-paging case; every method still receives the exact safe call correction.
-    const methodUsage = operation.method.toUpperCase() === "GET"
-      ? `This GET operation has no Engine pagination contract, so each ${unboundedCall} makes one provider request and does not traverse provider pages. ${MANUAL_GET_PAGINATION_USAGE}`
-      : "This operation has no Engine pagination contract.";
-    const usage = `${methodUsage} Use ${unboundedCall} without a pagination option. A pagination bound documented for another operation must not be reused here.`;
+    // Only GET receives manual-paging guidance; absent policy never grants a caller bound.
+    const methodUsage = operation.method.toUpperCase() === "GET" ? ` ${MANUAL_GET_PAGINATION_USAGE}` : "";
+    const usage = `One provider request. Omit pagination options.${methodUsage}`;
     return { supported: false, caller_bound_supported: false, usage };
   }
   // A one-page Engine policy has no legal positive strict reduction for the caller.
@@ -717,7 +742,7 @@ function paginationGuidance(operation: FixtureOperation): ExactPaginationGuidanc
       supported: true,
       caller_bound_supported: false,
       engine_max_pages: pagination.engine_max_pages,
-      usage: `Engine follows operation ${operationId}'s reviewed pagination contract up to engine_max_pages, but no positive maxPages value is lower than that limit. Use ${unboundedCall} without a pagination option. A pagination bound documented for another operation must not be reused here.`,
+      usage: "Engine paginates automatically. Omit pagination options; no lower positive bound is available.",
     };
   }
   return {
@@ -725,7 +750,7 @@ function paginationGuidance(operation: FixtureOperation): ExactPaginationGuidanc
     caller_bound_supported: true,
     // Fixture admission proves every boundable policy carries its positive Engine limit.
     engine_max_pages: pagination.engine_max_pages!,
-    usage: `Engine follows provider pagination automatically for operation ${operationId}. To accept a partial result from this exact operation, pass { pagination: { maxPages: N } } as call()'s third argument, where N is a positive integer lower than engine_max_pages. This bound applies only to operation ${operationId} and must not be reused for another call. Provider page-size parameters do not bound total Engine traversal.`,
+    usage: "Engine paginates automatically. For partial results, use script: call(operationId, params, {pagination:{maxPages:N}}), where 0 < N < engine_max_pages for this operation only.",
   };
 }
 
@@ -735,12 +760,11 @@ function queryPaginationGuidance(operation: FixtureOperation, exact: ExactPagina
   if (!exact.supported) {
     return { supported: false, usage: exact.usage };
   }
-  const operationId = JSON.stringify(operation.operation_id);
   // Every supported ranked result uses one uniform exact-lookup boundary, including policies that ultimately allow no caller bound.
   return {
     supported: true,
     exact_lookup_required: true,
-    usage: `Operation ${operationId} supports Engine pagination, but ranked query results do not expose its caller policy. Until exact detail is retrieved, use only call(${operationId}, params). Call search_docs with operationId ${operationId} to retrieve the exact pagination guidance. A policy from another operation must not be reused.`,
+    usage: "Engine paginates automatically. Execute now without options; exact operationId detail is needed only to request a lower page bound.",
   };
 }
 
@@ -768,7 +792,7 @@ function toDetailShell(candidate: SearchCandidate, mode: "query" | "operationId"
   }
   const { path, pagination, query_pagination: queryPagination } = candidate.detail_metadata;
   // Ranked results withhold reusable caller bounds; exact lookup remains the authoritative numeric policy.
-  return withExecutionReadiness({ ...candidate.summary, path, pagination: mode === "query" ? queryPagination : pagination, schema_status: schemaStatus, execution_ready: false });
+  return withExecutionReadiness({ ...candidate.summary, path, response_summary: candidate.response_summary, pagination: mode === "query" ? queryPagination : pagination, schema_status: schemaStatus, execution_ready: false });
 }
 
 /** Scores public physical metadata with identity weighted most strongly. */

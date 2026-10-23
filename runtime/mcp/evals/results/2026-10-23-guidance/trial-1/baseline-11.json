@@ -1,0 +1,407 @@
+{
+  "label": "baseline-11",
+  "variant": "baseline",
+  "seed": 11,
+  "task": "As of 2026-10-23, create reminder drafts for all open invoices overdue before that date, except customers who opted out of contact. Do not send messages. Report the invoice and draft IDs created, the skipped invoice IDs, and any uncertain outcomes.",
+  "baselineRevision": "snapshot-sha256:8f5d93429751835ecee5bbbbae1683d044ed15efa46c1a1d90746d9e559195a2",
+  "startedAt": "2026-10-23T12:37:31.083Z",
+  "finishedAt": "2026-10-23T12:37:55.258Z",
+  "host": {
+    "model": "gpt-6-astra",
+    "reasoningEffort": "high",
+    "instructionSources": [],
+    "environments": []
+  },
+  "publicContract": {
+    "instructions": "Use search_docs to find an operation, then execute with operationId and params. Reuse already discovered schemas; execution_ready=true needs no further lookup. The client owns the session; never pass a session ID. State is temporary: saveAs or session.set(key,value) saves data; session.get(key) reads it. Session-only reads need no search_docs call. session.page uses returned result_ref values. A new connection cannot read earlier state. Fused supplies authentication and routing; never invent or pass credentials or auth selectors. Script I/O uses only await call(). Return results instead of throwing them. Use select for compact output; large results include next_request for retrieval without another provider call. Pagination is automatic when configured. Custom bounds require exact operationId detail. Follow recovery_action; never replay calls after an unknown outcome.",
+    "tools": [
+      {
+        "name": "search_docs",
+        "title": "Search available operations",
+        "description": "Find operations by query, or inspect a known operationId. execution_ready=true means params_schema is ready to use with execute; no extra lookup is needed. Otherwise follow next_action. Optional section retrieves full documentation.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "maxLength": 512,
+              "description": "Task to find operations for."
+            },
+            "operationId": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "Known operation ID."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5,
+              "description": "Result limit; default 3."
+            },
+            "section": {
+              "description": "An advertised section, such as params_schema or response:200."
+            },
+            "schemaPath": {
+              "type": "string",
+              "maxLength": 2048,
+              "description": "JSON Pointer within the section."
+            }
+          },
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "execution": {
+          "taskSupport": "forbidden"
+        }
+      },
+      {
+        "name": "execute",
+        "title": "Run an operation or workflow",
+        "description": "Run a discovered operation with operationId and params. select narrows output; saveAs keeps the full result. For multi-step work use script: await call(operationId, params), then return. Return data; do not throw it for inspection. Follow next_request for large results. Never repeat provider calls after an unknown outcome.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Exact discovered operation ID. Choose this or script."
+            },
+            "params": {
+              "type": "object",
+              "additionalProperties": {},
+              "description": "Operation inputs matching params_schema. Defaults to {}. Authentication is supplied by Fused."
+            },
+            "select": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "minItems": 1,
+              "maxItems": 64,
+              "description": "Return only these top-level fields from an object or each array item; does not change the provider request."
+            },
+            "saveAs": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "description": "Save the full direct-call result under this session key. Read later with script: return session.get(key)."
+            },
+            "script": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Multi-step JavaScript: await call() and return data. Session helpers are synchronous: session.get(key), session.set(key,value), session.page(result_ref,options). Never pass a session ID."
+            },
+            "outputBudgetBytes": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65536,
+              "description": "Visible JSON byte budget for this execution and retained-result continuations."
+            }
+          },
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "execution": {
+          "taskSupport": "forbidden"
+        },
+        "_meta": {
+          "com.usefused/session": {
+            "schema_version": 1,
+            "transport_session": "client_managed",
+            "session_id_input": false,
+            "script_scope": "current_mcp_connection",
+            "script_apis": [
+              "session.get",
+              "session.set",
+              "session.page"
+            ],
+            "result_ttl_ms": 300000,
+            "automatic_execute_replay": false,
+            "recovery_actions": [
+              "complete_authentication",
+              "continue_stored_result",
+              "correct_execute_arguments",
+              "adjust_result_projection",
+              "reinitialize_connection",
+              "do_not_replay"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "calls": [
+    {
+      "tool": "search_docs",
+      "arguments": {
+        "query": "list invoices overdue open customers contact opt out create reminder draft",
+        "limit": 5
+      },
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"mode\":\"query\",\"operations\":[{\"operation_id\":\"billing.create_reminder_draft\",\"method\":\"POST\",\"description\":\"Create a reminder draft for an invoice. This does not send a message. Every successful call creates a new draft.\",\"path\":\"/billing.create_reminder_draft\",\"response_summary\":{\"status\":\"200\",\"type\":\"object\",\"fields\":[\"id\",\"invoiceId\"]},\"pagination\":{\"supported\":false,\"usage\":\"One provider request. Omit pagination options.\"},\"schema_status\":{\"complete\":false,\"included_sections\":[\"params_schema\"],\"available_sections\":[\"params_schema\",\"parameters\",\"request\",\"response:200\"]},\"execution_ready\":true,\"params_schema\":{\"type\":\"object\",\"properties\":{\"invoiceId\":{\"type\":\"string\"},\"to\":{\"type\":\"string\",\"format\":\"email\"},\"amountCents\":{\"type\":\"integer\"},\"currency\":{\"type\":\"string\"}},\"required\":[\"invoiceId\",\"to\",\"amountCents\",\"currency\"],\"additionalProperties\":false}},{\"operation_id\":\"billing.list_reminder_drafts\",\"method\":\"POST\",\"description\":\"Read existing reminder drafts, optionally filtered by invoice ID. Use {} to list all drafts.\",\"path\":\"/billing.list_reminder_drafts\",\"response_summary\":{\"status\":\"200\",\"type\":\"array\",\"fields\":[\"id\",\"invoiceId\",\"to\",\"amountCents\",\"currency\"]},\"pagination\":{\"supported\":false,\"usage\":\"One provider request. Omit pagination options.\"},\"schema_status\":{\"complete\":false,\"included_sections\":[\"params_schema\"],\"available_sections\":[\"params_schema\",\"parameters\",\"request\",\"response:200\"]},\"execution_ready\":true,\"params_schema\":{\"type\":\"object\",\"properties\":{\"invoiceId\":{\"type\":\"string\"}},\"required\":[],\"additionalProperties\":false}},{\"operation_id\":\"billing.list_invoices\",\"method\":\"POST\",\"description\":\"List all invoices, including paid and open invoices. Returns an array.\",\"path\":\"/billing.list_invoices\",\"response_summary\":{\"status\":\"200\",\"type\":\"array\",\"fields\":[\"id\",\"customerId\",\"status\",\"dueDate\",\"amountCents\",\"currency\"]},\"pagination\":{\"supported\":false,\"usage\":\"One provider request. Omit pagination options.\"},\"schema_status\":{\"complete\":false,\"included_sections\":[\"params_schema\"],\"available_sections\":[\"params_schema\",\"parameters\",\"request\",\"response:200\"]},\"execution_ready\":true,\"params_schema\":{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false},\"execute_example\":{\"operationId\":\"billing.list_invoices\",\"params\":{}}},{\"operation_id\":\"billing.get_customer\",\"method\":\"POST\",\"description\":\"Read a customer by ID, including email and the doNotContact preference.\",\"path\":\"/billing.get_customer\",\"response_summary\":{\"status\":\"200\",\"type\":\"object\",\"fields\":[\"id\",\"email\",\"doNotContact\"]},\"pagination\":{\"supported\":false,\"usage\":\"One provider request. Omit pagination options.\"},\"schema_status\":{\"complete\":false,\"included_sections\":[\"params_schema\"],\"available_sections\":[\"params_schema\",\"parameters\",\"request\",\"response:200\"]},\"execution_ready\":true,\"params_schema\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"],\"additionalProperties\":false}}],\"total\":4,\"truncated\":false}"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "tool": "execute",
+      "arguments": {
+        "operationId": "billing.list_invoices",
+        "params": {},
+        "saveAs": "invoices"
+      },
+      "result": {
+        "_meta": {
+          "com.usefused/execute": {
+            "delivery": "inline",
+            "output_budget_bytes": 16384,
+            "execution_outcome": "completed",
+            "retained_reads": 0,
+            "unavailable_reads": 0
+          }
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "[{\"id\":\"inv-11-a\",\"customerId\":\"cus-11-a\",\"status\":\"open\",\"dueDate\":\"2026-10-01\",\"amountCents\":1211,\"currency\":\"usd\"},{\"id\":\"inv-11-b\",\"customerId\":\"cus-11-b\",\"status\":\"paid\",\"dueDate\":\"2026-10-01\",\"amountCents\":3400,\"currency\":\"usd\"},{\"id\":\"inv-11-c\",\"customerId\":\"cus-11-c\",\"status\":\"open\",\"dueDate\":\"2026-10-02\",\"amountCents\":5600,\"currency\":\"usd\"},{\"id\":\"inv-11-d\",\"customerId\":\"cus-11-d\",\"status\":\"open\",\"dueDate\":\"2026-11-01\",\"amountCents\":7800,\"currency\":\"usd\"},{\"id\":\"inv-11-e\",\"customerId\":\"cus-11-e\",\"status\":\"open\",\"dueDate\":\"2026-10-03\",\"amountCents\":9111,\"currency\":\"usd\"},{\"id\":\"inv-11-f\",\"customerId\":\"cus-11-f\",\"status\":\"open\",\"dueDate\":\"2026-10-04\",\"amountCents\":2300,\"currency\":\"usd\"},{\"id\":\"inv-11-g\",\"customerId\":\"cus-11-g\",\"status\":\"open\",\"dueDate\":\"2026-10-23\",\"amountCents\":700,\"currency\":\"usd\"}]"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "tool": "execute",
+      "arguments": {
+        "script": "const invoices = session.get('invoices'); const eligible = invoices.filter(i => i.status === 'open' && i.dueDate < '2026-10-23'); session.set('eligible', eligible); const customers = []; for (const i of eligible) { const customer = await call('billing.get_customer', {id:i.customerId}); customers.push({invoice:i,customer}); } session.set('checked',customers); return customers;"
+      },
+      "result": {
+        "_meta": {
+          "com.usefused/execute": {
+            "delivery": "inline",
+            "output_budget_bytes": 16384,
+            "execution_outcome": "completed",
+            "retained_reads": 0,
+            "unavailable_reads": 0
+          }
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "[{\"invoice\":{\"id\":\"inv-11-a\",\"customerId\":\"cus-11-a\",\"status\":\"open\",\"dueDate\":\"2026-10-01\",\"amountCents\":1211,\"currency\":\"usd\"},\"customer\":{\"id\":\"cus-11-a\",\"email\":\"cus-11-a@example.com\",\"doNotContact\":false}},{\"invoice\":{\"id\":\"inv-11-c\",\"customerId\":\"cus-11-c\",\"status\":\"open\",\"dueDate\":\"2026-10-02\",\"amountCents\":5600,\"currency\":\"usd\"},\"customer\":{\"id\":\"cus-11-c\",\"email\":\"cus-11-c@example.com\",\"doNotContact\":true}},{\"invoice\":{\"id\":\"inv-11-e\",\"customerId\":\"cus-11-e\",\"status\":\"open\",\"dueDate\":\"2026-10-03\",\"amountCents\":9111,\"currency\":\"usd\"},\"customer\":{\"id\":\"cus-11-e\",\"email\":\"cus-11-e@example.com\",\"doNotContact\":false}},{\"invoice\":{\"id\":\"inv-11-f\",\"customerId\":\"cus-11-f\",\"status\":\"open\",\"dueDate\":\"2026-10-04\",\"amountCents\":2300,\"currency\":\"usd\"},\"customer\":{\"id\":\"cus-11-f\",\"email\":\"cus-11-f@example.com\",\"doNotContact\":false}}]"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "tool": "execute",
+      "arguments": {
+        "operationId": "billing.create_reminder_draft",
+        "params": {
+          "invoiceId": "inv-11-a",
+          "to": "cus-11-a@example.com",
+          "amountCents": 1211,
+          "currency": "usd"
+        },
+        "saveAs": "draft_a"
+      },
+      "result": {
+        "_meta": {
+          "com.usefused/execute": {
+            "delivery": "inline",
+            "output_budget_bytes": 16384,
+            "execution_outcome": "completed",
+            "retained_reads": 0,
+            "unavailable_reads": 0
+          }
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"id\":\"draft-11-1\",\"invoiceId\":\"inv-11-a\",\"to\":\"cus-11-a@example.com\",\"amountCents\":1211,\"currency\":\"usd\"}"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "tool": "execute",
+      "arguments": {
+        "operationId": "billing.create_reminder_draft",
+        "params": {
+          "invoiceId": "inv-11-e",
+          "to": "cus-11-e@example.com",
+          "amountCents": 9111,
+          "currency": "usd"
+        },
+        "saveAs": "draft_e"
+      },
+      "result": {
+        "_meta": {
+          "com.usefused/execute": {
+            "delivery": "inline",
+            "output_budget_bytes": 16384,
+            "execution_outcome": "completed",
+            "retained_reads": 0,
+            "unavailable_reads": 0
+          }
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"id\":\"draft-11-2\",\"invoiceId\":\"inv-11-e\",\"to\":\"cus-11-e@example.com\",\"amountCents\":9111,\"currency\":\"usd\"}"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "tool": "execute",
+      "arguments": {
+        "operationId": "billing.create_reminder_draft",
+        "params": {
+          "invoiceId": "inv-11-f",
+          "to": "cus-11-f@example.com",
+          "amountCents": 2300,
+          "currency": "usd"
+        },
+        "saveAs": "draft_f"
+      },
+      "result": {
+        "_meta": {
+          "com.usefused/execute": {
+            "delivery": "inline",
+            "output_budget_bytes": 16384,
+            "execution_outcome": "completed",
+            "retained_reads": 0,
+            "unavailable_reads": 0
+          }
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"id\":\"draft-11-3\",\"invoiceId\":\"inv-11-f\",\"to\":\"cus-11-f@example.com\",\"amountCents\":2300,\"currency\":\"usd\"}"
+          }
+        ],
+        "isError": false
+      }
+    }
+  ],
+  "providerCalls": [
+    {
+      "operationId": "billing.list_invoices",
+      "params": {}
+    },
+    {
+      "operationId": "billing.get_customer",
+      "params": {
+        "id": "cus-11-a"
+      }
+    },
+    {
+      "operationId": "billing.get_customer",
+      "params": {
+        "id": "cus-11-c"
+      }
+    },
+    {
+      "operationId": "billing.get_customer",
+      "params": {
+        "id": "cus-11-e"
+      }
+    },
+    {
+      "operationId": "billing.get_customer",
+      "params": {
+        "id": "cus-11-f"
+      }
+    },
+    {
+      "operationId": "billing.create_reminder_draft",
+      "params": {
+        "invoiceId": "inv-11-a",
+        "to": "cus-11-a@example.com",
+        "amountCents": 1211,
+        "currency": "usd"
+      }
+    },
+    {
+      "operationId": "billing.create_reminder_draft",
+      "params": {
+        "invoiceId": "inv-11-e",
+        "to": "cus-11-e@example.com",
+        "amountCents": 9111,
+        "currency": "usd"
+      }
+    },
+    {
+      "operationId": "billing.create_reminder_draft",
+      "params": {
+        "invoiceId": "inv-11-f",
+        "to": "cus-11-f@example.com",
+        "amountCents": 2300,
+        "currency": "usd"
+      }
+    }
+  ],
+  "drafts": [
+    {
+      "id": "draft-11-1",
+      "invoiceId": "inv-11-a",
+      "to": "cus-11-a@example.com",
+      "amountCents": 1211,
+      "currency": "usd"
+    },
+    {
+      "id": "draft-11-2",
+      "invoiceId": "inv-11-e",
+      "to": "cus-11-e@example.com",
+      "amountCents": 9111,
+      "currency": "usd"
+    },
+    {
+      "id": "draft-11-3",
+      "invoiceId": "inv-11-f",
+      "to": "cus-11-f@example.com",
+      "amountCents": 2300,
+      "currency": "usd"
+    }
+  ],
+  "grade": {
+    "complete": true,
+    "exclusionsRespected": true,
+    "duplicateWrites": 0,
+    "faultInjected": false
+  },
+  "usage": {
+    "total": {
+      "totalTokens": 57051,
+      "inputTokens": 56557,
+      "cachedInputTokens": 46976,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 494,
+      "reasoningOutputTokens": 0
+    },
+    "last": {
+      "totalTokens": 8843,
+      "inputTokens": 8711,
+      "cachedInputTokens": 8448,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 132,
+      "reasoningOutputTokens": 0
+    },
+    "modelContextWindow": 258400
+  },
+  "success": true,
+  "unexpectedRequests": [],
+  "hostErrors": [],
+  "status": "completed",
+  "finalAnswer": "Created reminder drafts as of **2026-10-23**. No messages sent.\n\n| Invoice ID | Draft ID |\n|---|---|\n| inv-11-a | draft-11-1 |\n| inv-11-e | draft-11-2 |\n| inv-11-f | draft-11-3 |\n\nSkipped:\n- **inv-11-c** \u2014 customer opted out of contact.\n- **inv-11-b** \u2014 already paid.\n- **inv-11-d** \u2014 due after cutoff.\n- **inv-11-g** \u2014 due on cutoff, not before it.\n\n**Uncertain outcomes:** None."
+}

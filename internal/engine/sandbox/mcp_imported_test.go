@@ -69,13 +69,13 @@ func TestImportedExecutionReceiptPrivacy(t *testing.T) {
 	}
 }
 
-// TestImportedNativeListsAndSSEAdmission covers empty-list wire shape and prevents bypassing the legacy handshake.
+// TestImportedNativeListsAndSSEAdmission covers built-in guidance without providers and preserves the legacy handshake.
 func TestImportedNativeListsAndSSEAdmission(t *testing.T) {
 	lists := importedNativeLists(nil, auth.RuntimeIdentity{})
 	result, handled, err := importedNativeRequest(context.Background(), nil, mcpJSONRPCRequest{Method: "prompts/list", Params: json.RawMessage(`{}`)}, auth.RuntimeIdentity{}, lists, nil)
 	raw, _ := json.Marshal(result)
-	// An empty MCP list must be an array, not null or an omitted property.
-	if err != nil || !handled || string(raw) != `{"prompts":[]}` {
+	// An app without imported providers still advertises the shared Fused workflow prompt.
+	if err != nil || !handled || !strings.Contains(string(raw), `"name":"fused-workflows"`) {
 		t.Fatalf("empty native list: %s, handled=%v, err=%v", raw, handled, err)
 	}
 	response := httptest.NewRecorder()

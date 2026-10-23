@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { SEARCH_DOCS_MAX_LIMIT, isDocumentationSection } from "./searchDocs.js";
-import { EXECUTE_MIN_OUTPUT_BYTES, EXECUTE_VISIBLE_OUTPUT_POLICY } from "./resultBudget.js";
+import { EXECUTE_INPUT_SHAPE } from "./executeInput.js";
 import { SESSION_CONTRACT_METADATA } from "./sessionContract.js";
-import { EXECUTE_ARGUMENT_DESCRIPTIONS, EXECUTE_TOOL_DESCRIPTION, SEARCH_DOCS_ARGUMENT_DESCRIPTIONS, SEARCH_DOCS_TOOL_DESCRIPTION } from "./toolDescriptions.js";
+import { EXECUTE_TOOL_DESCRIPTION, SEARCH_DOCS_ARGUMENT_DESCRIPTIONS, SEARCH_DOCS_TOOL_DESCRIPTION } from "./toolDescriptions.js";
 
 export const SEARCH_DOCS_DEFINITION = {
   title: "Search available operations",
@@ -38,14 +38,8 @@ export const SEARCH_DOCS_DEFINITION = {
 };
 
 export const EXECUTE_DEFINITION = {
-  title: "Execute a script",
+  title: "Run an operation or workflow",
   description: EXECUTE_TOOL_DESCRIPTION,
   _meta: { "com.usefused/session": SESSION_CONTRACT_METADATA },
-  inputSchema: {
-    outputBudgetBytes: z.number().int().min(EXECUTE_MIN_OUTPUT_BYTES).max(EXECUTE_VISIBLE_OUTPUT_POLICY.maxBytes).optional()
-      .describe(EXECUTE_ARGUMENT_DESCRIPTIONS.outputBudgetBytes),
-    script: z
-      .string()
-      .describe(EXECUTE_ARGUMENT_DESCRIPTIONS.script),
-  },
+  inputSchema: EXECUTE_INPUT_SHAPE,
 };

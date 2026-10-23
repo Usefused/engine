@@ -43,6 +43,7 @@ interface ResultAccess {
 /** Counts only admitted bridge attempts so outer recovery can conservatively account for sibling calls. */
 interface CallExecutionHistory {
   bridge_calls_started: number;
+  bridge_calls_completed: number;
 }
 
 /**
@@ -131,7 +132,7 @@ export async function runExecute(
 ): Promise<ExecuteOutcome> {
   const invocation = new Invocation(limits.timeoutMs, signal);
   const deadline = invocation.deadline;
-  const callHistory: CallExecutionHistory = { bridge_calls_started: 0 };
+  const callHistory: CallExecutionHistory = { bridge_calls_started: 0, bridge_calls_completed: 0 };
   const boundCall = buildBoundCall(callOptions, limits.maxCalls, callImpl, invocation, callHistory);
   const access: ResultAccess = { retained_reads: 0, unavailable_reads: 0 };
   const wrapped = `(async () => {\n${script}\n})()`;
@@ -220,16 +221,26 @@ function boundedExecuteError(error: unknown, message: string, maxBytes: number, 
   return { ...output, isError: true };
 }
 
-/** Uses trusted bridge recovery only when invocation history proves no sibling call may have dispatched. */
+/** Reports completed calls separately from uncertain dispatch while retaining the no-replay invariant. */
 function executionAwareRecovery(error: unknown, message: string, callHistory: CallExecutionHistory): ModelRecovery {
   const bridgeRecovery = bridgeRecoveryForError(error);
   const candidate = bridgeRecovery ?? recoveryForError(message);
+  // Pure script failures before any bridge attempt can be corrected without risking a duplicated provider action.
+  if (candidate.provider_execution === "unknown" && callHistory.bridge_calls_started === 0) {
+    return recoveryForError("MCP_EXECUTE_ARGUMENTS_INVALID:");
+  }
+  // A later script failure cannot erase successful provider responses; it also must not authorize replay.
+  if (candidate.provider_execution === "unknown" && callHistory.bridge_calls_started > 0 && callHistory.bridge_calls_completed === callHistory.bridge_calls_started) {
+    return { ...candidate, provider_execution: "complete" };
+  }
   // Outcomes other than not-started do not make a claim that sibling provider work was absent.
   if (candidate.provider_execution !== "not_started") return candidate;
   const safeBridgeCalls = bridgeRecovery ? 1 : 0;
   // A bridge-proven rejection owns one attempt; local validation must precede every bridge attempt.
   if (callHistory.bridge_calls_started <= safeBridgeCalls) return candidate;
-  return recoveryForError("MCP_EXECUTE_FAILED:");
+  const noReplay = recoveryForError("MCP_EXECUTE_FAILED:");
+  // An argument error after successful sibling calls forbids replay while accurately reporting those calls as complete.
+  return callHistory.bridge_calls_completed === callHistory.bridge_calls_started ? { ...noReplay, provider_execution: "complete" } : noReplay;
 }
 
 /**
@@ -272,6 +283,8 @@ function buildBoundCall(callOptions: CallClientOptions, maxCalls: number, callIm
       callHistory.bridge_calls_started = Math.min(callHistory.bridge_calls_started + 1, maxCalls);
       const result = await invocation.wait(callImpl(callOptions, operationId, params, invocation.signal, physicalOptions));
       invocation.assertActive();
+      // Only a fully received success counts as completed; timeouts and caught bridge errors stay uncertain.
+      callHistory.bridge_calls_completed++;
       return result;
     })();
     // Cleanup may abort a request the script deliberately did not await.

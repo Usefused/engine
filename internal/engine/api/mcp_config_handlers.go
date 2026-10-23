@@ -294,6 +294,8 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
+	// The served skill is pinned now so apply publishes exactly the scope and prose that was planned.
+	payload.MCPSkill = planMCPSkill(ctx, s, call.document.Name, payload.Description, selections, resolved)
 	resolvedPayload, _ := json.Marshal(payload)
 	requiredPermissions, requiredCount, err := configPlanRequiredPermissionsWithBuckets(
 		ctx, s, current, serviceNamesFromResolved(resolved), buckets.distinct(), call.document.Name, "mcp",

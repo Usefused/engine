@@ -1,0 +1,251 @@
+{
+  "date": "2026-10-23",
+  "baseline": "Pre-guidance runtime snapshot; exact SHA-256 recorded on each run",
+  "currentBundleSHA256": "9266b00deef876aa95f76f3e8cf5fb8e05404c03fb26a96b19aaa1be02920eca",
+  "guidanceSHA256": "c85fa2d488959906dc7f9992a24300b4ef68a894595127f8354de41866d971ab",
+  "codexVersion": "codex-cli 0.162.0-alpha.17.2",
+  "nodeVersion": "v24.21.0",
+  "priorTrial": "trial-1 preserves all eight initial trials. Its revised lost-response run stopped after reconciliation and left one invoice unattempted. Essential descriptions were then clarified to continue only unattempted steps, and all eight runs repeated without changing task or provider data.",
+  "runs": [
+    {
+      "label": "baseline-11",
+      "variant": "baseline",
+      "seed": 11,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": false
+      },
+      "success": true,
+      "status": "completed",
+      "finalReportIdsComplete": true,
+      "toolCalls": 8,
+      "providerCalls": 9,
+      "usage": {
+        "totalTokens": 72630,
+        "inputTokens": 72058,
+        "cachedInputTokens": 53632,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 572,
+        "reasoningOutputTokens": 0
+      }
+    },
+    {
+      "label": "baseline-22",
+      "variant": "baseline",
+      "seed": 22,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": false
+      },
+      "success": true,
+      "status": "completed",
+      "finalReportIdsComplete": true,
+      "toolCalls": 12,
+      "providerCalls": 9,
+      "usage": {
+        "totalTokens": 40168,
+        "inputTokens": 39652,
+        "cachedInputTokens": 30464,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 516,
+        "reasoningOutputTokens": 0
+      }
+    },
+    {
+      "label": "baseline-33",
+      "variant": "baseline",
+      "seed": 33,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": false
+      },
+      "success": true,
+      "status": "completed",
+      "finalReportIdsComplete": true,
+      "toolCalls": 7,
+      "providerCalls": 8,
+      "usage": {
+        "totalTokens": 56567,
+        "inputTokens": 56033,
+        "cachedInputTokens": 46336,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 534,
+        "reasoningOutputTokens": 0
+      }
+    },
+    {
+      "label": "baseline-44-lost-response",
+      "variant": "baseline",
+      "seed": 44,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": true
+      },
+      "success": true,
+      "status": "completed",
+      "finalReportIdsComplete": true,
+      "toolCalls": 10,
+      "providerCalls": 10,
+      "usage": {
+        "totalTokens": 66017,
+        "inputTokens": 65408,
+        "cachedInputTokens": 47104,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 609,
+        "reasoningOutputTokens": 0
+      }
+    },
+    {
+      "label": "current-11",
+      "variant": "current",
+      "seed": 11,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": false
+      },
+      "success": true,
+      "status": "completed",
+      "finalReportIdsComplete": true,
+      "toolCalls": 5,
+      "providerCalls": 9,
+      "usage": {
+        "totalTokens": 32830,
+        "inputTokens": 32193,
+        "cachedInputTokens": 22784,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 637,
+        "reasoningOutputTokens": 0
+      }
+    },
+    {
+      "label": "current-22",
+      "variant": "current",
+      "seed": 22,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": false
+      },
+      "success": true,
+      "status": "completed",
+      "finalReportIdsComplete": true,
+      "toolCalls": 6,
+      "providerCalls": 9,
+      "usage": {
+        "totalTokens": 42274,
+        "inputTokens": 41518,
+        "cachedInputTokens": 31488,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 756,
+        "reasoningOutputTokens": 11
+      }
+    },
+    {
+      "label": "current-33",
+      "variant": "current",
+      "seed": 33,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": false
+      },
+      "success": true,
+      "status": "completed",
+      "finalReportIdsComplete": true,
+      "toolCalls": 6,
+      "providerCalls": 9,
+      "usage": {
+        "totalTokens": 41838,
+        "inputTokens": 41168,
+        "cachedInputTokens": 31744,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 670,
+        "reasoningOutputTokens": 0
+      }
+    },
+    {
+      "label": "current-44-lost-response",
+      "variant": "current",
+      "seed": 44,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": true
+      },
+      "success": true,
+      "status": "completed",
+      "finalReportIdsComplete": true,
+      "toolCalls": 8,
+      "providerCalls": 10,
+      "usage": {
+        "totalTokens": 61816,
+        "inputTokens": 60699,
+        "cachedInputTokens": 49536,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 1117,
+        "reasoningOutputTokens": 0
+      }
+    }
+  ]
+}

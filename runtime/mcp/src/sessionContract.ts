@@ -96,12 +96,12 @@ export const SESSION_CONTRACT_METADATA = Object.freeze({
 
 /** Keeps helper semantics identical in the tool description and initialization instructions. */
 export const SESSION_USAGE_RULE =
-  'Session helpers are synchronous. Store: session.set("post", value); later read: return session.get("post"). session.get(key) requires exactly one string: a stored key or a returned result_ref; a missing stored key returns undefined. It does not list keys. Inspect a known object with Object.keys(session.get(key)). session.page(ref, {path, fields, offset}) accepts only retained result_ref values, not keys from session.set. Inline results are not saved automatically; save only values needed later. State is temporary, not durable storage.';
+  'State is temporary: saveAs or session.set(key,value) saves data; session.get(key) reads it. Session-only reads need no search_docs call. session.page uses returned result_ref values.';
 
-/** Repeats the safety-critical contract in model-visible text because clients may hide initialize metadata. */
+/** Keeps connection-owned state guidance in initialization while tool arguments describe individual helpers. */
 export const SESSION_AGENT_RULE =
-  "The MCP client has already attached execute to one client-owned session. Never invent, request, or pass a session ID. " + SESSION_USAGE_RULE +
-  " Follow recovery_action and execute_request exactly. A new connection cannot read prior state or result_ref values.";
+  "The client owns the session; never pass a session ID. " + SESSION_USAGE_RULE +
+  " A new connection cannot read earlier state.";
 
 export interface SessionToolRequest {
   tool: "execute";
@@ -164,8 +164,8 @@ export function inspectionScript(reference: string, root: unknown, outputBudgetB
 /** Maps runtime codes to recovery candidates; the execute boundary checks prior calls before allowing correction. */
 export function recoveryForError(message: string): ModelRecovery {
   const code = modelVisibleExecuteErrorCode(message);
-  // A malformed local read has not dispatched a provider; the caller must still account for earlier script work.
-  if (code === "MCP_SESSION_GET_ARGUMENTS_INVALID") {
+  // Invalid execution modes and local reads are correctable only after the caller accounts for earlier script work.
+  if (code === "MCP_SESSION_GET_ARGUMENTS_INVALID" || code === "MCP_EXECUTE_ARGUMENTS_INVALID") {
     return recovery("correct_execute_arguments", "correct_arguments", "not_started");
   }
   // Local physical option validation finishes before its bridge call and is safe to reformat when invocation history agrees.

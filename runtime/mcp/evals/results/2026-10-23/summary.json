@@ -1,0 +1,257 @@
+{
+  "date": "2026-10-23",
+  "runtimeBundleSHA256": "8f5d93429751835ecee5bbbbae1683d044ed15efa46c1a1d90746d9e559195a2",
+  "codexVersion": "codex-cli 0.162.0-alpha.17.2",
+  "nodeVersion": "v24.21.0",
+  "setupPilot": "Before the paired experiment, one baseline run completed (9 MCP calls, 76293 total tokens). The current runtime then failed before a model call because its CommonJS bundle had a .js extension under a type=module package. After correcting the launcher, the full paired experiment restarted in fresh contexts. No prompt, task, catalogue or provider data was tuned in response to the pilot.",
+  "runs": [
+    {
+      "label": "baseline-11",
+      "variant": "baseline",
+      "seed": 11,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": false
+      },
+      "success": true,
+      "finalReportIdsComplete": true,
+      "status": "completed",
+      "toolCalls": 9,
+      "providerCalls": 9,
+      "toolErrors": 0,
+      "usage": {
+        "totalTokens": 72881,
+        "inputTokens": 72193,
+        "cachedInputTokens": 61312,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 688,
+        "reasoningOutputTokens": 0
+      }
+    },
+    {
+      "label": "baseline-22",
+      "variant": "baseline",
+      "seed": 22,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": false
+      },
+      "success": true,
+      "finalReportIdsComplete": true,
+      "status": "completed",
+      "toolCalls": 7,
+      "providerCalls": 8,
+      "toolErrors": 0,
+      "usage": {
+        "totalTokens": 67141,
+        "inputTokens": 66475,
+        "cachedInputTokens": 48000,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 666,
+        "reasoningOutputTokens": 0
+      }
+    },
+    {
+      "label": "baseline-33",
+      "variant": "baseline",
+      "seed": 33,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": false
+      },
+      "success": true,
+      "finalReportIdsComplete": true,
+      "status": "completed",
+      "toolCalls": 8,
+      "providerCalls": 8,
+      "toolErrors": 0,
+      "usage": {
+        "totalTokens": 67322,
+        "inputTokens": 66652,
+        "cachedInputTokens": 56192,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 670,
+        "reasoningOutputTokens": 0
+      }
+    },
+    {
+      "label": "baseline-44-lost-response",
+      "variant": "baseline",
+      "seed": 44,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": true
+      },
+      "success": true,
+      "finalReportIdsComplete": true,
+      "status": "completed",
+      "toolCalls": 8,
+      "providerCalls": 9,
+      "toolErrors": 1,
+      "usage": {
+        "totalTokens": 76359,
+        "inputTokens": 75618,
+        "cachedInputTokens": 56704,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 741,
+        "reasoningOutputTokens": 27
+      }
+    },
+    {
+      "label": "current-11",
+      "variant": "current",
+      "seed": 11,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": false
+      },
+      "success": true,
+      "finalReportIdsComplete": true,
+      "status": "completed",
+      "toolCalls": 9,
+      "providerCalls": 9,
+      "toolErrors": 0,
+      "usage": {
+        "totalTokens": 65998,
+        "inputTokens": 65426,
+        "cachedInputTokens": 48512,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 572,
+        "reasoningOutputTokens": 0
+      }
+    },
+    {
+      "label": "current-22",
+      "variant": "current",
+      "seed": 22,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": false
+      },
+      "success": true,
+      "finalReportIdsComplete": true,
+      "status": "completed",
+      "toolCalls": 8,
+      "providerCalls": 9,
+      "toolErrors": 0,
+      "usage": {
+        "totalTokens": 66395,
+        "inputTokens": 65822,
+        "cachedInputTokens": 55936,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 573,
+        "reasoningOutputTokens": 0
+      }
+    },
+    {
+      "label": "current-33",
+      "variant": "current",
+      "seed": 33,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": false
+      },
+      "success": true,
+      "finalReportIdsComplete": true,
+      "status": "completed",
+      "toolCalls": 9,
+      "providerCalls": 9,
+      "toolErrors": 0,
+      "usage": {
+        "totalTokens": 57317,
+        "inputTokens": 56756,
+        "cachedInputTokens": 38528,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 561,
+        "reasoningOutputTokens": 0
+      }
+    },
+    {
+      "label": "current-44-lost-response",
+      "variant": "current",
+      "seed": 44,
+      "host": {
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "instructionSources": [],
+        "environments": []
+      },
+      "grade": {
+        "complete": true,
+        "exclusionsRespected": true,
+        "duplicateWrites": 0,
+        "faultInjected": true
+      },
+      "success": true,
+      "finalReportIdsComplete": true,
+      "status": "completed",
+      "toolCalls": 8,
+      "providerCalls": 9,
+      "toolErrors": 1,
+      "usage": {
+        "totalTokens": 74068,
+        "inputTokens": 73469,
+        "cachedInputTokens": 54656,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 599,
+        "reasoningOutputTokens": 14
+      }
+    }
+  ]
+}

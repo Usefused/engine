@@ -134,7 +134,7 @@ describe("managed timers", () => {
     await vi.advanceTimersByTimeAsync(50);
     const outcome = await pending;
     expect(outcome).toMatchObject({ isError: true, executionOutcome: "failed" });
-    expect(JSON.parse(outcome.text)).toMatchObject({ message: "callback failure", recovery_action: "do_not_replay", provider_execution: "unknown" });
+    expect(JSON.parse(outcome.text)).toMatchObject({ message: "callback failure", recovery_action: "correct_execute_arguments", provider_execution: "not_started" });
     expect(vi.getTimerCount()).toBe(0);
   });
 

@@ -184,10 +184,10 @@ func newMCPModernRequest(t *testing.T, fixture *mcpModernFixture, id any, method
 	request.Header.Set("Accept", "application/json, text/event-stream")
 	request.Header.Set(mcpProtocolVersionHeader, mcpModernProtocolVersion)
 	request.Header.Set(mcpMethodHeader, method)
-	// Name-bearing resource reads and tool calls mirror their exact routed parameter in a required header.
+	// Resource reads, prompt selection, and tool calls mirror their exact routed identity in the required header.
 	if method == "resources/read" {
 		request.Header.Set(mcpNameHeader, fields["uri"].(string))
-	} else if method == "tools/call" {
+	} else if method == "tools/call" || method == "prompts/get" {
 		request.Header.Set(mcpNameHeader, fields["name"].(string))
 	}
 	return request
@@ -213,9 +213,9 @@ func TestMCPModernDiscoveryAndResources(t *testing.T) {
 	fixture.router.ServeHTTP(discovery, newMCPModernRequest(t, fixture, 1, "server/discover", nil))
 	discovered := decodeMCPModernResult(t, discovery)
 	instructions, _ := discovered["instructions"].(string)
-	assertMCPSessionUsageGuidance(t, instructions)
+	assertMCPExecutionGuidance(t, instructions)
 	// Discovery preserves the authored purpose while adding the explicit handle contract without excessive prompt overhead.
-	if !strings.HasPrefix(instructions, "Exercise the MCP transport contract.") || !strings.Contains(instructions, "stateHandle is not a stored-value key or result_ref") || !strings.Contains(instructions, "Session-only reads need no search_docs call") || len(instructions) > 1500 {
+	if !strings.HasPrefix(instructions, "Exercise the MCP transport contract.") || !strings.Contains(instructions, "not a session.get key") || !strings.Contains(instructions, "Session-only reads need no search_docs call") || len(instructions) > 1500 {
 		t.Fatalf("modern server instructions = %q", instructions)
 	}
 	capabilities, _ := discovered["capabilities"].(map[string]any)
@@ -229,8 +229,8 @@ func TestMCPModernDiscoveryAndResources(t *testing.T) {
 	fixture.router.ServeHTTP(listedResponse, newMCPModernRequest(t, fixture, 2, "resources/list", nil))
 	listed := decodeMCPModernResult(t, listedResponse)
 	items, _ := listed["resources"].([]any)
-	// The immutable exact selection must project to one stable URI rather than a client-authored NATS subject.
-	if len(items) != 1 || items[0].(map[string]any)["uri"] != fixture.uri {
+	// The selected webhook keeps its stable URI while the static guide and server skill add no provider or subscription authority.
+	if len(items) != 3 || items[0].(map[string]any)["uri"] != fixture.uri || items[1].(map[string]any)["uri"] != mcpGuidance.Guide.URI || items[2].(map[string]any)["uri"] != "fused://skills/server" {
 		t.Fatalf("listed resources = %#v, want %s", items, fixture.uri)
 	}
 	message := nats.NewMsg(fixture.subject)
@@ -280,11 +280,11 @@ func TestMCPModernToolsAndExplicitStateEndToEnd(t *testing.T) {
 		// Only the execute descriptor owns session helpers; search guidance remains focused on discovery.
 		if tool["name"] == "execute" {
 			description, _ := tool["description"].(string)
-			assertMCPSessionUsageGuidance(t, description)
+			assertMCPExecutionGuidance(t, description)
 		}
 	}
 	// Modern discovery must distinguish the session continuation handle from the required stored-value key.
-	if len(tools) != 2 || !strings.Contains(listedResponse.Body.String(), `"stateHandle"`) || !strings.Contains(listedResponse.Body.String(), "session.get(key) requires exactly one string") || !strings.Contains(listedResponse.Body.String(), "stateHandle is not a stored-value key") || strings.Contains(listedResponse.Body.String(), `"com.usefused/session"`) || listedResponse.Header().Get(mcpSessionIDHeader) != "" {
+	if len(tools) != 2 || !strings.Contains(listedResponse.Body.String(), `"stateHandle"`) || !strings.Contains(listedResponse.Body.String(), "not a session.get key") || strings.Contains(listedResponse.Body.String(), `"com.usefused/session"`) || listedResponse.Header().Get(mcpSessionIDHeader) != "" {
 		t.Fatalf("modern tools/list = headers:%v body:%s", listedResponse.Header(), listedResponse.Body.String())
 	}
 	activeBeforeSearch := activeMCPSessionCount()

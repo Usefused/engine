@@ -175,21 +175,22 @@ func importedNativeItem(service uuid.UUID, kind string, raw json.RawMessage) (st
 	return key, item
 }
 
-// handleImportedNative handles native capabilities beside existing event resources on both MCP transports.
+// handleImportedNative merges built-in guidance with admitted provider and event capabilities on both transports.
 func handleImportedNative(ctx context.Context, w http.ResponseWriter, request mcpJSONRPCRequest, identity auth.RuntimeIdentity, server *FixtureServerMetadata, events map[string]mcpEventResource) bool {
 	// Tool calls keep the established sandbox and search paths.
 	if !strings.HasPrefix(request.Method, "prompts/") && request.Method != "resources/list" && request.Method != "resources/templates/list" && request.Method != "resources/read" {
 		return false
 	}
 	adapter := importedMCPAdapter()
-	if adapter == nil {
-		return false
-	}
-	selections, err := adapter.ImportedMCPScope(ctx, identity)
-	// Failed exact-scope reads cannot degrade to broader discovery.
-	if err != nil {
-		writeImportedNativeResponse(w, request, nil, err, server)
-		return true
+	var selections []models.SDKSelection
+	// Built-in guidance remains available without an imported provider, but provider scope failures still fail closed.
+	if adapter != nil {
+		var err error
+		selections, err = adapter.ImportedMCPScope(ctx, identity)
+		if err != nil {
+			writeImportedNativeResponse(w, request, nil, err, server)
+			return true
+		}
 	}
 	lists := importedNativeLists(selections, identity)
 	result, handled, err := importedNativeRequest(ctx, adapter, request, identity, lists, events)
@@ -199,7 +200,7 @@ func handleImportedNative(ctx context.Context, w http.ResponseWriter, request mc
 	return handled
 }
 
-// importedNativeRequest admits bounded list cursors and exact call parameters before upstream dispatch.
+// importedNativeRequest merges static guidance into bounded lists and admits exact reads before upstream dispatch.
 func importedNativeRequest(ctx context.Context, adapter ImportedMCPAdapter, request mcpJSONRPCRequest, identity auth.RuntimeIdentity, lists map[string][]any, events map[string]mcpEventResource) (any, bool, error) {
 	listKey := map[string]string{"prompts/list": "prompts", "resources/list": "resources", "resources/templates/list": "resourceTemplates"}[request.Method]
 	// Lists are finite immutable snapshots, not live upstream discovery.
@@ -208,13 +209,34 @@ func importedNativeRequest(ctx context.Context, adapter ImportedMCPAdapter, requ
 			return nil, true, err
 		}
 		items := lists[listKey]
+		// Fused-owned guidance is always present; imported entries retain their original namespaced identities.
+		if listKey == "prompts" {
+			items = append(items, mcpGuidancePrompt())
+		}
 		// Existing webhook resources remain available in the same native resource list.
 		if listKey == "resources" {
 			for _, event := range sortedMCPEventResources(events) {
 				items = append(items, event)
 			}
+			items = append(items, mcpGuidanceResource(), mcpSkillResource())
 		}
 		return map[string]any{listKey: items}, true, nil
+	}
+	// The server's own skill is rendered from its pinned plan snapshot and filtered by this token.
+	if result, handled, err := mcpSkillRequest(ctx, request, identity); handled {
+		return result, true, err
+	}
+	// Exact built-in reads never open provider connections or change authored provider prompts/resources.
+	if result, handled, err := mcpGuidanceRequest(request); handled {
+		return result, true, err
+	}
+	// Without a provider adapter, event reads continue through their established transport handler.
+	if adapter == nil {
+		// A named prompt lookup has no event fallback, so an unknown name is a parameter error.
+		if request.Method == "prompts/get" {
+			return nil, true, errors.New("unknown MCP prompt")
+		}
+		return nil, false, nil
 	}
 	return invokeImportedNative(ctx, adapter, request, identity)
 }
@@ -248,7 +270,7 @@ func invokeImportedNative(ctx context.Context, adapter ImportedMCPAdapter, reque
 	return raw, true, err
 }
 
-// writeImportedNativeResponse uses the negotiated transport envelope without exposing internal failures.
+// writeImportedNativeResponse preserves negotiated envelopes and private catalogue caching without exposing failures.
 func writeImportedNativeResponse(w http.ResponseWriter, request mcpJSONRPCRequest, result any, err error, server *FixtureServerMetadata) {
 	// Modern responses retain their required version and server metadata headers.
 	if server != nil {
@@ -262,6 +284,11 @@ func writeImportedNativeResponse(w http.ResponseWriter, request mcpJSONRPCReques
 		if json.Unmarshal(raw, &object) != nil {
 			writeMCPModernError(w, request.ID, -32603, "invalid MCP result", http.StatusBadGateway, nil)
 			return
+		}
+		// Merged catalogues remain token-scoped even when one built-in guide is public content.
+		if request.Method == "prompts/list" || request.Method == "resources/list" || request.Method == "resources/templates/list" {
+			object["ttlMs"] = mcpModernResourceCacheTTL
+			object["cacheScope"] = "private"
 		}
 		writeMCPModernResult(w, request.ID, object, *server)
 		return

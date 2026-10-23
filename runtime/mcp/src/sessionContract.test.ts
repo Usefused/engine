@@ -3,9 +3,9 @@ import { inspectionScript, modelRecoveryFromUnknown, modelVisibleExecuteErrorCod
 
 // The public contract must teach both human-readable and machine-readable consumers without carrying an opaque ID.
 it("advertises client-owned session state without exposing session identity", () => {
-  expect(SESSION_AGENT_RULE).toContain("already attached");
-  expect(SESSION_AGENT_RULE).toContain("Never invent");
-  expect(SESSION_AGENT_RULE).toContain("recovery_action");
+  expect(SESSION_AGENT_RULE).toContain("client owns the session");
+  expect(SESSION_AGENT_RULE).toContain("never pass a session ID");
+  expect(SESSION_AGENT_RULE).toContain("new connection cannot read earlier state");
   expect(SESSION_CONTRACT_METADATA).toMatchObject({
     schema_version: 1,
     transport_session: "client_managed",

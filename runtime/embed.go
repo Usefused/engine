@@ -9,3 +9,8 @@ var MCPSharedRuntimeBundle []byte
 //
 //go:embed mcp/dist/metadata-bundle.js
 var MCPMetadataBundle string
+
+// MCPGuidanceJSON is the shared server-owned guidance, never provider-authored instructions.
+//
+//go:embed mcp/src/guidance.json
+var MCPGuidanceJSON []byte

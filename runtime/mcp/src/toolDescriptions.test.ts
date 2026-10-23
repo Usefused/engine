@@ -1,55 +1,42 @@
 import { describe, expect, it } from "vitest";
-import {
-  EXECUTE_ARGUMENT_DESCRIPTIONS,
-  EXECUTE_TOOL_DESCRIPTION,
-  MCP_SERVER_INSTRUCTIONS,
-  SEARCH_DOCS_ARGUMENT_DESCRIPTIONS,
-  SEARCH_DOCS_TOOL_DESCRIPTION,
-} from "./toolDescriptions.js";
+import { EXECUTE_ARGUMENT_DESCRIPTIONS, EXECUTE_TOOL_DESCRIPTION, MCP_SERVER_INSTRUCTIONS, SEARCH_DOCS_ARGUMENT_DESCRIPTIONS, SEARCH_DOCS_TOOL_DESCRIPTION } from "./toolDescriptions.js";
 
-/** Counts the deterministic fixed prose injected before any tool result is returned. */
+/** Measures fixed prose separately from task-specific schemas and results. */
 function totalCharacters(description: string, argumentsByName: Record<string, string>): number {
   return description.length + Object.values(argumentsByName).reduce((total, value) => total + value.length, 0);
 }
 
-describe("model-visible MCP guidance", () => {
-  // Discovery guidance must stay compact while retaining the readiness handshake.
-  it("keeps search_docs within its fixed context budget", () => {
-    expect(totalCharacters(SEARCH_DOCS_TOOL_DESCRIPTION, SEARCH_DOCS_ARGUMENT_DESCRIPTIONS)).toBeLessThanOrEqual(900);
+describe("compact model-visible MCP guidance", () => {
+  // One discovery result should suffice when the callable schema is complete.
+  it("explains readiness without requiring redundant exact lookup", () => {
+    expect(totalCharacters(SEARCH_DOCS_TOOL_DESCRIPTION, SEARCH_DOCS_ARGUMENT_DESCRIPTIONS)).toBeLessThan(800);
     expect(SEARCH_DOCS_TOOL_DESCRIPTION).toContain("execution_ready=true");
+    expect(SEARCH_DOCS_TOOL_DESCRIPTION).toContain("no extra lookup");
     expect(SEARCH_DOCS_TOOL_DESCRIPTION).toContain("next_action");
-    expect(SEARCH_DOCS_TOOL_DESCRIPTION).toContain("params_schema");
+    expect(SEARCH_DOCS_TOOL_DESCRIPTION).toContain("one concise operation intent");
+    expect(SEARCH_DOCS_TOOL_DESCRIPTION).toContain("not a whole workflow");
   });
-
-  // Execution guidance retains the non-replay and session boundaries without duplicating full recovery docs.
-  it("keeps execute within its fixed context budget", () => {
-    expect(totalCharacters(EXECUTE_TOOL_DESCRIPTION, EXECUTE_ARGUMENT_DESCRIPTIONS)).toBeLessThanOrEqual(1_500);
-    expect(EXECUTE_TOOL_DESCRIPTION).toContain("execution_ready=true");
-    expect(EXECUTE_TOOL_DESCRIPTION).toContain("pagination guidance");
-    expect(EXECUTE_TOOL_DESCRIPTION).toContain("never replay it automatically");
-    expect(EXECUTE_ARGUMENT_DESCRIPTIONS.script).toContain("Never pass a session ID");
+  // Composition must be taught in tool metadata without a user-supplied system prompt.
+  it("teaches workflow composition and returning data over debug exceptions", () => {
+    expect(totalCharacters(EXECUTE_TOOL_DESCRIPTION, EXECUTE_ARGUMENT_DESCRIPTIONS)).toBeLessThan(1200);
+    expect(EXECUTE_TOOL_DESCRIPTION).toContain("operationId and params");
+    expect(EXECUTE_TOOL_DESCRIPTION).toContain("do not throw");
+    expect(EXECUTE_TOOL_DESCRIPTION).toContain("unknown outcome");
+    expect(EXECUTE_TOOL_DESCRIPTION).toContain("one script for a multi-step task");
+    expect(EXECUTE_TOOL_DESCRIPTION).toContain("stop writes, reconcile with reads");
+    expect(EXECUTE_TOOL_DESCRIPTION).toContain("resume only unattempted steps");
+    expect(EXECUTE_ARGUMENT_DESCRIPTIONS.script).toContain("Session helpers are synchronous");
+    expect(EXECUTE_ARGUMENT_DESCRIPTIONS.saveAs).toContain("return session.get(key)");
   });
-
-  // Either model-visible surface must teach correct state use without requiring another documentation call.
-  it.each([EXECUTE_TOOL_DESCRIPTION, MCP_SERVER_INSTRUCTIONS])("explains named keys and retained references in each guidance surface", (guidance) => {
-    expect(guidance).toContain("Session helpers are synchronous");
-    expect(guidance).toContain('session.set("post", value); later read: return session.get("post")');
-    expect(guidance).toContain("session.get(key) requires exactly one string");
-    expect(guidance).toContain("returned result_ref");
-    expect(guidance).toContain("missing stored key returns undefined");
-    expect(guidance).toContain("does not list keys");
-    expect(guidance).toContain("Object.keys(session.get(key))");
-    expect(guidance).toContain("accepts only retained result_ref values, not keys from session.set");
-    expect(guidance).toContain("Inline results are not saved automatically");
-    expect(guidance).toContain("not durable storage");
-  });
-
-  // Initialization remains the one concise source of cross-tool policy and recovery rules.
-  it("keeps server instructions bounded and safety-complete", () => {
-    expect(MCP_SERVER_INSTRUCTIONS.length).toBeLessThanOrEqual(3_500);
-    expect(MCP_SERVER_INSTRUCTIONS).toContain("next_action");
+  // Standing policy remains short while still covering auth, state lifetime, pagination and replay.
+  it("keeps initialization under a strict context budget", () => {
+    expect(MCP_SERVER_INSTRUCTIONS.length).toBeLessThan(1000);
     expect(MCP_SERVER_INSTRUCTIONS).toContain("never invent or pass credentials");
-    expect(MCP_SERVER_INSTRUCTIONS).toContain("provider_execution=complete");
-    expect(MCP_SERVER_INSTRUCTIONS).toContain("never replay mutations automatically");
+    expect(MCP_SERVER_INSTRUCTIONS).toContain("never pass a session ID");
+    expect(MCP_SERVER_INSTRUCTIONS).toContain("new connection cannot read earlier state");
+    expect(MCP_SERVER_INSTRUCTIONS).toContain("exact operationId detail");
+    expect(MCP_SERVER_INSTRUCTIONS).toContain("recovery_action");
+    expect(MCP_SERVER_INSTRUCTIONS).toContain("unknown outcome");
+    expect(MCP_SERVER_INSTRUCTIONS).toContain("continue only unattempted steps");
   });
 });

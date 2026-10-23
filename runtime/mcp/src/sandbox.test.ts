@@ -268,7 +268,7 @@ describe("runExecute -- call() wiring", () => {
     for (const script of scripts) {
       const callImpl = vi.fn().mockResolvedValue({ ok: true });
       const failure = errorValue(await runExecute(script, testCallOptions, new SessionState(), undefined, callImpl));
-      expect(failure).toMatchObject({ code: "MCP_CALL_OPTIONS_INVALID", recovery_action: "do_not_replay", execute_request: "do_not_replay", provider_execution: "unknown", automatic_replay: false });
+      expect(failure).toMatchObject({ code: "MCP_CALL_OPTIONS_INVALID", recovery_action: "do_not_replay", execute_request: "do_not_replay", provider_execution: "complete", automatic_replay: false });
       expect(callImpl).toHaveBeenCalledTimes(1);
     }
   });
@@ -336,11 +336,13 @@ describe("runExecute -- call() wiring", () => {
     'await call("write", {}); return session.get();',
     'const pending = call("write", {}); return session.get();',
   ])("preserves replay safety when a provider call precedes an invalid read: %s", async (script) => {
-    const callImpl = vi.fn().mockResolvedValue({ ok: true });
+    // A pending transport must remain genuinely unresolved when the local read fails.
+    const callImpl = script.startsWith("await") ? vi.fn().mockResolvedValue({ ok: true }) : vi.fn(() => new Promise(() => {}));
     const outcome = await runExecute(script, testCallOptions, new SessionState(), undefined, callImpl);
+    // Awaited success is complete; the unawaited sibling remains uncertain. Both forbid replay.
     expect(errorValue(outcome)).toMatchObject({
       code: "MCP_SESSION_GET_ARGUMENTS_INVALID", recovery_action: "do_not_replay",
-      execute_request: "do_not_replay", provider_execution: "unknown", automatic_replay: false,
+      execute_request: "do_not_replay", provider_execution: script.startsWith("await") ? "complete" : "unknown", automatic_replay: false,
     });
     expect(callImpl).toHaveBeenCalledTimes(1);
   });
@@ -368,7 +370,7 @@ describe("runExecute -- call() wiring", () => {
       new SessionState(),
     );
     expect(outcome).toMatchObject({ isError: true, delivery: "error" });
-    expect(JSON.parse(outcome.text)).toMatchObject({ message: "boom", recovery_action: "do_not_replay", execute_request: "do_not_replay", provider_execution: "unknown" });
+    expect(JSON.parse(outcome.text)).toMatchObject({ message: "boom", recovery_action: "correct_execute_arguments", execute_request: "correct_arguments", provider_execution: "not_started" });
   });
 });
 
@@ -473,7 +475,7 @@ describe("runExecute -- bounded output", () => {
     );
 
     expect(outcome).toMatchObject({ isError: true, delivery: "error" });
-    expect(JSON.parse(outcome.text)).toMatchObject({ message: "safe text", recovery_action: "do_not_replay", provider_execution: "unknown" });
+    expect(JSON.parse(outcome.text)).toMatchObject({ message: "safe text", recovery_action: "correct_execute_arguments", provider_execution: "not_started" });
   });
 
   it("returns stable serialization failures for circular and BigInt output", async () => {

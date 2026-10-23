@@ -538,11 +538,11 @@ func assertMCPStreamableEndToEndInitialize(t *testing.T, response *httptest.Resp
 	}
 	// Assert the session contract's promises rather than the superseded introductory wording.
 	assertMCPStreamableEndToEndResponse(t, response, http.StatusOK, "initialize",
-		"one client-owned session",
-		"Never invent, request, or pass a session ID",
-		"Session helpers are synchronous",
-		"session.get(key) requires exactly one string",
-		"Follow recovery_action and execute_request exactly",
+		"client owns the session",
+		"never pass a session ID",
+		"session.get(key)",
+		"operationId and params",
+		"recovery_action",
 	)
 	return sessionID, protocolVersion
 }
