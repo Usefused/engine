@@ -233,6 +233,29 @@ test("plan repairs missing provider identity once without changing the requested
   assert.equal(calls.length, 3);
 });
 
+// Canonical picker names must repair legacy membership through verified activation before authorization runs.
+test("plan repairs an active legacy service name only during user compilation", async () => {
+  const calls = [];
+  const mock = {
+    workspace: {
+      // Registry metadata identifies the same immutable service despite its older saved slug.
+      getServices: async () => [{ service_id: service.service_id, service_slug: "stripe", canonical_ref: "@stripe/stripe", enabled_versions: [{ service_version_id: service.service_version_id, status: "active" }] }],
+      // Re-adding the exact pin repairs identity without changing the activated version.
+      addService: async (...args) => calls.push(["activate", ...args]),
+    },
+    appConfig: {
+      // Capture ordering so plan admission cannot run before the legacy name is repaired.
+      plan: async () => { calls.push(["plan"]); return { plan_id: "p" }; },
+    },
+  };
+  const config = { name: "Customer", version: "1.0.0", source };
+  // Agent validation has no authority to change membership metadata.
+  await assert.rejects(client(mock).planUnifiedApp(config, { "@stripe/stripe": service }, () => {}, "", false), /Validate and compile/);
+  assert.deepEqual(calls, []);
+  await client(mock).planUnifiedApp(config, { "@stripe/stripe": service }, () => {});
+  assert.deepEqual(calls, [["activate", "service-id", "@stripe/stripe", "v1", "version-id"], ["plan"]]);
+});
+
 // Admission errors never become unbounded retries or permission-bypassing recovery.
 test("plan stops after one repair and never refreshes unrelated errors", async () => {
   for (const code of ["service_provider_identity_unavailable", "permission_denied"]) {

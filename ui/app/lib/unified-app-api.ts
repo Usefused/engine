@@ -1,6 +1,6 @@
 import type { ChooseDescribeService, DescribeProgress, DescribeSelectionReady } from "./app-describe-contract";
 import { describeApp } from "./app-describe-api";
-import { api } from "./api";
+import { api, type ActivatedService } from "./api";
 import { APIRequestError } from "./authorization-error";
 import { decodeUnifiedRelease, type UnifiedDraft, type UnifiedRelease, type UnifiedTemplate } from "./unified-app-contract";
 import type { AppPlanResponse } from "./app-builder-contract";
@@ -20,21 +20,11 @@ export async function reviseUnifiedApp(goal: string, baseline: UnifiedDraft, pro
   return { ...baseline, ...proposal, source: proposal.source! };
 }
 
-/** Compiles a fresh plan; agent callers can prohibit dependency activation and persisted metadata repair. */
+/** Compiles exact pins after repairing legacy names; agent callers can prohibit all dependency mutations. */
 export async function planUnifiedApp(config: Record<string, unknown>, services: UnifiedDraft["services"], progress: (message: string) => void, ownerTeam = "", allowDependencyChanges = true): Promise<AppPlanResponse> {
   const activated: string[] = [];
   try {
-    const workspace = await api.workspace.getServices();
-    for (const [key, pin] of Object.entries(services)) {
-      const enabled = workspace.find((service) => service.service_id === pin.service_id)?.enabled_versions?.some((version) => version.service_version_id === pin.service_version_id && version.status !== "deprecated");
-      // Reviewed, already-active dependencies remain untouched.
-      if (enabled) continue;
-      // Agent compilation cannot silently activate workspace capabilities; the user's compile action owns setup.
-      if (!allowDependencyChanges) throw new Error(`Enable ${key} ${pin.version} using Validate and compile before agent validation.`);
-      progress(`Enabling ${key} ${pin.version}…`);
-      await api.workspace.addService(pin.service_id, key, pin.version, pin.service_version_id);
-      activated.push(key);
-    }
+    await prepareUnifiedServices(services, progress, allowDependencyChanges, activated);
     progress("Compiling and validating your app…");
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(config)));
     const source_hash = `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
@@ -57,6 +47,30 @@ export async function planUnifiedApp(config: Record<string, unknown>, services: 
   }
 }
 
+/** Checks saved identity as well as activation because legacy slugs cannot satisfy canonical authorization. */
+function unifiedServiceNeedsPreparation(saved: ActivatedService | undefined, key: string, pin: UnifiedDraft["services"][string]): boolean {
+  // Only the reviewed immutable version can satisfy the selection, and deprecated versions cannot be reused.
+  const enabled = saved?.enabled_versions?.some((version) => version.service_version_id === pin.service_version_id && version.status !== "deprecated");
+  // Repair only a Registry-confirmed identity mismatch, never an arbitrary authored alias.
+  const legacyName = key.startsWith("@") && saved?.canonical_ref === key && saved.service_slug !== key;
+  return !enabled || legacyName;
+}
+
+/** Reuses verified activation to repair legacy membership while preserving the exact selected version. */
+async function prepareUnifiedServices(services: UnifiedDraft["services"], progress: (message: string) => void, allowChanges: boolean, activated: string[]): Promise<void> {
+  const workspace = await api.workspace.getServices();
+  for (const [key, pin] of Object.entries(services)) {
+    const saved = workspace.find((service) => service.service_id === pin.service_id);
+    // Current active identities need neither a write nor a Registry round trip.
+    if (!unifiedServiceNeedsPreparation(saved, key, pin)) continue;
+    // Only the user's compile action may activate capabilities or repair persisted names.
+    if (!allowChanges) throw new Error(`Prepare ${key} ${pin.version} using Validate and compile before agent validation.`);
+    progress(`Preparing ${key} ${pin.version}…`);
+    await api.workspace.addService(pin.service_id, key, pin.version, pin.service_version_id);
+    activated.push(key);
+  }
+}
+
 /** Repairs saved identities without selecting newer versions or changing authored operations. */
 async function refreshUnifiedServiceContracts(services: UnifiedDraft["services"], progress: (message: string) => void): Promise<void> {
   const refreshed = new Set<string>();
@@ -70,11 +84,12 @@ async function refreshUnifiedServiceContracts(services: UnifiedDraft["services"]
   }
 }
 
-/** Pages published templates through Registry's authenticated catalogue transport. */
-export async function listUnifiedTemplates(search = "", offset = 0, ids: string[] = []): Promise<{ items: UnifiedRelease[]; total: number }> {
-  const result = await api.graphql<{ unifiedAppTemplates: { items: WireRelease[]; total: number } }>(`query UnifiedAppTemplates($search: String!, $ids: [ID!], $limit: Int!, $offset: Int!) {
-    unifiedAppTemplates(search: $search, ids: $ids, limit: $limit, offset: $offset) { total items { ${releaseFields} } }
-  }`, { search, ids, limit: 20, offset });
+/** Applies private-only discovery on Registry before paging so filtered counts remain authoritative. */
+export async function listUnifiedTemplates(search = "", offset = 0, ids: string[] = [], privateOnly = false): Promise<{ items: UnifiedRelease[]; total: number }> {
+  // Clearing the filter includes both visibility states instead of selecting public releases alone.
+  const result = await api.graphql<{ unifiedAppTemplates: { items: WireRelease[]; total: number } }>(`query UnifiedAppTemplates($search: String!, $ids: [ID!], $limit: Int!, $offset: Int!, $public: Boolean) {
+    unifiedAppTemplates(search: $search, ids: $ids, limit: $limit, offset: $offset, public: $public) { total items { ${releaseFields} } }
+  }`, { search, ids, limit: 20, offset, public: privateOnly ? false : null });
   return { total: result.unifiedAppTemplates.total, items: result.unifiedAppTemplates.items.map(decodeUnifiedRelease) };
 }
 

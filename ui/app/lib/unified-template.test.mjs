@@ -25,6 +25,18 @@ test("app extraction preserves exact source and pins while excluding private con
   assert.deepEqual(parseTemplate(JSON.stringify(result)), result);
 });
 
+// Applied display labels must not replace the names compiled into the original source.
+test("extraction restores immutable authored keys without rewriting source", () => {
+  const saved = savedApp();
+  saved.config.services = { "Customer CRM": saved.config.services["@crm/customer"] };
+  saved.service_pins[0].key = "Customer CRM";
+  saved.service_pins[0].authored_key = "@crm/customer";
+  const result = templateFromApp(saved);
+  assert.deepEqual(Object.keys(result.services), ["@crm/customer"]);
+  assert.equal(result.source, saved.config.source);
+  assert.equal(result.services["@crm/customer"].service_version_id, "version-one");
+});
+
 // Unsupported dependencies cannot disappear from a template that appears to be a working app.
 test("extraction rejects missing source, missing pins, webhook and child-app dependencies", () => {
   const saved = savedApp();

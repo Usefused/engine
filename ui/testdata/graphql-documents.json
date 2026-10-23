@@ -1506,7 +1506,7 @@
       "file": "app/lib/unified-app-api.ts",
       "call": 1,
       "variant": 1,
-      "document": "query UnifiedAppTemplates($search: String!, $ids: [ID!], $limit: Int!, $offset: Int!) {\n    unifiedAppTemplates(search: $search, ids: $ids, limit: $limit, offset: $offset) { total items { id publisher hash public is_owner template } }\n  }"
+      "document": "query UnifiedAppTemplates($search: String!, $ids: [ID!], $limit: Int!, $offset: Int!, $public: Boolean) {\n    unifiedAppTemplates(search: $search, ids: $ids, limit: $limit, offset: $offset, public: $public) { total items { id publisher hash public is_owner template } }\n  }"
     },
     {
       "endpoint": "registry",

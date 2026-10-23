@@ -12,7 +12,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// AppConfigSourceHandler returns Engine-owned source to authorized editors without contacting Registry.
+// AppConfigSourceHandler returns private source and immutable compiled service names to authorized editors.
 func AppConfigSourceHandler(s store.Store, configs store.ConfigRepository) http.HandlerFunc {
 	// Authentication and edit authority are checked before private authoring is loaded.
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -45,6 +45,12 @@ func AppConfigSourceHandler(s store.Store, configs store.ConfigRepository) http.
 			writeSDKConfigError(w, err)
 			return
 		}
+		pins, err = workflowAuthoredServicePins(r.Context(), s, app, pins)
+		// Compiled aliases must come from this version's admitted bundle, never mutable Registry labels.
+		if err != nil {
+			writeSDKConfigError(w, err)
+			return
+		}
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, map[string]any{"app_id": app.AppID, "config": state.DesiredState, "owner_team": ownerTeam, "service_pins": pins})
 	}
@@ -52,6 +58,7 @@ func AppConfigSourceHandler(s store.Store, configs store.ConfigRepository) http.
 
 type workflowServicePin struct {
 	Key              string    `json:"key"`
+	AuthoredKey      string    `json:"authored_key,omitempty"`
 	ServiceID        uuid.UUID `json:"service_id"`
 	ServiceVersionID uuid.UUID `json:"service_version_id"`
 }

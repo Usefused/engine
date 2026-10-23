@@ -1,18 +1,23 @@
+import { CataloguePageHeader, catalogueActionClassName } from "~/components/layout/CataloguePageHeader";
+import { Select } from "~/components/forms/Select";
+import { AnchoredPopover } from "~/components/forms/AnchoredPopover";
 import { PageBackLink } from "~/components/layout/PageBackLink";
 import { UnifiedTemplatePublisher } from "~/components/apps/UnifiedTemplatePublisher";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState, useRef, useId, type FormEvent } from "react";
 import { Link, useSearchParams } from "@remix-run/react";
-import { ArrowRight, ChevronLeft, ChevronRight, Layers3, Loader2, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, ChevronDown, Search, Layers3, Plus, Upload } from "lucide-react";
 import { listUnifiedTemplates, setUnifiedTemplateVisibility } from "~/lib/unified-app-api";
 import { type UnifiedRelease } from "~/lib/unified-app-contract";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
+import { TemplateResults, TemplateDetailsSidebar } from "~/components/apps/UnifiedTemplateCatalogue";
 import { useToast } from "~/components/Toast";
 
-/** Separates catalogue browsing from the focused template-publication flow. */
+/** Keeps a paginated template library separate from source inspection in a modal sidebar. */
 export default function UnifiedAppTemplates() {
   const [params, setParams] = useSearchParams();
   const query = params.get("q") ?? "";
+  const privateOnly = params.get("private") === "1";
   // URL paging remains bounded even for manually edited or malformed links.
   const offset = templateOffset(params.get("offset"));
   const [search, setSearch] = useState(query);
@@ -23,6 +28,7 @@ export default function UnifiedAppTemplates() {
   const [selected, setSelected] = useState<UnifiedRelease | null>(null);
   // URL state resumes the publisher after creating an app and survives ordinary navigation.
   const publishOpen = params.get("publish") === "1";
+  const [detailError, setDetailError] = useState("");
   const [saving, setSaving] = useState(false);
   const [revision, setRevision] = useState(0);
   const { access } = useCurrentActorAccess();
@@ -34,18 +40,26 @@ export default function UnifiedAppTemplates() {
   // Search and page changes discard stale responses, preserving honest loading and failure states.
   useEffect(() => {
     let current = true;
-    setSearch(query); setLoading(true); setError(""); setSelected(null);
+    setSearch(query); setLoading(true); setError("");
     // Publishing has its own data reads and must not mount the unrelated template catalogue.
     if (publishOpen || !canRead) { setLoading(false); return; }
-    listUnifiedTemplates(query, offset).then((page) => {
+    listUnifiedTemplates(query, offset, [], privateOnly).then((page) => {
       // A newer search owns the page even if an earlier request finishes later.
       if (current) { setItems(page.items); setTotal(page.total); }
     }).catch((cause) => { if (current) setError(String(cause)); }).finally(() => { if (current) setLoading(false); });
     return () => { current = false; };
-  }, [query, offset, revision, canRead, publishOpen]);
+  }, [query, offset, privateOnly, revision, canRead, publishOpen]);
+
+  // Navigation closes inspection; a visibility refresh may keep the current release open.
+  useEffect(() => { setSelected(null); setDetailError(""); }, [query, offset, privateOnly, publishOpen]);
+
+  /** Updates the catalogue URL while preserving private-only discovery and resetting paging for new searches. */
+  function browse(next: { q?: string; offset?: number; privateOnly?: boolean }) {
+    setParams({ q: next.q ?? query, private: String(Number(next.privateOnly ?? privateOnly)), offset: String(next.offset ?? 0) });
+  }
 
   /** Explicit search submission mirrors the Services and Apps catalogue behavior. */
-  function submitSearch(event: FormEvent) { event.preventDefault(); setParams({ q: search.trim() }); }
+  function submitSearch(event: FormEvent) { event.preventDefault(); browse({ q: search.trim() }); }
 
   /** Opens or closes the publisher without discarding catalogue search and paging. */
   function togglePublisher(open: boolean) {
@@ -62,42 +76,106 @@ export default function UnifiedAppTemplates() {
     toast.success("Unified App template published.");
   }
 
-  /** Changes only the selected release's visibility after an explicit owner action. */
+  /** Applies a visibility change confirmed inside the sidebar and refreshes filtered totals. */
   async function changeVisibility(release: UnifiedRelease) {
-    const confirmed = await toast.confirm(`Make ${release.template.name} ${release.public ? "private" : "public"}?`);
-    // Owners can inspect source without committing a discoverability change.
-    if (!confirmed) return;
-    setSaving(true); setError("");
-    try { const updated = await setUnifiedTemplateVisibility(release.id, !release.public); setSelected(updated); setItems((rows) => rows.map((item) => item.id === updated.id ? updated : item)); }
-    catch (cause) { setError(String(cause)); }
+    setSaving(true); setDetailError("");
+    try {
+      const updated = await setUnifiedTemplateVisibility(release.id, !release.public);
+      // A completed mutation must not reopen a sidebar the user has already dismissed.
+      setSelected((current) => current?.id === updated.id ? updated : current);
+      setRevision((value) => value + 1);
+      toast.success("Template visibility updated.");
+    } catch (cause) { setDetailError(String(cause)); }
     finally { setSaving(false); }
   }
 
   // Denied readers never mount a catalogue that appears merely empty.
   if (!canRead) return <p className="text-slate-500">Catalogue read access is required to browse Unified App templates.</p>;
   // A dedicated publication view removes catalogue search, results, and pagination from the task.
-  if (publishOpen && canPublish) return <UnifiedTemplatePublisher key={params.get("app") ?? "choose"} initialAppID={params.get("app") ?? ""} canCreate={canCreate} onPublished={published} backTo={`/integrations/unified-apps/templates?q=${encodeURIComponent(query)}&offset=${offset}`} />;
+  if (publishOpen && canPublish) return <UnifiedTemplatePublisher key={params.get("app") ?? "choose"} initialAppID={params.get("app") ?? ""} canCreate={canCreate} onPublished={published} backTo={`/integrations/unified-apps/templates?q=${encodeURIComponent(query)}&offset=${offset}&private=${Number(privateOnly)}`} />;
   return <div className="space-y-6">
     <TemplateHeader canPublish={canPublish} canCreate={canCreate} onPublish={() => togglePublisher(!publishOpen)} />
-    <form role="search" onSubmit={submitSearch} className="relative"><Search className="absolute left-3 top-3 h-4 w-4 text-slate-400" /><input aria-label="Search Unified App templates" className="w-full rounded-lg border border-slate-300 bg-white py-2.5 pl-10 pr-24 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-violet)]" placeholder="Search templates by name, description, or category" value={search} maxLength={200} onChange={(event) => setSearch(event.target.value)} /><button type="submit" className="absolute right-3 top-2.5 text-sm font-medium text-slate-950">Search</button></form>
-    {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</p>}
-    {/* Loading and errors never reuse old results as the outcome of a new search. */}
-    <TemplateResults loading={loading} error={error} items={items} onSelect={setSelected} />
-    <nav aria-label="Template pages" className="flex items-center justify-between border-t border-slate-100 py-3 text-xs text-slate-500"><span>{total} templates</span><div className="flex gap-4"><button disabled={loading || offset === 0} onClick={() => setParams({ q: query, offset: String(Math.max(0, offset - 20)) })} className="inline-flex items-center gap-1 disabled:opacity-30"><ChevronLeft className="h-4 w-4" />Previous</button><button disabled={loading || offset + items.length >= total} onClick={() => setParams({ q: query, offset: String(offset + 20) })} className="inline-flex items-center gap-1 disabled:opacity-30">Next<ChevronRight className="h-4 w-4" /></button></div></nav>
-    {/* Inspection exposes source and exact scope before the user chooses to install a release. */}
-    {selected && <TemplateDetails selected={selected} canCreate={canCreate} canPublish={canPublish} saving={saving} onClose={() => setSelected(null)} onVisibility={changeVisibility} />}
+    <TemplateLibraryContent privateOnly={privateOnly} search={search} setSearch={setSearch} submitSearch={submitSearch} browse={browse} loading={loading} error={error} total={total} offset={offset} items={items} onSelect={(release) => { setDetailError(""); setSelected(release); }} />
+    {/* Source inspection overlays the catalogue instead of adding a second full-width page section. */}
+    {selected && <TemplateDetailsSidebar key={selected.id} selected={selected} canCreate={canCreate} canPublish={canPublish} saving={saving} error={detailError} onClose={() => setSelected(null)} onVisibility={changeVisibility} />}
+
   </div>;
 }
 
-/** Keeps standalone creation alongside the connected template-publishing entry point. */
-// Each header action follows its own workspace permission boundary.
-function TemplateHeader({ canPublish, canCreate, onPublish }: { canPublish: boolean; canCreate: boolean; onPublish: () => void }) { return <header className="flex flex-wrap items-start justify-between gap-4"><div><PageBackLink to="/integrations/sdks?type=unified_app">Back to Unified Apps</PageBackLink><h1 className="text-2xl font-bold text-slate-900">Unified App templates</h1><p className="mt-1 text-slate-500">Start from a ready-made app and make it yours.</p></div><div className="flex flex-wrap gap-3">{/* Catalogue actions retain their independent permission boundaries. */}{canPublish && <button type="button" onClick={onPublish} className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium">Publish template</button>}{canCreate && <Link to="/integrations/unified-apps/new" className="rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white">Create a Unified App</Link>}</div></header>; }
+type TemplateHeaderProps = { canPublish: boolean; canCreate: boolean; onPublish: () => void };
 
-/** Separates loading, failed searches, and empty catalogues from usable template rows. */
-function TemplateResults({ loading, error, items, onSelect }: { loading: boolean; error: string; items: UnifiedRelease[]; onSelect: (release: UnifiedRelease) => void }) { return loading ? <p role="status" className="flex items-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" />Loading templates…</p> : !error && items.length === 0 ? <section className="rounded-xl border border-slate-200 bg-white px-6 py-14 text-center"><Layers3 className="mx-auto h-8 w-8 text-slate-300" /><h2 className="mt-4 font-semibold text-slate-900">No templates found</h2><p className="mt-1 text-sm text-slate-500">Try another search or describe a Unified App from scratch.</p></section> : !error && <div className="space-y-3">{items.map((release) => <article key={release.id} className="rounded-xl border border-slate-200 bg-white p-5 transition-colors hover:border-slate-300"><div className="flex flex-wrap items-start justify-between gap-4"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h2 className="break-words font-semibold text-slate-900">{release.template.name}</h2><span className="rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-500">{release.template.version}</span><span className="rounded bg-[var(--brand-violet-tint)] px-2 py-0.5 text-xs text-[var(--brand-violet)]">{release.template.category}</span></div><p className="mt-2 text-sm text-slate-500">{release.template.description}</p><p className="mt-3 break-all text-xs text-slate-400">By {release.publisher} · {Object.keys(release.template.services).join(" · ")}</p></div><button type="button" onClick={() => onSelect(release)} className="inline-flex items-center gap-2 text-sm font-medium text-slate-950">View template <ArrowRight className="h-4 w-4" /></button></div></article>)}</div>; }
+/** Matches the Services header with one compact creation dropdown at every viewport size. */
+function TemplateHeader(props: TemplateHeaderProps) {
+  return <><PageBackLink to="/integrations/sdks?type=unified_app">Back to Unified Apps</PageBackLink><CataloguePageHeader title="Unified App templates" icon={Layers3} description="Start from a ready-made app and make it yours." actions={<TemplateHeaderActions {...props} />} /></>;
+}
 
-/** Shows source before installation and reserves visibility changes for the publisher. */
-function TemplateDetails({ selected, canCreate, canPublish, saving, onClose, onVisibility }: { selected: UnifiedRelease; canCreate: boolean; canPublish: boolean; saving: boolean; onClose: () => void; onVisibility: (release: UnifiedRelease) => void }) { return <section aria-label="Template details" className="space-y-4 rounded-xl border border-slate-200 bg-white p-5"><div className="flex justify-between gap-4"><h2 className="text-lg font-semibold">{selected.template.name}</h2><button onClick={onClose} className="text-sm text-slate-500">Close details</button></div><p className="text-sm text-slate-500">{selected.template.description}</p><ul className="list-inside list-disc text-sm text-slate-600">{selected.template.requirements.map((requirement) => <li key={requirement}>{requirement}</li>)}</ul><pre className="max-h-96 overflow-auto rounded-lg bg-slate-950 p-4 text-xs text-slate-100">{selected.template.source}</pre><div className="flex flex-wrap items-center gap-4">{canCreate && <Link to={`/integrations/unified-apps/new?template=${encodeURIComponent(selected.id)}`} className="rounded-lg bg-slate-950 px-4 py-2 text-sm text-white">Use template</Link>}{canPublish && selected.is_owner && <button disabled={saving} onClick={() => onVisibility(selected)} className="text-sm font-medium text-slate-600">Make {selected.public ? "private" : "public"}</button>}</div></section>; }
+/** Groups the two creation paths without relaxing either workspace permission. */
+function TemplateHeaderActions({ canPublish, canCreate, onPublish }: TemplateHeaderProps) {
+  const [open, setOpen] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const id = useId();
+  /** Dismisses the dropdown and returns keyboard focus to its single trigger. */
+  function close() { setOpen(false); trigger.current?.focus(); }
+  /** Closes the menu before switching to the dedicated template publisher. */
+  function publish() { close(); onPublish(); }
+  // Readers without either creation permission should not see an empty dropdown.
+  if (!canPublish && !canCreate) return null;
+  const actionClass = "flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 focus:bg-slate-50";
+  return <>
+    <button ref={trigger} type="button" aria-expanded={open} aria-controls={id} aria-haspopup="dialog" className={catalogueActionClassName} onClick={() => setOpen(previous => !previous)}><Plus className="h-3.5 w-3.5" aria-hidden="true" />New<ChevronDown className="h-3.5 w-3.5" aria-hidden="true" /></button>
+    {/* The shared popover handles viewport placement, outside clicks, and Escape dismissal. */}
+    {open && <AnchoredPopover anchor={trigger} onClose={close} width={232}><div id={id} role="dialog" aria-label="New template or app" className="space-y-1 p-1.5">
+      {/* Only authorized commands enter the dropdown and its initial focus order. */}
+      {canPublish && <button type="button" autoFocus onClick={publish} className={actionClass}><Upload className="h-4 w-4" aria-hidden="true" />Publish template</button>}
+      {canCreate && <Link to="/integrations/unified-apps/new" autoFocus={!canPublish} onClick={close} className={actionClass}><Plus className="h-4 w-4" aria-hidden="true" />Create app</Link>}
+    </div></AnchoredPopover>}
+  </>;
+}
 
 /** Invalid page URLs return to the first bounded catalogue page. */
-function templateOffset(value: string | null): number { return Math.max(0, Number.parseInt(value ?? "0", 10) || 0); }
+function templateOffset(value: string | null): number { return Math.floor(Math.max(0, Number.parseInt(value ?? "0", 10) || 0) / 20) * 20; }
+
+interface LibraryProps {
+  privateOnly: boolean; search: string; setSearch: (value: string) => void; submitSearch: (event: FormEvent) => void;
+  browse: (next: { q?: string; offset?: number; privateOnly?: boolean }) => void;
+  loading: boolean; error: string; total: number; offset: number; items: UnifiedRelease[]; onSelect: (release: UnifiedRelease) => void;
+}
+
+/** Keeps the combined library and pagination mounted independently of the detail sidebar. */
+function TemplateLibraryContent({ privateOnly, search, setSearch, submitSearch, browse, loading, error, total, offset, items, onSelect }: LibraryProps) {
+  // The Services-style collection keeps filtering above the grid and server totals beneath it.
+  return (
+    <div className="min-w-0 space-y-6">
+      <div className="min-w-0 space-y-6">
+        <div className="flex flex-wrap items-center gap-3"><form role="search" onSubmit={submitSearch} className="relative min-w-[200px] flex-1"><button type="submit" aria-label="Search" className="absolute left-2.5 top-1/2 -translate-y-1/2 cursor-pointer text-slate-400 hover:text-slate-600"><Search className="h-3.5 w-3.5" /></button><input aria-label="Search Unified App templates" className="w-full rounded-lg border border-slate-300 py-2 pl-9 pr-8 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Search templates" value={search} maxLength={200} onChange={(event) => setSearch(event.target.value)} /></form><label className="inline-flex min-h-9 shrink-0 cursor-pointer items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={privateOnly} onChange={(event) => browse({ privateOnly: event.target.checked })} className="h-4 w-4 rounded border-slate-300 accent-slate-950" />Private only</label></div>
+        {/* Failed queries stay distinct from a successful empty search. */}
+        {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</p>}
+        <TemplateResults loading={loading} error={error} items={items} onSelect={onSelect} />
+        {/* Failed or pending requests must not advertise stale page counts. */}
+        {!loading && !error && <TemplatePagination total={total} offset={offset} count={items.length} onPage={(nextOffset) => browse({ offset: nextOffset })} />}
+
+      </div>
+    </div>
+  );
+}
+
+/** Keeps Services-style pagination visible even when the current library fits on one page. */
+function TemplatePagination({ total, offset, count, onPage }: { total: number; offset: number; count: number; onPage: (offset: number) => void }) {
+  const page = Math.floor(offset / 20) + 1;
+  const pages = Math.max(1, Math.ceil(total / 20));
+  return <nav aria-label="Template pages" className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-1 py-3">
+    {/* Empty and stale page URLs should never display an inverted result range. */}
+    <p className="text-xs text-slate-500">{count === 0 ? "0" : `${offset + 1}–${offset + count}`} of {total}</p>
+    <div className="flex items-center gap-1">
+      <button type="button" aria-label="Previous page" title="Previous" disabled={offset === 0} onClick={() => onPage(Math.max(0, offset - 20))} className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-40"><ChevronLeft className="h-4 w-4" /></button>
+      <span className="pl-2 text-xs text-slate-500">Page</span>
+      <Select aria-label="Template page" density="compact" className="mx-1" value={page} onChange={(event) => onPage((Number(event.target.value) - 1) * 20)}>
+        {/* Preserve navigation out of a stale page URL without allocating options beyond the known total. */}
+        {page > pages && <option value={page}>{page}</option>}
+        {Array.from({ length: pages }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}</option>)}
+      </Select>
+      <span className="pr-2 text-xs text-slate-500">of {pages}</span>
+      <button type="button" aria-label="Next page" title="Next" disabled={offset + count >= total} onClick={() => onPage(offset + 20)} className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-40"><ChevronRight className="h-4 w-4" /></button>
+    </div>
+  </nav>;
+}

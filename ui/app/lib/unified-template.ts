@@ -8,7 +8,7 @@ export interface TemplateDependency {
   serviceOperations: { name: string }[];
 }
 
-/** Builds a portable allowlisted manifest without copying deployment credentials or runtime settings. */
+/** Builds a portable manifest using compiled source names without copying private deployment settings. */
 export function templateFromApp(saved: UnifiedAppSource): UnifiedTemplate {
   const config = saved.config;
   // Compiled bundles cannot be reconstructed into reviewable TypeScript.
@@ -21,7 +21,8 @@ export function templateFromApp(saved: UnifiedAppSource): UnifiedTemplate {
     const pin = saved.service_pins.find((item) => item.key === key);
     // Exact identities must survive extraction; never substitute the latest provider version.
     if (!pin) throw new Error(`Saved service identity is unavailable for ${key}.`);
-    return [key, { service_id: pin.service_id, service_version_id: pin.service_version_id, version: service.version, operations: [...service.operations] }];
+    // Engine may normalize saved keys to display labels; the immutable bundle retains the source's actual binding.
+    return [pin.authored_key ?? key, { service_id: pin.service_id, service_version_id: pin.service_version_id, version: service.version, operations: [...service.operations] }];
   }));
   // Non-Latin names still get an editable valid release slug.
   const slug = config.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 100).replace(/-$/, "") || "unified-app";

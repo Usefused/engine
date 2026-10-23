@@ -8,7 +8,7 @@ export interface UnifiedAppSource {
     webhook_attachment?: string;
     services: Record<string, Record<string, unknown> & { version: string; operations: string[]; webhooks?: string[] }>;
   };
-  service_pins: Array<{ key: string; service_id: string; service_version_id: string }>;
+  service_pins: Array<{ key: string; authored_key?: string; service_id: string; service_version_id: string }>;
 }
 
 /** Hydrates editable source from exact saved pins without rediscovering or upgrading provider versions. */
