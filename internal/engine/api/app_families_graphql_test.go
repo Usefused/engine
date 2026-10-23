@@ -48,6 +48,7 @@ func TestAppFamiliesPreserveUIVersionQueries(t *testing.T) {
 		t.Run(string(kind), func(t *testing.T) {
 			account, family, oldID, newID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 			latestCreatedAt := time.Now().UTC()
+			updatedAt := latestCreatedAt.Add(time.Hour)
 			deliveryMode := store.AppDeliveryMode("")
 			stableAppID := oldID
 			// SDK families expose package delivery while MCP families have no delivery subtype.
@@ -62,12 +63,12 @@ func TestAppFamiliesPreserveUIVersionQueries(t *testing.T) {
 			}}
 			s := &appFamilyGraphQLTestStore{artifactReferenceGraphQLTestStore: &artifactReferenceGraphQLTestStore{workspaceTestStore: fixture}, family: store.AppFamilyCatalogItem{
 				AppFamilyID: family, Name: "Support:Tools", Kind: kind, DeliveryMode: deliveryMode, VersionCount: 2,
-				LatestAppID: newID, LatestVersion: "2", LatestStatus: store.AppStatusActive, LatestCreatedAt: &latestCreatedAt,
+				LatestAppID: newID, LatestVersion: "2", LatestStatus: store.AppStatusActive, LatestCreatedAt: &latestCreatedAt, UpdatedAt: updatedAt,
 				StableAppID: stableAppID, StableVersion: "1",
 			}}
 			h := mountMCPGraphQLTestHandler(t, s)
 			data := doMCPGraphQLRequest(t, h, fmt.Sprintf(`query {
-    appFamilies(kind:%q,limit:1,offset:0) { total items { app_family_id name kind delivery_mode version_count latest_version latest_version_id latest_status latest_created_at stable_version stable_version_id transport_urls { streamable_http sse } } }
+    appFamilies(kind:%q,limit:1,offset:0) { total items { app_family_id name kind delivery_mode version_count latest_version latest_version_id latest_status latest_created_at updated_at stable_version stable_version_id transport_urls { streamable_http sse } } }
     apps(kind:%q,limit:20,offset:0) { total items { app_id app_family_id version } }
     app(app_id:%q) { app_id version }
     appVersions(app_family_id:%q) { app_id version }
@@ -82,6 +83,10 @@ func TestAppFamiliesPreserveUIVersionQueries(t *testing.T) {
 			// Grouping preserves logical identity and deterministic latest-version presentation without selecting execution implicitly.
 			if item["app_family_id"] != family.String() || item["version_count"] != float64(2) || item["latest_version_id"] != newID.String() || item["latest_version"] != "2" {
 				t.Fatalf("family: %#v", item)
+			}
+			// App updates must remain distinct from immutable version publication timestamps.
+			if item["updated_at"] != updatedAt.Format(mcpGraphQLTimeFormat) || item["latest_created_at"] != latestCreatedAt.Format(mcpGraphQLTimeFormat) {
+				t.Fatalf("family timestamps: %#v", item)
 			}
 			// Delivery metadata lets the unified Apps catalogue label rows without a second adapter-specific query.
 			if item["kind"] != string(kind) || item["delivery_mode"] != string(deliveryMode) {

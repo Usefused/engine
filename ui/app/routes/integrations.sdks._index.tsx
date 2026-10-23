@@ -1,6 +1,6 @@
 import { CataloguePageHeader } from "~/components/layout/CataloguePageHeader";
 import { hasAnyAppPermission } from "~/lib/current-actor-access";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useId } from "react";
 import { Link, useNavigate, useSearchParams, type MetaFunction } from "@remix-run/react";
 
 export const meta: MetaFunction = ({ matches }) => {
@@ -10,13 +10,15 @@ export const meta: MetaFunction = ({ matches }) => {
     { title: "Apps - Fused" },
   ];
 };
-import { Archive as ArchiveIcon, Layers3, Download, Globe2, Package, Play, ServerCrash, TerminalSquare, Trash2, Loader2, Search, X } from "lucide-react";
+import { Archive as ArchiveIcon, Layers3, Download, Globe2, Package, Play, ServerCrash, TerminalSquare, Trash2, Loader2, Search, X, MoreHorizontal } from "lucide-react";
 import { api } from "~/lib/api";
+import { deactivateFamilyVersions, type AppVersionIdentity } from "~/lib/app-family-deactivation";
 import { useToast } from "~/components/Toast";
 import { AppRuntimeStatus } from "~/components/apps/AppRuntimeStatus";
 import { formatAppDownloadCount } from "~/lib/app-downloads";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasResourcePermission, hasWorkspacePermission } from "~/lib/current-actor-access";
+import { AnchoredPopover } from "~/components/forms/AnchoredPopover";
 import { CreateAppMenu } from "~/components/apps/CreateAppMenu";
 
 interface SdkListItem {
@@ -35,7 +37,7 @@ interface SdkListItem {
   is_downloadable?: boolean;
   has_update_available?: boolean;
   has_deprecated_endpoints?: boolean;
-  created_at?: string;
+  updated_at?: string;
   killed_at?: string;
   downloads?: string | null;
   status: string | null;
@@ -125,7 +127,7 @@ function readAppPage(query: string, page: number, state: AppCatalogueState, type
           delivery_mode
           hosted_mcp
           target_language
-          created_at: latest_created_at
+          updated_at
           status: latest_status
           archived_at
           downloads
@@ -175,6 +177,7 @@ function LanguageBadge({ targetLanguage }: { targetLanguage?: string }) {
 
 interface SdkRowProps {
   sdk: SdkListItem;
+  showDownloads: boolean;
   canManage: boolean;
   selectedIds: string[];
   setSelectedIds: React.Dispatch<React.SetStateAction<string[]>>;
@@ -186,18 +189,13 @@ interface SdkRowProps {
 	archived: boolean;
 }
 
-/** Renders app identity and runtime state without duplicating row actions. */
+/** Groups app metadata with its name and exposes the complete name when desktop text is truncated. */
 function SdkNameCell({ sdk, archived }: { sdk: SdkListItem; archived: boolean }) {
   return (
     <div className="min-w-0">
-      <div className="flex min-w-0 items-center gap-2">
-        <span className="block min-w-0 truncate font-semibold text-slate-900">{sdk.name}</span>
-        {/* Delivery badges make the mixed catalogue scannable without splitting one app lifecycle into tabs. */}
-        {sdk.target_type === "mcp" && (
-          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-violet-100 text-violet-700 uppercase tracking-wider">
-            MCP
-          </span>
-        )}
+      <div className="flex min-w-0 flex-wrap items-center gap-2 md:flex-nowrap">
+        {/* Mobile names wrap; the native hover tooltip reveals truncated desktop names. The MCP tab already supplies its type. */}
+        <span title={sdk.name} className="block w-full min-w-0 whitespace-normal [overflow-wrap:anywhere] font-medium leading-5 text-slate-900 md:w-auto md:truncate md:font-semibold">{sdk.name}</span>
         {/* Hosted source has a distinct identity in the shared app catalogue. */}
         {sdk.target_type === "unified_app" && <span className="rounded bg-violet-100 px-2 py-0.5 text-[10px] font-bold uppercase text-violet-700">Unified App</span>}
         {/* One combined family advertises MCP alongside its SDK and REST badges. */}
@@ -221,6 +219,8 @@ function SdkNameCell({ sdk, archived }: { sdk: SdkListItem; archived: boolean })
 	  ) : (
 		<span className="mt-0.5 block text-xs text-slate-400">No active versions</span>
 	  )}
+      {/* Version metadata belongs directly to the identity on compact rows. */}
+      <div className="mt-1.5 md:hidden"><SdkVersionBadges sdk={sdk} /></div>
     </div>
   );
 }
@@ -233,14 +233,15 @@ function AppCatalogueIcon({ view }: { view: string }) {
   return <Package className="w-4 h-4" />;
 }
 
-/** Renders the latest version and family version count for one application. */
+/** Keeps version metadata quiet beside mobile identities and explicit in desktop columns. */
 function SdkVersionBadges({ sdk }: { sdk: SdkListItem }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
       {/* Latest is catalogue metadata only; detail navigation remains pinned to its exact version ID. */}
-      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200">
+      <span className="inline-flex items-center text-xs text-slate-500 md:px-2 md:py-0.5 md:rounded md:font-medium md:bg-slate-100 md:text-slate-700 md:border md:border-slate-200">
         {sdk.version ?? "—"}
       </span>
+      <span className="text-xs text-slate-300 md:hidden" aria-hidden="true">·</span>
       <span className="text-xs text-slate-400">{sdk.version_count} {sdk.version_count === 1 ? "version" : "versions"}</span>
       {sdk.killed_at && (
         <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-500 border border-slate-200">
@@ -268,66 +269,102 @@ interface SdkActionButtonsProps {
 	onArchive: (id: string, name: string) => void;
 	onMcpLifecycle: (sdk: SdkListItem, action: McpLifecycleAction) => void;
 	archived: boolean;
+  onAction?: () => void;
 }
 
-/** Renders exact-version actions for the latest version represented by a family row. */
-function SdkActionButtons({ sdk, onDownload, onDeactivate, onArchive, onMcpLifecycle, archived }: SdkActionButtonsProps) {
-	// Archived history is read-only and cannot acquire runtime or lifecycle actions.
-	if (archived) return null;
-	// A live empty family exposes only the final deletion action that releases its name.
-	if (!sdk.app_id || !sdk.version) {
-		return (
-		  <button
-			onClick={(event) => { event.stopPropagation(); onArchive(sdk.app_family_id, sdk.name); }}
-			className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-slate-950 bg-white hover:bg-slate-50 rounded-lg transition-colors cursor-pointer"
-			title="Delete app and release its name"
-		  >
-			<ArchiveIcon className="w-4 h-4" />
-		  </button>
-		);
-	}
-  return (
-    <div className="flex justify-end gap-1 sm:gap-2">
-      {/* Package downloads apply only to generated SDKs; MCP and REST apps retain the same row without a fake action. */}
-      {sdk.target_type === "sdk" ? (
-        sdk.is_downloadable ? (
-          <button
-            onClick={(e) => { e.stopPropagation(); onDownload(sdk.app_id!, sdk.name, sdk.version!); }}
-            className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-slate-950 bg-white hover:bg-slate-50 rounded-lg transition-colors cursor-pointer"
-            title="Download latest SDK version"
-          >
-            <Download className="w-4 h-4" />
-          </button>
-        ) : (
-          <button
-            disabled
-            className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-slate-400 bg-slate-100 rounded-lg cursor-not-allowed"
-            title="This SDK has expired and its files have been cleaned up."
-          >
-            <Download className="w-4 h-4" />
-          </button>
-        )
-      ) : null}
-      {/* MCP keeps its reversible deprecation controls inside the shared app-row action area. */}
-      {sdk.target_type === "mcp" && sdk.status === "active" ? (
-        <button type="button" onClick={(event) => { event.stopPropagation(); onMcpLifecycle(sdk, "deprecate"); }} className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-white text-slate-950 hover:bg-slate-50" title="Deprecate MCP server"><ServerCrash className="h-4 w-4" /></button>
-      ) : sdk.target_type === "mcp" && sdk.status === "deprecated" ? (
-        <button type="button" onClick={(event) => { event.stopPropagation(); onMcpLifecycle(sdk, "restore"); }} className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-white text-slate-950 hover:bg-slate-50" title="Restore MCP server"><Play className="h-4 w-4" /></button>
-      ) : null}
-      <button
-        onClick={(e) => { e.stopPropagation(); onDeactivate(sdk.app_id!, sdk.name, sdk.version!); }}
-        className="inline-flex items-center justify-center w-8 h-8 text-sm font-medium text-slate-950 bg-white hover:bg-slate-50 rounded-lg transition-colors cursor-pointer"
-        title="Deactivate latest app version"
-      >
-        <Trash2 className="w-4 h-4" />
-      </button>
-    </div>
-  );
+type AppRowAction = { label: string; icon: typeof Trash2; run: () => void; disabled?: boolean };
+
+/** Projects only reversible MCP transitions supported by the current immutable version. */
+function mcpRowActions(sdk: SdkListItem, onMcpLifecycle: SdkActionButtonsProps["onMcpLifecycle"]): AppRowAction[] {
+  // Other adapters have no MCP lifecycle controls.
+  if (sdk.target_type !== "mcp") return [];
+  // Unrecognized states never acquire a guessed transition.
+  const action = sdk.status === "active" ? "deprecate" : sdk.status === "deprecated" ? "restore" : null;
+  // Unsupported lifecycle states have no reversible command to render.
+  if (!action) return [];
+  // Each state names its available reverse transition explicitly.
+  const label = action === "deprecate" ? "Deprecate" : "Restore";
+  const icon = action === "deprecate" ? ServerCrash : Play;
+  // The route still owns lifecycle confirmation and persistence.
+  return [{ label, icon, run: () => onMcpLifecycle(sdk, action) }];
 }
 
-/** Formats the live creation or retained deletion date used by a catalogue row. */
+/** Defines one labeled options list shared across viewport sizes. */
+function appRowActions({ sdk, onDownload, onDeactivate, onArchive, onMcpLifecycle }: SdkActionButtonsProps): AppRowAction[] {
+  // Versionless families expose only name release, never version-scoped commands.
+  if (!sdk.app_id || !sdk.version) {
+    return [{ label: "Delete app", icon: ArchiveIcon, run: () => onArchive(sdk.app_family_id, sdk.name) }];
+  }
+  const actions: AppRowAction[] = [];
+  // Only generated SDKs have packages; unavailable packages remain visibly disabled.
+  if (sdk.target_type === "sdk") {
+    actions.push({ label: "Download", icon: Download, disabled: !sdk.is_downloadable, run: () => onDownload(sdk.app_id!, sdk.name, sdk.version!) });
+  }
+  actions.push(...mcpRowActions(sdk, onMcpLifecycle));
+  // MCP rows represent the whole server; other adapters retain their existing version action.
+  const deactivateLabel = sdk.target_type === "mcp" ? "Deactivate all" : "Deactivate";
+  actions.push({ label: deactivateLabel, icon: Trash2, run: () => onDeactivate(sdk.app_id!, sdk.name, sdk.version!) });
+  return actions;
+}
+
+/** Labels every authorized command inside the options disclosure. */
+function SdkActionButtons(props: SdkActionButtonsProps) {
+  const { archived, onAction } = props;
+  // Archived history cannot acquire runtime or lifecycle actions through either presentation.
+  if (archived) return null;
+  const actions = appRowActions(props);
+  const buttonClass = "flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 focus:bg-slate-50 disabled:opacity-40";
+  return <div className="space-y-1 p-1.5">
+    {actions.map(({ label, icon: Icon, run, disabled }, index) => <button key={label} type="button" title={label} aria-label={label} disabled={disabled}
+      // Focus the first available command when the user opens options.
+      autoFocus={index === actions.findIndex((action) => !action.disabled)} className={buttonClass}
+      onClick={(event) => {
+        // A lifecycle command must not also navigate the row; confirmation stays with the route handlers.
+        event.stopPropagation();
+        onAction?.();
+        run();
+      }}>
+      <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+      {/* Text labels keep destructive commands explicit at every viewport size. */}
+      <span>{label}</span>
+    </button>)}
+  </div>;
+}
+
+/** Keeps lifecycle actions behind an explicit options control at every viewport size. */
+function SdkRowOptions(props: SdkActionButtonsProps) {
+  const [open, setOpen] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const id = useId();
+  /** Dismisses options and restores the invoking control without performing an action. */
+  function close() {
+    setOpen(false);
+    trigger.current?.focus();
+  }
+  // Read-only archive rows do not show an empty options trigger.
+  if (props.archived) return null;
+  return <div className="flex justify-end">
+    <button ref={trigger} type="button" title="Options" aria-label={`Options for ${props.sdk.name}`} aria-expanded={open} aria-controls={id} aria-haspopup="dialog"
+      className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-50 hover:text-slate-900"
+      onClick={(event) => {
+        // Disclosure is independent of opening the selected immutable version.
+        event.stopPropagation();
+        setOpen((previous) => !previous);
+      }}><MoreHorizontal className="h-5 w-5" aria-hidden="true" /></button>
+    {/* Portalling prevents the last row's options from being clipped by the catalogue border. */}
+    {open && <AnchoredPopover anchor={trigger} onClose={close} width={192}>
+      <div id={id} role="dialog" aria-label={`Options for ${props.sdk.name}`} onClick={(event) => {
+        // Portal clicks still bubble through React; empty panel space must not open the underlying row.
+        event.stopPropagation();
+      }}><SdkActionButtons {...props} onAction={close} /></div>
+    </AnchoredPopover>}
+  </div>;
+}
+
+/** Formats the latest app update or retained deletion date used by a catalogue row. */
 function appCatalogueDate(sdk: SdkListItem, archived: boolean): string {
-  const value = archived ? sdk.archived_at : sdk.created_at;
+  // Archived history uses the deletion event; live rows use the server-owned update timestamp.
+  const value = archived ? sdk.archived_at : sdk.updated_at;
   // Missing family timestamps remain blank rather than inventing a lifecycle date.
   if (!value) return "";
   return new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
@@ -343,65 +380,72 @@ function appRowCursor(appId: string | null): string {
 function selectionControlOpacity(appId: string | null, showCheckbox: boolean): string {
   // A missing immutable identity cannot participate in bulk version actions.
   if (!appId) return "pointer-events-none opacity-0";
-  return showCheckbox ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-within:opacity-100";
+  // Touch users cannot hover, so selection remains visible on small screens.
+  return showCheckbox ? "opacity-100" : "opacity-100 md:opacity-0 md:group-hover:opacity-100 md:focus-within:opacity-100";
 }
 
-/** Renders one family catalogue row that opens its latest exact version. */
-function SdkRow({ sdk, canManage, selectedIds, setSelectedIds, onNavigate, onDownload, onDeactivate, onArchive, onMcpLifecycle, archived }: SdkRowProps) {
+/** Groups mobile identity and version metadata beside a secondary-action disclosure, preserving desktop columns. */
+function SdkRow({ sdk, showDownloads, canManage, selectedIds, setSelectedIds, onNavigate, onDownload, onDeactivate, onArchive, onMcpLifecycle, archived }: SdkRowProps) {
   const appId = sdk.app_id;
   // Only a family with a latest immutable version can participate in version-scoped navigation or selection.
   const isSelected = appId ? selectedIds.includes(appId) : false;
   const showCheckbox = selectedIds.length > 0 || isSelected;
   return (
     <tr
-	  className={`hover:bg-slate-50/50 transition-colors group ${appRowCursor(appId)}`}
+	  className={`grid grid-cols-[minmax(0,1fr)_56px] items-start md:table-row hover:bg-slate-50/50 transition-colors group ${appRowCursor(appId)}`}
       onClick={() => {
         // Family rows open the deterministic latest immutable version when one exists.
         if (appId) onNavigate(appId);
       }}
     >
-      <td className="px-3 sm:px-6 py-4 min-w-0">
-        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-          <div className="relative w-8 h-8 rounded shrink-0">
+      <td className="min-w-0 pl-3 pr-0 py-4 md:px-6 md:py-4">
+        <div className="flex min-w-0 items-start gap-3 md:items-center">
+          <div className="relative mt-0.5 w-5 h-5 shrink-0 md:mt-0 md:w-8 md:h-8">
             {/* Management controls require an exact family grant and never appear for read-only rows. */}
             {canManage && (
-			  <div className={`absolute inset-0 z-10 bg-white/90 rounded flex items-center justify-center transition-opacity duration-200 ${selectionControlOpacity(appId, showCheckbox)}`} onClick={(e) => e.stopPropagation()}>
+			  <label className={`absolute -left-3 -top-3 z-10 h-11 w-11 md:inset-0 md:h-8 md:w-8 md:bg-white/90 rounded flex items-center justify-center cursor-pointer transition-opacity duration-200 ${selectionControlOpacity(appId, showCheckbox)}`} onClick={(e) => e.stopPropagation()}>
                 <input
                   type="checkbox"
                   className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
                   checked={isSelected}
+                  aria-label={`Select ${sdk.name}`}
                   onChange={() => {
                     // Selection remains exact-version scoped even though each row represents a family.
                     if (!appId) return;
                     setSelectedIds(prev => prev.includes(appId) ? prev.filter(i => i !== appId) : [...prev, appId]);
                   }}
                 />
-              </div>
+              </label>
             )}
-            <div className="absolute inset-0 w-8 h-8 rounded bg-blue-100 flex items-center justify-center text-blue-600">
+            <div className="absolute inset-0 rounded bg-blue-100 hidden md:flex items-center justify-center text-blue-600">
               <AppCatalogueIcon view={sdk.target_type} />
             </div>
           </div>
 		  <SdkNameCell sdk={sdk} archived={archived} />
         </div>
       </td>
-      <td className="px-2 sm:px-6 py-4">
+      <td className="hidden min-w-0 px-3 py-4 md:table-cell">
         <SdkVersionBadges sdk={sdk} />
       </td>
-      <td className="hidden md:table-cell px-6 py-4 text-slate-500 font-medium">
+      {/* Download metrics describe generated packages, so only the SDK catalogue includes this cell. */}
+      {showDownloads && <td className="hidden md:table-cell px-3 py-4 text-slate-500 font-medium">
         {formatAppDownloadCount(sdk.downloads)}
-      </td>
-      <td className="hidden lg:table-cell px-6 py-4 text-slate-500">
+      </td>}
+      <td className="hidden md:table-cell px-3 py-4 text-slate-500">
         {appCatalogueDate(sdk, archived)}
       </td>
-      <td className="px-2 sm:px-6 py-4 text-right">
-		{canManage ? <SdkActionButtons sdk={sdk} onDownload={onDownload} onDeactivate={onDeactivate} onArchive={onArchive} onMcpLifecycle={onMcpLifecycle} archived={archived} /> : null}
+      <td className="px-1 pt-1 text-right md:px-3 md:py-4">
+        {/* Options retain the exact-family management permission and existing confirmation flow. */}
+        {canManage &&
+          <SdkRowOptions sdk={sdk} onDownload={onDownload} onDeactivate={onDeactivate} onArchive={onArchive} onMcpLifecycle={onMcpLifecycle} archived={archived} />
+        }
       </td>
     </tr>
   );
 }
 
 interface SdkListContentProps {
+  showDownloads: boolean;
 	state: AppCatalogueState;
   canCreate: boolean;
   canManage: (sdk: SdkListItem) => boolean;
@@ -444,7 +488,7 @@ function AppCatalogueEmpty({ state, query, canCreate }: { state: AppCatalogueSta
 }
 
 /** Selects the loading, empty, or populated app-list presentation. */
-function SdkListContent({ state, canCreate, canManage, loading, searching, sdks, query, selectedIds, setSelectedIds, navigate, onDownload, onDeactivate, onArchive, onMcpLifecycle }: SdkListContentProps) {
+function SdkListContent({ showDownloads, state, canCreate, canManage, loading, searching, sdks, query, selectedIds, setSelectedIds, navigate, onDownload, onDeactivate, onArchive, onMcpLifecycle }: SdkListContentProps) {
 	const archived = state === "archive";
 	// Loading and debounced search share one bounded placeholder to prevent stale rows from flashing.
   if (loading || searching) {
@@ -462,18 +506,22 @@ function SdkListContent({ state, canCreate, canManage, loading, searching, sdks,
   // Only families with a live immutable version participate in version-scoped bulk actions.
   const selectableIds = sdks.flatMap((sdk) => sdk.app_id && canManage(sdk) ? [sdk.app_id] : []);
   return (
-    <div className="bg-white rounded-xl border border-slate-200 overflow-x-auto">
-      <table className="w-full table-fixed md:table-auto text-left text-sm whitespace-nowrap">
-        <thead className="bg-slate-50 border-b border-slate-200 text-slate-500">
-          <tr>
-            <th className="w-[55%] md:w-auto px-3 sm:px-6 py-4 font-medium">
-              <div className="flex items-center gap-3">
-                <div className="flex items-center justify-center w-8 h-8">
-                  <div className={`transition-opacity duration-200 ${selectedIds.length > 0 ? 'opacity-100' : 'opacity-0'}`}>
+    <div className="bg-white rounded-xl border border-slate-200 overflow-hidden md:overflow-x-auto">
+      {/* Mobile rows use their full width; bounded desktop columns keep long names from pushing actions off-screen. */}
+      <table className="block w-full text-left text-sm md:table md:table-fixed md:whitespace-nowrap">
+        <thead className="block bg-slate-50 border-b border-slate-200 text-slate-500 md:table-header-group">
+          <tr className="block md:table-row">
+            <th className="block px-3 py-1 font-medium md:table-cell md:px-6 md:py-4">
+              <div className="flex items-center gap-0 md:gap-3">
+                {/* Keep touch selection discoverable and prevent selecting a page with no manageable versions. */}
+                <label className="-ml-3 flex items-center justify-center w-11 h-11 cursor-pointer md:ml-0 md:w-8 md:h-8">
+                  <div className={`transition-opacity duration-200 ${selectedIds.length > 0 ? 'opacity-100' : 'opacity-100 md:opacity-0 md:focus-within:opacity-100'}`}>
                     <input
                       type="checkbox"
                       className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
                       checked={selectedIds.length === selectableIds.length && selectableIds.length > 0}
+                      aria-label="Select all apps on this page"
+                      disabled={selectableIds.length === 0}
                       onChange={() => {
                         // Select-all never manufactures an identity for retained versionless families.
                         if (selectedIds.length === selectableIds.length) {
@@ -484,21 +532,24 @@ function SdkListContent({ state, canCreate, canManage, loading, searching, sdks,
                       }}
                     />
                   </div>
-                </div>
-                <span>App</span>
+                </label>
+                <span className="text-xs font-normal md:hidden">Select page</span><span className="hidden md:inline">App</span>
               </div>
             </th>
-            <th className="w-[25%] md:w-auto px-2 sm:px-6 py-4 font-medium">Latest version</th>
-            <th className="hidden md:table-cell px-6 py-4 font-medium">Downloads</th>
-			<th className="hidden lg:table-cell px-6 py-4 font-medium">{archived ? "Deleted" : "Date"}</th>
-            <th className="w-[20%] md:w-auto px-2 sm:px-6 py-4 font-medium text-right">Action</th>
+            <th className="hidden w-32 md:table-cell px-3 py-4 font-medium">Latest version</th>
+            {/* Keep headers aligned with the SDK-only package metrics in each row. */}
+            {showDownloads && <th className="hidden w-24 md:table-cell px-3 py-4 font-medium">Downloads</th>}
+			{/* Archived rows preserve deletion history instead of implying a live update. */}
+            <th className="hidden w-32 md:table-cell px-3 py-4 font-medium">{archived ? "Deleted" : "Last updated"}</th>
+            <th className="hidden w-16 md:table-cell px-3 py-4 font-medium text-right"><span className="sr-only">Options</span></th>
           </tr>
         </thead>
-        <tbody className="divide-y divide-slate-100">
+        <tbody className="block divide-y divide-slate-100 md:table-row-group">
           {sdks.map((sdk) => (
             <SdkRow
               key={sdk.app_family_id}
               sdk={sdk}
+              showDownloads={showDownloads}
               canManage={canManage(sdk)}
               selectedIds={selectedIds}
               setSelectedIds={setSelectedIds}
@@ -523,16 +574,17 @@ function SdkPagination({ page, total, onPage }: {
   onPage: (page: number) => void;
 }) {
   const pageCount = Math.max(1, Math.ceil(total / SDK_PAGE_SIZE));
+  // A single page needs no navigation controls.
   if (pageCount <= 1) return null;
   return (
-    <div className="flex items-center justify-between gap-4 text-sm text-slate-600">
+    <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-slate-600">
       <span>Page {page + 1} of {pageCount}</span>
       <div className="flex items-center gap-2">
         <button
           type="button"
           disabled={page === 0}
           onClick={() => onPage(page - 1)}
-          className="rounded-lg border border-slate-300 px-3 py-1.5 disabled:opacity-40"
+          className="min-h-11 rounded-lg border border-slate-300 px-3 py-2 disabled:opacity-40 md:min-h-0 md:py-1.5"
         >
           Previous
         </button>
@@ -540,7 +592,7 @@ function SdkPagination({ page, total, onPage }: {
           type="button"
           disabled={page + 1 >= pageCount}
           onClick={() => onPage(page + 1)}
-          className="rounded-lg border border-slate-300 px-3 py-1.5 disabled:opacity-40"
+          className="min-h-11 rounded-lg border border-slate-300 px-3 py-2 disabled:opacity-40 md:min-h-0 md:py-1.5"
         >
           Next
         </button>
@@ -571,11 +623,11 @@ function AppsCatalogueHeader({ type, canBrowseTemplates, canCreate, selectedCoun
   </CataloguePageHeader>;
 }
 
-/** Keeps Apps navigation in order on one horizontally scrollable row. */
+/** Fits the four app types on narrow phones while retaining horizontal scrolling at tighter widths. */
 function AppCatalogueTypeTabs({ selected, onSelect }: { selected: AppCatalogueType; onSelect: (type: AppCatalogueType) => void }) {
-  return <div role="tablist" aria-label="App type" className="fused-tabs-scroll gap-2 border-b border-slate-200 pb-3">
+  return <div role="tablist" aria-label="App type" className="fused-tabs-scroll gap-1 md:gap-2 border-b border-slate-200 pb-3">
     {/* Every tab controls the same server-filtered result panel. */}
-    {APP_CATALOGUE_TYPES.map((item) => <button key={item.type} id={`app-type-${item.type}`} type="button" role="tab" aria-controls="app-catalogue-panel" aria-selected={selected === item.type} onClick={() => onSelect(item.type)} className={`rounded-lg px-4 py-2 text-sm font-medium ${selected === item.type ? "bg-slate-950 text-white" : "text-slate-600 hover:bg-slate-100"}`}>{item.label}</button>)}
+    {APP_CATALOGUE_TYPES.map((item) => <button key={item.type} id={`app-type-${item.type}`} type="button" role="tab" aria-controls="app-catalogue-panel" aria-selected={selected === item.type} onClick={() => onSelect(item.type)} className={`rounded-lg px-3 md:px-4 py-2 text-sm font-medium ${selected === item.type ? "bg-slate-950 text-white" : "text-slate-600 hover:bg-slate-100"}`}>{item.label}</button>)}
   </div>;
 }
 
@@ -617,6 +669,7 @@ export default function SdkHistory() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const requestID = useRef(0);
   const [isDeactivatingMultiple, setIsDeactivatingMultiple] = useState(false);
+  const mcpDeactivationPending = useRef(false);
   const navigate = useNavigate();
   const canRead = hasAnyAppPermission(access, "read");
   const canCreate = ["sdk", "mcp", "api", "unified_app"].some((kind) => hasWorkspacePermission(access, `app.${kind}.create`));
@@ -753,12 +806,64 @@ export default function SdkHistory() {
     }
   };
 
-  /** Confirms and deactivates one immutable app version. */
+  /** Deactivates reviewed MCP versions while retaining each server identity and its name. */
+  const handleDeactivateMcpServers = async (servers: SdkListItem[]) => {
+    // Prevent duplicate prompts and require the same family management grant as the row controls.
+    if (mcpDeactivationPending.current || servers.length === 0 || servers.some((server) => server.target_type !== "mcp" || !canManage(server))) return;
+    mcpDeactivationPending.current = true;
+    setIsDeactivatingMultiple(true);
+    try {
+      const result = await deactivateFamilyVersions(servers.map((server) => server.app_family_id), {
+        /** Uses unpaginated family discovery so older versions cannot remain hidden behind a catalogue page. */
+        listVersions: async (familyId) => {
+          const result = await api.mcpGraphql<{ appVersions: AppVersionIdentity[] }>(`
+            query MCPVersionsToDeactivate($familyId: String!) {
+              appVersions(app_family_id: $familyId) { app_id }
+            }
+          `, { familyId });
+          return result.appVersions;
+        },
+        /** Names the server scope and irreversible version count before any cleanup is dispatched. */
+        confirm: (count) => {
+          // A single-server action names its target; bulk actions name the reviewed server count.
+          const target = servers.length === 1 ? `MCP server "${servers[0].name}"` : `${servers.length} MCP servers`;
+          return toast.confirm(`Deactivate all ${count} version(s) of ${target}? This permanently removes their runtimes and stops their MCP endpoints. The server names remain reserved until you delete the apps.`);
+        },
+        deactivate: api.sdks.deactivate,
+      });
+      // Cancellation must not emit a success message or imply that runtime state changed.
+      if (result.cancelled) return;
+      // Partial cleanup and concurrent publication must never be presented as a stopped server.
+      if (result.failed > 0 || result.remaining !== 0) {
+        // Unknown final state requires an explicit verification warning instead of a guessed count.
+        const remaining = result.remaining === null ? "Could not verify the remaining versions. Refresh before retrying." : `${result.remaining} version(s) remain. Review them and retry.`;
+        toast.error(`Deactivated ${result.removed} version(s); ${result.failed} request(s) failed. ${remaining}`);
+      } else {
+        toast.success(`All versions deactivated. ${servers.length} MCP server(s) have no remaining runtimes.`);
+      }
+    } catch (cause) {
+      // Discovery failures occur before mutation and must remain visible to the operator.
+      toast.error(`Could not deactivate MCP servers: ${cause instanceof Error ? cause.message : "Unknown error"}`);
+    } finally {
+      mcpDeactivationPending.current = false;
+      setIsDeactivatingMultiple(false);
+      await fetchSdks(query, page);
+    }
+  };
+
+  /** Routes MCP catalogue actions to whole-server cleanup and retains exact-version actions for other adapters. */
   const handleDeactivate = async (id: string, name: string, version: string) => {
     const app = sdks.find((candidate) => candidate.app_id === id);
+    // The MCP catalogue action covers all server versions, including older executable siblings.
+    if (app?.target_type === "mcp") {
+      await handleDeactivateMcpServers([app]);
+      return;
+    }
+    // Other catalogue views keep the existing SDK fallback for their exact-version action.
     const targetType = app?.target_type ?? "sdk";
     const typeLabel = appTypeLabel(targetType);
     const confirmed = await toast.confirm(`Deactivate ${typeLabel} "${name}" version "${version}"? This permanently removes its ${appRemovalScope(targetType)}.`);
+    // No irreversible version cleanup may run after cancellation.
     if (!confirmed) return;
     try {
       await api.sdks.deactivate(id);
@@ -808,10 +913,17 @@ export default function SdkHistory() {
     }
   };
 
-  /** Confirms and deactivates the selected immutable versions in parallel. */
+  /** Applies whole-server semantics to selected MCP rows and exact-version cleanup to other tabs. */
   const handleDeactivateMultiple = async () => {
+    // Empty selections must not open a destructive confirmation.
     if (selectedIds.length === 0) return;
+    // Selected MCP rows are logical servers, so bulk cleanup includes their older versions too.
+    if (type === "mcp") {
+      await handleDeactivateMcpServers(sdks.filter((sdk) => sdk.app_id && selectedIds.includes(sdk.app_id)));
+      return;
+    }
     const confirmed = await toast.confirm(`Deactivate ${selectedIds.length} app version(s)? This permanently removes their runtimes and any generated packages.`);
+    // Preserve cancellation before any selected version is removed.
     if (!confirmed) return;
     
     setIsDeactivatingMultiple(true);
@@ -888,8 +1000,11 @@ export default function SdkHistory() {
         </div>
       )}
 
-	  <div id="app-catalogue-panel" role="tabpanel" aria-labelledby={`app-type-${type}`}>
+      {/* Reserve the launcher footprint below the final row and pagination, including single-page searches. */}
+	  <div id="app-catalogue-panel" role="tabpanel" aria-labelledby={`app-type-${type}`} className="space-y-4 pb-24">
+      {/* Hosted MCP, Unified App, and REST runtimes do not have downloadable packages. */}
       <SdkListContent
+        showDownloads={type === "sdk"}
 		state={state}
 		canCreate={canCreate && state === "active"}
         canManage={canManage}

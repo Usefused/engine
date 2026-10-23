@@ -22,6 +22,7 @@ type AppFamilyCatalogItem struct {
 	LatestVersion   string
 	LatestStatus    AppStatus
 	LatestCreatedAt *time.Time
+	UpdatedAt       time.Time
 	StableAppID     uuid.UUID
 	StableVersion   string
 	ArchivedAt      *time.Time
@@ -76,7 +77,7 @@ func (s *postgresStore) ListAuthorizedAppFamilies(ctx context.Context, accountID
 		return []AppFamilyCatalogItem{}, 0, nil
 	}
 	args := []any{accountID, kind, strings.TrimSpace(search), archived, scope.All, scope.IDs}
-	// One account-scoped window scan computes counts and the newest immutable row without a per-family lookup.
+	// One account-scoped scan computes counts and latest publication; the later family/publication timestamp describes catalogue updates without per-row lookups.
 	rows, err := s.db.Query(ctx, `
  WITH version_catalog AS (
    SELECT app.app_family_id, app.account_id, app.app_id, app.version, app.status, app.created_at,
@@ -90,7 +91,7 @@ func (s *postgresStore) ListAuthorizedAppFamilies(ctx context.Context, accountID
  COALESCE(latest.app_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(latest.version, ''),
  COALESCE(latest.status, ''), latest.created_at,
  COALESCE(stable.app_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(stable.version, '')
-	, family.archived_at
+	, family.archived_at, GREATEST(family.updated_at, latest.created_at)
  FROM fused_app_families family
  LEFT JOIN version_catalog latest ON latest.app_family_id = family.app_family_id
    AND latest.account_id = family.account_id AND latest.version_rank = 1
@@ -110,7 +111,7 @@ func (s *postgresStore) ListAuthorizedAppFamilies(ctx context.Context, accountID
 		// The fixed projection contains only family metadata and the explicit MCP promotion pointer.
 		if err := rows.Scan(&item.AppFamilyID, &item.Name, &item.Kind, &item.DeliveryMode, &item.TargetLanguage, &item.VersionCount,
 			&item.LatestAppID, &item.LatestVersion, &item.LatestStatus, &item.LatestCreatedAt,
-			&item.StableAppID, &item.StableVersion, &item.ArchivedAt); err != nil {
+			&item.StableAppID, &item.StableVersion, &item.ArchivedAt, &item.UpdatedAt); err != nil {
 			return nil, 0, fmt.Errorf("scan app family: %w", err)
 		}
 		items = append(items, item)

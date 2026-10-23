@@ -35,6 +35,7 @@ var appFamilySummaryGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"latest_status":     &graphql.Field{Type: graphql.String},
 		"hosted_mcp":        &graphql.Field{Type: graphql.Boolean},
 		"latest_created_at": &graphql.Field{Type: graphql.String},
+		"updated_at":        &graphql.Field{Type: graphql.String},
 		"archived_at":       &graphql.Field{Type: graphql.String},
 		"downloads":         &graphql.Field{Type: graphql.String},
 		"stable_version":    &graphql.Field{Type: graphql.String},
@@ -107,6 +108,10 @@ func appFamilySummaryFields(r *http.Request, item store.AppFamilyCatalogItem, co
 	result := map[string]interface{}{
 		"app_family_id": item.AppFamilyID.String(), "name": item.Name, "kind": string(item.Kind),
 		"delivery_mode": string(item.DeliveryMode), "target_language": item.TargetLanguage, "version_count": item.VersionCount,
+	}
+	// Persisted catalogue updates also exist for families without a live version.
+	if !item.UpdatedAt.IsZero() {
+		result["updated_at"] = item.UpdatedAt.Format(mcpGraphQLTimeFormat)
 	}
 	// Archive timestamps expose deletion history without reintroducing archived families into live discovery.
 	if item.ArchivedAt != nil {

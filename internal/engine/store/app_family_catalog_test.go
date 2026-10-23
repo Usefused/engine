@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/google/uuid"
@@ -93,6 +94,20 @@ func testAppFamilyCataloguePostgres(t *testing.T, view string) {
 	if items[0].LatestAppID != latestAppID || items[0].LatestVersion != "102" || items[0].LatestStatus != AppStatusActive || items[0].LatestCreatedAt == nil {
 		t.Fatalf("latest version: %#v", items[0])
 	}
+	// Publishing a newer version must advance catalogue freshness even without a family metadata write.
+	if !items[0].UpdatedAt.Equal(*items[0].LatestCreatedAt) {
+		t.Fatalf("publication update: %#v", items[0])
+	}
+	familyUpdatedAt := items[0].LatestCreatedAt.Add(time.Hour)
+	// A later family change must take precedence over the latest immutable publication.
+	if _, err := fixture.pool.Exec(fixture.ctx, `UPDATE fused_app_families SET updated_at=$2 WHERE app_family_id=$1`, fixture.familyID, familyUpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+	updated, _, err := fixture.repository.ListAuthorizedAppFamilies(fixture.ctx, accountID, all, view, "Alpha:", false, 1, 0)
+	// The projection must expose the persisted update, without changing latest-version identity.
+	if err != nil || len(updated) != 1 || !updated[0].UpdatedAt.Equal(familyUpdatedAt) || updated[0].LatestAppID != latestAppID {
+		t.Fatalf("family update: %#v, error %v", updated, err)
+	}
 	// The grouped row must retain its immutable delivery mode for a mixed Apps catalogue.
 	expectedDeliveryMode := AppDeliveryMode("")
 	// MCP has no delivery-mode subtype, while SDK-kind families persist either package or direct REST delivery.
@@ -110,6 +125,10 @@ func testAppFamilyCataloguePostgres(t *testing.T, view string) {
 	// Family pagination must include retained identities with zero live versions.
 	if err != nil || total != 2 || len(items) != 1 || items[0].Name != "beta" || items[0].VersionCount != 0 {
 		t.Fatalf("second page: %#v, total %d, error %v", items, total, err)
+	}
+	// Retained versionless families still have a meaningful metadata update timestamp.
+	if items[0].UpdatedAt.IsZero() {
+		t.Fatal("versionless family has no update timestamp")
 	}
 	scoped := accesscontrol.AuthorizedScope{IDs: []uuid.UUID{fixture.familyID}}
 	items, total, err = fixture.repository.ListAuthorizedAppFamilies(fixture.ctx, accountID, scoped, view, "", false, 20, 0)

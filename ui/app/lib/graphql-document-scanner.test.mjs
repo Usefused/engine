@@ -63,14 +63,14 @@ test("keeps the Registry repo-boundary manifest synchronized when present", (t) 
 // Pin the reviewed inventory, including secret-reference lookup and imported-MCP contract reads.
 test("accounts for every current UI GraphQL call and document variant", () => {
   const scan = scanCurrentUI();
-  // Exact totals ensure every static query remains represented in schema validation.
-  assert.equal(scan.call_count, 115);
-  assert.equal(scan.calls.length, 115);
-  assert.equal(scan.document_count, 133);
-  assert.equal(scan.documents.length, 133);
+  // Include full-family MCP version discovery so destructive review cannot rely only on the latest row.
+  assert.equal(scan.call_count, 116);
+  assert.equal(scan.calls.length, 116);
+  assert.equal(scan.document_count, 134);
+  assert.equal(scan.documents.length, 134);
   assert.equal(scan.documents.filter(/** Registry documents are validated against its separate schema. */ ({ endpoint }) => endpoint === "registry").length, 35);
-  assert.equal(scan.documents.filter(/** Engine documents retain their own schema-validation boundary. */ ({ endpoint }) => endpoint === "engine").length, 98);
-  assert.equal(scan.calls.reduce(/** Every expanded variant must belong to a scanned call. */ (count, call) => count + call.document_count, 0), 133);
+  assert.equal(scan.documents.filter(/** Engine documents retain their own schema-validation boundary. */ ({ endpoint }) => endpoint === "engine").length, 99);
+  assert.equal(scan.calls.reduce(/** Every expanded variant must belong to a scanned call. */ (count, call) => count + call.document_count, 0), 134);
 });
 
 test("resolves imported fragments and expands conditional and map variants", () => {
