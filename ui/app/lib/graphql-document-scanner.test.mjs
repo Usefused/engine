@@ -60,17 +60,17 @@ test("keeps the Registry repo-boundary manifest synchronized when present", (t) 
   }
 });
 
-// Pin the reviewed inventory, including secret-reference lookup and imported-MCP contract reads.
+// Pin the reviewed inventory, including Unified App template source, version history, and dependency checks.
 test("accounts for every current UI GraphQL call and document variant", () => {
   const scan = scanCurrentUI();
-  // Include full-family MCP version discovery so destructive review cannot rely only on the latest row.
-  assert.equal(scan.call_count, 116);
-  assert.equal(scan.calls.length, 116);
-  assert.equal(scan.document_count, 134);
-  assert.equal(scan.documents.length, 134);
-  assert.equal(scan.documents.filter(/** Registry documents are validated against its separate schema. */ ({ endpoint }) => endpoint === "registry").length, 35);
-  assert.equal(scan.documents.filter(/** Engine documents retain their own schema-validation boundary. */ ({ endpoint }) => endpoint === "engine").length, 99);
-  assert.equal(scan.calls.reduce(/** Every expanded variant must belong to a scanned call. */ (count, call) => count + call.document_count, 0), 134);
+  // Template publication adds three Engine reads and one Registry dependency check.
+  assert.equal(scan.call_count, 120);
+  assert.equal(scan.calls.length, 120);
+  assert.equal(scan.document_count, 138);
+  assert.equal(scan.documents.length, 138);
+  assert.equal(scan.documents.filter(/** Registry documents are validated against its separate schema. */ ({ endpoint }) => endpoint === "registry").length, 36);
+  assert.equal(scan.documents.filter(/** Engine documents retain their own schema-validation boundary. */ ({ endpoint }) => endpoint === "engine").length, 102);
+  assert.equal(scan.calls.reduce(/** Every expanded variant must belong to a scanned call. */ (count, call) => count + call.document_count, 0), 138);
 });
 
 test("resolves imported fragments and expands conditional and map variants", () => {

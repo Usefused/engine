@@ -1,3 +1,4 @@
+import { Select } from "../components/forms/Select.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -7,12 +8,19 @@ import * as importContract from "./webhook-editor-import.ts";
 
 const require = createRequire(import.meta.url);
 
+// Resolve the production dropdown through Node while retaining normal JSX/runtime dependencies.
+function requireDiagnostics(name) {
+  // Vite aliases need an explicit mapping in the CommonJS component fixture.
+  if (name === "~/components/forms/Select") return { Select };
+  return require(name);
+}
+
 // Resolve the real presentation component so controller fixtures keep their production dependency graph.
 function loadImportDiagnostics() {
  const source = readFileSync(new URL("../components/ImportDiagnostics.tsx", import.meta.url), "utf8");
  const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
  const exports = {};
- new Function("exports", "require", output)(exports, require);
+ new Function("exports", "require", output)(exports, requireDiagnostics);
  return exports;
 }
 

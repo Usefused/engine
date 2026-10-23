@@ -37,7 +37,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '24.x'
+          node-version: '24.22.1'
           cache: npm
           cache-dependency-path: runtime/mcp/package-lock.json
       - name: Build embedded MCP runtime
@@ -83,7 +83,7 @@ jobs:
       - name: Prepare embedded UI
         uses: actions/setup-node@v4
         with:
-          node-version: '24.x'
+          node-version: '24.22.1'
           cache: npm
           cache-dependency-path: |
             ui/package-lock.json

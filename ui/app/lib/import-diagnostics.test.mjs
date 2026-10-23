@@ -1,3 +1,4 @@
+import { Select } from "../components/forms/Select.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -7,10 +8,17 @@ import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 
 const require = createRequire(import.meta.url);
+
+// Resolve the production dropdown through Node while retaining normal JSX/runtime dependencies.
+function requireDiagnostics(name) {
+  // Vite aliases need an explicit mapping in the CommonJS component fixture.
+  if (name === "~/components/forms/Select") return { Select };
+  return require(name);
+}
 const source = readFileSync(new URL("../components/ImportDiagnostics.tsx", import.meta.url), "utf8");
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
 const exported = {};
-new Function("exports", "require", compiled)(exported, require);
+new Function("exports", "require", compiled)(exported, requireDiagnostics);
 
 // Rendering the real component proves corrections and unknown schemas are visually distinct.
 test("shows corrected and unspecified schemas without presenting unknown information as fixed", () => {

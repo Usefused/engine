@@ -1,3 +1,4 @@
+import { Select } from "../components/forms/Select.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
@@ -22,6 +23,8 @@ async function mountPublisher(overrides = {}, props = {}) {
   globalThis.window = dom.window; globalThis.document = dom.window.document; globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const publications = [], pages = [];
   const dependencies = {
+    // Keep the real dropdown so selection events exercise production form semantics.
+    "~/components/forms/Select": { Select },
     // The workspace back link renders in a separate portal outside this focused component fixture.
     "~/components/layout/PageBackLink": { PageBackLink: () => null },
     "@remix-run/react": { Link: ({ to, children, ...rest }) => createElement("a", { href: to, ...rest }, children) },

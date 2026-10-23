@@ -1,6 +1,6 @@
 module github.com/Usefused/engine
 
-go 1.26.6
+go 1.27.3
 
 require (
 	github.com/ThreadifyDev/go-sdk v0.3.0

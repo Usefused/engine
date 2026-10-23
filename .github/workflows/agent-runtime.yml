@@ -32,7 +32,8 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v6
         with:
-          go-version-file: .agent-compiler/go.mod
+          # Compile bundled agents with the certificate-trust security fix too.
+          go-version: '1.27.3'
           cache-dependency-path: .agent-compiler/go.sum
       - uses: actions/setup-python@v6
         with:

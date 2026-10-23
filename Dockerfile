@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:24-alpine AS ui-builder
+FROM node:24.22.1-alpine AS ui-builder
 
 WORKDIR /app
 
@@ -10,7 +10,7 @@ RUN npm ci
 COPY ui/ ./
 RUN npm rebuild && NODE_OPTIONS="--max-old-space-size=1536" npm run build
 
-FROM node:24-alpine AS mcp-runtime-builder
+FROM node:24.22.1-alpine AS mcp-runtime-builder
 
 WORKDIR /app/runtime/mcp
 
@@ -26,7 +26,7 @@ RUN npm run build
 
 # Compile reviewed Unified App source inside Engine. The compiler and its
 # pinned dependencies stay in the image, never in a tenant app sandbox.
-FROM node:24-alpine AS execution-compiler-builder
+FROM node:24.22.1-alpine AS execution-compiler-builder
 
 WORKDIR /app/runtime/execution
 RUN apk upgrade --no-cache
@@ -37,7 +37,7 @@ COPY runtime/execution/src ./src
 RUN npm run build && npm prune --omit=dev
 
 # Build with the patched standard library required by go.mod.
-FROM golang:1.26.6-alpine AS engine-base
+FROM golang:1.27.3-alpine AS engine-base
 
 WORKDIR /app
 
@@ -93,7 +93,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -o /out/fused-engine ./cmd/engine
 
 # The optional pinned Python agent runtime requires glibc.
-FROM node:24-bookworm-slim AS engine-runtime-base
+FROM node:24.22.1-bookworm-slim AS engine-runtime-base
 
 WORKDIR /app
 

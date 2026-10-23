@@ -24,8 +24,8 @@ function loadModule(path, modules) {
   const module = { exports: {} };
   // Resolve the real shared control; fixture substitutions remain limited to page IO and hooks.
   const dependency = (name) => {
-    // Transpiled component imports resolve from their source directory, not this test directory.
-    if (name === "../forms/Select.ts") return { Select };
+    // Resolve both relative and Vite-aliased imports to the real shared dropdown.
+    if (name === "../forms/Select.ts" || name === "~/components/forms/Select") return { Select };
     // The production label uses a Vite alias that Node's fixture loader must resolve explicitly.
     if (name === "~/components/forms/FieldLabel") return { FieldLabel };
     // The API client uses the real ESM catalog route helper inside this CommonJS test wrapper.

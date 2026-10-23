@@ -1,3 +1,4 @@
+import { Select } from "~/components/forms/Select";
 import type { SpecificationImportDiagnostic } from "~/lib/api";
 
 /** Shows completed source corrections separately from contract details that remain unspecified. */
@@ -39,9 +40,9 @@ function renderDiagnostic(item: SpecificationImportDiagnostic, index: number) {
   </li>;
 }
 
-/** Chooses the source policy before review; the returned plan locks this choice until replanning. */
+/** Uses the shared control for source policy; the returned plan locks this choice until replanning. */
 export function ImportRepairMode({ value = "safe", onChange, disabled = false }: { value?: "safe" | "report_only"; onChange: (value: "safe" | "report_only") => void; disabled?: boolean }) {
-  return <label className="block space-y-2 text-sm"><span className="font-medium text-slate-900">Source corrections</span><select aria-label="Source corrections" className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2" value={value} disabled={disabled} onChange={(event) => onChange(event.target.value as "safe" | "report_only")}><option value="safe">Apply safe corrections automatically</option><option value="report_only">Report only — I’ll correct the source</option></select><span className="block text-xs text-slate-500">Report only lists required corrections and blocks import until you resolve them.</span></label>;
+  return <label className="block space-y-2 text-sm"><span className="font-medium text-slate-900">Source corrections</span><Select aria-label="Source corrections" className="w-full" value={value} disabled={disabled} onChange={(event) => onChange(event.target.value as "safe" | "report_only")}><option value="safe">Apply safe corrections automatically</option><option value="report_only">Report only — I’ll correct the source</option></Select><span className="block text-xs text-slate-500">Report only lists required corrections and blocks import until you resolve them.</span></label>;
 }
 
 /** Extracts only the diagnostic collection retained by the shared API error boundary. */

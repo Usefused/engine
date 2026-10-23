@@ -1,3 +1,4 @@
+import { Select } from "~/components/forms/Select";
 import { PageBackLink } from "~/components/layout/PageBackLink";
 import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "@remix-run/react";
@@ -290,15 +291,15 @@ function publicationBlocked(checks: TemplateChecks | null, isPublic: boolean): b
   return !checks || checks.blockers.length > 0 || (isPublic && checks.publicBlockers.length > 0);
 }
 
-/** Keeps historical versions selectable even when the selected source cannot be published. */
+/** Uses the shared control to keep historical versions selectable even when publication is unavailable. */
 function TemplateVersionPicker({ appID, versions, reviewing, onChange }: { appID: string; versions: TemplateAppVersion[]; reviewing: boolean; onChange: (id: string) => void }) {
   // The chooser has no saved app history.
   if (!appID) return null;
-  return <label className="block space-y-2 text-sm font-medium">App version<select aria-label="App version" className={fieldClass} value={appID} onChange={(event) => onChange(event.target.value)} disabled={reviewing || !versions.length}>
+  return <label className="block space-y-2 text-sm font-medium">App version<Select aria-label="App version" className="w-full" value={appID} onChange={(event) => onChange(event.target.value)} disabled={reviewing || !versions.length}>
     {/* Keep the selected ID represented while history is loading or unavailable. */}
     {!versions.some((item) => item.app_id === appID) && <option value={appID}>Selected app version</option>}
     {versions.map((item) => <option key={item.app_id} value={item.app_id}>{item.version}</option>)}
-  </select></label>;
+  </Select></label>;
 }
 
 /** Shows only admission failures relevant to the selected visibility. */

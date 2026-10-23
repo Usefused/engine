@@ -1,3 +1,4 @@
+import { Select } from "../components/forms/Select.ts";
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
@@ -8,12 +9,19 @@ import { createRoot } from 'react-dom/client';
 import { JSDOM } from 'jsdom';
 const require = createRequire(import.meta.url);
 
+// Resolve the production dropdown through Node while retaining normal JSX/runtime dependencies.
+function requireDiagnostics(name) {
+  // Vite aliases need an explicit mapping in the CommonJS component fixture.
+  if (name === "~/components/forms/Select") return { Select };
+  return require(name);
+}
+
 // Load the shared diagnostic boundary so route imports resolve without replacing its behavior.
 function loadImportDiagnostics() {
   const source = readFileSync(new URL('../components/ImportDiagnostics.tsx', import.meta.url), 'utf8');
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const exports = {};
-  new Function('require', 'exports', compiled)(require, exports);
+  new Function('require', 'exports', compiled)(requireDiagnostics, exports);
   return exports;
 }
 
