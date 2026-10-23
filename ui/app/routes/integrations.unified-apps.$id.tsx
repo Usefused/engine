@@ -1,3 +1,4 @@
+import { templatePublishPath } from "~/lib/unified-template";
 import { UnifiedAppWebhooks } from "~/components/apps/UnifiedAppWebhooks";
 import { unifiedAppTabs, selectedUnifiedAppTab } from "~/lib/unified-app-tabs";
 import { UnifiedAppSchedules } from "~/components/apps/UnifiedAppSchedules";
@@ -22,7 +23,7 @@ import { useToast } from "~/components/Toast";
 interface UnifiedApp { app_id: string; app_family_id: string; name: string; description: string; version: string; status: string; kind: string; created_at: string }
 interface AppService { service_id: string; service_name: string; service_slug: string; version: string; endpoint_count: number }
 
-/** Groups app automation and linked service details while restricting private automation and source to family managers. */
+/** Groups app automation and source actions behind family management and catalogue publication permissions. */
 export default function UnifiedAppDetails() {
   const { id: routeID } = useParams();
   const id = String(routeID);
@@ -117,6 +118,8 @@ export default function UnifiedAppDetails() {
   if (!app) return <p role="status" className="flex items-center gap-2 text-slate-500"><Loader2 className="h-4 w-4 animate-spin" />Loading Unified App…</p>;
   const canReadActivity = hasResourcePermission(access, "app.unified_app.read", "APP", app.app_family_id) && hasWorkspacePermission(access, "audit.read");
   const canManage = hasResourcePermission(access, "app.unified_app.manage", "APP", app.app_family_id);
+  // Publishing requires access to both the private source and catalogue management.
+  const canPublishTemplate = canManage && hasWorkspacePermission(access, "catalogue.manage");
   // Historical schemas remain readable, but only the current version offers live invocation controls.
   const executionFamilyID = traffic === id ? app.app_family_id : undefined;
   const tabs = unifiedAppTabs(canManage, canReadActivity);
@@ -125,7 +128,7 @@ export default function UnifiedAppDetails() {
   return <div className="space-y-6">
     <AppDetailBackLink to="/integrations/sdks?type=unified_app" />
     {/* Private source and successor deployment require management of this exact family. */}
-    <AppDetailHeader name={app.name} summary={app.description || "Combine approved services into one typed action for onboarding, fulfillment, or reporting."} status={app.status} version={app.version} createdAt={app.created_at} leadingMetadata={<span className="text-[var(--brand-violet)]">Unified App</span>} action={canManage ? <Link to={`/integrations/unified-apps/new?edit=${encodeURIComponent(id)}`} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"><Pencil className="h-4 w-4" aria-hidden="true" />Edit app</Link> : null} />
+    <AppDetailHeader name={app.name} summary={app.description || "Combine approved services into one typed action for onboarding, fulfillment, or reporting."} status={app.status} version={app.version} createdAt={app.created_at} leadingMetadata={<span className="text-[var(--brand-violet)]">Unified App</span>} action={canManage ? <div className="flex flex-wrap items-center gap-3">{/* Templates expose source only after a separate review. */}{canPublishTemplate && <Link to={templatePublishPath(id)} className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium">Publish as template</Link>}<Link to={`/integrations/unified-apps/new?edit=${encodeURIComponent(id)}`} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"><Pencil className="h-4 w-4" aria-hidden="true" />Edit app</Link></div> : null} />
     <AppDetailTabs label="Unified App details" active={active} tabs={tabs} onChange={(tab) => setParams({ tab })} />
     {/* Only the selected permission-checked tab mounts its data consumer. */}
     {active === "overview" && <div className="space-y-6"><UnifiedAppUsage app={app} /><section className="rounded-xl border border-slate-200 bg-white p-5"><div className="flex flex-wrap items-center justify-between gap-3"><h2 className="font-semibold text-slate-900">Execution</h2><AppExecutionTokens familyID={app.app_family_id} kind="unified_app" /></div><p className="mt-2 text-sm text-slate-500">Use this stable app URL with an execution token. Switching traffic changes the version that runs without changing your URL or token.</p><AppExecutionEndpoint appID={app.app_family_id} appName={app.name} /></section><UnifiedAppContract key={id} appID={id} familyID={executionFamilyID} version={app.version} /><section className="overflow-hidden rounded-xl border border-slate-200 bg-white"><h2 className="border-b border-slate-100 px-5 py-4 font-semibold">Connected services</h2>{/* The whole row is a native link, preserving keyboard navigation and modifier-click behavior. */}{services.map((service) => <Link key={service.service_id} to={serviceDetailPath(service.service_id, service.service_slug)} className="group flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-5 py-4 text-sm transition hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-slate-950"><span className="font-medium text-slate-900 group-hover:text-[var(--brand-violet)]">{service.service_name}</span><span className="inline-flex items-center gap-3 text-slate-500">{service.version} · {service.endpoint_count} operations<ArrowUpRight aria-hidden="true" className="h-4 w-4 shrink-0" /></span></Link>)}</section></div>}

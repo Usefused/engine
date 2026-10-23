@@ -1,3 +1,5 @@
+import { PageBackLink } from "~/components/layout/PageBackLink";
+import { templatePublishPath } from "~/lib/unified-template";
 import { UnifiedAppBucketScope } from "~/components/apps/UnifiedAppBucketScope";
 import { runtimeBucketNames } from "~/lib/unified-app-runtime-buckets";
 import { AppExecutionEndpoint } from "~/components/apps/AppExecutionEndpoint";
@@ -53,13 +55,15 @@ function canValidateUnifiedDraft(draft: UnifiedDraft, name: string, version: str
   return !draftHasWebhookEvents(draft) || Boolean(draft.webhookAttachment?.trim());
 }
 
-/** Shares labeled source authoring, selection, compilation, and deployment for new apps and immutable successors. */
+/** Shares source authoring and deployment while preserving an optional return to template publication. */
 export default function CreateUnifiedApp() {
   const { access } = useCurrentActorAccess();
   const credentialReview = useAppCredentialReview();
   const compiledInput = useRef<{ config: Record<string, unknown>; services: UnifiedDraft["services"]; ownerTeam?: string } | null>(null);
   const [params] = useSearchParams();
   const editID = params.get("edit");
+  // Only the fixed publication return intent is supported; arbitrary redirect URLs are ignored.
+  const returnToPublisher = !editID && params.get("returnTo") === "publish-template";
   // Private source takes precedence over a template supplied in the same URL.
   const templateID = editID ? null : params.get("template");
   const [editSource, setEditSource] = useState<UnifiedAppSource | null>(null);
@@ -383,9 +387,11 @@ export default function CreateUnifiedApp() {
   // Render permission failures separately from the describe and credential UI.
   if (!editID && !canCreate) return <div className="space-y-4"><AppDetailBackLink to="/integrations/sdks?type=unified_app" /><p className="text-slate-500">Unified App creation access is required.</p></div>;
   // Success deliberately retains the one-time token until the user leaves this page.
-  if (result) return <CreatedUnifiedApp result={result} name={name} version={version} credentialWarning={credentialReview.warning} />;
+  if (result) return <CreatedUnifiedApp result={result} name={name} version={version} credentialWarning={credentialReview.warning} returnToPublisher={returnToPublisher} />;
   return <div className="mx-auto min-w-0 w-full max-w-5xl space-y-6">
-    <AppDetailBackLink to={editID ? `/integrations/unified-apps/${editID}` : "/integrations/sdks?type=unified_app"} />
+    {/* Returning from creation keeps the template-publishing intent visible. */}
+    <PageBackLink to={editID ? `/integrations/unified-apps/${editID}` : returnToPublisher ? templatePublishPath() : "/integrations/sdks?type=unified_app"}>{returnToPublisher ? "Back to template publishing" : "Back to apps"}</PageBackLink>
+    {returnToPublisher && <p className="rounded-lg bg-violet-50 p-4 text-sm text-violet-900">Create and deploy your Unified App, then continue to review and publish its template.</p>}
     <header className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="text-2xl font-bold text-slate-900">{editID ? "Edit Unified App" : "Create a Unified App"}</h1><p className="mt-1 text-slate-500">{editSource ? `Editing version ${editSource.config.version}. Deploy your changes as a new version; your app URL and tokens stay the same.` : "Describe what you want to build. Review it, then run it on Fused."}</p></div>{/* Templates start a separate app rather than replacing a saved editor baseline. */}{!editID && <Link to="/integrations/unified-apps/templates" className="text-sm font-medium text-[var(--brand-violet)] hover:underline">Browse templates</Link>}</header>
     {/* The shared agent owns intent and follow-ups; manual selection remains directly available. */}
     {!editID && agent && <section className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-violet-200 bg-violet-50/50 p-5">
@@ -460,15 +466,16 @@ export default function CreateUnifiedApp() {
   </div>;
 }
 
-/** Groups the named execution URL, created identity, and one-time credential in one completion panel. */
-function CreatedUnifiedApp({ result, name, version, credentialWarning }: { result: { app_id: string; app_family_id: string; execution_token?: string }; name: string; version: string; credentialWarning?: ReactNode }) {
+/** Retains the one-time token before the user resumes publication with the exact deployed version. */
+function CreatedUnifiedApp({ result, name, version, credentialWarning, returnToPublisher = false }: { result: { app_id: string; app_family_id: string; execution_token?: string }; name: string; version: string; credentialWarning?: ReactNode; returnToPublisher?: boolean }) {
   const [copied, setCopied] = useState(false);
 
   /** Confirms copying without persisting the one-time credential beyond this page. */
   function confirmCopy() { setCopied(true); }
 
   return <div className="mx-auto max-w-3xl space-y-6">
-    <AppDetailBackLink to="/integrations/sdks?type=unified_app" />
+    {/* The completed creation keeps the original publishing destination available. */}
+    <PageBackLink to={returnToPublisher ? templatePublishPath(result.app_id) : "/integrations/sdks?type=unified_app"}>{returnToPublisher ? "Back to template publishing" : "Back to apps"}</PageBackLink>
     {credentialWarning}
     <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
       <header className="space-y-4 p-5 sm:p-6">
@@ -486,8 +493,9 @@ function CreatedUnifiedApp({ result, name, version, credentialWarning }: { resul
         <span role="status" className="sr-only">{copied && "Execution token copied"}</span>
       </div>}
       <footer className="flex flex-wrap items-center justify-between gap-4 border-t border-slate-200 bg-slate-50 px-5 py-4 sm:px-6">
-        <p className="text-sm text-slate-500">View activity, requests, and versions.</p>
-        <Link className={buttonClass} to={`/integrations/unified-apps/${result.app_id}`}>Open app <ArrowRight className="h-4 w-4" aria-hidden="true" /></Link>
+        {/* Publication is a separate reviewed action, so creation never automatically shares source. */}
+        <p className="text-sm text-slate-500">{returnToPublisher ? "Continue to prepare and review your template." : "View activity, requests, and versions."}</p>
+        <Link className={buttonClass} to={returnToPublisher ? templatePublishPath(result.app_id) : `/integrations/unified-apps/${result.app_id}`}>{returnToPublisher ? "Continue to publish template" : "Open app"} <ArrowRight className="h-4 w-4" aria-hidden="true" /></Link>
       </footer>
     </section>
   </div>;

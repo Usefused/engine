@@ -1280,7 +1280,7 @@ function BuilderPagination(props: Pick<
   );
 }
 
-// BuilderSelectionPane uses one compact service header for review and catalogue discovery.
+// BuilderSelectionPane distinguishes available service discovery from review of selected services.
 function BuilderSelectionPane(props: BuilderSelectionPaneProps) {
   const selected = props.data.filter((row) => hasServiceSelection(row.service.id, props));
   // A cleared selection returns to discovery so removing the last operation cannot strand the user.
@@ -1296,7 +1296,8 @@ function BuilderSelectionPane(props: BuilderSelectionPaneProps) {
         </div> : <>
         {/* Review shows only selected services; catalogue browsing is an explicit, reversible choice. */}
         <div className="mb-4 flex items-center justify-between gap-3">
-          <h3 className="text-sm font-semibold text-slate-900">Services ({selected.length})</h3>
+          {/* A selection count must not look like the number of available catalogue services. */}
+          <h3 className="text-sm font-semibold text-slate-900">{browsing ? "Choose services" : `Selected services (${selected.length})`}</h3>
           {/* With no selection the catalogue is already open, so only selected apps need a toggle. */}
           {selected.length > 0 && <button type="button" onClick={() => props.setBrowsingServices(!browsing)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">{browsing ? "Done selecting" : "Add services"}</button>}
         </div>

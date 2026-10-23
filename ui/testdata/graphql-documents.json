@@ -1,6 +1,6 @@
 {
-  "call_count": 116,
-  "document_count": 134,
+  "call_count": 120,
+  "document_count": 138,
   "calls": [
     {
       "endpoint": "engine",
@@ -594,6 +594,30 @@
       "endpoint": "registry",
       "file": "app/lib/unified-app-api.ts",
       "call": 3,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/unified-template-api.ts",
+      "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/unified-template-api.ts",
+      "call": 2,
+      "document_count": 1
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/unified-template-api.ts",
+      "call": 3,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/unified-template-api.ts",
+      "call": 4,
       "document_count": 1
     },
     {
@@ -1497,6 +1521,34 @@
       "call": 3,
       "variant": 1,
       "document": "mutation SetUnifiedAppTemplateVisibility($id: ID!, $public: Boolean!) {\n    setUnifiedAppTemplateVisibility(id: $id, public: $public) { id publisher hash public is_owner template }\n  }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/unified-template-api.ts",
+      "call": 1,
+      "variant": 1,
+      "document": "query TemplateApps($search: String!, $offset: Int!, $archived: Boolean!) {\n    appFamilies(kind: \"unified_app\", search: $search, archived: $archived, limit: 20, offset: $offset) {\n      items { app_family_id app_id: latest_version_id name version: latest_version } total\n    }\n  }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/unified-template-api.ts",
+      "call": 2,
+      "variant": 1,
+      "document": "query TemplateAppIdentity($id: String!) {\n    app(app_id: $id) { app_family_id kind }\n  }"
+    },
+    {
+      "endpoint": "engine",
+      "file": "app/lib/unified-template-api.ts",
+      "call": 3,
+      "variant": 1,
+      "document": "query TemplateAppVersions($family: String!) {\n    appVersions(app_family_id: $family) { app_id version }\n  }"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/lib/unified-template-api.ts",
+      "call": 4,
+      "variant": 1,
+      "document": "query TemplateDependency($id: String!, $version: String!) {\n      service(id: $id, version: $version) { id canonical_ref is_public }\n      serviceVersions(serviceId: $id) { id name status is_public }\n      serviceOperations(serviceId: $id, version: $version) { name }\n    }"
     },
     {
       "endpoint": "engine",
