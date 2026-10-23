@@ -69,6 +69,7 @@ type sdkConfigDocument struct {
 	// Description is the authored MCP server summary returned in protocol identity metadata.
 	Description                string `json:"description,omitempty"`
 	FusedIntelligentClassifier bool   `json:"fused-intelligent-classifier,omitempty"`
+	FusedSkillPolish           bool   `json:"fused-skill-polish,omitempty"`
 	Language                   string `json:"language"`
 	Bucket                     string `json:"bucket,omitempty"`
 	// RuntimeBuckets explicitly opts this immutable Unified App into a finite bucket scope.
