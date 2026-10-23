@@ -798,18 +798,26 @@ func ValidateResolvedHeader(name, value string) error {
 // a selected connection resource.
 func ValidateLiteralBucketValue(location, name, value string) error {
 	location = strings.ToLower(strings.TrimSpace(location))
+	// Certificate entries are public PEM values in a distinct, non-transport namespace.
+	if location == "cert" {
+		return validateCertificateBucketValue(name, value)
+	}
+	// Host routing remains governed by the reviewed connection profile.
 	if location == "base_url" {
 		return errors.New("base_url must be configured through a connection profile")
 	}
 	// Literal bucket values may be bound to 'header', 'query', 'path', 'body', or
 	// 'env' (which aliases to bucket variables mapped purely for variable injections
 	// like ${bucket.env.X} without needing to map to an HTTP transport boundary).
+	// Unknown locations cannot become unreviewed request injection targets.
 	if !contains([]string{"header", "query", "path", "body", "env"}, location) {
 		return errors.New("bucket value location is invalid")
 	}
+	// Names must remain single-line identifiers regardless of their destination.
 	if strings.TrimSpace(name) == "" || strings.ContainsAny(name, "\r\n") {
 		return errors.New("bucket value name is invalid")
 	}
+	// Header values need the stronger protected-header and newline checks.
 	if location == "header" {
 		return ValidateResolvedHeader(name, value)
 	}

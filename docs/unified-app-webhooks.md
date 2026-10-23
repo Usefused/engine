@@ -23,8 +23,8 @@ Use the exact operation and event names from your service contract. An app may s
 
 ```sh
 fused-cli webhook apply -f .fused/webhooks/team-events.yaml
-fused-cli unified-app plan -f .fused/unified_app/issue-handler.yaml
-fused-cli unified-app apply -f .fused/unified_app/issue-handler.yaml
+fused-cli app plan -f .fused/unified_app/issue-handler.yaml
+fused-cli app apply -f .fused/unified_app/issue-handler.yaml
 ```
 
 The hosted consumer starts automatically after apply, normally within five seconds. No SDK receiver process or additional public endpoint is needed. Direct registrations retain existing signature verification; managed webhook relays enter the same event stream.

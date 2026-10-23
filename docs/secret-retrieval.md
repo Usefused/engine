@@ -52,9 +52,9 @@ Policy updates record their resulting exportable boolean in the same audit.
 ## CLI
 
 ```sh
-# Stdin keeps the supplied secret out of process arguments and shell history.
-fused-cli bucket secret set default MY_KEY --value-stdin --exportable
-fused-cli bucket credential set <service> --bucket default --type api_key --value-stdin --exportable
+# Interactive setup collects values when none are supplied.
+fused-cli bucket secret set MY_KEY --bucket default --exportable
+fused-cli connect <service> --bucket default --type api_key
 
 # Obtain the opaque secret ID from metadata, then change its policy or reveal it.
 fused-cli bucket secret list default --json
@@ -63,6 +63,10 @@ fused-cli bucket secret reveal default <secret-id>
 fused-cli bucket secret reveal default <secret-id> --json
 fused-cli bucket secret exportable default <secret-id> --enabled=false
 ```
+
+`connect` writes API keys with retrieval disabled. Use `bucket secret exportable`
+to opt in after setup or replacement. Generic secret writes accept `--exportable`,
+and named retrieval uses `bucket secret get MY_KEY --bucket default`.
 
 `reveal` explicitly prints plaintext. Ordinary output preserves exact bytes with
 no appended newline; `--json` returns a `value` field. Listing and writes never

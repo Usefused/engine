@@ -255,9 +255,11 @@ therefore produces an actionable caller-facing message. Messages are bounded to
 64 KiB; stack traces and raw provider requests/responses remain in permission-gated
 private diagnostics. Do not put secrets in intentionally thrown messages.
 
-Missing provider credentials return an interactive setup command using the service
-slug and bucket name, for example
-`fused-cli secret set 'stripe' --bucket 'production' --type 'basic' --auth-name 'basicAuth' --interactive`.
+Configure missing provider credentials with the service and bucket identified in
+the error, for example
+`fused-cli connect 'stripe' --bucket 'production' --type 'basic' --auth-name 'basicAuth'`.
+The picker marks configured methods as editable and collects replacement values
+without displaying existing secrets.
 Immutable IDs remain available in structured credential errors and are used as a
 fallback when readable metadata is unavailable or ambiguous. Replay preserves the
 same credential failure seen by the live app.

@@ -351,15 +351,19 @@ func (s *postgresStore) UpsertBucketValue(ctx context.Context, val BucketValue) 
 	return err
 }
 
+// GetBucketValues resolves service overrides before bucket-global environment values in one bounded query.
 func (s *postgresStore) GetBucketValues(ctx context.Context, bucketID, serviceID uuid.UUID, keyNames []string) ([]BucketValue, error) {
 	keyNames = uniqueSecretKeyNames(keyNames)
+	// An empty reference set must not broaden into a bucket scan.
 	if len(keyNames) == 0 {
 		return nil, nil
 	}
 	query := `
-		SELECT id, bucket_id, service_id, key_name, location, value, created_at, updated_at
+		SELECT DISTINCT ON (key_name) id, bucket_id, service_id, key_name, location, value, created_at, updated_at
 		FROM fused_bucket_values
-		WHERE bucket_id = $1 AND service_id = $2 AND key_name = ANY($3)
+		WHERE bucket_id = $1 AND key_name = ANY($3)
+		  AND (service_id = $2 OR (service_id = '00000000-0000-0000-0000-000000000000'::uuid AND location = 'env'))
+		ORDER BY key_name, (service_id = $2) DESC
 	`
 	return s.collectBucketValues(ctx, query, bucketID, serviceID, keyNames)
 }
