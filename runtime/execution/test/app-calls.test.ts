@@ -36,6 +36,8 @@ async execute({input}) {
     const context = vm.createContext({ __fusedHost: {
       // Inspect the complete host payload so provider selectors or credentials cannot leak into delegation.
       async fetch(raw: string) {
+        // Admission restores empty progress before any child invocation.
+        if (JSON.parse(raw).snapshot === "load") return "null";
         requests.push(JSON.parse(raw));
         return JSON.stringify({ status, executionId: "child-run", output: { value: "child output" } });
       },

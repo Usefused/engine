@@ -10,10 +10,11 @@ export default buildUnifiedApp({
   input: z.object({}),
   output: z.object({ sum: z.number() }),
   recovery: { mode: "automatic", maxAttempts: 3, backoffSeconds: 5 },
-  // Progress is explicit so another interpreter can continue after this attempt ends.
-  async execute() {
-    // A fresh run starts at the beginning; subsequent attempts load committed progress.
-    const saved = (await snapshot.load<{ next: number; sum: number }>()) ?? { next: 1, sum: 0 };
+  // Engine restores saved progress before entering this function on every attempt.
+  async execute({ input, snapshot: restored }) {
+    // Validate the app's JSON state shape; a fresh run begins with null progress.
+    const saved = z.nullable(z.object({ next: z.number(), sum: z.number() })).parse(restored)
+      ?? { next: 1, sum: 0 };
     let sum = saved.sum;
     // Saving after each bounded unit lets a replacement skip the completed prefix.
     for (let next = saved.next; next <= 5; next++) {
@@ -25,9 +26,13 @@ export default buildUnifiedApp({
 });
 ```
 
-`fused.snapshot` exposes the same helpers. `snapshot.save()` resolves only after the Engine commits encrypted progress. It is separate from `fused.db.set()`, whose execution document remains buffered until the terminal result commits. Snapshot data is bounded to 512 KiB and shares the existing host-call and replay-evidence limits.
+The execution wrapper automatically loads progress before calling `execute({ input, snapshot })`, for initial executions and both manual and automatic recovery. Authors only need to save checkpoints and use the supplied state to continue. The context's `snapshot` is JSON data; validate its shape with Zod as above. Aliasing it as `restored` avoids shadowing the imported `snapshot.save()` helper. The original `input` remains unchanged.
 
-The function starts again on each attempt. Loading a snapshot does not restore the JavaScript stack, promises, timers, or local variables. If no snapshot exists, the function starts with its original input and `snapshot.load()` returns `null`. A failed or uncertain save cancels the attempt even if authored code catches its error.
+`fused.snapshot.save()` exposes the same save helper. `snapshot.save()` resolves only after the Engine commits encrypted progress. It is separate from `fused.db.set()`, whose execution document remains buffered until the terminal result commits. Snapshot data is bounded to 512 KiB and shares the existing host-call and replay-evidence limits. Automatic restoration uses that recorded host channel too, so diagnostic replay reads the recorded state without accessing live snapshots.
+
+The function starts again on each attempt. Restoring a snapshot does not restore the JavaScript stack, promises, timers, or local variables. If no snapshot exists, `execute` receives `snapshot: null`. A new logical run also starts with null progress. A failed automatic load prevents entry into authored execution; it never falls back to empty progress. A failed or uncertain save cancels the attempt even if authored code catches its error.
+
+Publish a new immutable app version to adopt automatic context restoration; already published bundles keep their compiled behavior. The explicit `snapshot.load()` helper remains available for existing source, but is no longer needed in the authored execution function.
 
 ## Recovery policy
 

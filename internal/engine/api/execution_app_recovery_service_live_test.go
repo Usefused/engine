@@ -113,7 +113,7 @@ func scheduledRecoveryLiveServiceRun(t *testing.T, fixture mcpOperationPostgresF
 	return projectCapabilityExecution(result, "")
 }
 
-// recoveryLiveServiceSource saves the first real provider response so recovery needs only the second operation.
+// recoveryLiveServiceSource uses automatically restored progress so recovery executes only remaining provider work.
 func recoveryLiveServiceSource(mode string) string {
 	return fmt.Sprintf(`import * as z from "zod/mini";
 import {buildUnifiedApp,snapshot} from "@fused/unified-app";
@@ -121,8 +121,8 @@ import {fused} from "@fused/operations";
 const todo=z.object({id:z.number(),title:z.string()});
 export default buildUnifiedApp({input:z.object({}),output:z.object({first:todo,second:todo}),
 recovery:{mode:%q,maxAttempts:3,backoffSeconds:1},
-// The saved provider response supplies completed work to a fresh interpreter.
-async execute(){const saved=await snapshot.load<{first:{id:number,title:string}}>();
+// Engine supplies the saved provider response to each replacement interpreter automatically.
+async execute({snapshot:restored}){const saved=z.nullable(z.object({first:todo})).parse(restored);
 // A fresh attempt fails only after the first HTTPS response has been committed.
 if(saved===null){const first=todo.parse(await fused.todos.first({}));await snapshot.save({first});throw new Error("deliberate failure after service response snapshot");}
 const second=todo.parse(await fused.todos.second({}));return {first:saved.first,second};}});`, mode)

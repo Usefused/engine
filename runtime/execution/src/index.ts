@@ -39,6 +39,8 @@ declare global {
 
 export interface ExecutionContext<Input> {
   input: Input;
+  /** Engine-restored progress for this run, or null when no snapshot has been saved. */
+  snapshot: JsonValue;
 }
 
 export interface RecoveryPolicy {
@@ -137,6 +139,12 @@ async function saveSnapshot(state: JsonValue): Promise<void> {
 }
 
 export const snapshot = Object.freeze({ load: loadSnapshot, save: saveSnapshot });
+
+// Restore progress before authored code can perform effects; failed reads must abort the attempt.
+export async function executeWithSnapshot<Input extends $ZodType, Output extends $ZodType>(app: UnifiedApp<Input, Output>, input: output<Input>): Promise<input<Output>> {
+  const snapshot = await loadSnapshot();
+  return app.execute({ input, snapshot });
+}
 
 // Ensure host-bound effects cannot run while build declarations are evaluated.
 function host(): ExecutionHost {
@@ -343,10 +351,10 @@ export function toPublicSchema(schema: $ZodType): Record<string, unknown> {
   return converted as Record<string, unknown>;
 }
 
-// Parse both boundaries so generated client, REST, and MCP see the same authored output.
+// Parse both boundaries and restore progress through the same entry point as hosted execution.
 export async function runUnifiedApp<Input extends $ZodType, Output extends $ZodType>(app: UnifiedApp<Input, Output>, rawInput: unknown): Promise<output<Output>> {
   const input = await parseAsync(app.input, rawInput);
-  const output = await app.execute({ input });
+  const output = await executeWithSnapshot(app, input);
   const parsed = await parseAsync(app.output, output);
   encodeJson(parsed, "Unified App output");
   return parsed;

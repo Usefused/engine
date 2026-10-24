@@ -116,8 +116,20 @@ test("execution validates input and output", async () => {
     // This deliberately violates the output contract to prove runtime validation.
     execute: async () => ({ value: "wrong" as unknown as number }),
   });
-  await assert.rejects(runUnifiedApp(app, { value: 3 }), /expected string/);
-  await assert.rejects(runUnifiedApp(app, { value: "valid" }), /expected number/);
+  globalThis.__fusedHost = {
+    // Restore empty progress so output validation still reaches the deliberately invalid return value.
+    async fetch() { return "null"; },
+    // This schema test must not access buffered data.
+    async dbGet() { throw new Error("unexpected data read"); },
+    // This schema test must not write buffered data.
+    async dbSet() { throw new Error("unexpected data write"); },
+  };
+  try {
+    await assert.rejects(runUnifiedApp(app, { value: 3 }), /expected string/);
+    await assert.rejects(runUnifiedApp(app, { value: "valid" }), /expected number/);
+  } finally {
+    globalThis.__fusedHost = undefined;
+  }
 });
 
 // Verify public schemas cannot silently omit an authored custom validation rule.
@@ -137,6 +149,8 @@ test("bundle exports a singular Engine contract", async () => {
   sandbox.__fusedHost = {
     // Return one workspace operation result via the JSON bridge.
     async fetch(requestJson: string) {
+      // Fresh runs restore empty progress before the selected provider call.
+      if (JSON.parse(requestJson).snapshot === "load") return "null";
       assert.deepEqual(JSON.parse(requestJson), { service: "crm", operation: "create", input: { name: "Jane" }, selector: { environment: "prod" } });
       return JSON.stringify({ id: "cus_123" });
     },
@@ -227,6 +241,8 @@ test("selected operation methods compile and omit local schema hints", async () 
   sandbox.__fusedHost = {
     // The typed method still carries only its selected author keys to Engine.
     async fetch(requestJson: string) {
+      // Fresh runs restore empty progress before the selected provider call.
+      if (JSON.parse(requestJson).snapshot === "load") return "null";
       assert.deepEqual(JSON.parse(requestJson), { service: "greeting", operation: "greet", input: { name: "Jane" } });
       return JSON.stringify({ greeting: "Hello Jane" });
     },

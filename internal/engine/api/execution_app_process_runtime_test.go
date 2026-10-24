@@ -16,15 +16,24 @@ type processCompilerHost struct {
 	calls int
 }
 
-// Fetch verifies the generated SDK-style binding reaches the reviewed service and operation.
+// Fetch restores fresh-run progress before verifying the reviewed SDK-style service binding.
 func (host *processCompilerHost) Fetch(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var request struct {
+		Snapshot  string
 		Service   string
 		Operation string
 		Input     struct{ Name string }
 	}
+	// Invalid bridge payloads cannot be mistaken for fresh snapshot reads.
+	if json.Unmarshal(raw, &request) != nil {
+		return nil, errors.New("invalid generated request")
+	}
+	// Each fixture invocation is a fresh logical run with no saved checkpoint.
+	if request.Snapshot == "load" {
+		return json.RawMessage("null"), nil
+	}
 	// The test fails if generated code loses its exact selected operation or input envelope.
-	if json.Unmarshal(raw, &request) != nil || request.Service != "greeting" || request.Operation != "greet" {
+	if request.Service != "greeting" || request.Operation != "greet" {
 		return nil, errors.New("unexpected generated binding")
 	}
 	host.calls++

@@ -99,7 +99,7 @@ export async function buildExecutionBundle(spec: BundleSpec): Promise<ExecutionB
   const bindingSource = generateExecutionBindingsSource(spec.selectedOperations);
   const source = `
 import authored from ${JSON.stringify(entryFile)};
-import { toPublicSchema } from ${JSON.stringify(runtimeFile)};
+import { toPublicSchema, executeWithSnapshot } from ${JSON.stringify(runtimeFile)};
 const app = authored;
 // A missing builder contract cannot become the one app-level execute operation.
 if (!app || !app.input || !app.output || !app.fetch || typeof app.execute !== "function") {
@@ -115,8 +115,8 @@ globalThis.FusedUnifiedApp = {
   output: app.output,
   fetch: { searchable },
   selectedOperations,
-  // The Engine runner parses both Zod boundaries around authored execution.
-  execute: ({ input }) => app.execute({ input })
+  // Restore Engine-owned progress on every attempt before entering authored code.
+  execute: ({ input }) => executeWithSnapshot(app, input)
 };
 globalThis.FusedExecutionManifest = { schemaVersion: 1, inputSchema, outputSchema, searchable, selectedOperations, recovery };
 `;

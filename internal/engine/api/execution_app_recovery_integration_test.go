@@ -69,14 +69,14 @@ func TestUnifiedAppSnapshotRecoveryProcess(t *testing.T) {
 	}
 }
 
-// recoveryTestSource fails after progress so the replacement must load rather than repeat the initial branch.
+// recoveryTestSource proves a replacement receives saved progress without an authored load call.
 func recoveryTestSource(mode string) string {
 	return fmt.Sprintf(`import * as z from "zod/mini";
 import {buildUnifiedApp,snapshot} from "@fused/unified-app";
 export default buildUnifiedApp({input:z.object({}),output:z.object({sum:z.number()}),
 recovery:{mode:%q,maxAttempts:3,backoffSeconds:1},
-// Explicit progress survives an authored failure and replacement of the executor process.
-async execute(){const state=await snapshot.load<{next:number,sum:number}>();
+// Engine supplies restored progress before a replacement enters authored execution.
+async execute({snapshot:restored}){const state=z.nullable(z.object({next:z.number(),sum:z.number()})).parse(restored);
 // A fresh run deliberately fails only after Engine acknowledges the durable save.
 if(state===null){await snapshot.save({next:2,sum:1});throw new Error("deliberate failure after snapshot");}
 let sum=state.sum;

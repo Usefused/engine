@@ -47,7 +47,12 @@ async execute({input}) {
     const requests: any[] = [];
     const sandbox: any = { __fusedHost: {
       // Collect only the bridge request; no provider credentials or network client exist in authored code.
-      async fetch(raw: string) { requests.push(JSON.parse(raw)); return JSON.stringify({ count: 3 }); },
+      async fetch(raw: string) {
+        // Fresh execution restores no progress before dispatching selected provider operations.
+        if (JSON.parse(raw).snapshot === "load") return "null";
+        requests.push(JSON.parse(raw));
+        return JSON.stringify({ count: 3 });
+      },
       // The facade must preserve the existing execution data helper as well.
       async dbSet(raw: string) { assert.equal(raw, '{"count":3}'); },
     } };
@@ -65,7 +70,11 @@ async execute({input}) {
     assert.equal(requests[2].selector.endUserRef, "bob");
     assert.deepEqual(JSON.parse(JSON.stringify(sandbox.FusedExecutionManifest.selectedOperations[0])), { service: selection.service, operation: selection.operation, serviceId: selection.serviceId, serviceVersionId: selection.serviceVersionId, endpointId: selection.endpointId });
     // Provider failures must propagate unchanged and stop subsequent authored calls.
-    sandbox.__fusedHost.fetch = async () => { throw new Error("provider failure"); };
+    sandbox.__fusedHost.fetch = async (raw: string) => {
+      // Restoration succeeds so the failure still exercises the provider path.
+      if (JSON.parse(raw).snapshot === "load") return "null";
+      throw new Error("provider failure");
+    };
     await assert.rejects(sandbox.FusedUnifiedApp.execute({ input: { email: "test@example.com" } }), /provider failure/);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

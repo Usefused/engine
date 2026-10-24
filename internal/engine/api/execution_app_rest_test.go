@@ -476,3 +476,8 @@ func (*capabilityRouteStore) GetExecutionRecovery(context.Context, uuid.UUID, uu
 func (*capabilityRouteStore) CheckExecutionAttempt(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
 	return nil
 }
+
+// ReadExecutionSnapshot restores empty progress for fresh routing fixtures; PostgreSQL tests own saved-state recovery.
+func (*capabilityRouteStore) ReadExecutionSnapshot(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []byte) (store.ExecutionSnapshot, error) {
+	return store.ExecutionSnapshot{State: json.RawMessage("null")}, nil
+}
