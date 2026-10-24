@@ -121,7 +121,8 @@ func (s *EngineGRPCServer) scheduledRunSpec(ctx context.Context, item store.Unif
 	if requestErr != nil || !found {
 		return capabilityRunSpec{}, store.ErrUnifiedAppBundleNotFound
 	}
-	return capabilityRunSpec{identity: auth.RuntimeIdentity{AccountID: item.AccountID, AppFamilyID: item.FamilyID, AppID: id, AppVersion: app.Version, Kind: store.AppKindUnifiedApp},
+	// Engine-owned triggers have no caller token to narrow scope; immutable app selections still fence every provider call.
+	return capabilityRunSpec{identity: auth.RuntimeIdentity{AccountID: item.AccountID, AppFamilyID: item.FamilyID, AppID: id, AppVersion: app.Version, Kind: store.AppKindUnifiedApp, TokenPolicy: store.AppTokenPolicy{AllowAll: true}},
 		version: app.Version, bundle: bundle, manifest: manifest, input: item.Input, mode: "live", transport: "schedule", schedule: &item}, nil
 }
 

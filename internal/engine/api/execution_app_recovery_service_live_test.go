@@ -18,6 +18,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 )
 
 // TestUnifiedAppRecoveryLiveService opts into real HTTPS calls without exposing credentials or mutating provider data.
@@ -26,14 +27,16 @@ func TestUnifiedAppRecoveryLiveService(t *testing.T) {
 	if os.Getenv("FUSED_RECOVERY_LIVE_SERVICE") != "1" {
 		t.Skip("FUSED_RECOVERY_LIVE_SERVICE=1 enables real JSONPlaceholder requests")
 	}
-	// Both recovery triggers must preserve provider results across a replacement interpreter.
+	// Engine-triggered first attempts must have the same selected-operation authority as recovery attempts.
 	for _, mode := range []string{"manual", "automatic"} {
-		t.Run(mode, func(t *testing.T) { runRecoveryLiveService(t, mode) })
+		t.Run(mode, func(t *testing.T) { runRecoveryLiveService(t, mode, "webhook") })
 	}
+	// Exercise the real scheduled admission path as well as webhook identity construction.
+	t.Run("scheduled", func(t *testing.T) { runRecoveryLiveService(t, "automatic", "schedule") })
 }
 
-// runRecoveryLiveService uses production persistence, exact operation resolution, dispatch and confinement end to end.
-func runRecoveryLiveService(t *testing.T, mode string) {
+// runRecoveryLiveService uses production trigger identities, persistence, dispatch and confinement end to end.
+func runRecoveryLiveService(t *testing.T, mode, trigger string) {
 	t.Helper()
 	fixture := openMCPAppOperationPostgresFixture(t)
 	t.Setenv("FUSED_EXECUTION_COMPILER", "../../../runtime/execution/dist/src/cli.js")
@@ -46,19 +49,10 @@ func runRecoveryLiveService(t *testing.T, mode string) {
 	seedRecoveryApp(t, fixture, artifact)
 	seedRecoveryLiveService(t, fixture)
 	server := newRecoveryLiveServiceServer(t, fixture)
-	bundle, manifest, _, requestErr := server.findUnifiedAppBundle(fixture.ctx, fixture.appID)
-	// A missing compiled bundle cannot provide evidence of a real provider invocation.
-	if requestErr != nil {
-		t.Fatal(requestErr)
-	}
-	identity := auth.RuntimeIdentity{AccountID: fixture.accountID, AppFamilyID: fixture.familyID, AppID: fixture.appID, AppVersion: "1.0.0", Kind: store.AppKindUnifiedApp, TokenPolicy: store.AppTokenPolicy{AllowAll: true}}
-	first, requestErr := server.executeCapabilityRun(fixture.ctx, capabilityRunSpec{
-		identity: identity, version: "1.0.0", bundle: bundle, manifest: manifest,
-		input: json.RawMessage(`{}`), mode: "live", transport: "webhook", webhookEventID: uuid.NewString(),
-	})
+	first := initialRecoveryLiveServiceRun(t, fixture, server, trigger)
 	// The first result must fail after its successful remote response was durably saved.
-	if requestErr != nil || first.Status != "failed" {
-		t.Fatalf("first attempt=%+v error=%v", first, requestErr)
+	if first.Status != "failed" {
+		t.Fatalf("first attempt=%+v", first)
 	}
 	assertRecoveryLiveServiceCall(t, fixture, first.ExecutionID, "first", 1)
 	state, err := fixture.repository.(store.ExecutionRecoveryStore).GetExecutionRecovery(fixture.ctx, fixture.accountID, fixture.appID, first.ExecutionID)
@@ -70,6 +64,53 @@ func runRecoveryLiveService(t *testing.T, mode string) {
 	server.capabilityWorkerManager().Close()
 	replacement := newRecoveryLiveServiceServer(t, fixture)
 	resumeRecoveryLiveService(t, fixture, replacement, first, mode)
+}
+
+// initialRecoveryLiveServiceRun prevents fixtures from manufacturing a token policy that production triggers omit.
+func initialRecoveryLiveServiceRun(t *testing.T, fixture mcpOperationPostgresFixture, server *EngineGRPCServer, trigger string) capabilityExecutionEnvelope {
+	t.Helper()
+	// Scheduling must reserve its occurrence through the actual worker entry point.
+	if trigger == "schedule" {
+		return scheduledRecoveryLiveServiceRun(t, fixture, server)
+	}
+	message := &nats.Msg{Data: []byte(`{}`), Header: nats.Header{}}
+	message.Header.Set("X-Webhook-Msg-ID", uuid.NewString())
+	spec, err := server.unifiedWebhookRunSpec(fixture.ctx, store.UnifiedAppWebhookTarget{AccountID: fixture.accountID, FamilyID: fixture.familyID, AppID: fixture.appID, Version: "1.0.0"}, message)
+	recoveryAPIMust(t, err)
+	first, requestErr := server.executeCapabilityRun(fixture.ctx, spec)
+	// Failed admission must not be confused with the deliberately authored provider-after-snapshot failure.
+	if requestErr != nil {
+		t.Fatal(requestErr)
+	}
+	return first
+}
+
+// scheduledRecoveryLiveServiceRun executes one fixture-owned occurrence using the production schedule worker.
+func scheduledRecoveryLiveServiceRun(t *testing.T, fixture mcpOperationPostgresFixture, server *EngineGRPCServer) capabilityExecutionEnvelope {
+	t.Helper()
+	runAt := time.Now().Add(time.Minute)
+	item := store.UnifiedAppSchedule{ID: uuid.New(), AccountID: fixture.accountID, FamilyID: fixture.familyID, Name: "Live service recovery", Input: json.RawMessage(`{}`), RunAt: &runAt, Timezone: "UTC", Enabled: true, CreatedBy: uuid.New()}
+	repository := fixture.repository.(store.UnifiedAppScheduleStore)
+	// Exact cleanup keeps the disposable database reusable without altering any other schedules.
+	t.Cleanup(func() {
+		_, err := fixture.pool.Exec(context.Background(), `DELETE FROM fused_unified_app_schedules WHERE id=$1`, item.ID)
+		recoveryAPIMust(t, err)
+	})
+	recoveryAPIMust(t, repository.SaveUnifiedAppSchedule(fixture.ctx, item, server.masterKey))
+	_, err := fixture.pool.Exec(fixture.ctx, `UPDATE fused_unified_app_schedules SET next_run_at=NOW()-INTERVAL '1 second' WHERE id=$1`, item.ID)
+	recoveryAPIMust(t, err)
+	items, err := repository.ListUnifiedAppSchedules(fixture.ctx, fixture.accountID, fixture.familyID, server.masterKey)
+	recoveryAPIMust(t, err)
+	server.runScheduledApp(fixture.ctx, repository, items[0])
+	items, err = repository.ListUnifiedAppSchedules(fixture.ctx, fixture.accountID, fixture.familyID, server.masterKey)
+	recoveryAPIMust(t, err)
+	// An admission failure leaves no execution to inspect and must fail this regression immediately.
+	if items[0].LastExecutionID == nil {
+		t.Fatal("schedule did not reserve its first attempt")
+	}
+	result, err := fixture.repository.(store.ExecutionResultStore).GetExecutionResult(fixture.ctx, fixture.accountID, fixture.appID, *items[0].LastExecutionID)
+	recoveryAPIMust(t, err)
+	return projectCapabilityExecution(result, "")
 }
 
 // recoveryLiveServiceSource saves the first real provider response so recovery needs only the second operation.

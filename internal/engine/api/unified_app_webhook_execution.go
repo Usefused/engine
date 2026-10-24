@@ -137,9 +137,10 @@ func (s *EngineGRPCServer) unifiedWebhookRunSpec(ctx context.Context, target sto
 	if !found {
 		return capabilityRunSpec{}, store.ErrUnifiedAppBundleNotFound
 	}
+	// Verified Engine delivery uses the app's selected operations without an absent caller token denying every call.
 	return capabilityRunSpec{
 		identity: auth.RuntimeIdentity{AccountID: target.AccountID, AppFamilyID: target.FamilyID, AppID: target.AppID,
-			AppVersion: target.Version, Kind: store.AppKindUnifiedApp},
+			AppVersion: target.Version, Kind: store.AppKindUnifiedApp, TokenPolicy: store.AppTokenPolicy{AllowAll: true}},
 		version: target.Version, bundle: bundle, manifest: manifest, input: message.Data,
 		mode: "live", transport: "webhook", webhookEventID: eventID,
 	}, nil
