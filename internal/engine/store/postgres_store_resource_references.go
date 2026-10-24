@@ -10,12 +10,19 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// ResolveResourceReference admits valid UUIDs or permission-scoped human references without trusting partial parses.
 func (s *postgresStore) ResolveResourceReference(ctx context.Context, query ResourceReferenceQuery) (uuid.UUID, error) {
+	// Unsupported reference kinds cannot select a repository or relax its visibility constraints.
 	if err := validateResourceReferenceQuery(query); err != nil {
 		return uuid.Nil, err
 	}
 	value := strings.TrimSpace(query.Value)
-	exactID, _ := uuid.Parse(value)
+	var exactID uuid.UUID
+	// Parse can return nonzero bytes on error, especially for 32-character names; only success establishes UUID identity.
+	if parsed, err := uuid.Parse(value); err == nil {
+		exactID = parsed
+	}
+	// Family and exact-version selectors retain their distinct identity and permission boundaries.
 	switch query.Kind {
 	case ReferenceApp:
 		return s.resolveAppVersionReference(ctx, exactID, value, query.AppVersion, query.AppKind.String(), query.AllowedAll, query.AllowedIDs)
