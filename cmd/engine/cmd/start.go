@@ -1117,8 +1117,11 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	sandbox.SetMCPCapabilityAdapter(executionServer)
 	// Discovery reuses the licensed Registry client without introducing provider credentials in Engine.
 	sandbox.SetMCPOperationClassifier(deps.registryClient)
-	// MCP skill prose is polished by the Registry LLM through the same licensed client; failures fall back to the template.
-	mcpskill.SetPolisher(deps.registryClient)
+	// MCP skill prose uses the Registry LLM only when the operator opts in; otherwise every skill uses the template.
+	if deps.cfg.Engine.MCPSkillPolish {
+		mcpskill.SetPolisher(deps.registryClient)
+		slog.Info("MCP skill prose polishing enabled", "source", "engine.mcp_skill_polish")
+	}
 	sandbox.InitSandbox(
 		r, deps.natsClient, deps.cfg, deps.localObjectCache, deps.tokenValidator, deps.engineStore, deps.engineStore, deps.configStore, secretResolver,
 		deps.providerRateLimits, port, executionServer.StartConnectSession,

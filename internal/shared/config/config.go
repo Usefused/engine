@@ -74,6 +74,10 @@ type EngineConfig struct {
 	// apps Fused has pre-registered with which providers) to Fused's own
 	// operators; it is unrelated to any customer or installation credential.
 	ManagedAuthBrokerAdminKey string `yaml:"-"`
+	// MCPSkillPolish lets this Engine send MCP server metadata (name, description, service names and
+	// operation IDs) to the Fused Registry LLM at plan time to write skill prose. Off by default:
+	// it is the operator's consent for every MCP server this Engine plans.
+	MCPSkillPolish bool `yaml:"mcp_skill_polish"`
 }
 
 const (
@@ -297,6 +301,14 @@ func applyEnvironment(cfg *Config) error {
 	// deployment setting that belongs in a checked-in or mounted YAML file.
 	if adminKey := os.Getenv("FUSED_MANAGED_AUTH_BROKER_ADMIN_KEY"); adminKey != "" {
 		cfg.Engine.ManagedAuthBrokerAdminKey = adminKey
+	}
+	if rawPolish := os.Getenv("FUSED_ENGINE_MCP_SKILL_POLISH"); rawPolish != "" {
+		polish, err := strconv.ParseBool(rawPolish)
+		// Why: this is consent to send metadata off the Engine, so a typo must stop startup rather than guess.
+		if err != nil {
+			return fmt.Errorf("parse FUSED_ENGINE_MCP_SKILL_POLISH: %w", err)
+		}
+		cfg.Engine.MCPSkillPolish = polish
 	}
 	if rawWorkers := os.Getenv("FUSED_ENGINE_CONNECTED_AUTH_REFRESH_WORKERS"); rawWorkers != "" {
 		workers, err := strconv.Atoi(rawWorkers)

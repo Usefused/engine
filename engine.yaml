@@ -41,6 +41,12 @@ engine:
   # Bounded OAuth refresh concurrency. Override with
   # FUSED_ENGINE_CONNECTED_AUTH_REFRESH_WORKERS; accepted range is 1..64.
   connected_auth_refresh_workers: 4
+  # Let the Fused Registry LLM write the prose of each MCP server's skill
+  # resource (fused://skills/server). Off by default. When on, MCP planning
+  # sends the server name, description, service names and operation IDs to
+  # the Registry; never credentials, schemas or tokens. Override with
+  # FUSED_ENGINE_MCP_SKILL_POLISH=true|false.
+  # mcp_skill_polish: false
   # Shared bundled-schema-dictionary ceiling (default 8192). Override with
   # FUSED_SCHEMA_MAX_DEFINITIONS (1..500000); must match Registry's value.
 

@@ -10,10 +10,10 @@ import (
 	"github.com/Usefused/engine/internal/shared/models"
 )
 
-// planMCPSkill computes the served skill's exact scope and, only when the config opts in with
-// fused-skill-polish, asks the Registry LLM to polish its prose. It never fails planning: a catalogue
-// or model problem leaves a template-only skill, because the MCP server is fully usable without one.
-func planMCPSkill(ctx context.Context, s store.Store, name, description string, selections []models.SDKSelection, resolved []sdkResolvedService, polish bool) *mcpskill.Snapshot {
+// planMCPSkill computes the served skill's exact scope and asks the Registry LLM to polish its prose.
+// It never fails planning: a catalogue or model problem leaves a template-only skill, because the
+// MCP server itself is fully usable without one.
+func planMCPSkill(ctx context.Context, s store.Store, name, description string, selections []models.SDKSelection, resolved []sdkResolvedService) *mcpskill.Snapshot {
 	catalogue, err := loadMCPAppOperationCatalogue(ctx, s, store.AppCatalogItem{Name: name, Selections: selections})
 	// The pinned inventory must be complete; on failure the served skill points agents at search_docs instead.
 	if err != nil {
@@ -21,10 +21,7 @@ func planMCPSkill(ctx context.Context, s store.Store, name, description string, 
 		return nil
 	}
 	snapshot := mcpskill.BuildSnapshot(mcpSkillOperations(catalogue.Operations), mcpSkillServices(resolved))
-	// Server metadata leaves the Engine only with explicit, version-pinned consent.
-	if polish {
-		snapshot.Prose = mcpskill.Polish(ctx, mcpskill.NewPolishRequest(name, description, snapshot))
-	}
+	snapshot.Prose = mcpskill.Polish(ctx, mcpskill.NewPolishRequest(name, description, snapshot))
 	return snapshot
 }
 

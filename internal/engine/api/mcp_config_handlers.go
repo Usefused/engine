@@ -10,6 +10,7 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/entitlement"
+	"github.com/Usefused/engine/internal/engine/mcpskill"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/canonical"
@@ -210,10 +211,6 @@ func validateMCPServerDescription(doc sdkConfigDocument, kind string) error {
 	if doc.FusedIntelligentClassifier && kind != "mcp" {
 		return errors.New("fused-intelligent-classifier is only supported on an mcp config")
 	}
-	// Skill prose is generated only for standalone MCP versions, so other kinds must not record ineffective consent.
-	if doc.FusedSkillPolish && kind != "mcp" {
-		return errors.New("fused-skill-polish is only supported on an mcp config")
-	}
 	// SDK documents share this decoder but must not be subjected to MCP-only metadata requirements.
 	if kind != store.AppKindMCP.String() {
 		return nil
@@ -299,7 +296,7 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		return sdkPlanResult{}, err
 	}
 	// The served skill is pinned now so apply publishes exactly the scope and prose that was planned.
-	payload.MCPSkill = planMCPSkill(ctx, s, call.document.Name, payload.Description, selections, resolved, call.document.FusedSkillPolish)
+	payload.MCPSkill = planMCPSkill(ctx, s, call.document.Name, payload.Description, selections, resolved)
 	resolvedPayload, _ := json.Marshal(payload)
 	requiredPermissions, requiredCount, err := configPlanRequiredPermissionsWithBuckets(
 		ctx, s, current, serviceNamesFromResolved(resolved), buckets.distinct(), call.document.Name, "mcp",
@@ -331,8 +328,13 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		return sdkPlanResult{}, configPlanSaveHTTPError(err)
 	}
 	trace.SpanFromContext(ctx).SetAttributes(attribute.Int("required_permissions_count", requiredCount))
+	summary := mcpSearchPlanSummary(current == nil, services, call.document.FusedIntelligentClassifier)
+	// Reviewers see when this Engine sends server metadata to the Registry LLM for skill prose.
+	if mcpskill.PolishEnabled() {
+		summary["mcp_skill_prose"] = mcpskill.PolishDisclosure
+	}
 	return sdkPlanResult{
-		plan: plan, summary: mcpSearchPlanSummary(current == nil, services, call.document.FusedIntelligentClassifier),
+		plan: plan, summary: summary,
 		notifications: withAppCredentialReadinessWarning(collectSDKPlanNotifications(ctx, configStore, registryClient, call, resolved), readiness),
 		readiness:     readiness,
 	}, nil

@@ -15,6 +15,8 @@ const (
 	polishOperationLimit = 200
 	// polishDescriptionLimit bounds the authored description sent as evidence.
 	polishDescriptionLimit = 2000
+	// PolishDisclosure is shown in MCP plan summaries when the Engine operator enabled skill prose polishing.
+	PolishDisclosure = "Skill prose is written by the Fused Registry LLM (engine.mcp_skill_polish). The server name, description, service names and operation IDs are sent; no credentials, schemas or tokens. If the model is unavailable, the template is used."
 )
 
 // PolishService is one service and its operation IDs, sent to the Registry as evidence only.
@@ -46,6 +48,13 @@ func SetPolisher(client Polisher) {
 	polisherMu.Lock()
 	defer polisherMu.Unlock()
 	polisher = client
+}
+
+// PolishEnabled reports whether this Engine's operator opted into Registry LLM skill prose.
+func PolishEnabled() bool {
+	polisherMu.RLock()
+	defer polisherMu.RUnlock()
+	return polisher != nil
 }
 
 // NewPolishRequest builds bounded evidence from a snapshot without mutating it.
