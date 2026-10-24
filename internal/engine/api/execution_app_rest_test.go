@@ -18,6 +18,8 @@ import (
 )
 
 type capabilityRouteStore struct {
+	// These fixtures exercise execution routing; production PostgreSQL tests own recovery persistence.
+	store.ExecutionRecoveryStore
 	store.Store
 	mu           sync.Mutex
 	bundle       store.UnifiedAppBundle
@@ -463,4 +465,14 @@ func waitCapabilityTerminal(t *testing.T, fixture *capabilityRouteStore, executi
 		case <-time.After(time.Millisecond):
 		}
 	}
+}
+
+// GetExecutionRecovery leaves legacy route-fixture results ungrouped; real attempt history is tested with PostgreSQL.
+func (*capabilityRouteStore) GetExecutionRecovery(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*store.ExecutionRecovery, error) {
+	return nil, nil
+}
+
+// CheckExecutionAttempt admits fixture-owned calls so compiled nested-app tests retain their original routing focus.
+func (*capabilityRouteStore) CheckExecutionAttempt(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
+	return nil
 }

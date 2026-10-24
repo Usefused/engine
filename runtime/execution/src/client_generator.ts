@@ -7,7 +7,17 @@ export type ExecutionMode = "live" | "replay" | "rerun";
 export type SearchScalar = string | number | boolean | null;
 export type SearchField = /* SEARCH_FIELDS */;
 export type SearchWhere = Partial<Record<SearchField, SearchScalar>>;
+export interface ExecutionAttempt {
+  executionId: string;
+  runId: string;
+  attempt: number;
+  current: boolean;
+  status: ExecutionStatus;
+  snapshotRevision: number;
+}
 export interface ExecutionResult {
+  runId?: string;
+  attempt?: number;
   executionId: string;
   appFamilyId: string;
   version: string;
@@ -106,6 +116,11 @@ export class FusedExecutionClient {
     return this.transport.request("GET", this.transport.appPath() + "/executions/" + encodeURIComponent(executionId), undefined, { "X-Execution-Read-Handle": readHandle });
   }
 
+  // Discover the current attempt using the original run's caller-held read capability.
+  attempts(executionId: string, readHandle: string): Promise<{ attempts: ExecutionAttempt[] }> {
+    return this.transport.request("GET", this.transport.appPath() + "/executions/" + encodeURIComponent(executionId) + "/attempts", undefined, { "X-Execution-Read-Handle": readHandle });
+  }
+
   // Search only metadata fields and data paths declared by this app version.
   search(where: SearchWhere, limit = 20): Promise<{ items: ExecutionResult[] }> {
     // Engine accepts bounded first-page searches and enforces the immutable allowlist.
@@ -119,7 +134,7 @@ export class FusedExecutionClient {
     return this.transport.request("POST", this.transport.appPath() + "/executions/" + encodeURIComponent(executionId) + "/replay", undefined, { "X-Execution-Read-Handle": readHandle });
   }
 
-  // Require an explicit key because rerun can repeat provider mutations.
+  // Resume saved progress under one explicit request key; external effects may still repeat after the last snapshot.
   rerun(executionId: string, readHandle: string, idempotencyKey: string): Promise<ExecutionResult> {
     // An empty key cannot provide stable duplicate-submission identity.
     if (!idempotencyKey) throw new Error("Rerun requires an idempotency key");

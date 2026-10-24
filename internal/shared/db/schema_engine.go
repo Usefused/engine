@@ -1696,6 +1696,27 @@ func engineSchemaQueries() []string {
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_unified_app_results_rerun
 			ON fused_unified_app_results(account_id, app_id, app_token_id, source_execution_id, idempotency_key_hash)
 			WHERE mode = 'rerun';`,
+		// Recovery metadata belongs to retained attempts; only one attempt may own each logical run.
+		`CREATE TABLE IF NOT EXISTS fused_unified_app_recovery (
+			execution_id uuid PRIMARY KEY REFERENCES fused_unified_app_results(id) ON DELETE CASCADE,
+			run_id uuid NOT NULL, account_id uuid NOT NULL, app_id uuid NOT NULL,
+			attempt integer NOT NULL CHECK (attempt BETWEEN 1 AND 10),
+			current boolean NOT NULL DEFAULT true, ready boolean NOT NULL DEFAULT false,
+			mode text NOT NULL CHECK (mode IN ('manual','automatic')),
+			max_attempts integer NOT NULL CHECK (max_attempts BETWEEN 1 AND 10),
+			backoff_seconds integer NOT NULL CHECK (backoff_seconds BETWEEN 1 AND 300),
+			lease_until timestamptz NOT NULL DEFAULT (clock_timestamp()+INTERVAL '2 minutes'),
+			revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0),
+			encrypted_dek text, encrypted_snapshot text,
+			request_key text, request_source uuid, request_token uuid,
+			UNIQUE(run_id,attempt),
+			CHECK ((encrypted_dek IS NULL) = (encrypted_snapshot IS NULL))
+		);`,
+		`ALTER TABLE fused_unified_app_recovery ADD COLUMN IF NOT EXISTS ready boolean NOT NULL DEFAULT false;`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_unified_app_current_attempt ON fused_unified_app_recovery(run_id) WHERE current;`,
+		// Explicit manual requests must remain discoverable without scanning inactive attempt history.
+		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_recovery_ready ON fused_unified_app_recovery(lease_until) WHERE current AND ready;`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_recovery_due ON fused_unified_app_recovery(lease_until) WHERE current AND mode='automatic';`,
 		// Replay evidence is encrypted independently of queryable result data and expires with its terminal execution.
 		`CREATE TABLE IF NOT EXISTS fused_unified_app_replay_evidence (
 			execution_id uuid PRIMARY KEY REFERENCES fused_unified_app_results(id) ON DELETE CASCADE,

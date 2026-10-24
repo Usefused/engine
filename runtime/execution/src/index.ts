@@ -41,7 +41,14 @@ export interface ExecutionContext<Input> {
   input: Input;
 }
 
+export interface RecoveryPolicy {
+  mode: "manual" | "automatic";
+  maxAttempts: number;
+  backoffSeconds: number;
+}
+
 export interface UnifiedApp<Input extends $ZodType, Output extends $ZodType> {
+  readonly recovery: Readonly<RecoveryPolicy>;
   readonly input: Input;
   readonly output: Output;
   readonly fetch: Readonly<{ searchable: readonly string[] }>;
@@ -49,6 +56,7 @@ export interface UnifiedApp<Input extends $ZodType, Output extends $ZodType> {
 }
 
 export interface UnifiedAppConfig<Input extends $ZodType, Output extends $ZodType> {
+  recovery?: Partial<RecoveryPolicy>;
   input: Input;
   output: Output;
   fetch?: { searchable?: readonly string[] };
@@ -102,8 +110,33 @@ export function buildUnifiedApp<Input extends $ZodType, Output extends $ZodType>
   }
   // An omitted fetch policy exposes only Engine-owned metadata search fields.
   const searchable = validateSearchablePaths(config.fetch?.searchable ?? []);
-  return Object.freeze({ input: config.input, output: config.output, fetch: Object.freeze({ searchable }), execute: config.execute });
+  const recovery = validateRecoveryPolicy(config.recovery);
+  return Object.freeze({ input: config.input, output: config.output, fetch: Object.freeze({ searchable }), recovery, execute: config.execute });
 }
+
+// Validate immutable retry policy before an app can be published with automatic effects.
+export function validateRecoveryPolicy(policy?: Partial<RecoveryPolicy>): Readonly<RecoveryPolicy> {
+  const value = { mode: "manual", maxAttempts: 3, backoffSeconds: 5, ...policy } as RecoveryPolicy;
+  // Unknown modes cannot accidentally opt a user into unattended execution.
+  if (value.mode !== "manual" && value.mode !== "automatic") throw new Error("recovery.mode must be manual or automatic");
+  // A finite total attempt budget includes the initial execution and manual retries.
+  if (!Number.isInteger(value.maxAttempts) || value.maxAttempts < 1 || value.maxAttempts > 10) throw new Error("recovery.maxAttempts must be between 1 and 10");
+  // Even immediate failures must wait before another automatic attempt.
+  if (!Number.isInteger(value.backoffSeconds) || value.backoffSeconds < 1 || value.backoffSeconds > 300) throw new Error("recovery.backoffSeconds must be between 1 and 300");
+  return Object.freeze(value);
+}
+
+// Load only explicitly saved JSON progress; a fresh run returns null.
+async function loadSnapshot<T extends JsonValue = JsonValue>(): Promise<T | null> {
+  return JSON.parse(await host().fetch(JSON.stringify({ snapshot: "load" }))) as T | null;
+}
+
+// Resolve only after Engine acknowledges the durable snapshot, independently of buffered execution data.
+async function saveSnapshot(state: JsonValue): Promise<void> {
+  await host().fetch(encodeJson({ snapshot: "save", state }, "snapshot", MAX_JSON_BYTES));
+}
+
+export const snapshot = Object.freeze({ load: loadSnapshot, save: saveSnapshot });
 
 // Ensure host-bound effects cannot run while build declarations are evaluated.
 function host(): ExecutionHost {
@@ -268,6 +301,7 @@ async function dbSet(value: JsonValue): Promise<void> {
 }
 
 export const fused = Object.freeze({
+  snapshot,
   fetch: fetchOperation,
   callApp,
   forUserRef,

@@ -13,6 +13,9 @@ func registerNativeRESTControlRoutes(r chi.Router, deps engineRouterDeps) {
 	if deps.cfg != nil {
 		enginePublicGRPCURL = deps.cfg.Engine.PublicGRPCURL
 	}
+	// Recovery controls share native family authorization and the scheduler's durable queue.
+	r.Get("/apps/{app_id}/executions/{execution_id}/attempts", api.UnifiedAppRecoveryControlHandler(deps.engineStore))
+	r.Post("/apps/{app_id}/executions/{execution_id}/rerun", api.UnifiedAppRecoveryControlHandler(deps.engineStore))
 	r.Get("/audit/export", api.AuditExportHandler(deps.engineStore))
 	r.Mount("/workspace", api.WorkspaceHandler(deps.engineStore, deps.registryClient, deps.masterKey, deps.appTokenRevoker, deps.managedAuthConnectClient, deps.connectRedirectURI))
 	api.MountConfigRoutes(r, deps.configStore, deps.engineStore, deps.registryClient, deps.registryProxy, deps.registryClient, deps.masterKey, enginePublicGRPCURL, deps.controlAuth)

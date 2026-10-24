@@ -2,7 +2,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
 import { build } from "esbuild";
-import { validateSearchablePaths } from "./index";
+import { validateSearchablePaths, validateRecoveryPolicy, type RecoveryPolicy } from "./index";
 import { generateExecutionBindingsSource } from "./bindings";
 import { validateExecutionSource } from "./typecheck";
 
@@ -25,6 +25,7 @@ export interface BundleSpec {
 }
 
 export interface ExecutionBundleManifest {
+  recovery?: Readonly<RecoveryPolicy>;
   schemaVersion: 1;
   inputSchema: Record<string, unknown>;
   outputSchema: Record<string, unknown>;
@@ -108,6 +109,7 @@ const inputSchema = toPublicSchema(app.input);
 const outputSchema = toPublicSchema(app.output);
 const searchable = app.fetch.searchable;
 const selectedOperations = ${selections};
+const recovery = app.recovery;
 globalThis.FusedUnifiedApp = {
   input: app.input,
   output: app.output,
@@ -116,7 +118,7 @@ globalThis.FusedUnifiedApp = {
   // The Engine runner parses both Zod boundaries around authored execution.
   execute: ({ input }) => app.execute({ input })
 };
-globalThis.FusedExecutionManifest = { schemaVersion: 1, inputSchema, outputSchema, searchable, selectedOperations };
+globalThis.FusedExecutionManifest = { schemaVersion: 1, inputSchema, outputSchema, searchable, selectedOperations, recovery };
 `;
   const result = await build({
     stdin: { contents: source, resolveDir: path.dirname(entryFile), sourcefile: "fused-execution-entry.ts", loader: "ts" },
@@ -192,7 +194,8 @@ export function parseExecutionManifest(raw: unknown): ExecutionBundleManifest {
   const searchable = validateSearchablePaths(raw.searchable);
   const selectedOperations = raw.selectedOperations as SelectedOperation[];
   validateSelections(selectedOperations);
-  return { schemaVersion: 1, inputSchema: raw.inputSchema, outputSchema: raw.outputSchema, searchable, selectedOperations: exactSelections(selectedOperations) };
+  // Historical manifests omit recovery; newly compiled builders carry an explicit finite policy.
+  return { schemaVersion: 1, inputSchema: raw.inputSchema, outputSchema: raw.outputSchema, searchable, selectedOperations: exactSelections(selectedOperations), ...manifestRecovery(raw.recovery) };
 }
 
 // Let the caller's isolated build worker evaluate top-level code without invoking execute.
@@ -208,4 +211,13 @@ function stableSourceMap(code: string, entryFile: string): string {
     map.sources = map.sources.map((source: string, index: number) => path.basename(source) === path.basename(entryFile) ? "unified-app.ts" : `fused-runtime/${index}/${path.basename(source)}`);
     return prefix + Buffer.from(JSON.stringify(map)).toString("base64");
   });
+}
+
+// Preserve historical manifests while validating every new retry policy before publishing it.
+function manifestRecovery(value: unknown): Pick<ExecutionBundleManifest, "recovery"> {
+  // An absent policy must not silently change an existing bundle's public manifest.
+  if (value === undefined) return {};
+  // A policy must be a structured declaration, never a primitive coerced into defaults.
+  if (!isRecord(value)) throw new Error("Invalid Unified App recovery policy");
+  return { recovery: validateRecoveryPolicy(value as Partial<RecoveryPolicy>) };
 }

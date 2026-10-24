@@ -39,6 +39,8 @@ func (s *EngineGRPCServer) StartUnifiedAppScheduleWorker(ctx context.Context) (*
 		defer ticker.Stop()
 		for {
 			s.runScheduleBatch(workerCtx, repository)
+			// Recovery uses the same bounded, cancellable scheduler lifecycle as cron.
+			s.runExecutionRecoveryBatch(workerCtx)
 			// Cancellation prevents new admissions after the active batch drains.
 			select {
 			case <-workerCtx.Done():

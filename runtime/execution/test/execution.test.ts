@@ -304,7 +304,10 @@ test("generated client compiles and routes execution lifecycle calls", async () 
     await client.search({ "data.customerId": "cus_123" }, 10);
     await client.replay("run-id", "a".repeat(64));
     await client.rerun("run-id", "a".repeat(64), "new-key");
-    assert.equal(calls.length, 5);
+    await client.attempts("run-id", "a".repeat(64));
+    assert.equal(calls.length, 6);
+    assert.ok(calls[5].url.endsWith("/attempts"));
+    assert.equal(calls[5].init.headers["X-Execution-Read-Handle"], "a".repeat(64));
     assert.equal(calls[0].url, "http://engine/v1/apps/app-id/executions");
     assert.equal(calls[0].init.headers.Authorization, "Bearer secret");
     assert.equal(calls[0].init.body, JSON.stringify({ operation: "execute", input: { name: "Jane" } }));

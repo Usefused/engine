@@ -57,7 +57,7 @@ func (s *EngineGRPCServer) loadUnifiedAppSource(ctx context.Context, request *ht
 	return unifiedAppSource{scope: scope, identity: identity, appID: identity.AppID, result: result}, nil
 }
 
-// handleCapabilityRerun starts a new live execution from retained input only after explicit caller authorization.
+// handleCapabilityRerun recovers saved progress when available, retaining caller authorization and idempotency.
 func (s *EngineGRPCServer) handleCapabilityRerun(writer http.ResponseWriter, request *http.Request) {
 	ctx, span := otel.Tracer("engine").Start(request.Context(), "engine.unified_app.rerun")
 	defer span.End()
@@ -65,6 +65,10 @@ func (s *EngineGRPCServer) handleCapabilityRerun(writer http.ResponseWriter, req
 	source, requestErr := s.loadUnifiedAppSource(ctx, request)
 	if requestErr != nil {
 		writeCapabilityError(writer, span, requestErr)
+		return
+	}
+	// Recovery-enabled runs share one snapshot-aware path for manual and automatic attempts.
+	if s.trySnapshotRerun(writer, request.WithContext(ctx), span, source) {
 		return
 	}
 	// A still-running source has no stable retained input/outcome for explicit rerun.

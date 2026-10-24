@@ -208,23 +208,25 @@ func validScheduledRecord(item UnifiedAppSchedule, record ExecutionResult) bool 
 	return record.SourceScheduleID != nil && *record.SourceScheduleID == item.ID && record.AccountID == item.AccountID && record.AppFamilyID == item.FamilyID && item.NextRunAt != nil && bytes.Equal(item.Input, record.Input)
 }
 
-// FinishScheduledExecution updates only the occurrence that still owns the schedule's running marker.
+// FinishScheduledExecution pauses uncertain schedules unless their current run has bounded automatic recovery.
 func (s *postgresStore) FinishScheduledExecution(ctx context.Context, id, executionID uuid.UUID, status string) error {
 	// Fixed terminal values prevent raw provider messages from entering the schedule summary.
 	if status != "succeeded" && status != "failed" && status != "indeterminate" {
 		return ErrExecutionResultInvalid
 	}
 	_, err := s.db.Exec(ctx, `UPDATE fused_unified_app_schedules SET last_status=$3,revision=revision+1,
-		enabled=CASE WHEN $3='indeterminate' THEN false ELSE enabled END
+		enabled=CASE WHEN $3='indeterminate' AND NOT EXISTS(SELECT 1 FROM fused_unified_app_recovery c WHERE c.execution_id=$2 AND c.current AND c.mode='automatic' AND c.attempt<c.max_attempts) THEN false ELSE enabled END
 		WHERE id=$1 AND last_execution_id=$2 AND last_status='running'`, id, executionID, status)
 	return err
 }
 
-// RecoverScheduledExecutions pauses abandoned work; automatic retries could repeat irreversible provider effects.
+// RecoverScheduledExecutions pauses abandoned work unless its explicit bounded policy authorizes automatic recovery.
 func (s *postgresStore) RecoverScheduledExecutions(ctx context.Context) ([]ExecutionResult, error) {
 	rows, err := s.db.Query(ctx, `WITH abandoned AS (
-		UPDATE fused_unified_app_schedules SET last_status='indeterminate',enabled=false,revision=revision+1
-		WHERE last_status='running' AND last_started_at<NOW()-INTERVAL '5 minutes' RETURNING last_execution_id
+		UPDATE fused_unified_app_schedules SET last_status='indeterminate',
+ enabled=CASE WHEN EXISTS(SELECT 1 FROM fused_unified_app_recovery c WHERE c.execution_id=last_execution_id AND c.current AND c.mode='automatic' AND c.attempt<c.max_attempts) THEN enabled ELSE false END,revision=revision+1
+		WHERE last_status='running' AND last_started_at<NOW()-INTERVAL '5 minutes'
+AND NOT EXISTS(SELECT 1 FROM fused_unified_app_recovery c WHERE c.execution_id=last_execution_id AND c.current AND (c.ready OR c.lease_until>clock_timestamp())) RETURNING last_execution_id
 	) UPDATE fused_unified_app_results SET status='indeterminate',error_code='scheduled_run_interrupted',
 		error_message='Scheduled run was interrupted; review provider state before retrying',completed_at=NOW(),updated_at=NOW(),expires_at=NOW()+INTERVAL '24 hours'
 		WHERE id IN (SELECT last_execution_id FROM abandoned) AND status IN ('queued','running') RETURNING `+executionResultColumns)

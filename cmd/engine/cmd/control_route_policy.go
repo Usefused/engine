@@ -87,6 +87,9 @@ var dynamicControlRequirements = map[string]dynamicRequirementKind{
 	http.MethodPost + " /apps/{app_id}/bundle": dynamicAppAccess,
 	// Diagnostics resolve the immutable version to its family and require a separate private-data grant.
 	http.MethodGet + " /apps/{app_id}/executions/{execution_id}/diagnostics": dynamicAppAccess,
+	// Recovery reads and triggers resolve ordinary read/manage grants on the exact family.
+	http.MethodGet + " /apps/{app_id}/executions/{execution_id}/attempts": dynamicAppAccess,
+	http.MethodPost + " /apps/{app_id}/executions/{execution_id}/rerun":   dynamicAppAccess,
 	// Failure messages use receipt-reader grants resolved against the persisted app family.
 	http.MethodGet + " /apps/{app_id}/executions/{execution_id}/failure": dynamicAppAccess,
 	// Traffic discovery and promotion use the same family boundary and durable control audit.
@@ -244,6 +247,9 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodPost, "/apps/{app_id}/bundle", false, nil},
 	// The dynamic resolver and handler both protect private execution diagnostics.
 	{http.MethodGet, "/apps/{app_id}/executions/{execution_id}/diagnostics", false, nil},
+	// Manual recovery mutations use the normal control-plane audit boundary.
+	{http.MethodGet, "/apps/{app_id}/executions/{execution_id}/attempts", false, nil},
+	{http.MethodPost, "/apps/{app_id}/executions/{execution_id}/rerun", false, nil},
 	// Message-only reads remain subject to app visibility and execution-history authorization.
 	{http.MethodGet, "/apps/{app_id}/executions/{execution_id}/failure", false, nil},
 	// Explicitly admit these routes to authorization and mutation auditing.

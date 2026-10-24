@@ -201,6 +201,8 @@ func unifiedAppOpenAPIResponseSchema(output map[string]any) map[string]any {
 		"properties": map[string]any{
 			"bucketId":    map[string]any{"type": "string", "format": "uuid", "description": "Explicit runtime bucket selected for this execution, when present."},
 			"executionId": map[string]any{"type": "string", "format": "uuid"},
+			"runId":       map[string]any{"type": "string", "format": "uuid", "description": "Logical run shared by recovery attempts."},
+			"attempt":     map[string]any{"type": "integer", "minimum": 1, "maximum": 10},
 			"appId":       map[string]any{"type": "string", "format": "uuid"},
 			"version":     map[string]any{"type": "string"}, "status": map[string]any{"type": "string"},
 			"mode": map[string]any{"type": "string"}, "output": output,

@@ -24,6 +24,8 @@ import (
 )
 
 type capabilityExecutionEnvelope struct {
+	RunID                *uuid.UUID              `json:"runId,omitempty"`
+	Attempt              int                     `json:"attempt,omitempty"`
 	BucketID             *uuid.UUID              `json:"bucketId,omitempty"`
 	ExecutionID          uuid.UUID               `json:"executionId"`
 	AppID                uuid.UUID               `json:"-"`
@@ -41,13 +43,14 @@ type capabilityExecutionEnvelope struct {
 	CompletedAt          *time.Time              `json:"completedAt,omitempty"`
 }
 
-// MountUnifiedAppRoutes adds rerun and replay to the existing SDK execution endpoint.
+// MountUnifiedAppRoutes adds recovery history, rerun and replay to the existing execution endpoint.
 func MountUnifiedAppRoutes(router chi.Router, server *EngineGRPCServer) {
 	// A missing server cannot accidentally publish a route without authentication.
 	if router == nil || server == nil {
 		return
 	}
 	router.Post("/v1/apps/{app_id}/executions/{execution_id}/rerun", server.handleCapabilityRerun)
+	router.Get("/v1/apps/{app_id}/executions/{execution_id}/attempts", server.handleCapabilityAttempts)
 	router.Post("/v1/apps/{app_id}/executions/{execution_id}/replay", server.handleCapabilityReplay)
 }
 
@@ -238,6 +241,7 @@ func capabilityPublicError(code string, failures ...error) string {
 // projectCapabilityExecution returns the authored output and one-time read handle while keeping stored search data private.
 func projectCapabilityExecution(record *store.ExecutionResult, readHandle string) capabilityExecutionEnvelope {
 	projected := capabilityExecutionEnvelope{
+		RunID: record.RunID, Attempt: record.Attempt,
 		BucketID:    record.BucketID,
 		ExecutionID: record.ID, AppID: record.AppID, AppFamilyID: record.AppFamilyID, Version: record.AppVersion,
 		Status: record.Status, Mode: record.Mode,

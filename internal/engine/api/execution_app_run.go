@@ -59,6 +59,9 @@ func (s *EngineGRPCServer) executeCapabilityRun(ctx context.Context, spec capabi
 
 // runAdmittedCapability owns provider work only after the result reservation is durable.
 func (s *EngineGRPCServer) runAdmittedCapability(ctx context.Context, spec capabilityRunSpec, admitted admittedCapabilityRun) (capabilityExecutionEnvelope, *restExecutionError) {
+	// A fixed execution budget ends before the durable two-minute attempt fence can expire.
+	ctx, cancelAttempt := capabilityAttemptContext(ctx, spec.manifest)
+	defer cancelAttempt()
 	ctx = withUnifiedAppCallRoot(ctx, spec.identity.AppFamilyID)
 	// A request-local binding cannot mutate shared family routing or propagate into child apps.
 	ctx = sandbox.WithUnifiedAppBucket(ctx, spec.identity.AppID, spec.bucketID)
@@ -86,6 +89,7 @@ func (s *EngineGRPCServer) runAdmittedCapability(ctx context.Context, spec capab
 		apps: s, runtime: s.runtime, identity: spec.identity,
 		executionID: admitted.id, bindings: admitted.bindings,
 	}
+	s.prepareAttemptHost(spec, host, cancelAttempt)
 	// Buffering the JSON document keeps the final state and output in one terminal SQL update.
 	buffer := NewBufferedCapabilityHost(host)
 	// Recording every workspace call gives replay a sealed transcript without exposing provider credentials.
@@ -100,10 +104,8 @@ func (s *EngineGRPCServer) runAdmittedCapability(ctx context.Context, spec capab
 		output, runErr = s.runUnifiedAppWorker(ctx, spec.identity, []byte(spec.bundle.BundleJS), spec.input, recorder, controls)
 	}
 	history, historyErr := recorder.History()
-	// An incomplete recording cannot be presented as a replayable success.
-	if historyErr != nil && runErr == nil {
-		runErr = historyErr
-	}
+	// Cancellation and incomplete history cannot become success even if authored code caught a host error.
+	runErr = recordedCapabilityError(runErr, ctx.Err(), historyErr)
 	status, errorCode := capabilityCompletion(runErr, ctx.Err(), host.providerCallsStarted())
 	// Terminal state survives client cancellation and remains attached to its original trace.
 	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -145,6 +147,10 @@ func (s *EngineGRPCServer) admitCapabilityRun(ctx context.Context, spec capabili
 	id, handle, created, err := reserveCapabilityRun(ctx, results, spec)
 	// A rejected reservation cannot acquire a cache reference or start provider work.
 	if err != nil {
+		// Automatic recovery requires a durable direct origin rather than guessed consumer delegation.
+		if errors.Is(err, store.ErrExecutionRecoveryOrigin) {
+			return admittedCapabilityRun{}, newRESTExecutionError(400, "recovery_origin_unsupported", err.Error())
+		}
 		// The same caller key cannot name two different retained inputs or app versions.
 		if errors.Is(err, store.ErrExecutionResultIdempotencyConflict) {
 			return admittedCapabilityRun{}, newRESTExecutionError(http.StatusConflict, "idempotency_conflict", "idempotency key belongs to a different rerun")
@@ -160,6 +166,11 @@ func (s *EngineGRPCServer) prepareCapabilityRun(ctx context.Context, spec capabi
 	if err := s.authorizeRuntimeBucket(ctx, spec); err != nil {
 		return admittedCapabilityRun{}, err
 	}
+	// Recovery-enabled source must never silently run without durable snapshot support.
+	if err := s.requireRecoveryStore(spec); err != nil {
+		return admittedCapabilityRun{}, err
+	}
+
 	results, ok := s.store.(store.ExecutionResultStore)
 	// Missing durable storage or an authored contract prevents unrecorded effects.
 	if !ok || spec.bundle == nil || spec.manifest == nil {
@@ -198,6 +209,7 @@ func reserveCapabilityRun(ctx context.Context, results store.ExecutionResultStor
 		return uuid.Nil, "", false, err
 	}
 	record := store.ExecutionResult{
+
 		BucketID: spec.bucketID,
 		ID:       id, AccountID: spec.identity.AccountID, AppFamilyID: spec.identity.AppFamilyID,
 		AppID: spec.identity.AppID, AppVersion: spec.version,
@@ -205,6 +217,10 @@ func reserveCapabilityRun(ctx context.Context, results store.ExecutionResultStor
 		IdempotencyKeyHash: spec.idempotencyKeyHash, Status: "queued", Input: spec.input,
 		Mode: spec.mode, SourceExecutionID: spec.sourceExecutionID,
 		SourceWebhookEventID: spec.webhookEventID,
+	}
+	// Compiled recovery policy is copied into the initial durable reservation.
+	if spec.manifest != nil {
+		record.Recovery = spec.manifest.Recovery
 	}
 	// Schedules advance only in the same transaction that durably accepts this occurrence.
 	if spec.schedule != nil {
@@ -244,5 +260,38 @@ func loadCapabilityRunEnvelope(ctx context.Context, results store.ExecutionResul
 	if err != nil {
 		return capabilityExecutionEnvelope{}, newRESTExecutionError(http.StatusServiceUnavailable, "result_unavailable", "execution result is unavailable")
 	}
+	// Recovery metadata groups attempts without changing ordinary result or read-handle ownership.
+	if repository, ok := results.(store.ExecutionRecoveryStore); ok {
+		state, err := repository.GetExecutionRecovery(ctx, identity.AccountID, identity.AppID, executionID)
+		if err != nil {
+			return capabilityExecutionEnvelope{}, newRESTExecutionError(503, "result_unavailable", "execution recovery is unavailable")
+		} // Missing metadata is allowed; unavailable metadata is not.
+		if state != nil {
+			record.RunID = &state.RunID
+			record.Attempt = state.Attempt
+		} // Historical runs have no synthetic attempt metadata.
+	}
 	return projectCapabilityExecution(record, readHandle), nil
+}
+
+// recordedCapabilityError preserves authored failures and prevents uncertain persistence from reporting success.
+func recordedCapabilityError(runErr, ctxErr, historyErr error) error {
+	// A known authored failure is more specific than later cancellation or transcript failure.
+	if runErr != nil {
+		return runErr
+	}
+	// Lost snapshot acknowledgements poison the entire attempt, including caught host errors.
+	if ctxErr != nil {
+		return ctxErr
+	}
+	return historyErr
+}
+
+// capabilityAttemptContext bounds recoverable work below its lease without changing historical bundle timing.
+func capabilityAttemptContext(ctx context.Context, manifest *unifiedAppManifest) (context.Context, context.CancelFunc) {
+	// Historical bundles retain the caller's existing timeout contract.
+	if manifest == nil || manifest.Recovery == nil {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, 45*time.Second)
 }

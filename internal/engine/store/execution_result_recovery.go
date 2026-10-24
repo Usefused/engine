@@ -13,7 +13,7 @@ type ExecutionResultRecoveryStore interface {
 	RecoverStaleExecutionResults(context.Context, time.Time, int) (int64, error)
 }
 
-// RecoverStaleExecutionResults gives abandoned rows a terminal result in one bounded SQL update.
+// RecoverStaleExecutionResults finalizes abandoned rows while preserving queued or leased recovery work.
 func (s *postgresStore) RecoverStaleExecutionResults(ctx context.Context, before time.Time, limit int) (int64, error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.execution_result.recover_stale")
 	defer span.End()
@@ -24,6 +24,7 @@ func (s *postgresStore) RecoverStaleExecutionResults(ctx context.Context, before
 	tag, err := s.db.Exec(ctx, `WITH abandoned AS (
 		SELECT id FROM fused_unified_app_results
 		WHERE status IN ('queued','running') AND updated_at<$1
+AND NOT EXISTS(SELECT 1 FROM fused_unified_app_recovery c WHERE c.execution_id=fused_unified_app_results.id AND c.current AND (c.ready OR c.lease_until>clock_timestamp()))
 		ORDER BY updated_at, id LIMIT $2 FOR UPDATE SKIP LOCKED
 	)
 	UPDATE fused_unified_app_results result SET

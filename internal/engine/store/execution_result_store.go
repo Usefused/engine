@@ -35,29 +35,32 @@ var (
 // ExecutionResult is the durable record for one exact unified app version.
 // Input and read-handle hashes are deliberately omitted from JSON projections.
 type ExecutionResult struct {
-	BucketID             *uuid.UUID      `json:"bucketId,omitempty"`
-	ID                   uuid.UUID       `json:"executionId"`
-	AccountID            uuid.UUID       `json:"-"`
-	AppFamilyID          uuid.UUID       `json:"-"`
-	AppID                uuid.UUID       `json:"appId"`
-	AppVersion           string          `json:"version"`
-	AppTokenID           uuid.UUID       `json:"-"`
-	ReadHandleHash       string          `json:"-"`
-	IdempotencyKeyHash   string          `json:"-"`
-	Status               string          `json:"status"`
-	Input                json.RawMessage `json:"-"`
-	Output               json.RawMessage `json:"output,omitempty"`
-	Data                 json.RawMessage `json:"data"`
-	ErrorCode            string          `json:"-"`
-	ErrorMessage         string          `json:"-"`
-	SourceExecutionID    *uuid.UUID      `json:"sourceExecutionId,omitempty"`
-	SourceScheduleID     *uuid.UUID      `json:"sourceScheduleId,omitempty"`
-	SourceWebhookEventID string          `json:"sourceWebhookEventId,omitempty"`
-	Mode                 string          `json:"mode"`
-	CreatedAt            time.Time       `json:"createdAt"`
-	UpdatedAt            time.Time       `json:"updatedAt"`
-	CompletedAt          *time.Time      `json:"completedAt,omitempty"`
-	ExpiresAt            *time.Time      `json:"expiresAt,omitempty"`
+	RunID                *uuid.UUID               `json:"runId,omitempty"`
+	Attempt              int                      `json:"attempt,omitempty"`
+	Recovery             *ExecutionRecoveryPolicy `json:"-"`
+	BucketID             *uuid.UUID               `json:"bucketId,omitempty"`
+	ID                   uuid.UUID                `json:"executionId"`
+	AccountID            uuid.UUID                `json:"-"`
+	AppFamilyID          uuid.UUID                `json:"-"`
+	AppID                uuid.UUID                `json:"appId"`
+	AppVersion           string                   `json:"version"`
+	AppTokenID           uuid.UUID                `json:"-"`
+	ReadHandleHash       string                   `json:"-"`
+	IdempotencyKeyHash   string                   `json:"-"`
+	Status               string                   `json:"status"`
+	Input                json.RawMessage          `json:"-"`
+	Output               json.RawMessage          `json:"output,omitempty"`
+	Data                 json.RawMessage          `json:"data"`
+	ErrorCode            string                   `json:"-"`
+	ErrorMessage         string                   `json:"-"`
+	SourceExecutionID    *uuid.UUID               `json:"sourceExecutionId,omitempty"`
+	SourceScheduleID     *uuid.UUID               `json:"sourceScheduleId,omitempty"`
+	SourceWebhookEventID string                   `json:"sourceWebhookEventId,omitempty"`
+	Mode                 string                   `json:"mode"`
+	CreatedAt            time.Time                `json:"createdAt"`
+	UpdatedAt            time.Time                `json:"updatedAt"`
+	CompletedAt          *time.Time               `json:"completedAt,omitempty"`
+	ExpiresAt            *time.Time               `json:"expiresAt,omitempty"`
 }
 
 // ExecutionResultSearch scopes query terms to one immutable app version and its admitted data paths.
@@ -149,24 +152,24 @@ func validateExecutionTrigger(record ExecutionResult) error {
 	if record.AppTokenID == uuid.Nil && record.SourceWebhookEventID == "" && record.SourceScheduleID == nil {
 		return ErrExecutionResultInvalid
 	}
-	// A scheduled run cannot impersonate a caller, webhook, rerun, or empty schedule identity.
+	// Schedule provenance is explicit on an original occurrence or inherited by its recovery attempts.
 	if !validScheduleTrigger(record) {
 		return ErrExecutionResultInvalid
 	}
-	// Event provenance cannot be injected into token-backed calls, reruns, or replay records.
-	if record.SourceWebhookEventID != "" && (len(record.SourceWebhookEventID) > 256 || record.Mode != "live" || record.AppTokenID != uuid.Nil) {
+	// Recovery retains event provenance; ordinary callers and replay cannot invent it.
+	if record.SourceWebhookEventID != "" && (len(record.SourceWebhookEventID) > 256 || (record.Mode != "rerun" && (record.Mode != "live" || record.AppTokenID != uuid.Nil))) {
 		return ErrExecutionResultInvalid
 	}
 	return nil
 }
 
-// validScheduleTrigger keeps scheduled provenance exclusive to Engine-owned live runs.
+// validScheduleTrigger permits inherited provenance on a recovery attempt of scheduled work.
 func validScheduleTrigger(record ExecutionResult) bool {
 	// Ordinary caller and webhook records have no schedule identity.
 	if record.SourceScheduleID == nil {
 		return true
 	}
-	return *record.SourceScheduleID != uuid.Nil && record.AppTokenID == uuid.Nil && record.SourceWebhookEventID == "" && record.Mode == "live"
+	return *record.SourceScheduleID != uuid.Nil && record.SourceWebhookEventID == "" && ((record.Mode == "live" && record.AppTokenID == uuid.Nil) || record.Mode == "rerun")
 }
 
 // validNewExecutionModeFields binds optional idempotency to a declared execution mode.
@@ -206,6 +209,10 @@ func validExecutionReadHash(hash string) bool {
 
 // CreateExecutionResult records an accepted call before dispatch or worker startup.
 func (s *postgresStore) CreateExecutionResult(ctx context.Context, record ExecutionResult) error {
+	// Recovery-enabled bundles reserve their first attempt in the same transaction as the result.
+	if record.Recovery != nil && record.Mode == "live" {
+		return s.createRecoverableExecution(ctx, record)
+	}
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.execution_result.create")
 	defer span.End()
 	// All triggers must persist complete ownership before effects begin.
@@ -217,7 +224,7 @@ func (s *postgresStore) CreateExecutionResult(ctx context.Context, record Execut
 	if err != nil {
 		return err
 	}
-	// A new execution owns an empty document; rerun and replay never inherit durable data.
+	// Each attempt owns a fresh terminal document; durable snapshots use separate recovery storage.
 	_, err = s.db.Exec(ctx, `INSERT INTO fused_unified_app_results
 		(id, account_id, app_family_id, app_id, app_version, app_token_id, read_handle_hash, idempotency_key_hash, status, input, data, source_execution_id, mode, source_webhook_event_id, source_schedule_id, runtime_bucket_id)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),'queued',$9,'null'::jsonb,$10,$11,NULLIF($12,''),$13,$14)`,
@@ -279,12 +286,12 @@ func (s *postgresStore) matchExistingRerun(ctx context.Context, record Execution
 	return existingID, nil
 }
 
-// StartExecutionResult moves only an accepted queued call into worker execution.
+// StartExecutionResult admits only queued work whose recovery ownership has not expired or been replaced.
 func (s *postgresStore) StartExecutionResult(ctx context.Context, accountID, appID, executionID uuid.UUID) error {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.execution_result.start")
 	defer span.End()
 	tag, err := s.db.Exec(ctx, `UPDATE fused_unified_app_results SET status='running', updated_at=NOW()
-		WHERE id=$1 AND account_id=$2 AND app_id=$3 AND status='queued'`, executionID, accountID, appID)
+		WHERE id=$1 AND account_id=$2 AND app_id=$3 AND status='queued' AND NOT EXISTS(SELECT 1 FROM fused_unified_app_recovery c WHERE c.execution_id=$1 AND (NOT c.current OR c.ready OR c.lease_until<=clock_timestamp()))`, executionID, accountID, appID)
 	if err != nil {
 		return err
 	}
@@ -295,7 +302,7 @@ func (s *postgresStore) StartExecutionResult(ctx context.Context, accountID, app
 	return nil
 }
 
-// CompleteExecutionResult commits the final JSONB document, authored output, and status in one row update.
+// CompleteExecutionResult atomically commits terminal data only while this attempt retains ownership.
 func (s *postgresStore) CompleteExecutionResult(ctx context.Context, accountID, appID, executionID uuid.UUID, status string, rawOutput, rawData json.RawMessage, errorCode, errorMessage string) error {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.execution_result.complete")
 	defer span.End()
@@ -318,7 +325,7 @@ func (s *postgresStore) CompleteExecutionResult(ctx context.Context, accountID, 
 	tag, err := s.db.Exec(ctx, `UPDATE fused_unified_app_results
 		SET status=$4, output=$5::jsonb, data=$6::jsonb, error_code=$7, error_message=$8, updated_at=NOW(),
 			completed_at=NOW(), expires_at=NOW()+INTERVAL '24 hours'
-		WHERE id=$1 AND account_id=$2 AND app_id=$3 AND status IN ('queued','running')`,
+		WHERE id=$1 AND account_id=$2 AND app_id=$3 AND status IN ('queued','running') AND NOT EXISTS(SELECT 1 FROM fused_unified_app_recovery c WHERE c.execution_id=$1 AND (NOT c.current OR c.ready OR c.lease_until<=clock_timestamp()))`,
 		executionID, accountID, appID, status, output, data, errorCode, errorMessage)
 	if err != nil {
 		return err

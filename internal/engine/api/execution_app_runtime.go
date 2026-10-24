@@ -15,15 +15,17 @@ import (
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/executionevent"
 	"github.com/Usefused/engine/internal/engine/sandbox"
+	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/google/uuid"
 )
 
 type unifiedAppManifest struct {
-	SchemaVersion      int                           `json:"schemaVersion"`
-	InputSchema        json.RawMessage               `json:"inputSchema"`
-	OutputSchema       json.RawMessage               `json:"outputSchema"`
-	Searchable         []string                      `json:"searchable"`
-	SelectedOperations []unifiedAppManifestOperation `json:"selectedOperations"`
+	Recovery           *store.ExecutionRecoveryPolicy `json:"recovery,omitempty"`
+	SchemaVersion      int                            `json:"schemaVersion"`
+	InputSchema        json.RawMessage                `json:"inputSchema"`
+	OutputSchema       json.RawMessage                `json:"outputSchema"`
+	Searchable         []string                       `json:"searchable"`
+	SelectedOperations []unifiedAppManifestOperation  `json:"selectedOperations"`
 }
 
 type unifiedAppManifestOperation struct {
@@ -55,14 +57,17 @@ type capabilityHostFetchSelector struct {
 }
 
 type executionCapabilityHost struct {
-	apps        *EngineGRPCServer
-	runtime     *sandbox.EngineGRPCServer
-	identity    auth.RuntimeIdentity
-	executionID uuid.UUID
-	bindings    map[string]sandbox.ExactOperationBinding
-	mu          sync.Mutex
-	callCount   int
-	called      bool
+	recovery      store.ExecutionRecoveryStore
+	snapshotMu    sync.Mutex
+	cancelAttempt context.CancelFunc
+	apps          *EngineGRPCServer
+	runtime       *sandbox.EngineGRPCServer
+	identity      auth.RuntimeIdentity
+	executionID   uuid.UUID
+	bindings      map[string]sandbox.ExactOperationBinding
+	mu            sync.Mutex
+	callCount     int
+	called        bool
 }
 
 // parseUnifiedAppManifest admits one bounded app-level execute descriptor shared by deployment and execution.
@@ -90,6 +95,12 @@ func parseUnifiedAppManifest(raw json.RawMessage) (*unifiedAppManifest, error) {
 
 // validateUnifiedAppManifest requires one typed execute contract and a bounded physical method set.
 func validateUnifiedAppManifest(manifest *unifiedAppManifest) error {
+	// Authored retry policy must be finite before an immutable bundle can be accepted.
+	if manifest.Recovery != nil {
+		if err := manifest.Recovery.Validate(); err != nil {
+			return err
+		} // Invalid recovery cannot acquire execution authority.
+	}
 	// Event-only apps have no physical methods; app config validation separately requires an inbound selection.
 	if !json.Valid(manifest.InputSchema) || !json.Valid(manifest.OutputSchema) || len(manifest.SelectedOperations) > maxUnifiedAppSelectedOperations {
 		return errors.New("unified app manifest is invalid")
@@ -126,8 +137,20 @@ func unifiedAppBindings(manifest *unifiedAppManifest) (map[string]sandbox.ExactO
 
 // Fetch routes recorded effects through either the selected app or physical operation boundary.
 func (host *executionCapabilityHost) Fetch(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	// Every host effect rechecks recovery ownership before reaching provider or snapshot storage.
+	if host.recovery != nil {
+		if err := host.recovery.CheckExecutionAttempt(ctx, host.identity.AccountID, host.identity.AppID, host.executionID); err != nil {
+			host.cancelAttempt()
+			return nil, errors.New("execution attempt is no longer active")
+		} // A lost fence cancels even if authored code catches this error.
+	}
 	// A dedicated discriminator keeps hosted inputs separate from provider selectors and credentials.
 	var kind map[string]json.RawMessage
+	// Snapshot calls share recorded replay transport without being dispatched to a provider.
+	if json.Unmarshal(raw, &kind) == nil && kind["snapshot"] != nil {
+		return host.executeSnapshot(ctx, raw)
+	}
+	// Hosted app calls retain their existing selected dependency boundary.
 	if json.Unmarshal(raw, &kind) == nil && kind["unifiedApp"] != nil {
 		return host.callUnifiedApp(ctx, raw)
 	}
