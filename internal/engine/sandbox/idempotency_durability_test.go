@@ -99,8 +99,9 @@ func TestIdempotencyConcurrentCalls(t *testing.T) {
 	err := invoke()
 	close(release)
 	firstErr := <-done
+	var rejection *IdempotencyRejectionError
 	// The duplicate must fail before dispatch, then replay once the owner's result commits.
-	if !errors.Is(err, store.ErrIdempotencyInProgress) || firstErr != nil {
+	if !errors.Is(err, store.ErrIdempotencyInProgress) || !errors.As(err, &rejection) || firstErr != nil {
 		t.Fatalf("first=%v duplicate=%v", firstErr, err)
 	}
 	// A completed response remains usable after the concurrent reservation conflict.
@@ -110,6 +111,23 @@ func TestIdempotencyConcurrentCalls(t *testing.T) {
 	// No duplicate write is permitted during or after the race.
 	if calls.Load() != 1 {
 		t.Fatalf("provider calls=%d", calls.Load())
+	}
+}
+
+// TestIdempotencyReservationRacePreservesRejection covers a competing owner winning after the initial cache miss.
+func TestIdempotencyReservationRacePreservesRejection(t *testing.T) {
+	withIdempotencyStore(t, newFakeIdempotencyStore())
+	ctx := contextWithExecutionIdentity(context.Background(), "race-key", "same-input")
+	appID := uuid.New()
+	// Establish the other worker's ownership at the atomic reservation boundary.
+	if _, err := reserveCachedExecution(ctx, appID); err != nil {
+		t.Fatal(err)
+	}
+	_, err := reserveCachedExecution(ctx, appID)
+	var rejection *IdempotencyRejectionError
+	// The race loser needs the same safe public guidance as a pending cache lookup.
+	if !errors.Is(err, store.ErrIdempotencyInProgress) || !errors.As(err, &rejection) {
+		t.Fatalf("reservation race lost its pre-dispatch classification: %v", err)
 	}
 }
 

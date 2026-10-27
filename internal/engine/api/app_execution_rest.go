@@ -501,9 +501,24 @@ func restErrorFromExecution(err error) *restExecutionError {
 // restPhysicalExecutionError maps canonical physical replay, policy, media,
 // and cancellation decisions without exposing raw provider errors.
 func restPhysicalExecutionError(err error) *restExecutionError {
+	var rejection *sandbox.IdempotencyRejectionError
+	// Only a pre-dispatch replay gate may promise that this request did not call the provider.
 	switch {
 	case errors.Is(err, store.ErrIdempotencyKeyConflict):
-		return newRESTExecutionError(http.StatusConflict, "idempotency_conflict", "Idempotency-Key was reused for different input")
+		return newRESTExecutionErrorWithDetails(http.StatusConflict, "idempotency_conflict",
+			"This idempotency key was already used for a different request. Fused rejected this request before calling the provider.",
+			map[string]any{
+				"provider_execution": "not_started",
+				"remediation":        "To retry the original operation, use the same key with the original request. Use a new key only when you intend to perform a separate operation.",
+			})
+	case errors.As(err, &rejection) && errors.Is(err, store.ErrIdempotencyInProgress):
+		return newRESTExecutionErrorWithDetails(http.StatusConflict, "idempotency_unresolved",
+			"An earlier request with this idempotency key has no confirmed saved result. It may still be running, or its provider outcome may be unknown. Fused blocked this request and did not call the provider again.",
+			map[string]any{
+				"provider_execution": "not_started",
+				"previous_outcome":   "pending_or_unknown",
+				"remediation":        "Retry later with the same key and identical request. If the outcome remains unresolved, check the original execution and provider state. Do not change the key just to bypass this protection; that could duplicate the operation.",
+			})
 	case errors.Is(err, sandbox.ErrPhysicalOperationNotAllowed):
 		return newRESTExecutionError(http.StatusForbidden, "operation_not_allowed", "token does not allow this operation")
 	case errors.Is(err, sandbox.ErrPhysicalSelectorContract):

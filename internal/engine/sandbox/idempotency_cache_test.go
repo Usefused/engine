@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -215,8 +216,10 @@ func TestIdempotency_DifferentKeys_BothHitVendor(t *testing.T) {
 	}
 }
 
+// TestIdempotency_SameKeyDifferentBody_Conflicts preserves the typed rejection through actual dispatch.
 func TestIdempotency_SameKeyDifferentBody_Conflicts(t *testing.T) {
 	var vendorCalls int
+	// Count real provider calls independently of the cache's claimed outcome.
 	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		vendorCalls++
 		w.Write([]byte(`{"ok":true}`))
@@ -231,14 +234,18 @@ func TestIdempotency_SameKeyDifferentBody_Conflicts(t *testing.T) {
 	ctx2 := contextWithExecutionIdentity(context.Background(), "reused-key", "hash-different")
 
 	buf := engine.NewBufferStream()
+	// The original request must commit a replayable response before testing conflict reporting.
 	if err := engineExecuteCore(ctx1, cache, engine.NewDispatcher(), &dummyTokenValidator{}, appID, "tok", endpointName, map[string]any{}, nil, "", buf); err != nil {
 		t.Fatalf("first execute error: %v", err)
 	}
 
 	err := engineExecuteCore(ctx2, cache, engine.NewDispatcher(), &dummyTokenValidator{}, appID, "tok", endpointName, map[string]any{}, nil, "", buf)
-	if err == nil {
-		t.Fatal("expected an error when the same idempotency key is reused with a different request body")
+	var rejection *IdempotencyRejectionError
+	// Transports need both the stable cause and proof that this attempt never dispatched.
+	if !errors.Is(err, store.ErrIdempotencyKeyConflict) || !errors.As(err, &rejection) {
+		t.Fatalf("expected a typed pre-dispatch key conflict, got %v", err)
 	}
+	// Improving the error must not weaken the duplicate-write fence.
 	if vendorCalls != 1 {
 		t.Errorf("expected the conflicting second call to never reach the vendor, got %d vendor calls", vendorCalls)
 	}

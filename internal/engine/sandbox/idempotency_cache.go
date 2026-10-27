@@ -31,6 +31,25 @@ type idempotencyStore interface {
 
 var globalIdempotencyStore idempotencyStore
 
+// IdempotencyRejectionError proves this request was blocked before provider dispatch.
+// A persistence error after dispatch must not claim the provider was never called.
+type IdempotencyRejectionError struct{ Cause error }
+
+// Error retains the underlying diagnostic while transports project safe public guidance.
+func (e *IdempotencyRejectionError) Error() string { return e.Cause.Error() }
+
+// Unwrap preserves the store decision for errors.Is across execution boundaries.
+func (e *IdempotencyRejectionError) Unwrap() error { return e.Cause }
+
+// idempotencyRejection marks only known replay gates, leaving storage outages unclassified.
+func idempotencyRejection(err error) error {
+	// Only these decisions prove an existing key prevented this provider dispatch.
+	if errors.Is(err, store.ErrIdempotencyKeyConflict) || errors.Is(err, store.ErrIdempotencyInProgress) {
+		return &IdempotencyRejectionError{Cause: err}
+	}
+	return err
+}
+
 // idempotencyReplayedAttr mirrors models.EngineExecutionEvent.IdempotencyReplayed
 // onto the OTEL span for this execution, so a cache-hit is visible in traces
 // the same way it's visible in the persisted audit record -- debugging a
@@ -84,11 +103,7 @@ func lookupCachedExecution(ctx context.Context, appID uuid.UUID) (exec *models.I
 		if errors.Is(err, store.ErrIdempotentExecutionNotFound) {
 			return nil, false, nil
 		}
-		// Conflicting inputs cannot reuse a successful result.
-		if errors.Is(err, store.ErrIdempotencyKeyConflict) {
-			return nil, false, errors.New("idempotency key already used with a different request body")
-		}
-		return nil, false, err
+		return nil, false, idempotencyRejection(err)
 	}
 	// A shared business key must remain available for every run that consumes its response.
 	if err := retainCachedExecution(ctx, found); err != nil {
@@ -106,7 +121,7 @@ func reserveCachedExecution(ctx context.Context, appID uuid.UUID) (*models.Idemp
 	if ok {
 		record.RunID = &runID
 	}
-	return record, globalIdempotencyStore.ReserveIdempotentExecution(ctx, record)
+	return record, idempotencyRejection(globalIdempotencyStore.ReserveIdempotentExecution(ctx, record))
 }
 
 // tryReplayFromIdempotencyCache is engineExecuteCore's first move once the
