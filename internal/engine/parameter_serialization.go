@@ -7,6 +7,7 @@ import (
 	neturl "net/url"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Usefused/engine/internal/shared/models"
@@ -93,39 +94,60 @@ type parameterParts struct {
 	object map[string]string
 }
 
+// splitParameterValue shares scalar wire formatting across OpenAPI styles and parameter containers.
 func splitParameterValue(value any) (parameterParts, error) {
+	// Missing optional values preserve the existing empty-parameter representation.
 	if value == nil {
 		return parameterParts{scalar: ""}, nil
 	}
 	raw := reflect.ValueOf(value)
+	// Inspect containers through wrappers without changing the caller's scalar types.
 	for raw.Kind() == reflect.Pointer || raw.Kind() == reflect.Interface {
+		// Nil wrappers have the same representation as an absent value.
 		if raw.IsNil() {
 			return parameterParts{scalar: ""}, nil
 		}
 		raw = raw.Elem()
 	}
+	// Styles join the components later; every component must use the same numeric representation.
 	switch raw.Kind() {
 	case reflect.Array, reflect.Slice:
 		values := make([]string, raw.Len())
 		for i := 0; i < raw.Len(); i++ {
-			values[i] = fmt.Sprint(raw.Index(i).Interface())
+			values[i] = formatParameterScalar(raw.Index(i).Interface())
 		}
 		return parameterParts{array: values}, nil
 	case reflect.Map:
 		return splitParameterObject(raw)
 	default:
-		return parameterParts{scalar: fmt.Sprint(value)}, nil
+		return parameterParts{scalar: formatParameterScalar(value)}, nil
 	}
 }
 
+// formatParameterScalar keeps decoded JSON numbers in decimal notation without rounding or coercing strings.
+func formatParameterScalar(value any) string {
+	// Go's default float formatter switches large IDs to exponents, which changes provider resource paths.
+	switch number := value.(type) {
+	case float64:
+		return strconv.FormatFloat(number, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(number), 'f', -1, 32)
+	default:
+		// Preserve exact integer/json.Number text and caller-authored strings instead of parsing through floats.
+		return fmt.Sprint(value)
+	}
+}
+
+// splitParameterObject preserves field names while applying the same scalar formatting as arrays and primitives.
 func splitParameterObject(raw reflect.Value) (parameterParts, error) {
+	// Only string-keyed maps can represent an OpenAPI parameter object.
 	if raw.Type().Key().Kind() != reflect.String {
 		return parameterParts{}, errors.New("OpenAPI parameter objects require string keys")
 	}
 	values := make(map[string]string, raw.Len())
 	iterator := raw.MapRange()
 	for iterator.Next() {
-		values[iterator.Key().String()] = fmt.Sprint(iterator.Value().Interface())
+		values[iterator.Key().String()] = formatParameterScalar(iterator.Value().Interface())
 	}
 	return parameterParts{object: values}, nil
 }

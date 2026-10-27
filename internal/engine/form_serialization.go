@@ -5,7 +5,7 @@ import (
 	"reflect"
 )
 
-// addDeepFormValue preserves nested object/array structure using deterministic bracketed form keys.
+// addDeepFormValue preserves nested structure and the shared decimal scalar format in bracketed form fields.
 func addDeepFormValue(name string, value any, form queryParameters, allowReserved bool, depth int) error {
 	// Bound recursion independently of request size, including cyclic values supplied by Go callers.
 	if depth > 32 {
@@ -16,6 +16,7 @@ func addDeepFormValue(name string, value any, form queryParameters, allowReserve
 	if !raw.IsValid() {
 		return nil
 	}
+	// Containers retain their brackets; leaves share ordinary parameter wire formatting.
 	switch raw.Kind() {
 	case reflect.Map:
 		return addDeepFormObject(name, raw, form, allowReserved, depth)
@@ -28,7 +29,7 @@ func addDeepFormValue(name string, value any, form queryParameters, allowReserve
 		}
 	default:
 		// Union fields can choose a scalar (including an empty-string reset); its bracket path is already complete.
-		form.Add(name, fmt.Sprint(value), allowReserved)
+		form.Add(name, formatParameterScalar(value), allowReserved)
 	}
 	return nil
 }
