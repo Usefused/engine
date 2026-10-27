@@ -235,6 +235,16 @@ async function callApp(alias: string, input: JsonObject): Promise<UnifiedAppCall
   return JSON.parse(response) as UnifiedAppCallResult;
 }
 
+// Call an explicitly selected Bridge capability through the recorded host effect channel.
+async function callBridge(alias: string, input: JsonValue): Promise<JsonValue> {
+  // The alias selects an immutable app binding; runtime destinations cannot be supplied.
+  if (typeof alias !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(alias)) {
+    throw new Error("fused.callBridge requires a selected Bridge alias");
+  }
+  const response = await host().fetch(encodeJson({ bridge: alias, input }, "fused.callBridge request", 1 << 20));
+  return JSON.parse(response) as JsonValue;
+}
+
 // Check the author-owned page ceiling locally while leaving operation policy to the Engine.
 function validateFetchPagination(pagination: WorkspaceOperationRequest["pagination"]): void {
   // Omission retains automatic pagination exactly as configured for the selected provider operation.
@@ -319,6 +329,7 @@ export const fused = Object.freeze({
   snapshot,
   fetch: fetchOperation,
   callApp,
+  callBridge,
   forUserRef,
   forServiceUserRefs,
   db: Object.freeze({ get: dbGet, set: dbSet }),

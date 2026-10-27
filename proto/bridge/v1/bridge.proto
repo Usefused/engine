@@ -1,0 +1,35 @@
+syntax = "proto3";
+package fused.bridge.v1;
+option go_package = "github.com/Usefused/engine/pkg/bridge/v1;bridgev1";
+
+// Bridge initiates this authenticated stream; Engine never dials the local installation.
+service BridgeService { rpc Connect(stream BridgeFrame) returns (stream EngineFrame); }
+// The first frame must be Hello; subsequent frames belong to the welcomed generation.
+message BridgeFrame {
+  oneof message { Hello hello = 1; Manifest manifest = 2; CallResult result = 3; Event event = 4; Heartbeat heartbeat = 5; Inventory inventory = 6; }
+}
+message EngineFrame {
+  oneof message { Welcome welcome = 1; ManifestAccepted manifest_accepted = 2; Call call = 3; Cancel cancel = 4; EventAccepted event_accepted = 5; ProtocolError error = 6; Heartbeat heartbeat = 7; InventoryAccepted inventory_accepted = 8; }
+}
+message Hello { uint32 protocol_major = 1; uint32 protocol_minor = 2; string pairing_id = 3; string installation_id = 4; bool durable_calls = 5; }
+message Welcome { uint32 protocol_major = 1; uint32 protocol_minor = 2; uint64 generation = 3; string destination_id = 4; uint32 max_inflight_events = 5; uint32 max_payload_bytes = 6; }
+// Hash is sha256 of exact manifest_json bytes; retries preserve those bytes.
+message Manifest { string profile_id = 1; string revision = 2; string hash = 3; bytes manifest_json = 4; bool historical = 5; }
+message ManifestAccepted { string profile_id = 1; string revision = 2; string hash = 3; }
+// JSON bytes preserve scalar, array and object inputs without Struct coercion.
+message Call { string request_id = 1; string profile_id = 2; string connection_id = 3; string operation_id = 4; string contract_hash = 5; bytes input_json = 6; int64 deadline_unix_ms = 7; uint64 generation = 8; string manifest_hash = 9; string idempotency_key = 10; }
+// outcome is completed, not_started or unknown; acceptance alone is never completion.
+message CallResult { string request_id = 1; string outcome = 2; bytes result_json = 3; string error_code = 4; uint64 generation = 5; }
+message Cancel { string request_id = 1; uint64 generation = 2; }
+// Stable IDs and original contracts survive reconnects and manifest updates.
+message Event { string event_id = 1; string profile_id = 2; string connection_id = 3; string operation_id = 4; string contract_hash = 5; string manifest_hash = 6; bytes payload_json = 7; int64 captured_unix_ms = 8; string destination_id = 9; }
+// Acceptance transfers durable delivery responsibility to this Engine destination only.
+message EventAccepted { string event_id = 1; string destination_id = 2; }
+message Heartbeat { uint64 generation = 1; }
+// ref_id identifies an event ID or manifest hash; retryable never authorizes command replay.
+message ProtocolError { string code = 1; string ref_id = 2; bool retryable = 3; }
+
+// Inventory is the complete sorted Profile list; hash identifies its compact JSON string array.
+message Inventory { repeated string profile_ids = 1; string hash = 2; }
+// Acceptance commits removals and binds the inventory to the welcomed session generation.
+message InventoryAccepted { string hash = 1; }

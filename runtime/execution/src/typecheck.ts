@@ -57,7 +57,7 @@ export function validateExecutionSource(spec: BundleSpec): void {
     noEmit: true, strict: true, skipLibCheck: true, types: [], lib: ["lib.es2022.d.ts"],
     target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler,
   };
-  const host = typecheckHost(entry, declarations, generateExecutionBindingsDeclaration(spec.selectedOperations), options);
+  const host = typecheckHost(entry, declarations, generateExecutionBindingsDeclaration(spec.selectedOperations, spec.selectedBridges ?? []), options);
   const program = ts.createProgram([entry, declarations], options, host);
   const diagnostics = ts.getPreEmitDiagnostics(program);
   // Failed type checks must never produce a deployable bundle or hide behind successful transpilation.

@@ -976,7 +976,8 @@ func bindAppFamilyServiceBucketsTx(ctx context.Context, tx pgx.Tx, familyID uuid
 
 // publishConfigAppTx persists immutable app publication identity atomically while preserving immutability checks.
 func publishConfigAppTx(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, params ApplyAppConfigPlanParams) (uuid.UUID, bool, error) {
-	capabilityKeys, capabilityHash, err := capability.KeysAndHash(params.Scope.Selections, params.Scope.UnifiedApps...)
+	// Only separately resolved Bridge bindings extend the canonical family capability surface.
+	capabilityKeys, capabilityHash, err := capability.KeysAndHashWithBridges(params.Scope.Selections, params.Scope.Bridges, params.Scope.UnifiedApps...)
 	if err != nil {
 		return uuid.Nil, false, err
 	}
@@ -1185,15 +1186,15 @@ func validatePlannedExecutionBundle(params ApplyAppConfigPlanParams) error {
 	return validateUnifiedAppBundle(bundle)
 }
 
-// validateAppApplySelections requires a reviewed provider selection for every app kind.
+// validateAppApplySelections requires reviewed provider or Bridge authority while preserving strict provider schema decoding.
 func validateAppApplySelections(scope AppRuntime) error {
 	selections, err := models.DecodeAppSelections(scope.ScopeSchemaVersion, scope.Selections)
 	// Missing or malformed selections cannot become an implicit provider scope.
 	if err != nil {
 		return err
 	}
-	// A pinned bundle identifies code, but never grants provider authority by itself.
-	if len(selections) == 0 {
+	// A pinned bundle alone grants no operations; separately admitted Bridge bindings supply explicit local scope.
+	if len(selections) == 0 && len(scope.Bridges) == 0 {
 		return models.ErrAppSelectionSchemaMismatch
 	}
 	return nil

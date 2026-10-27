@@ -87,11 +87,20 @@ func handleMCPModernToolsList(ctx context.Context, span trace.Span, w http.Respo
 		writeMCPModernError(w, request.ID, -32603, "MCP attachment catalogue unavailable", http.StatusServiceUnavailable, nil)
 		return
 	}
+	// Bridge aliases join the same authenticated catalogue after hosted attachments.
+	if err := appendBridgeMCPTools(ctx, result, admission); err != nil {
+		writeMCPModernError(w, request.ID, -32603, "MCP Bridge catalogue unavailable", http.StatusServiceUnavailable, nil)
+		return
+	}
 	writeMCPModernResult(w, request.ID, result, admission.server)
 }
 
 // handleMCPModernToolsCall executes one tool and retains sandbox state only behind an explicit token-bound handle.
 func handleMCPModernToolsCall(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, routeID, token string, request mcpJSONRPCRequest, admission *mcpModernAdmission) {
+	// Local aliases must be admitted before the physical script decoder.
+	if handleBridgeMCPCall(ctx, w, r, request, admission) {
+		return
+	}
 	// Attached aliases must be admitted before the physical script decoder.
 	if handleAttachedMCPCall(ctx, w, r, request, admission) {
 		return

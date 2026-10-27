@@ -28,9 +28,10 @@ type SidebarItem = {
 const PUBLIC_NAV_ITEMS: SidebarItem[] = [
   {
     to: "/integrations",
-    label: "Services",
+    label: "Integrations",
     Icon: Layers,
-    isActive: (pathname, search) => pathname === "/integrations" && search.get("tab") !== "analytics",
+    // Service browsing and Bridge installations share one integration source destination.
+    isActive: (pathname, search) => (pathname === "/integrations" && search.get("tab") !== "analytics") || (pathname === "/integrations/bridges" || pathname.startsWith("/integrations/bridges/")),
   },
 ];
 
@@ -63,7 +64,7 @@ const AUTH_NAV_ITEMS: SidebarItem[] = [
     label: "Access",
     Icon: ShieldCheck,
     isActive: (pathname) => pathname.startsWith("/integrations/access"),
-    visible: (access) => hasWorkspacePermission(access, "access.read"),
+    // Every signed-in person can review their own app authorizations.
   },
   {
     to: "/integrations/activity",
@@ -71,12 +72,34 @@ const AUTH_NAV_ITEMS: SidebarItem[] = [
     Icon: Activity,
     visible: (access) => workspaceActivityTabs(access).length > 0,
   },
-  { to: "/integrations/settings", label: "Settings", Icon: Settings, visible: (access) => hasWorkspacePermission(access, "account.read") },
+  {
+    to: "/integrations/settings", label: "Settings", Icon: Settings,
+    // Access administrators must still reach OAuth settings without account or billing authority.
+    visible: (access) => hasWorkspacePermission(access, "account.read") || hasWorkspacePermission(access, "access.read"),
+  },
 ];
 
+/** Choose a reachable landing page for each section without broadening its data permissions. */
+function sidebarDestination(item: SidebarItem, access: CurrentActorAccess | null): SidebarItem {
+  // Personal authorizations remain available when people and team administration is denied.
+  if (item.label === "Access" && !hasWorkspacePermission(access, "access.read")) {
+    return { ...item, to: "/integrations/access/authorized-apps" };
+  }
+  // Access-only administrators enter advanced settings without hitting account-only data loaders.
+  if (item.label === "Settings" && !hasWorkspacePermission(access, "account.read")) {
+    return { ...item, to: "/integrations/settings/advanced", isActive: /** Keep all advanced settings within Settings. */ (pathname) => pathname.startsWith("/integrations/settings") };
+  }
+  return item;
+}
+
+/** Expose authenticated destinations according to their own read capabilities. */
 export function sidebarItems(isAuth: boolean, access: CurrentActorAccess | null): SidebarItem[] {
+  // Public visitors cannot discover personal or workspace administration destinations.
   if (!isAuth) return PUBLIC_NAV_ITEMS;
-  return [...PUBLIC_NAV_ITEMS, ...AUTH_NAV_ITEMS.filter((item) => item.visible?.(access) ?? true)];
+  return [...PUBLIC_NAV_ITEMS, ...AUTH_NAV_ITEMS
+    // Ungated entries contain personal views; restricted entries require their explicit capability.
+    .filter(/** Apply each destination's visibility policy. */ (item) => item.visible?.(access) ?? true)
+    .map(/** Resolve the permitted landing page for this actor. */ (item) => sidebarDestination(item, access))];
 }
 
 function isItemActive(item: SidebarItem, pathname: string, search: URLSearchParams): boolean {

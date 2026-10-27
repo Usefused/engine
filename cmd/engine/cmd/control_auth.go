@@ -11,6 +11,7 @@ import (
 )
 
 var controlPlanePrefixes = []string{
+	"/bridges",
 	"/auth",
 	"/graphql",
 	"/integrations",
@@ -39,6 +40,7 @@ var controlPlanePrefixes = []string{
 }
 
 var publicEngineRoutes = map[string]struct{}{
+	"/bridges/discovery":     {},
 	"/health":                {},
 	"/auth/managed/start":    {},
 	"/auth/managed/poll":     {},
@@ -206,6 +208,11 @@ func isRuntimeControlExclusion(request *http.Request) bool {
 	}
 	if request.Method != http.MethodPost {
 		return false
+	}
+	// Installation self-revocation authenticates its own narrowly scoped credential.
+	if strings.HasPrefix(path, "/bridges/pairings/") {
+		parts := strings.Split(strings.TrimPrefix(path, "/bridges/pairings/"), "/")
+		return len(parts) == 2 && parts[0] != "" && parts[1] == "revoke"
 	}
 	const prefix = "/v1/apps/"
 	if !strings.HasPrefix(path, prefix) {

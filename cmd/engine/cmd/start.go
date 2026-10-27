@@ -26,6 +26,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/apptokeninvalidation"
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/authevent"
+	"github.com/Usefused/engine/internal/engine/bridgehost"
 	"github.com/Usefused/engine/internal/engine/browserauth"
 	"github.com/Usefused/engine/internal/engine/cliauth"
 	"github.com/Usefused/engine/internal/engine/connectauth"
@@ -50,6 +51,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
+	bridgev1 "github.com/Usefused/engine/pkg/bridge/v1"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -275,7 +277,20 @@ func runEngine(cmd *cobra.Command) {
 	managedAuthBroker := newManagedAuthBrokerDeps(ctx, database, masterKey, cfg)
 	managedWebhookBroker := startWebhookRelay(ctx, database, natsClient, masterKey, managedAuthBroker, managedAuthClientDependencies, managedAuthBrokerURL)
 
+	// Reverse sessions share the Engine database and internal broker across replicas.
+	bridgeHost := bridgehost.New(database, natsClient.Conn)
+	// Failed cross-replica routing must stop startup before Bridge sessions become available.
+	if err := bridgeHost.StartRouting(ctx); err != nil {
+		slog.ErrorContext(ctx, "Bridge routing initialization failed", slog.Any("error", err))
+		return
+	}
+	// Durable ingress remains an outbox until the shared receiver stream acknowledges handoff.
+	if err := bridgeHost.StartEventDelivery(ctx, natsClient); err != nil {
+		slog.ErrorContext(ctx, "Bridge event delivery initialization failed", "error", err)
+		return
+	}
 	r := buildEngineRouter(engineRouterDeps{
+		bridgeHost:               bridgeHost,
 		workers:                  &engineWorkers,
 		ctx:                      ctx,
 		cfg:                      cfg,
@@ -308,7 +323,7 @@ func runEngine(cmd *cobra.Command) {
 
 	webhookSrv := startWebhookServer(ctx, r)
 	srv := startEngineHTTPServer(ctx, r)
-	grpcServer := startEngineGRPCServer(ctx, engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator, webhookStreams, managedAuthClientDependencies.connect, connectRedirectURI)
+	grpcServer := startEngineGRPCServer(ctx, engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator, webhookStreams, managedAuthClientDependencies.connect, connectRedirectURI, bridgeHost)
 
 	waitForEngineShutdown(ctx, cancel, srv, webhookSrv, grpcServer)
 }
@@ -981,6 +996,7 @@ func loadMasterKey(ctx context.Context) []byte {
 }
 
 type engineRouterDeps struct {
+	bridgeHost               *bridgehost.Server
 	workers                  *engineWorkers
 	ctx                      context.Context
 	cfg                      *config.Config
@@ -1052,6 +1068,10 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	r.Use(controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, newControlRequirementResolver(deps.engineStore, deps.configStore), auditRecorder))
 	// Workspace-wide agent transport shares the authenticated control origin.
 	mountFusedAgent(r, deps)
+	// Fixtures may omit Bridge; production injects one host for HTTP and gRPC.
+	if deps.bridgeHost != nil {
+		deps.bridgeHost.MountHTTP(r, deps.cfg.Engine.PublicURL, deps.cfg.Engine.PublicGRPCURL)
+	}
 	api.MountBrowserSessionRoutes(r, deps.browserSession)
 	api.MountManagedIdentityRoutes(r, deps.managedLogin, deps.browserCookies)
 	api.MountCLILoginRoutes(r, deps.cliLogin, deps.browserSession)
@@ -1103,6 +1123,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	executionServer := api.NewEngineGRPCServer(
 		deps.engineStore, deps.registryClient, deps.masterKey, deps.configStore, deps.natsClient, deps.tokenValidator, deps.managedAuthConnectClient, deps.connectRedirectURI,
 	)
+	executionServer.ConfigureBridgeHost(deps.bridgeHost)
 	// Config.Load has already validated this policy; pass the same resolved YAML to every HTTP/MCP app adapter.
 	if err := executionServer.ConfigureUnifiedAppAdmission(deps.cfg.Engine.UnifiedApps); err != nil {
 		// Invalid embedded startup wiring must never leave an executor silently using different limits.
@@ -1358,7 +1379,7 @@ func serveHTTPServer(ctx context.Context, srv *http.Server, startMessage string,
 }
 
 // startEngineGRPCServer injects the same canonical callback identity used by HTTP and GraphQL consent flows.
-func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator, webhookStreams *webhookstream.Registry, managedConnect *managedauthclient.ConnectClient, redirectURI string) *grpc.Server {
+func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, masterKey []byte, configStore store.ConfigRepository, natsClient *messaging.NATSClient, tokenValidator auth.TokenValidator, webhookStreams *webhookstream.Registry, managedConnect *managedauthclient.ConnectClient, redirectURI string, bridgeHost *bridgehost.Server) *grpc.Server {
 	listenAddress := engineGRPCListenAddress(grpcHost, grpcPort)
 	lis, err := net.Listen("tcp", listenAddress)
 	if err != nil {
@@ -1371,9 +1392,13 @@ func startEngineGRPCServer(ctx context.Context, engineStore store.Store, registr
 		grpc.UnaryInterceptor(enginemiddleware.UnaryLicenseEnforcement),
 		grpc.StreamInterceptor(enginemiddleware.StreamLicenseEnforcement),
 	)
+	// Bridge owns its installation authentication independently of app execution tokens.
+	bridgev1.RegisterBridgeServiceServer(grpcServer, bridgeHost)
 	// SubscribeWebhooks needs both dependencies to resolve the configured
 	// attachment and bridge its durable JetStream consumer to the gRPC stream.
-	enginev1.RegisterEngineServiceServer(grpcServer, api.NewEngineGRPCServerWithWebhookStreams(engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator, webhookStreams, managedConnect, redirectURI))
+	executionServer := api.NewEngineGRPCServerWithWebhookStreams(engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator, webhookStreams, managedConnect, redirectURI)
+	executionServer.ConfigureBridgeHost(bridgeHost)
+	enginev1.RegisterEngineServiceServer(grpcServer, executionServer)
 
 	go serveGRPCServer(ctx, grpcServer, lis, listenAddress)
 	return grpcServer
@@ -1394,10 +1419,12 @@ func serveGRPCServer(ctx context.Context, grpcServer *grpc.Server, lis net.Liste
 	}
 }
 
+// waitForEngineShutdown shares one bounded drain budget across both HTTP and streaming transports.
 func waitForEngineShutdown(ctx context.Context, cancel context.CancelFunc, srv *http.Server, webhookSrv *http.Server, grpcServer *grpc.Server) {
 	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(quit)
 	<-quit
 	slog.InfoContext(ctx, "Shutting down Engine...")
 
@@ -1406,13 +1433,14 @@ func waitForEngineShutdown(ctx context.Context, cancel context.CancelFunc, srv *
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
 
+	// Report an exhausted HTTP drain budget before stopping the remaining transports.
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.ErrorContext(shutdownCtx, "Server forced to shutdown", slog.Any("error", err))
 	}
 
 	shutdownWebhookServer(shutdownCtx, webhookSrv)
 
-	grpcServer.GracefulStop()
+	shutdownGRPCServer(shutdownCtx, grpcServer)
 	slog.InfoContext(shutdownCtx, "Engine exited")
 }
 
@@ -1451,4 +1479,22 @@ func initDependencies(ctx context.Context, cfg *config.Config) (*config.Config, 
 		os.Exit(1)
 	}
 	return cfg, database, natsClient, rateLimitKV
+}
+
+// shutdownGRPCServer lets in-flight calls drain but prevents persistent Bridge streams from blocking exit.
+func shutdownGRPCServer(ctx context.Context, server *grpc.Server) {
+	drained := make(chan struct{})
+	// Run the blocking drain independently so the shared shutdown deadline remains enforceable.
+	go func() {
+		server.GracefulStop()
+		close(drained)
+	}()
+	// Persistent streams must be closed once the process-wide drain budget expires.
+	select {
+	case <-drained:
+		return
+	case <-ctx.Done():
+		server.Stop()
+		<-drained
+	}
 }

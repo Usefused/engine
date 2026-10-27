@@ -1,3 +1,4 @@
+import type { SelectedBridge } from "./bridge-bindings";
 import path from "node:path";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
@@ -21,6 +22,7 @@ export interface SelectedOperation extends ExactOperationBinding {
 
 export interface BundleSpec {
   entryFile: string;
+  selectedBridges?: readonly SelectedBridge[];
   selectedOperations: readonly SelectedOperation[];
 }
 
@@ -97,7 +99,7 @@ export async function buildExecutionBundle(spec: BundleSpec): Promise<ExecutionB
   // Bundle the ESM-capable source so esbuild can remove unused Zod/runtime branches.
   const runtimeFile = path.resolve(__dirname, "../../src/index.ts");
   const selections = JSON.stringify(exactSelections(spec.selectedOperations));
-  const bindingSource = generateExecutionBindingsSource(spec.selectedOperations);
+  const bindingSource = generateExecutionBindingsSource(spec.selectedOperations, spec.selectedBridges ?? []);
   const source = `
 import authored from ${JSON.stringify(entryFile)};
 import { toPublicSchema, executeWithSnapshot } from ${JSON.stringify(runtimeFile)};

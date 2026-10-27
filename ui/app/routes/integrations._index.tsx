@@ -1,3 +1,4 @@
+import { IntegrationSourceTabs } from "~/components/layout/IntegrationSourceTabs";
 import { importErrorDiagnostics } from "~/components/ImportDiagnostics";
 import type { SpecificationImportDiagnostic } from "~/lib/api";
 import { Layers, Plus } from "lucide-react";
@@ -606,6 +607,7 @@ export default function IntegrationsIndex() {
 
   return (
     <div>
+      <IntegrationSourceTabs />
       <div className="mb-6">
         <CataloguePageHeader title="Services" icon={Layers} description="Choose and configure the services your apps and MCP servers can use." actions={
           <button

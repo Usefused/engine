@@ -42,6 +42,8 @@ var builtInRoles = []RoleDefinition{
 		Permissions: []Permission{
 			PermissionWorkspaceRead,
 			PermissionWorkspaceUpdate,
+			PermissionBridgeRead,
+			PermissionBridgeManage,
 			PermissionServiceRead,
 			PermissionServiceConsume,
 			PermissionServiceManage,

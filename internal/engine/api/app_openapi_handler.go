@@ -52,7 +52,7 @@ func AppOpenAPIHandler(engineStore store.Store, contracts appOpenAPIContractStor
 			return
 		}
 		bundles, _ := engineStore.(store.UnifiedAppBundleStore)
-		document, err := buildAppOpenAPIDocumentWithBundle(request.Context(), contracts, bundles, app, family, request.URL.Query().Get("operation"))
+		document, err := buildStoredAppOpenAPIDocument(request.Context(), engineStore, contracts, bundles, app, family, request.URL.Query().Get("operation"))
 		if err != nil {
 			writeSDKConfigError(response, err)
 			return
@@ -94,17 +94,17 @@ func validAppOpenAPIFamilyIdentity(family *store.AppFamily, app *store.App, acco
 
 // buildAppOpenAPIDocument composes the one stable REST route from immutable
 // selected service operations, then enforces the response cap.
-func buildAppOpenAPIDocument(ctx context.Context, contracts appOpenAPIContractStore, app *store.App, family *store.AppFamily, operationFilter string) ([]byte, error) {
-	return buildAppOpenAPIDocumentWithBundle(ctx, contracts, nil, app, family, operationFilter)
+func buildAppOpenAPIDocument(ctx context.Context, contracts appOpenAPIContractStore, app *store.App, family *store.AppFamily, operationFilter string, bridges ...models.BridgeBinding) ([]byte, error) {
+	return buildAppOpenAPIDocumentWithBundle(ctx, contracts, nil, app, family, operationFilter, bridges...)
 }
 
-// buildAppOpenAPIDocumentWithBundle adds the exact authored execute contract to the existing SDK export.
-func buildAppOpenAPIDocumentWithBundle(ctx context.Context, contracts appOpenAPIContractStore, bundles store.UnifiedAppBundleStore, app *store.App, family *store.AppFamily, operationFilter string) ([]byte, error) {
+// buildAppOpenAPIDocumentWithBundle combines exact provider, Bridge, and authored contracts in one export.
+func buildAppOpenAPIDocumentWithBundle(ctx context.Context, contracts appOpenAPIContractStore, bundles store.UnifiedAppBundleStore, app *store.App, family *store.AppFamily, operationFilter string, bridges ...models.BridgeBinding) ([]byte, error) {
 	filter, err := validateAppOpenAPIOperationFilter(operationFilter)
 	if err != nil {
 		return nil, err
 	}
-	export, err := loadAppOpenAPIOperations(ctx, contracts, app, filter)
+	export, err := loadAppOpenAPIOperations(ctx, contracts, app, filter, bridges)
 	if err != nil {
 		return nil, err
 	}
@@ -214,20 +214,46 @@ func unifiedAppOpenAPIResponseSchema(output map[string]any) map[string]any {
 	}
 }
 
-// loadAppOpenAPIOperations exports selected physical operations after graph retirement.
-func loadAppOpenAPIOperations(ctx context.Context, contracts appOpenAPIContractStore, app *store.App, operationFilter string) (*appOpenAPIExport, error) {
+// loadAppOpenAPIOperations exports only immutable provider and local capabilities selected by this app.
+func loadAppOpenAPIOperations(ctx context.Context, contracts appOpenAPIContractStore, app *store.App, operationFilter string, bridges []models.BridgeBinding) (*appOpenAPIExport, error) {
+	// Unknown scope versions cannot safely establish operation membership.
 	if app == nil || app.ScopeSchemaVersion != models.AppScopeSchemaVersion {
 		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app scope is incompatible"}
 	}
 	selections, err := decodeAppOpenAPISelections(app.Selections)
+	// Malformed provider scope cannot be hidden by valid Bridge attachments.
 	if err != nil {
 		return nil, err
 	}
-	// Every SDK and Unified App version has selected provider scope; empty scope is invalid.
-	if len(selections) == 0 {
+	// Local attachments are real execution scope; entirely empty apps remain invalid.
+	if len(selections)+len(bridges) == 0 {
 		return nil, workspaceConfigHTTPError{status: http.StatusConflict, message: "app selections are unavailable"}
 	}
-	matches, err := loadAppOpenAPIEndpointMatches(ctx, contracts, selections, operationFilter)
+	export := &appOpenAPIExport{components: make(map[string]any)}
+	export.operations, err = loadPhysicalAppOpenAPIOperations(ctx, contracts, export, selections, operationFilter)
+	// A partial physical projection must never be published as a complete mixed app.
+	if err != nil {
+		return nil, err
+	}
+	if err := appendBridgeOpenAPIOperations(export, bridges, operationFilter); err != nil {
+		return nil, err
+	}
+	// Provider and local aliases share the same REST operation namespace.
+	export.operations, err = rejectAmbiguousAppOpenAPIOperations(export.operations)
+	if err != nil {
+		return nil, err
+	}
+	return export, export.err
+}
+
+// loadPhysicalAppOpenAPIOperations avoids provider storage lookups for Bridge-only apps.
+func loadPhysicalAppOpenAPIOperations(ctx context.Context, contracts appOpenAPIContractStore, export *appOpenAPIExport, selections []models.SDKSelection, filter string) ([]appOpenAPIOperation, error) {
+	// No provider grants means there are no provider schemas to discover.
+	if len(selections) == 0 {
+		return nil, nil
+	}
+	matches, err := loadAppOpenAPIEndpointMatches(ctx, contracts, selections, filter)
+	// Snapshot failures cannot yield a partial projection.
 	if err != nil {
 		return nil, err
 	}
@@ -236,18 +262,7 @@ func loadAppOpenAPIOperations(ctx context.Context, contracts appOpenAPIContractS
 	if err != nil {
 		return nil, err
 	}
-	export := &appOpenAPIExport{components: make(map[string]any)}
-	export.operations, err = physicalAppOpenAPIOperations(export, selections, matches, metadata)
-	// A physical schema failure prevents an apparently complete mixed export.
-	if err != nil {
-		return nil, err
-	}
-	// Exact physical names still need one collision check before public export.
-	export.operations, err = rejectAmbiguousAppOpenAPIOperations(export.operations)
-	if err != nil {
-		return nil, err
-	}
-	return export, export.err
+	return physicalAppOpenAPIOperations(export, selections, matches, metadata)
 }
 
 // loadAppOpenAPIEndpointMatches keeps one exact batch query and validates its complete selected scope.

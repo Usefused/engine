@@ -57,6 +57,7 @@ var (
 )
 
 type AppRuntime struct {
+	Bridges []models.BridgeBinding
 	// UnifiedApps contributes hosted delegation to immutable publication capability accounting.
 	UnifiedApps []models.UnifiedAppBinding
 	AccountID   uuid.UUID

@@ -142,6 +142,7 @@ func ConnectNATS() (*NATSClient, error) {
 	return &NATSClient{Conn: nc, JS: js, server: embeddedServer}, nil
 }
 
+// ensureEmbeddedNATS provides local durable messaging with room for bounded encoded Bridge frames.
 func ensureEmbeddedNATS(natsURL string) (*server.Server, error) {
 	// The probe only elects a convenience follower on the same host; embedded
 	// mode is deliberately not presented as a resilient Engine cluster.
@@ -155,7 +156,7 @@ func ensureEmbeddedNATS(natsURL string) (*server.Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve embedded NATS store directory: %w", err)
 	}
-	ns, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: 4222, JetStream: true, StoreDir: storeDir})
+	ns, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: 4222, JetStream: true, StoreDir: storeDir, MaxPayload: 4 << 20})
 	if err != nil {
 		return nil, fmt.Errorf("initialize embedded NATS server: %w", err)
 	}

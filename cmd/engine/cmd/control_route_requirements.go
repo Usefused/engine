@@ -709,21 +709,22 @@ func (r *storeBackedControlRequirementResolver) desiredConfigDocumentRequirement
 			Secret string `json:"secret"`
 		} `json:"services"`
 		UnifiedApps map[string]models.UnifiedAppReference `json:"unified_apps"`
+		Bridges     map[string]models.BridgeReference     `json:"bridges"`
 	}
 	// Incomplete documents cannot safely establish service authorization targets.
 	if json.Unmarshal(raw, &doc) != nil || r.store == nil {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
-	// Hosted-only consumers have real execution scope; completely empty apps remain invalid.
-	if len(doc.Services) == 0 && len(doc.UnifiedApps) == 0 {
+	// Local and hosted attachments are execution scope even without provider services.
+	if !hasDesiredExecutionScope(len(doc.Services), len(doc.UnifiedApps), len(doc.Bridges)) {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
-	attachments, err := r.desiredAttachmentRequirements(ctx, actor.AccountID, configType, doc.UnifiedApps)
+	attachments, err := r.desiredAppAttachmentRequirements(ctx, actor, configType, doc.UnifiedApps, len(doc.Bridges))
 	// Unavailable or cross-account dependencies cannot establish authorization scope.
 	if err != nil {
 		return nil, err
 	}
-	// Hosted-only consumers need bucket and attached-family grants, not invented service scope.
+	// Attachment-only consumers retain bucket and dependency grants without invented provider scope.
 	if len(doc.Services) == 0 {
 		return r.appendDesiredConfigBucketRequirements(ctx, actor.WorkspaceID, attachments, doc.Bucket, doc.Services, bucketPermission)
 	}
@@ -791,7 +792,7 @@ func desiredConfigBucketNames(topLevel string, services map[string]struct {
 	return mapKeys(names), nil
 }
 
-// storedDesiredConfigSelectionRequirements checks provider and hosted scope from the immutable plan at apply time.
+// storedDesiredConfigSelectionRequirements checks provider, hosted, and local scope from the immutable plan at apply time.
 func storedDesiredConfigSelectionRequirements(
 	plan *store.ConfigPlan,
 	servicePermission accesscontrol.Permission,
@@ -807,16 +808,17 @@ func storedDesiredConfigSelectionRequirements(
 			ServiceID uuid.UUID `json:"service_id"`
 		} `json:"selections"`
 		UnifiedApps []models.UnifiedAppBinding `json:"unified_apps"`
+		Bridges     []models.BridgeBinding     `json:"bridges"`
 	}
 	// The resolved bucket is required even when the authored app selects no provider services.
 	if json.Unmarshal(plan.ResolvedPayload, &payload) != nil || payload.BucketID == uuid.Nil {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
-	// A stored plan must retain at least one provider or hosted capability.
-	if len(payload.Selections) == 0 && len(payload.UnifiedApps) == 0 {
+	// Immutable Bridge scope also makes an attachment-only plan executable.
+	if !hasDesiredExecutionScope(len(payload.Selections), len(payload.UnifiedApps), len(payload.Bridges)) {
 		return nil, accesscontrol.ErrPolicyDenied
 	}
-	requirements, err := attachedBindingRequirements(plan.ConfigType, payload.UnifiedApps)
+	requirements, err := storedAppAttachmentRequirements(plan.ConfigType, payload.UnifiedApps, payload.Bridges)
 	// Invalid hosted identities cannot be skipped even when physical selections are also present.
 	if err != nil {
 		return nil, err

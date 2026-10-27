@@ -122,8 +122,8 @@ Admin registration below remains available for long-lived integrations.
 
 ## Register an OAuth client (admin)
 
-1. Sign in as the admin user and open **Access → OAuth Clients**
-   (`/integrations/access/oauth-clients`).
+1. Sign in as the admin user and open **Settings → Advanced → OAuth Clients**
+   (`/integrations/settings/oauth-clients`).
 2. Under **Register a client**, fill in a client name, choose **Confidential
    (server-side app, gets a secret)**, enter your redirect URI under
    **Redirect URIs (one per line)**, and enter `service.read` under **Allowed
@@ -199,7 +199,7 @@ above (all one-time-use — capture fresh values if you re-run a step).
 
 Still as the end-user session from above:
 
-1. Open **Access → Connected Apps** (`/integrations/access/connected-apps`,
+1. Open **Access → Authorized Apps** (`/integrations/access/authorized-apps`,
    reachable by any signed-in user — no `access.read` gate).
 2. Confirm the authorized client appears with its scopes ("Scopes:
    service.read") and a "Connected `<timestamp>`" line.
@@ -213,7 +213,7 @@ Still as the end-user session from above:
 
 ## Revocation and error paths
 
-1. As the admin, revoke the client from **Access → OAuth Clients** (confirm
+1. As the admin, revoke the client from **Settings → Advanced → OAuth Clients** (confirm
    prompt: `Revoke "<client name>"? Every token it has issued will stop
    working immediately.`). Confirm every still-live token issued under that
    client immediately stops authenticating, and that `/oauth/authorize` for

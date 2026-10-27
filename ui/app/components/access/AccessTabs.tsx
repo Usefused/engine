@@ -1,13 +1,14 @@
 import { SectionTabs } from "~/components/layout/SectionTabs";
+import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
+import { hasWorkspacePermission } from "~/lib/current-actor-access";
 
-const ACCESS_TABS = [
-  { label: "People", to: "/integrations/access/people" },
-  { label: "Teams", to: "/integrations/access/teams" },
-  { label: "OAuth Clients", to: "/integrations/access/oauth-clients" },
-  { label: "Connected Apps", to: "/integrations/access/connected-apps" },
-];
-
-/** Keeps Access destinations on the same scrollable navigation strip as other sections. */
+/** Keep personal authorizations available without exposing workspace administration tabs. */
 export function AccessTabs() {
-  return <SectionTabs tabs={ACCESS_TABS} label="Access navigation" />;
+  const { access } = useCurrentActorAccess();
+  // People and teams require workspace authority; personal consent management does not.
+  const adminTabs = hasWorkspacePermission(access, "access.read") ? [
+    { label: "People", to: "/integrations/access/people" },
+    { label: "Teams", to: "/integrations/access/teams" },
+  ] : [];
+  return <SectionTabs tabs={[...adminTabs, { label: "Authorized Apps", to: "/integrations/access/authorized-apps" }]} label="Access navigation" />;
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -40,9 +41,10 @@ func validateExecutionSourceMode(doc sdkConfigDocument) error {
 }
 
 type executionPlanArtifact struct {
-	Digest   string          `json:"digest"`
-	BundleJS string          `json:"bundle_js"`
-	Manifest json.RawMessage `json:"manifest"`
+	ResolvedBridges []models.BridgeBinding `json:"-"`
+	Digest          string                 `json:"digest"`
+	BundleJS        string                 `json:"bundle_js"`
+	Manifest        json.RawMessage        `json:"manifest"`
 }
 
 type executionCompilerSelection struct {
@@ -84,7 +86,18 @@ func compileExecutionPlanSource(ctx context.Context, s store.Store, doc sdkConfi
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.unified_app.compile")
 	defer span.End()
 	span.SetAttributes(attribute.Int("execution.operation_count", len(pins)))
-	artifact, err := runExecutionCompiler(ctx, doc.Source, pins)
+	var bridges []models.BridgeBinding
+	if len(doc.Bridges) > 0 {
+		actor, ok := accesscontrol.ActorFromContext(ctx)
+		if !ok {
+			return nil, errors.New("Bridge authorization unavailable")
+		}
+		bridges, err = resolveBridgeAttachments(ctx, s, actor.AccountID, doc)
+		if err != nil {
+			return nil, err
+		}
+	}
+	artifact, err := runExecutionCompiler(ctx, doc.Source, pins, bridges)
 	// Authored source and compiler diagnostics are deliberately absent from telemetry.
 	if err != nil {
 		span.SetStatus(codes.Error, "compile_failed")
@@ -94,6 +107,7 @@ func compileExecutionPlanSource(ctx context.Context, s store.Store, doc sdkConfi
 		span.SetStatus(codes.Error, "compile_scope_mismatch")
 		return nil, err
 	}
+	artifact.ResolvedBridges = bridges
 	span.SetAttributes(attribute.String("outcome", "compiled"), attribute.Int("execution.bundle_bytes", len(artifact.BundleJS)))
 	return artifact, nil
 }
@@ -225,7 +239,7 @@ func bindExecutionCompilerMatches(selections []models.SDKSelection, keys []strin
 }
 
 // runExecutionCompiler invokes the Engine-owned compiler with bounded source and private temporary artifacts.
-func runExecutionCompiler(ctx context.Context, source string, pins []executionCompilerSelection) (*executionPlanArtifact, error) {
+func runExecutionCompiler(ctx context.Context, source string, pins []executionCompilerSelection, bridgeGroups ...[]models.BridgeBinding) (*executionPlanArtifact, error) {
 	release, err := admitExecutionCompile(ctx)
 	// Limit the aggregate compiler and inspection footprint before creating temporary files or processes.
 	if err != nil {
@@ -246,7 +260,11 @@ func runExecutionCompiler(ctx context.Context, source string, pins []executionCo
 	}
 	defer os.RemoveAll(dir)
 	paths := []string{filepath.Join(dir, "app.ts"), filepath.Join(dir, "spec.json"), filepath.Join(dir, "bundle.js"), filepath.Join(dir, "manifest.json"), filepath.Join(dir, "digest.json")}
-	spec, _ := json.Marshal(map[string]any{"entryFile": paths[0], "selectedOperations": pins})
+	var bridges []models.BridgeBinding
+	if len(bridgeGroups) > 0 {
+		bridges = bridgeGroups[0]
+	}
+	spec, _ := json.Marshal(map[string]any{"entryFile": paths[0], "selectedOperations": pins, "selectedBridges": bridges})
 	// Source and spec remain private to this one bounded compiler invocation.
 	if err := os.WriteFile(paths[0], []byte(source), 0600); err != nil {
 		return nil, workspaceConfigHTTPError{status: 503, message: "unified app compiler storage is unavailable"}

@@ -107,7 +107,9 @@ test("restricted access navigation is permission-aware and direct denial is expl
   assert.match(apps, /<CreateAppMenu/);
   assert.doesNotMatch(apps, /createTo|createLabel/);
   assert.match(sidebar, /visible: \(access\) => hasAnyPermission\(access, "bucket\.read"\)/);
-  assert.match(sidebar, /visible: \(access\) => hasWorkspacePermission\(access, "access\.read"\)/);
+  // Personal authorizations remain discoverable while administrative tabs retain their read gate.
+  assert.match(source("../components/access/AccessTabs.tsx"), /hasWorkspacePermission\(access, "access\.read"\)/);
+  assert.match(sidebar, /to: "\/integrations\/access\/authorized-apps"/);
   assert.match(gate, /Access not available/);
   assert.match(gate, /Ask a workspace administrator/);
   assert.doesNotMatch(gate, /No teams yet/);

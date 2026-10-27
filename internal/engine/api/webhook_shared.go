@@ -260,7 +260,7 @@ func isFusedAuthEventName(eventName string) bool {
 func shouldPublishWebhookAnalytics(subject string) bool {
 	parsed, ok := messaging.ParseWebhookSubject(subject)
 	// Reserved Fused auth subjects share transport mechanics but are not provider webhook executions.
-	if !ok || parsed.FusedAuth {
+	if !ok || parsed.FusedAuth || parsed.FusedBridge {
 		return false
 	}
 	return true
@@ -275,7 +275,7 @@ func publishFailedAnalytics(ctx context.Context, accountID, serviceID uuid.UUID,
 func publishSuccessAnalytics(ctx context.Context, accountID uuid.UUID, msgID string, m *nats.Msg) {
 	parsed, ok := messaging.ParseWebhookSubject(m.Subject)
 	// Malformed or Engine-owned subjects never enter provider delivery analytics.
-	if !ok || parsed.FusedAuth {
+	if !ok || parsed.FusedAuth || parsed.FusedBridge {
 		return
 	}
 	publishWebhookOutcome(ctx, accountID, parsed.ServiceID.String(), parsed.EventName, msgID, "success", "", m)

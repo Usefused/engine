@@ -2020,6 +2020,8 @@ func engineSchemaQueries() []string {
 	queries = append(queries, `ALTER TABLE fused_workspace_secrets ADD COLUMN IF NOT EXISTS exportable boolean NOT NULL DEFAULT false;`)
 	queries = append(queries, oauthProviderSchemaQueries()...)
 	queries = append(queries, managedAuthBrokerSchemaQueries()...)
+	// Bridge durability shares the Engine schema lifecycle and backup boundary.
+	queries = append(queries, bridgeSchemaQueries()...)
 	return queries
 }
 

@@ -24,7 +24,7 @@ const sdkGenerationBuildSelect = `
 	       plan.id, COALESCE(app.sdk_generation_job_id, ''),
 	       app.account_id,
 	       COALESCE(app.sdk_generation_status, ''),
-           COALESCE(plan.resolved_payload->'unified_apps', '[]'::jsonb)
+           COALESCE(plan.resolved_payload->'unified_apps', '[]'::jsonb), COALESCE(plan.resolved_payload->'bridges', '[]'::jsonb)
 	FROM fused_apps app
 	JOIN fused_app_families family
 	  ON family.app_family_id = app.app_family_id
@@ -98,13 +98,13 @@ type sdkGenerationBuildScanner interface {
 // while keeping its JSON validation identical for both callers.
 func scanSDKGenerationBuild(row sdkGenerationBuildScanner) (*SDKGenerationBuild, error) {
 	var build SDKGenerationBuild
-	var selections, bindings, attachments []byte
+	var selections, bindings, attachments, bridges []byte
 	var planID uuid.UUID
 	err := row.Scan(
 		&build.Request.Name, &build.Request.Version, &build.Request.AppFamilyID, &build.Request.AppID,
 		&build.Request.SourceHash, &build.Request.GeneratorVersion, &build.Request.TargetLanguage,
 		&selections, &build.Request.Description, &build.Request.IncludeMCP, &build.Request.SkipSandbox,
-		&build.Request.DefaultEngineURL, &bindings, &planID, &build.JobID, &build.AccountID, &build.Status, &attachments,
+		&build.Request.DefaultEngineURL, &bindings, &planID, &build.JobID, &build.AccountID, &build.Status, &attachments, &bridges,
 	)
 	if err != nil {
 		return nil, err
@@ -118,6 +118,10 @@ func scanSDKGenerationBuild(row sdkGenerationBuildScanner) (*SDKGenerationBuild,
 	// Recovery must replay the same hosted methods as the originally submitted package.
 	if err := json.Unmarshal(attachments, &build.Request.UnifiedApps); err != nil {
 		return nil, fmt.Errorf("decode SDK hosted app bindings: %w", err)
+	}
+	// Recovery retains the exact local contracts admitted at plan time.
+	if err := json.Unmarshal(bridges, &build.Request.Bridges); err != nil {
+		return nil, err
 	}
 	build.Request.IdempotencyKey = planID.String()
 	build.Request.TargetType = AppKindSDK.String()

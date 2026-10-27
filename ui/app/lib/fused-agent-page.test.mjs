@@ -91,7 +91,7 @@ test('inherited fieldset locks prevent edits during an existing form action', ()
 test('production account, OAuth and personal key displays omit issued values from agent context', () => {
   const markup = [
     routeCredentialMarkup('integrations.settings.tsx', 'newKey'),
-    routeCredentialMarkup('integrations.access.oauth-clients.tsx', 'secret'),
+    routeCredentialMarkup('integrations.settings_.oauth-clients.tsx', 'secret'),
     renderToStaticMarkup(React.createElement(PersonalCredentialPanel, { credentials: [], issuedSecret: 'PRIVATE-ISSUED-CREDENTIAL' })),
   ];
   for (const html of markup) {

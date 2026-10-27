@@ -19,6 +19,10 @@ var unifiedAppAlias = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 // validateAttachedAppServices accepts hosted capabilities alongside ordinary physical selections.
 func validateAttachedAppServices(doc sdkConfigDocument) error {
+	// Local-provider references share immutable application admission.
+	if err := validateBridgeReferences(doc); err != nil {
+		return err
+	}
 	// Hosted dependencies use the same explicit admission across execution adapters.
 	if len(doc.UnifiedApps) > 0 && doc.Kind != "sdk" && doc.Kind != "mcp" && doc.Kind != "unified_app" {
 		return errors.New("unified_apps requires an SDK, MCP, or Unified App config")
@@ -34,7 +38,7 @@ func validateAttachedAppServices(doc sdkConfigDocument) error {
 		}
 	}
 	// A reference-only consumer is valid; a completely empty app remains invalid.
-	if len(doc.Services) == 0 && len(doc.UnifiedApps) > 0 {
+	if len(doc.Services) == 0 && (len(doc.UnifiedApps) > 0 || len(doc.Bridges) > 0) {
 		return nil
 	}
 	return validateAppServiceDocs(doc.Services)
@@ -76,7 +80,7 @@ func resolveUnifiedAppAttachments(ctx context.Context, s store.Store, accountID 
 }
 
 // attachmentPermissions adds typed use authority to the ordinary owner and actor preflight.
-func attachmentPermissions(raw json.RawMessage, bindings []models.UnifiedAppBinding) (json.RawMessage, int, error) {
+func attachmentPermissions(raw json.RawMessage, bindings []models.UnifiedAppBinding, bridgeGroups ...[]models.BridgeBinding) (json.RawMessage, int, error) {
 	requirements, err := accesscontrol.UnmarshalRequiredPermissions(raw)
 	// Persisted permission metadata must remain authoritative for apply.
 	if err != nil {
@@ -96,8 +100,20 @@ func attachmentPermissions(raw json.RawMessage, bindings []models.UnifiedAppBind
 		requirements = append(requirements, accesscontrol.Requirement{Permission: accesscontrol.PermissionAppUnifiedAppUse, Resource: ref})
 		names[ref] = binding.Name
 	}
+	// Bridge ownership is rechecked for both the applying actor and owning team.
+	bridgeCount := 0
+	for _, group := range bridgeGroups {
+		for _, binding := range group {
+			workspace, parseErr := uuid.Parse(binding.WorkspaceID)
+			if parseErr != nil {
+				return nil, 0, errors.New("invalid Bridge workspace pin")
+			}
+			requirements = append(requirements, accesscontrol.Requirement{Permission: accesscontrol.PermissionBridgeManage, Resource: accesscontrol.ResourceRef{Type: accesscontrol.ResourceWorkspace, ID: workspace}})
+			bridgeCount++
+		}
+	}
 	// Preserve existing display names when there is no hosted dependency.
-	if len(bindings) == 0 {
+	if len(bindings) == 0 && bridgeCount == 0 {
 		return raw, len(requirements), nil
 	}
 	return marshalPlanRequiredPermissions(deduplicateConfigRequirements(requirements), names, nil)

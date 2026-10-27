@@ -660,7 +660,7 @@ var ErrSDKPackageNotGenerated = errors.New("app has no generated SDK package")
 func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID, appID uuid.UUID) (*models.SDKGenerationRequest, error) {
 	var request models.SDKGenerationRequest
 	var deliveryMode AppDeliveryMode
-	var selections, bindings, attached []byte
+	var selections, bindings, attached, bridges []byte
 	var planID uuid.UUID
 	err := s.db.QueryRow(ctx, `
 		SELECT family.display_name, app.version, app.app_family_id, app.app_id,
@@ -671,7 +671,7 @@ func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID
 		       COALESCE((plan.resolved_payload->>'skip_sandbox')::boolean, false),
 		       COALESCE(plan.resolved_payload->>'default_engine_url', ''),
 		       COALESCE(plan.resolved_payload->'contract_bindings', '[]'::jsonb),
-		       plan.id, COALESCE(family.delivery_mode, ''), COALESCE(plan.resolved_payload->'unified_apps', '[]'::jsonb)
+		       plan.id, COALESCE(family.delivery_mode, ''), COALESCE(plan.resolved_payload->'unified_apps', '[]'::jsonb), COALESCE(plan.resolved_payload->'bridges', '[]'::jsonb)
 		FROM fused_apps app
 		JOIN fused_app_families family
 		  ON family.app_family_id = app.app_family_id
@@ -693,7 +693,7 @@ func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID
 		&request.Name, &request.Version, &request.AppFamilyID, &request.AppID,
 		&request.SourceHash, &request.GeneratorVersion, &request.TargetLanguage,
 		&selections, &request.Description, &request.IncludeMCP, &request.SkipSandbox,
-		&request.DefaultEngineURL, &bindings, &planID, &deliveryMode, &attached,
+		&request.DefaultEngineURL, &bindings, &planID, &deliveryMode, &attached, &bridges,
 	)
 	// Absence and cross-account identity remain indistinguishable to callers.
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -717,6 +717,10 @@ func (s *postgresStore) GetSDKPackageBuildRequest(ctx context.Context, accountID
 	}
 	// Package recovery must retain the same public hosted contracts as its original build.
 	if err := json.Unmarshal(attached, &request.UnifiedApps); err != nil {
+		return nil, err
+	}
+	// Bridge contracts must survive package cache eviction without rediscovering mutable device state.
+	if err := json.Unmarshal(bridges, &request.Bridges); err != nil {
 		return nil, err
 	}
 	request.IdempotencyKey = planID.String()

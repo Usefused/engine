@@ -11,6 +11,9 @@ import (
 type Permission string
 
 const (
+	// Bridge grants scope local-provider registration separately from app execution.
+	PermissionBridgeRead              Permission = "bridge.read"
+	PermissionBridgeManage            Permission = "bridge.manage"
 	PermissionWorkspaceRead           Permission = "workspace.read"
 	PermissionWorkspaceUpdate         Permission = "workspace.update"
 	PermissionServiceRead             Permission = "service.read"
@@ -122,6 +125,8 @@ var (
 		PermissionUnifiedAppDiagnosticsRead,
 		PermissionAccessRead,
 		PermissionAccessManage,
+		PermissionBridgeRead,
+		PermissionBridgeManage,
 	}
 	permissionSet = newPermissionSet(allPermissions)
 )

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -36,7 +37,12 @@ func validateDirectAPIOpenAPIPlan(ctx context.Context, s store.Store, doc sdkCon
 		Status: store.AppStatusActive,
 	}
 	family := &store.AppFamily{Kind: store.AppKindSDK, DisplayName: doc.Name}
-	_, err = buildAppOpenAPIDocument(ctx, contracts, app, family, "")
+	bridges, err := directAPIPlanBridgeBindings(ctx, s, doc)
+	// Exact local schemas must resolve before a direct API can claim exportable scope.
+	if err != nil {
+		return err
+	}
+	_, err = buildAppOpenAPIDocument(ctx, contracts, app, family, "", bridges...)
 	// The exporter already classifies schema absence and inconsistency with a stable repairable error code.
 	if err != nil {
 		return err
@@ -52,4 +58,18 @@ func directAPIOpenAPIPlanID(existingAppID uuid.UUID, doc sdkConfigDocument) uuid
 	}
 	// New app identity is allocated during apply, while schema validity remains independent of the deterministic placeholder value.
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("direct-api-openapi-plan\x00"+doc.Name+"\x00"+doc.Version))
+}
+
+// directAPIPlanBridgeBindings reuses contract admission so OpenAPI never trusts client-supplied local schemas.
+func directAPIPlanBridgeBindings(ctx context.Context, s store.Store, doc sdkConfigDocument) ([]models.BridgeBinding, error) {
+	// Existing provider plans need no new control actor or Bridge store dependency.
+	if len(doc.Bridges) == 0 {
+		return nil, nil
+	}
+	actor, ok := accesscontrol.ActorFromContext(ctx)
+	// Bridge schema discovery requires the same authenticated workspace authority as publication.
+	if !ok {
+		return nil, accesscontrol.ErrAuthenticationRequired
+	}
+	return resolveBridgeAttachments(ctx, s, actor.AccountID, doc)
 }

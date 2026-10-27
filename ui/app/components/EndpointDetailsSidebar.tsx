@@ -1,6 +1,5 @@
-import { useState } from "react";
-import { OperationDetailsHeader, OperationParameterTable, OperationDisclosure } from "~/components/OperationDetailsParts";
-import { AlertTriangle, ChevronDown, ChevronUp, Loader2, Copy, Check, Info } from "lucide-react";
+import { OperationDetailsHeader, OperationParameterTable, OperationCodeExample, OperationDetailsPanel, OperationDetailsBody, OperationSummary, OperationTechnicalDetails, OperationSection, OperationSchemaDisclosure } from "~/components/OperationDetailsParts";
+import { AlertTriangle, Loader2, Info } from "lucide-react";
 import { SchemaViewer } from "~/components/SchemaViewer";
 import { type JsonSchemaNode } from "~/components/SchemaViewer";
 import {
@@ -34,15 +33,13 @@ function ResponseSchemaViewer({ code, schema, serviceId, componentScope, allowRe
     ? { bg: "bg-red-50",       text: "text-red-700",        border: "border-red-200",        dotColor: "bg-red-500"       }
     : { bg: "bg-slate-50",     text: "text-slate-700",      border: "border-slate-200",      dotColor: "bg-slate-500"     };
 
-  return <OperationDisclosure track="toggle_response_schema" label="Schema" badge={
+  return <OperationSchemaDisclosure track="toggle_response_schema" label="Schema" badge={
     <span className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${codeStyle.bg} ${codeStyle.text} ${codeStyle.border}`}>
       <span className={`h-1.5 w-1.5 rounded-full ${codeStyle.dotColor}`} />{code}
     </span>
   }>
-    <div className="bg-[#161c27] p-4 animate-in fade-in slide-in-from-top-1 duration-200">
       <SchemaViewer schema={schema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
-    </div>
-  </OperationDisclosure>;
+  </OperationSchemaDisclosure>;
 }
 
 // schemaContractProjection prefers the bounded projection while retaining raw-schema compatibility.
@@ -99,35 +96,23 @@ function operationDisplayType(endpoint: IntegrationObject): string {
   return "REST API";
 }
 
-// OperationMetadata surfaces persisted v3 identity and policy instead of hiding it in the raw response.
+/** Keep exact technical identity available without repeating it in the operation overview. */
 function OperationMetadata({ endpoint }: { endpoint: IntegrationObject }) {
+  // Only declared facts appear; absence must not imply a protocol or policy default.
   const facts = [
     ["Operation ID", endpoint.name],
-    endpoint.provider_protocol && ["Protocol", endpoint.provider_protocol],
+    endpoint.provider_protocol && ["Protocol", endpoint.provider_protocol.toUpperCase()],
     endpoint.operation_kind && ["Operation", endpoint.operation_kind],
     endpoint.normalized_path && ["Normalized path", endpoint.normalized_path],
     endpoint.stable_key && ["Stable key", endpoint.stable_key],
-  ].filter(Boolean) as string[][];
+  ].filter(Boolean) as [string, string][];
   const hasPolicy = Boolean(endpoint.pagination || endpoint.security_requirements?.length);
+  // An empty technical disclosure provides no useful inspection target.
   if (facts.length === 0 && !hasPolicy) return null;
-  return (
-    <div className="mt-2 space-y-2 text-xs text-slate-500">
-      {facts.map(([label, value]) => (
-        <div key={label} className="flex min-w-0 gap-2">
-          <span className="shrink-0 font-medium text-slate-600">{label}</span>
-          <code className="min-w-0 break-all text-slate-500">{value}</code>
-        </div>
-      ))}
-      {hasPolicy && (
-        <details>
-          <summary className="cursor-pointer font-medium text-slate-600">Execution metadata</summary>
-          <pre className="mt-2 max-h-48 overflow-auto rounded-md bg-slate-950 p-3 text-[10px] text-slate-200">
-            {JSON.stringify({ pagination: endpoint.pagination, security_requirements: endpoint.security_requirements }, null, 2)}
-          </pre>
-        </details>
-      )}
-    </div>
-  );
+  return <OperationTechnicalDetails facts={facts}>
+      {/* Raw policy remains inspectable on demand rather than dominating the summary. */}
+      {hasPolicy && <OperationCodeExample label="Execution policy" language="JSON" code={JSON.stringify({ pagination: endpoint.pagination, security_requirements: endpoint.security_requirements }, null, 2)} copyLabel="Copy execution policy" />}
+  </OperationTechnicalDetails>;
 }
 
 export interface EndpointDetailsSidebarProps {
@@ -162,17 +147,10 @@ export default function EndpointDetailsSidebar({
   const responseSchemas = canonicalResponseSchemas(selectedEndpoint.responses);
   const endpointDrift = drift.filter((snapshot) => snapshot.integration_object_id === selectedEndpoint.id);
 
-  // Isolate fixed surfaces from the parent page's space-y margins without adding a layout box.
-  return (
-    <div className="contents">
-      <div className="fixed inset-0 bg-slate-900/20 z-40 transition-opacity" onClick={() => setSelectedEndpoint(null)} />
-      <div data-fused-detail-sidebar className="fixed inset-y-0 right-0 w-full md:w-[600px] bg-white shadow-2xl z-50 overflow-y-auto overflow-x-hidden transform transition-transform border-l border-slate-200 flex flex-col">
-        <EndpointSidebarHeader endpoint={selectedEndpoint} endpointType={endpointType} close={() => setSelectedEndpoint(null)} />
-        <EndpointDriftPanel snapshots={endpointDrift} driftAction={driftAction} handleDismiss={handleDismiss} handleApply={handleApply} />
-        <EndpointContractContent endpoint={selectedEndpoint} isLoading={isLoading} requestSchema={requestSchema} responseSchemas={responseSchemas} serviceId={srv.id} serviceName={srv.name} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
-      </div>
-    </div>
-  );
+  return <OperationDetailsPanel label={`Operation ${selectedEndpoint.name}`} onClose={/** Dismiss without changing the selected service version. */ () => setSelectedEndpoint(null)} header={<EndpointSidebarHeader endpoint={selectedEndpoint} endpointType={endpointType} close={/** Header dismissal shares the panel lifecycle. */ () => setSelectedEndpoint(null)} />}>
+    <EndpointDriftPanel snapshots={endpointDrift} driftAction={driftAction} handleDismiss={handleDismiss} handleApply={handleApply} />
+    <EndpointContractContent endpoint={selectedEndpoint} isLoading={isLoading} requestSchema={requestSchema} responseSchemas={responseSchemas} serviceId={srv.id} serviceName={srv.name} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
+  </OperationDetailsPanel>;
 }
 
 // methodBadgeClass maps operation verbs to stable header colors.
@@ -268,54 +246,36 @@ function EndpointContractContent({ endpoint, isLoading, requestSchema, responseS
   // Defer contract presentation until the selected version has finished loading.
   if (isLoading) return <div className="flex min-h-[300px] flex-1 items-center justify-center text-slate-400"><Loader2 className="mr-3 h-8 w-8 animate-spin text-blue-500" />Loading endpoint details...</div>;
   return (
-    <div className="flex flex-1 flex-col space-y-8 p-4 sm:p-6">
+    <OperationDetailsBody>
       <EndpointSummary endpoint={endpoint} />
       <GeneratedSDKExample endpoint={endpoint} serviceName={serviceName} requestSchema={requestSchema} />
       {/* Missing parameter contracts stay empty rather than inventing fields. */}
       <OperationParameterTable parameters={endpoint.parameters ?? []} />
       <RequestSchemaSection endpoint={endpoint} schema={requestSchema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
       <ResponseSchemasSection responses={responseSchemas} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />
-    </div>
+    </OperationDetailsBody>
   );
 }
 
-// EndpointSummary displays descriptive and deprecation metadata.
+/** Lead with the operation's purpose and keep implementation metadata behind an optional disclosure. */
 function EndpointSummary({ endpoint }: { endpoint: IntegrationObject }) {
+  // A dated deprecation is more actionable than the generic retired-operation notice.
   const deprecation = endpoint.deprecation_date
     ? `This endpoint will be removed on ${new Date(endpoint.deprecation_date).toLocaleDateString()}.`
     : "This endpoint is deprecated and should no longer be used.";
-  return <div><h2 className="text-lg font-semibold text-slate-900">{endpoint.name}</h2><OperationMetadata endpoint={endpoint} />{(endpoint.deprecated || endpoint.deprecation_date) && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">{deprecation}</p>}{endpoint.description && <div className="mt-2 text-sm text-slate-600" dangerouslySetInnerHTML={{ __html: stripLinks(endpoint.description) }} />}</div>;
+  return <OperationSummary title={endpoint.name}
+    // Render only the supplied description and explicit deprecation notice.
+    description={endpoint.description && <div dangerouslySetInnerHTML={{ __html: stripLinks(endpoint.description) }} />}
+    notice={(endpoint.deprecated || endpoint.deprecation_date) && <p className="rounded-lg bg-red-50 p-3 text-xs leading-5 text-red-700">{deprecation}</p>}>
+    <OperationMetadata endpoint={endpoint} />
+  </OperationSummary>;
 }
 
 // GeneratedSDKExample displays the matching generated call or subscription
 // without exposing credentials or provider-derived examples.
 function GeneratedSDKExample({ endpoint, serviceName, requestSchema }: { endpoint: IntegrationObject; serviceName: string; requestSchema?: JsonSchemaNode }) {
-  const [copied, setCopied] = useState(false);
   const code = typescriptSDKCallExample(serviceName, endpoint, requestSchema);
-
-  // copyExample reports a short-lived local state change and never sends the
-  // generated snippet or operation metadata to another service.
-  function copyExample() {
-    navigator.clipboard.writeText(code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  }
-
-  return (
-    <details className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-      <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-        <span>Generated SDK example</span>
-        <span className="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">TypeScript</span>
-      </summary>
-      <div className="relative border-t border-slate-200 bg-slate-950">
-        <button onClick={copyExample} className="absolute right-2 top-2 rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white" title="Copy generated example" aria-label="Copy generated SDK example">
-          {/* Copy feedback stays local and does not change the example's transport. */}
-          {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
-        </button>
-        <pre className="overflow-x-auto p-4 pr-10 text-[11px] leading-5 text-slate-200"><code>{code}</code></pre>
-      </div>
-    </details>
-  );
+  return <OperationSection title="Use in an app"><OperationCodeExample label="Generated SDK example" language="TypeScript" code={code} copyLabel="Copy generated SDK example" /></OperationSection>;
 }
 
 // WebhookSchemaNotice explains the observation path without presenting an
@@ -342,27 +302,19 @@ function WebhookSchemaNotice() {
 // RequestSchemaSection keeps unknown webhook bodies visible while preserving
 // declared scalar, reference, and object schemas as expandable contracts.
 function RequestSchemaSection({ endpoint, schema, serviceId, componentScope, allowRemoteRefs }: { endpoint: IntegrationObject; schema?: JsonSchemaNode; serviceId: string } & ComponentReferenceScope) {
-  const [open, setOpen] = useState(false);
   // A missing or empty inbound body is pending knowledge, not an absent UI section.
   if (endpoint.isWebhook && webhookSchemaPending(schema)) return <WebhookSchemaNotice />;
   // Outbound operations without a body should not inherit webhook inference copy.
   if (!schema) return null;
-  return (
-    <div>
-      <button data-track="toggle_request_schema" onClick={() => setOpen(!open)} aria-expanded={open} className="flex w-full justify-between rounded border p-3 text-xs font-medium">
-        {/* Inbound and outbound schemas describe opposite directions. */}
-        <span>{endpoint.isWebhook ? "Event Schema" : "Request Schema"}</span>
-        {/* The chevron reflects disclosure state without implying schema validity. */}
-        {open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-      </button>
-      {/* Resolve and render schema details only when the user expands them. */}
-      {open && <div className="bg-[#161c27] p-4"><SchemaViewer schema={schema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} isWebhookEvent={endpoint.isWebhook} /></div>}
-    </div>
-  );
+  // Inbound and outbound contracts share presentation while retaining their direction labels.
+  return <OperationSchemaDisclosure track="toggle_request_schema" label={endpoint.isWebhook ? "Event Schema" : "Request Schema"}>
+    <SchemaViewer schema={schema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} isWebhookEvent={endpoint.isWebhook} />
+  </OperationSchemaDisclosure>;
 }
 
 // ResponseSchemasSection renders every canonical response media representation.
 function ResponseSchemasSection({ responses, serviceId, componentScope, allowRemoteRefs }: { responses: CanonicalResponseSchema[]; serviceId: string } & ComponentReferenceScope) {
+  // Omit a response section only when the contract declares no representations.
   if (responses.length === 0) return null;
-  return <div><h3 className="mb-3 border-b pb-2 text-sm font-semibold">Responses</h3><div className="space-y-4">{responses.map((response) => <ResponseSchemaViewer key={response.key} code={response.label} schema={response.schema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />)}</div></div>;
+  return <OperationSection title="Responses">{responses.map(/** Retain each media representation as its own expandable schema. */ (response) => <ResponseSchemaViewer key={response.key} code={response.label} schema={response.schema} serviceId={serviceId} componentScope={componentScope} allowRemoteRefs={allowRemoteRefs} />)}</OperationSection>;
 }

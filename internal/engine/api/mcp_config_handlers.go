@@ -295,6 +295,11 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
+	// Local provider contracts are pinned beside hosted dependencies.
+	payload.Bridges, err = resolveBridgeAttachments(ctx, s, call.accountID, call.document)
+	if err != nil {
+		return sdkPlanResult{}, err
+	}
 	// The served skill is pinned now so apply publishes exactly the scope and prose that was planned.
 	payload.MCPSkill = planMCPSkill(ctx, s, call.document.Name, payload.Description, selections, resolved)
 	resolvedPayload, _ := json.Marshal(payload)
@@ -306,7 +311,7 @@ func createMCPConfigPlan(ctx context.Context, configStore store.ConfigRepository
 		return sdkPlanResult{}, workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to compute required permissions"}
 	}
 	// Actor and owning team must both be allowed to use every attached app.
-	requiredPermissions, requiredCount, err = attachmentPermissions(requiredPermissions, payload.UnifiedApps)
+	requiredPermissions, requiredCount, err = attachmentPermissions(requiredPermissions, payload.UnifiedApps, payload.Bridges)
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
@@ -502,6 +507,7 @@ func executeMCPConfigApply(ctx context.Context, configStore store.ConfigReposito
 		description:                payload.Description,
 		fusedIntelligentClassifier: payload.FusedIntelligentClassifier,
 		unifiedApps:                payload.UnifiedApps,
+		bridges:                    payload.Bridges,
 	})
 	// Runtime scope must be complete before publishing any family version.
 	if err != nil {

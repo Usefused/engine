@@ -145,6 +145,10 @@ func (s *EngineGRPCServer) handleRESTExecution(writer http.ResponseWriter, reque
 	if s.tryAttachedUnifiedAppRun(writer, request, identity, decoded) {
 		return
 	}
+	// Bridge aliases retain immutable app membership and their own command uncertainty semantics.
+	if s.tryBridgeRun(writer, request, identity, decoded) {
+		return
+	}
 	s.handleRawRESTExecution(writer, request, appID, scope, identity, decoded, canonical)
 }
 

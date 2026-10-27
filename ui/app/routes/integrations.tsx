@@ -15,9 +15,9 @@ export default function IntegrationsLayout() {
   const isAuth = rootData?.isAuth ?? false;
   const [signOutError, setSignOutError] = useState("");
 
-  useEffect(() => {
-    // Hosted app authoring and access pages belong to the authenticated Engine workspace.
-    const isAuthenticatedStaticRoute = location.pathname.startsWith("/integrations/unified-apps") || location.pathname.startsWith("/integrations/webhooks") || location.pathname.startsWith("/integrations/access/") ||
+  useEffect(/** Keep relocated workspace routes behind the same sign-in boundary. */ () => {
+    // Explicit workspace prefixes take precedence over public provider-shaped URLs.
+    const isAuthenticatedStaticRoute = location.pathname.startsWith("/integrations/settings/") || (location.pathname === "/integrations/bridges" || location.pathname.startsWith("/integrations/bridges/")) || location.pathname.startsWith("/integrations/unified-apps") || location.pathname.startsWith("/integrations/webhooks") || location.pathname.startsWith("/integrations/access/") ||
       location.pathname.startsWith("/integrations/mcp/") ||
       location.pathname.startsWith("/integrations/sdks/") || [
       "/integrations/buckets",

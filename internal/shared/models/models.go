@@ -1188,6 +1188,7 @@ type SDKContractBinding struct {
 }
 
 type SDKGenerationRequest struct {
+	Bridges []BridgeBinding `json:"bridges,omitempty"`
 	// UnifiedApps carries public hosted contracts, never source or execution tokens.
 	UnifiedApps      []UnifiedAppBinding `json:"unified_apps,omitempty"`
 	Name             string              `json:"name"`

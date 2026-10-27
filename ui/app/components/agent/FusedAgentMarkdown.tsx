@@ -22,7 +22,7 @@ const tokens = {
 };
 
 /** Shows source as selectable text; copying never executes code or applies it to a workspace form. */
-function CodeBlock({ children }: ComponentPropsWithoutRef<'pre'>) {
+export function CodeBlock({ children }: ComponentPropsWithoutRef<'pre'>) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const timer = useRef<ReturnType<typeof setTimeout>>();
   // Markdown emits one code child for both fenced and indented blocks, including unfinished streamed fences.

@@ -128,7 +128,7 @@ interface SchemaViewerProps {
   isWebhookEvent?: boolean;
 }
 
-// SchemaViewer renders a schema tree and scopes any remote component expansion.
+// SchemaViewer contains intrinsic tree width so deep indentation scrolls locally instead of collapsing controls.
 export function SchemaViewer({ schema, serviceId, componentScope = "latest", allowRemoteRefs = true, isWebhookEvent }: SchemaViewerProps) {
   // Leaving a service/version view discards its private definitions instead of retaining a global cache.
   const cache = React.useMemo(() => new Map<string, unknown>(), [serviceId, componentScope]);
@@ -138,8 +138,11 @@ export function SchemaViewer({ schema, serviceId, componentScope = "latest", all
   }
   return (
     <ComponentResolutionContext.Provider key={`${serviceId}:${componentScope}`} value={{ componentScope, allowRemoteRefs, document: schema, cache }}>
-      <div className="text-[11px] leading-normal select-text w-full">
-        <SchemaNode node={schema} serviceId={serviceId} depth={0} isWebhookEvent={isWebhookEvent} />
+      <div className="w-full min-w-0 overflow-x-auto overscroll-x-contain">
+        {/* Preserve each nested row's intrinsic width; only this viewport may scroll horizontally. */}
+        <div className="w-max min-w-full text-[11px] leading-normal select-text">
+          <SchemaNode node={schema} serviceId={serviceId} depth={0} isWebhookEvent={isWebhookEvent} />
+        </div>
       </div>
     </ComponentResolutionContext.Provider>
   );

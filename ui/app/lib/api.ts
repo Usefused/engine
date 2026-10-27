@@ -1292,7 +1292,18 @@ export interface OAuthConnectedApp {
   granted_at: string;
 }
 
+export interface BridgeInstallation { pairing_id:string; name:string; scope:"workspace"|"profiles"; profile_ids:string[]; generation:number; }
+export interface BridgeManifest { state:"online"|"offline"; profile_id:string; revision:string; manifest_hash:string; document:{ operations:Array<{connection_id:string;operation_id:string;contract_hash:string;contract_json:string}> }; }
+
 export const api = {
+  bridges: {
+    /** Read only sanitized installation metadata through the normal browser session. */
+    list: () => req<{bridges:BridgeInstallation[]}>("/bridges"),
+    /** Use Engine's persisted digest rather than hashing reformatted JSON in the browser. */
+    manifests: (id:string) => req<{manifests:BridgeManifest[]}>(`/bridges/${encodeURIComponent(id)}/manifests`),
+    /** Revoke only the explicitly selected installation using the shared CSRF boundary. */
+    revoke: (id:string) => req<{revoked:boolean}>(`/bridges/${encodeURIComponent(id)}`,{method:"DELETE"}),
+  },
   mcpCatalog: {
     /** Reads the caller's saved snapshot without contacting the upstream server. */
     get: (serviceID: string, versionID: string, signal?: AbortSignal) => req<{ catalog: McpCatalogSnapshot | null }>(mcpCatalogPath(serviceID, versionID), { signal }),

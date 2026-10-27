@@ -100,7 +100,7 @@ async function main(): Promise<void> {
   const manifest = paths.bundleOnly ? undefined : await inspectExecutionBundle(bundle.code, (code) => evaluateInChild(code, paths.inspector));
   const clientSource = paths.client && manifest ? generateExecutionClientSource(manifest) : undefined;
   // Local declarations guide authoring but do not alter the Engine's ID-only manifest.
-  const bindingsSource = paths.bindings ? generateExecutionBindingsDeclaration(config.selectedOperations) : undefined;
+  const bindingsSource = paths.bindings ? generateExecutionBindingsDeclaration(config.selectedOperations, config.selectedBridges ?? []) : undefined;
   writeBuildArtifacts(paths, bundle, manifest, clientSource, bindingsSource);
 }
 

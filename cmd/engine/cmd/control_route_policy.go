@@ -146,6 +146,11 @@ func pathRequirement(permission accesscontrol.Permission, resourceType accesscon
 // even though their transport is mounted by prefix, so newly added Registry
 // endpoints remain denied until this local policy is deliberately extended.
 var controlRESTPolicies = []controlRoutePolicy{
+	{http.MethodPost, "/bridges/pairings", false, []routeRequirement{workspaceRequirement(accesscontrol.PermissionBridgeManage)}},
+	{http.MethodGet, "/bridges", false, []routeRequirement{workspaceRequirement(accesscontrol.PermissionBridgeRead)}},
+	{http.MethodDelete, "/bridges/{pairing_id}", false, []routeRequirement{workspaceRequirement(accesscontrol.PermissionBridgeManage)}},
+	{http.MethodPut, "/bridges/{pairing_id}/profiles", false, []routeRequirement{workspaceRequirement(accesscontrol.PermissionBridgeManage)}},
+	{http.MethodGet, "/bridges/{pairing_id}/manifests", false, []routeRequirement{workspaceRequirement(accesscontrol.PermissionBridgeRead)}},
 	{http.MethodGet, "/agent/status", false, nil},
 	{http.MethodGet, "/agent/sessions", false, nil},
 	{http.MethodPost, "/agent/sessions", false, nil},

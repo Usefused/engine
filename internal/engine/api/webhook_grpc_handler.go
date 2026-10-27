@@ -36,6 +36,7 @@ type pendingWebhookMsgs struct {
 
 // webhookSubscriptionScope contains the already-authorized subject union and stable durable identity.
 type webhookSubscriptionScope struct {
+	bridgeEvents   []string
 	appID          uuid.UUID
 	tokenID        uuid.UUID
 	accountID      uuid.UUID
@@ -106,7 +107,7 @@ func (s *EngineGRPCServer) SubscribeWebhooks(stream enginev1.EngineService_Subsc
 	}
 
 	msgMap := newPendingWebhookMsgs()
-	sub, err := setupGRPCWebhookConsumer(ctx, thread, s.natsClient.JS, scope.accountID, scope.appFamilyID, scope.appID, subscribeMsg.GetReceiverName(), scope.filterSubjects, s.natsClient, stream, msgMap, registration)
+	sub, err := setupGRPCWebhookConsumer(ctx, thread, s.natsClient.JS, scope.accountID, scope.appFamilyID, scope.appID, subscribeMsg.GetReceiverName(), scope.filterSubjects, s.natsClient, stream, msgMap, registration, func() error { return s.revalidateWebhookSubscription(ctx, scope) })
 	// Consumer setup must complete before readiness is acknowledged to the generated receiver.
 	if err != nil {
 		return status.Error(codes.Internal, "internal error")
@@ -147,7 +148,13 @@ func (s *EngineGRPCServer) resolveWebhookSubscriptionScope(ctx context.Context, 
 	if err != nil || !sameWebhookRuntimeIdentity(runtime, appID, accountID, appFamilyID) {
 		return webhookSubscriptionScope{}, status.Error(codes.Internal, "failed to resolve SDK webhook configuration")
 	}
-	providerRequests, authEventRequests := partitionWebhookEventRequests(requestedEvents)
+	bridgeRequests, remaining := partitionBridgeEvents(requestedEvents)
+	bridgeSubjects, err := s.bridgeEventSubjects(ctx, identity, bridgeRequests)
+	// A local subscription requires both exact app selection and current installation authority.
+	if err != nil {
+		return webhookSubscriptionScope{}, status.Error(codes.PermissionDenied, "Bridge event subscription unavailable")
+	}
+	providerRequests, authEventRequests := partitionWebhookEventRequests(remaining)
 	providerEvents, err := validateRequestedEvents(runtime, providerRequests)
 	// Malformed immutable selections cannot fall back to mutable workspace state for broader provider delivery.
 	if err != nil {
@@ -167,7 +174,7 @@ func (s *EngineGRPCServer) resolveWebhookSubscriptionScope(ctx context.Context, 
 	providerSubjects := buildFilterSubjects(accountID, webhookLabel, providerEvents)
 	return webhookSubscriptionScope{
 		appID: appID, tokenID: identity.TokenID, accountID: accountID, appFamilyID: appFamilyID, webhookLabel: webhookLabel,
-		providerEvents: providerEvents, filterSubjects: append(providerSubjects, authSubjects...),
+		bridgeEvents: bridgeRequests, providerEvents: providerEvents, filterSubjects: append(append(providerSubjects, authSubjects...), bridgeSubjects...),
 	}, nil
 }
 
@@ -264,7 +271,9 @@ func (s *EngineGRPCServer) revalidateWebhookSubscription(ctx context.Context, sc
 	if err != nil || !sameWebhookRuntimeIdentity(runtime, scope.appID, scope.accountID, scope.appFamilyID) {
 		return status.Error(codes.PermissionDenied, "webhook subscription app version is no longer active")
 	}
-	return nil
+	// Local installation revocation must fence an already-open durable receiver.
+	_, err = s.bridgeEventSubjects(ctx, identity, scope.bridgeEvents)
+	return err
 }
 
 // sameWebhookTokenIdentity compares only stable authorization identity retained by the live stream.
@@ -275,7 +284,7 @@ func sameWebhookTokenIdentity(identity auth.RuntimeIdentity, scope webhookSubscr
 
 // setupGRPCWebhookConsumer gives each receiver a stable durable name and queue
 // group so reconnects preserve explicit acknowledgement and redelivery state.
-func setupGRPCWebhookConsumer(ctx context.Context, thread observability.Thread, js nats.JetStreamContext, accountID, appFamilyID, appID uuid.UUID, receiverName string, filterSubjects []string, natsClient *messaging.NATSClient, stream enginev1.EngineService_SubscribeWebhooksServer, msgMap *pendingWebhookMsgs, registration *webhookstream.Registration) (*nats.Subscription, error) {
+func setupGRPCWebhookConsumer(ctx context.Context, thread observability.Thread, js nats.JetStreamContext, accountID, appFamilyID, appID uuid.UUID, receiverName string, filterSubjects []string, natsClient *messaging.NATSClient, stream enginev1.EngineService_SubscribeWebhooksServer, msgMap *pendingWebhookMsgs, registration *webhookstream.Registration, beforeBridgeDelivery ...func() error) (*nats.Subscription, error) {
 	// A receiver with no authorized explicit or implicit event subjects still receives the normal subscription acknowledgement.
 	if len(filterSubjects) == 0 {
 		return nil, nil // No subscription needed
@@ -309,6 +318,10 @@ func setupGRPCWebhookConsumer(ctx context.Context, thread observability.Thread, 
 	sub, err := js.QueueSubscribe(deliverSubject, durableName, func(m *nats.Msg) {
 		// An invalidated registration must stop public delivery even before the event loop returns and unsubscribes.
 		if !registration.IsCurrent() {
+			return
+		}
+		// Installation authority is rechecked on every local delivery, not just on periodic receiver heartbeats.
+		if !bridgeDeliveryAuthorized(m.Subject, beforeBridgeDelivery) {
 			return
 		}
 		handleGRPCNatsMessage(ctx, thread, m, accountID, natsClient, stream, msgMap)
@@ -512,4 +525,20 @@ func webhookStreamCancellationError(reason webhookstream.CancellationReason) err
 		// Unexpected local teardown is retriable but must never continue delivery on the old stream.
 		return status.Error(codes.Unavailable, "webhook subscription ended; reconnect")
 	}
+}
+
+// bridgeDeliveryAuthorized separates local installation checks from ordinary provider subscriptions.
+func bridgeDeliveryAuthorized(subject string, checks []func() error) bool {
+	parsed, valid := messaging.ParseWebhookSubject(subject)
+	// Ordinary provider deliveries retain their existing registration authorization path.
+	if !valid || !parsed.FusedBridge {
+		return true
+	}
+	for _, check := range checks {
+		// Leave a local broker message pending when installation authority has disappeared.
+		if check() != nil {
+			return false
+		}
+	}
+	return true
 }

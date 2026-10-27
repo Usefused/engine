@@ -18,9 +18,9 @@ func TestPermissionCatalogueContainsUniqueValidNames(t *testing.T) {
 		}
 		seen[permission] = struct{}{}
 	}
-	// Secret retrieval adds a separate grant without broadening use or management access.
-	if len(permissions) != 49 {
-		t.Fatalf("permission catalogue contains %d entries, want 49", len(permissions))
+	// Bridge read/manage add distinct grants without widening existing app execution scopes.
+	if len(permissions) != 51 {
+		t.Fatalf("permission catalogue contains %d entries, want 51", len(permissions))
 	}
 }
 

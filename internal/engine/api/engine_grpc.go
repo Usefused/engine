@@ -24,6 +24,7 @@ import (
 )
 
 type EngineGRPCServer struct {
+	bridgeHost bridgeInvoker
 	enginev1.UnimplementedEngineServiceServer
 	runtime        *sandbox.EngineGRPCServer
 	restRuntime    restExecutionRuntime
@@ -85,9 +86,12 @@ func (s *EngineGRPCServer) Disconnect(ctx context.Context, req *enginev1.Disconn
 	return s.runtime.Disconnect(ctx, req)
 }
 
-// Execute delegates provider calls to sandbox, keeping auth-management RPCs
-// from forking the runtime dispatch implementation.
+// Execute routes selected Bridge aliases before the ordinary physical provider dispatcher.
 func (s *EngineGRPCServer) Execute(req *enginev1.ExecuteRequest, stream enginev1.EngineService_ExecuteServer) error {
+	// Local capabilities share app authentication but never enter physical retry policies.
+	if strings.HasPrefix(req.GetEndpointName(), "bridge:") {
+		return s.executeBridgeGRPC(req, stream)
+	}
 	// Provider calls retain the sandbox transport so retry, idempotency, and
 	// dispatch observability stay on their single established path.
 	return s.runtime.Execute(req, stream)

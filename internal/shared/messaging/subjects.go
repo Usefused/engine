@@ -25,9 +25,10 @@ const (
 
 // WebhookSubject describes the public routing fields shared by provider and Engine-owned deliveries.
 type WebhookSubject struct {
-	ServiceID uuid.UUID
-	EventName string
-	FusedAuth bool
+	ServiceID   uuid.UUID
+	EventName   string
+	FusedAuth   bool
+	FusedBridge bool
 }
 
 func ProviderRateLimitKVStream() string {
@@ -69,6 +70,10 @@ func ParseWebhookSubject(subject string) (WebhookSubject, bool) {
 	if accountErr != nil || accountID == uuid.Nil {
 		return WebhookSubject{}, false
 	}
+	// Local ingress reserves a non-service segment so provider labels cannot impersonate it.
+	if parts[2] == "fused-bridge" {
+		return parseBridgeWebhookSubject(parts)
+	}
 	// Engine-owned auth subjects reserve the third segment and carry family identity before service identity.
 	if parts[2] == AuthWebhookSubjectMarker {
 		return parseFusedAuthWebhookSubject(parts)
@@ -99,4 +104,18 @@ func parseFusedAuthWebhookSubject(parts []string) (WebhookSubject, bool) {
 		return WebhookSubject{}, false
 	}
 	return WebhookSubject{ServiceID: serviceID, EventName: eventName, FusedAuth: true}, true
+}
+
+// parseBridgeWebhookSubject projects an installation and exact event digest into the existing receiver envelope.
+func parseBridgeWebhookSubject(parts []string) (WebhookSubject, bool) {
+	// Only one digest segment is admitted; broker wildcards and arbitrary event names are excluded.
+	if len(parts) != 5 || len(parts[4]) != 64 {
+		return WebhookSubject{}, false
+	}
+	pairing, err := uuid.Parse(parts[3])
+	// Device identity is distinct from Registry service identity even though the public receiver key uses UUIDs.
+	if err != nil || pairing == uuid.Nil {
+		return WebhookSubject{}, false
+	}
+	return WebhookSubject{ServiceID: pairing, EventName: "bridge." + parts[4], FusedBridge: true}, true
 }

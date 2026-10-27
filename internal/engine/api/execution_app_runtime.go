@@ -160,6 +160,10 @@ func (host *executionCapabilityHost) Fetch(ctx context.Context, raw json.RawMess
 	if json.Unmarshal(raw, &kind) == nil && kind["unifiedApp"] != nil {
 		return host.callUnifiedApp(ctx, raw)
 	}
+	// Local effects use the same recorded fetch channel and immutable alias admission.
+	if kind["bridge"] != nil {
+		return host.callBridge(ctx, raw)
+	}
 	return host.fetchWorkspaceOperation(ctx, raw)
 }
 

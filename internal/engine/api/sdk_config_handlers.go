@@ -60,6 +60,7 @@ type SDKConfigApplyRequest struct {
 }
 
 type sdkConfigDocument struct {
+	Bridges map[string]models.BridgeReference `json:"bridges,omitempty"`
 	// UnifiedApps declares explicit hosted capabilities included in this immutable consumer.
 	UnifiedApps map[string]models.UnifiedAppReference `json:"unified_apps,omitempty"`
 	APIVersion  string                                `json:"apiVersion"`
@@ -214,6 +215,7 @@ func (b appBucketSet) distinct() []store.Bucket {
 // selections used by both SDK and MCP config apply. SDK generation adds its
 // Registry-specific fields separately, while MCP never carries a target.
 type appResolvedPayload struct {
+	Bridges        []models.BridgeBinding `json:"bridges,omitempty"`
 	RuntimeBuckets []appResolvedBucketRef `json:"runtime_buckets,omitempty"`
 	// UnifiedApps pins attachment identity alongside the reviewed provider selections.
 	UnifiedApps []models.UnifiedAppBinding `json:"unified_apps,omitempty"`
@@ -599,7 +601,7 @@ func validateUnifiedAppConfigDocument(doc sdkConfigDocument) error {
 	if err := validateAttachedAppServices(doc); err != nil {
 		return err
 	}
-	return validateExecutionOperationScope(doc.Services, len(doc.UnifiedApps))
+	return validateExecutionOperationScope(doc.Services, len(doc.UnifiedApps)+len(doc.Bridges))
 }
 
 // validateExecutionIdentityAndRuntime validates hosted source identity and rejects unsupported runtime declarations.
@@ -853,6 +855,10 @@ func decodeAppApplyPlan(ctx context.Context, configStore store.ConfigRepository,
 	// Recheck operator opt-in before a previously planned import can mutate app state.
 	if err := validateImportedMCPFeature(doc); err != nil {
 		return sdkConfigDocument{}, appResolvedPayload{}, workspaceConfigHTTPError{status: http.StatusForbidden, message: err.Error()}
+	}
+	// Bridge pins must still match reviewed, authorized contracts before publication.
+	if err := verifyBridgeAttachments(ctx, s, doc, payload); err != nil {
+		return sdkConfigDocument{}, appResolvedPayload{}, err
 	}
 	// References retain the exact authorized version across delayed applies.
 	if err := verifyUnifiedAppAttachments(ctx, s, doc, payload); err != nil {
@@ -1135,7 +1141,7 @@ func createSDKConfigPlan(
 	if err := json.Unmarshal(definition.resolvedPayload, &attachmentPayload); err != nil {
 		return sdkPlanResult{}, err
 	}
-	requiredPermissions, requiredCount, err = attachmentPermissions(requiredPermissions, attachmentPayload.UnifiedApps)
+	requiredPermissions, requiredCount, err = attachmentPermissions(requiredPermissions, attachmentPayload.UnifiedApps, attachmentPayload.Bridges)
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
@@ -1167,7 +1173,7 @@ func createSDKConfigPlan(
 	trace.SpanFromContext(ctx).SetAttributes(attribute.Int("required_permissions_count", requiredCount))
 	return sdkPlanResult{
 		plan:          plan,
-		summary:       appPlanSummary(appID == uuid.Nil, !definition.noop && appID != uuid.Nil, definition.services, call.document),
+		summary:       appPlanSummary(appID == uuid.Nil, !definition.noop && appID != uuid.Nil, definition.services, call.document, attachmentPayload.Bridges),
 		notifications: withAppCredentialReadinessWarning(notifications, definition.readiness),
 		readiness:     definition.readiness,
 	}, nil
@@ -1221,12 +1227,19 @@ func appConfigPermissionType(doc sdkConfigDocument) string {
 }
 
 // appPlanSummary presents the persisted family kind independently of package delivery.
-func appPlanSummary(create, update bool, services []map[string]any, doc sdkConfigDocument) map[string]any {
-	// Existing SDK and API plans retain their established review keys.
-	if doc.Kind != store.AppKindUnifiedApp.String() {
-		return sdkPlanSummary(create, update, services, sdkConfigGeneratesPackage(doc))
+func appPlanSummary(create, update bool, services []map[string]any, doc sdkConfigDocument, bridgeGroups ...[]models.BridgeBinding) map[string]any {
+	summary := sdkPlanSummary(create, update, services, sdkConfigGeneratesPackage(doc))
+	if doc.Kind == store.AppKindUnifiedApp.String() {
+		summary = map[string]any{"create_execution": create, "update_execution": update, "services": services, "runtime_buckets": doc.RuntimeBuckets}
 	}
-	return map[string]any{"create_execution": create, "update_execution": update, "services": services, "runtime_buckets": doc.RuntimeBuckets}
+	if len(bridgeGroups) > 0 && len(bridgeGroups[0]) > 0 {
+		selections := []map[string]any{}
+		for _, binding := range bridgeGroups[0] {
+			selections = append(selections, map[string]any{"group": binding.Group, "connection": binding.ConnectionID, "operation": binding.OperationID, "kind": binding.Kind})
+		}
+		summary["bridges"] = selections
+	}
+	return summary
 }
 
 // resolveSDKPlanDefinition resolves sdk plan definition from immutable app scope before provider dispatch.
@@ -1289,6 +1302,15 @@ func completeResolvedAppPayload(ctx context.Context, s store.Store, call sdkPlan
 	payload.ExecutionBundle = artifact
 	var err error
 	payload.UnifiedApps, err = resolveUnifiedAppAttachments(ctx, s, call.accountID, call.document)
+	// A failed hosted dependency must not be hidden by Bridge resolution.
+	if err != nil {
+		return err
+	}
+	if artifact != nil {
+		payload.Bridges = artifact.ResolvedBridges
+		return nil
+	}
+	payload.Bridges, err = resolveBridgeAttachments(ctx, s, call.accountID, call.document)
 	return err
 }
 
@@ -3697,6 +3719,10 @@ func ensureAppPayloadContractsCurrent(ctx context.Context, registryClient sandbo
 		local.setGenerationTargetBindings(resolved.ContractBindings)
 	}
 	bindings := allAppContractBindings(resolved)
+	// Bridge-only scope has no provider revisions; its exact local contracts are revalidated by verifyBridgeAttachments.
+	if len(bindings) == 0 && len(resolved.Selections) == 0 && len(resolved.Bridges) > 0 {
+		return nil
+	}
 	// Local runtime or retained generation identity must remain unchanged at each publication checkpoint.
 	if err := ensureSDKContractBindingsCurrent(ctx, registryClient, apiKey, bindings); err != nil {
 		return generationPinPlanError(err, workspaceConfigHTTPError{status: http.StatusConflict, message: err.Error()})
@@ -4290,6 +4316,7 @@ func appRequiredOAuthSecretFields(name string) []appMissingCredentialField {
 // persistAppRuntimeParams carries the exact app version plus its family-level
 // bucket and owner inputs into the atomic config apply transaction.
 type persistAppRuntimeParams struct {
+	bridges        []models.BridgeBinding
 	unifiedApps    []models.UnifiedAppBinding
 	accountID      uuid.UUID
 	appID          uuid.UUID
@@ -4322,20 +4349,28 @@ type persistAppRuntimeParams struct {
 	executionBundle  *store.UnifiedAppBundle
 }
 
-// appRuntimeForApply copies compiled private definitions and hashes into the immutable runtime record.
+// appRuntimeForApply copies admitted provider and Bridge scope into the immutable runtime record.
 func appRuntimeForApply(p persistAppRuntimeParams) (store.AppRuntime, error) {
+	// Every app still owns a concrete family bucket even when its operations are local.
 	if p.bucketID == uuid.Nil || strings.TrimSpace(p.bucketName) == "" {
 		return store.AppRuntime{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "app bucket identity unavailable"}
 	}
-	if err := validateAppRuntimeSelections(p.scopeSchemaVersion, p.selections, p.bundleDigest); err != nil {
+	// A validated local-only scope persists an explicit empty provider set, never ambiguous JSON null.
+	if p.selections == nil && len(p.bridges) > 0 {
+		p.selections = []models.SDKSelection{}
+	}
+	// Local attachments do not excuse malformed provider selections in mixed apps.
+	if err := validateAppRuntimeSelections(p.scopeSchemaVersion, p.selections, p.bundleDigest, p.bridges...); err != nil {
 		return store.AppRuntime{}, err
 	}
 	selections, err := json.Marshal(p.selections)
+	// Encoding must succeed before scope reaches the atomic publication transaction.
 	if err != nil {
 		return store.AppRuntime{}, workspaceConfigHTTPError{status: http.StatusConflict, message: "app selections are invalid"}
 	}
 	return store.AppRuntime{
 		UnifiedApps:                p.unifiedApps,
+		Bridges:                    p.bridges,
 		AccountID:                  p.accountID,
 		AppID:                      p.appID,
 		OwnerSubjectID:             p.ownerSubjectID,
@@ -4356,11 +4391,12 @@ func appRuntimeForApply(p persistAppRuntimeParams) (store.AppRuntime, error) {
 
 // validateAppRuntimeSelections keeps an incomplete plan or Registry response
 // from becoming durable app state that SDK and MCP detail readers cannot use.
-func validateAppRuntimeSelections(scopeSchemaVersion int, selections []models.SDKSelection, _ string) error {
-	// Authored code never expands the provider scope reviewed in plan.
-	if len(selections) == 0 {
+func validateAppRuntimeSelections(scopeSchemaVersion int, selections []models.SDKSelection, _ string, bridges ...models.BridgeBinding) error {
+	// Only admitted local bindings justify a scope without provider operations.
+	if len(selections) == 0 && len(bridges) == 0 {
 		return appSelectionSchemaMismatchError()
 	}
+	// Both ordinary and local-only apps must retain the canonical selection schema version.
 	if err := models.ValidateAppSelections(scopeSchemaVersion, selections); err != nil {
 		return appSelectionSchemaMismatchError()
 	}
@@ -4445,6 +4481,7 @@ func applyGeneratedAppRuntime(
 		sourceHash:                 plan.SourceHash,
 		generatorVersion:           appGeneratorVersionForApply(doc, result),
 		unifiedApps:                payload.UnifiedApps,
+		bridges:                    payload.Bridges,
 		generationJobID:            result.JobID,
 		generationStatus:           appGenerationStatusForApply(doc, result),
 		executionBundle:            executionBundle,

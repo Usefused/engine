@@ -1,3 +1,4 @@
+import { generateBridgeBindings, type SelectedBridge } from "./bridge-bindings";
 import type { SelectedOperation } from "./bundle";
 import { renderPublicType } from "./client_schema";
 import { operationAliases } from "./aliases";
@@ -48,11 +49,12 @@ function aliasedServices(operations: readonly SelectedOperation[], declaration: 
 }
 
 // Keep SDK-style calls on the same fetch bridge, including selectors, pagination and connected users.
-export function generateExecutionBindingsSource(operations: readonly SelectedOperation[]): string {
+export function generateExecutionBindingsSource(operations: readonly SelectedOperation[], bridges: readonly SelectedBridge[] = []): string {
   const types = operations.map(operationTypes).join("\n");
   const exact = [...serviceGroups(operations)].map(([service, entries]) => serviceSource(service, entries, false)).join(", ");
-  return `import { fused as runtime, type JsonObject, type WorkspaceOperationRequest } from "@fused/unified-app";
+  return `import { fused as runtime, type JsonObject, type JsonValue, type WorkspaceOperationRequest } from "@fused/unified-app";
 ${types}
+${generateBridgeBindings(bridges)}
 type OperationOptions = Pick<WorkspaceOperationRequest, "selector" | "pagination" | "idempotencyKey">;
 // Each facade binds exact selected operations to one existing Engine transport.
 function bindOperations(transport: Pick<typeof runtime, "fetch">) {
@@ -70,12 +72,13 @@ export const fused = Object.freeze({ ...runtime, ...bound.methods,
 }
 
 // Emit the same callable surface for local TypeScript checks without changing authorization manifests.
-export function generateExecutionBindingsDeclaration(operations: readonly SelectedOperation[]): string {
+export function generateExecutionBindingsDeclaration(operations: readonly SelectedOperation[], bridges: readonly SelectedBridge[] = []): string {
   const types = operations.map(operationTypes).join("\n");
   const exact = [...serviceGroups(operations)].map(([service, entries]) => serviceSource(service, entries, true)).join(" ");
   return `declare module "@fused/operations" {
 import { fused as runtime, type WorkspaceOperationRequest } from "@fused/unified-app";
 ${types}
+${generateBridgeBindings(bridges, true)}
 export type OperationOptions = Pick<WorkspaceOperationRequest, "selector" | "pagination" | "idempotencyKey">;
 type ExactServices = { ${exact} };
 type SelectedServices = { ${aliasedServices(operations, true)} };
