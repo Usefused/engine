@@ -100,7 +100,7 @@ func (s *EngineGRPCServer) reconcileUnifiedWebhookReceivers(ctx context.Context,
 			delete(receivers, familyID)
 		}
 	}
-	// Small payload-free fences can expire without extending the normal 24-hour private result retention.
+	// Payload-free delivery fences expire independently of operator-configured private result retention.
 	if _, err := repository.DeleteExpiredUnifiedAppWebhookDeliveries(readCtx, time.Now(), 500); err != nil {
 		slog.WarnContext(ctx, "Unified App webhook delivery cleanup failed")
 	}

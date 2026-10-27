@@ -26,7 +26,7 @@ func (s *postgresStore) SaveExecutionDiagnostics(ctx context.Context, accountID,
 	if err != nil {
 		return err
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE fused_unified_app_results SET diagnostic_dek=$4,diagnostic_payload=$5 WHERE id=$1 AND account_id=$2 AND app_id=$3 AND status IN ('succeeded','failed','indeterminate') AND expires_at>NOW() AND diagnostic_payload IS NULL`, id, accountID, appID, wrapped, ciphertext)
+	tag, err := s.db.Exec(ctx, `UPDATE fused_unified_app_results SET diagnostic_dek=$4,diagnostic_payload=$5 WHERE id=$1 AND account_id=$2 AND app_id=$3 AND status IN ('succeeded','failed','indeterminate') AND (expires_at IS NULL OR expires_at>NOW()) AND diagnostic_payload IS NULL`, id, accountID, appID, wrapped, ciphertext)
 	// A failed SQL write leaves the already-completed execution untouched.
 	if err != nil {
 		return err
@@ -41,7 +41,7 @@ func (s *postgresStore) SaveExecutionDiagnostics(ctx context.Context, accountID,
 // GetExecutionDiagnostics never projects private data without exact account, version, and retention checks.
 func (s *postgresStore) GetExecutionDiagnostics(ctx context.Context, accountID, appID, id uuid.UUID, key []byte) (json.RawMessage, error) {
 	var wrapped, ciphertext string
-	err := s.db.QueryRow(ctx, `SELECT diagnostic_dek,diagnostic_payload FROM fused_unified_app_results WHERE id=$1 AND account_id=$2 AND app_id=$3 AND expires_at>NOW() AND diagnostic_payload IS NOT NULL`, id, accountID, appID).Scan(&wrapped, &ciphertext)
+	err := s.db.QueryRow(ctx, `SELECT diagnostic_dek,diagnostic_payload FROM fused_unified_app_results WHERE id=$1 AND account_id=$2 AND app_id=$3 AND (expires_at IS NULL OR expires_at>NOW()) AND diagnostic_payload IS NOT NULL`, id, accountID, appID).Scan(&wrapped, &ciphertext)
 	// Missing and expired records share one response and cannot reveal another account's execution.
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrExecutionResultNotFound

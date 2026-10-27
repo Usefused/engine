@@ -38,19 +38,24 @@ func requestBodyHashFromContext(ctx context.Context) string {
 	return id.requestBodyHash
 }
 
+// paramsWithExecutionHeaders copies caller input so retries hash the same authored parameters.
 func paramsWithExecutionHeaders(params map[string]any, idempotencyKey, requestBodyHash string) map[string]any {
+	// Unkeyed requests need no allocation or synthetic headers.
 	if idempotencyKey == "" && requestBodyHash == "" {
 		return params
 	}
-	if params == nil {
-		params = map[string]any{}
+	out := make(map[string]any, len(params)+1)
+	for key, value := range params {
+		out[key] = value
 	}
-
-	headers := existingHeaders(params)
+	headers := make(map[string]any)
+	for key, value := range existingHeaders(params) {
+		headers[key] = value
+	}
 	setHeaderIfMissing(headers, idempotencyHeaderName, idempotencyKey)
 	setHeaderIfMissing(headers, requestBodyHashHeaderName, requestBodyHash)
-	params["_headers"] = headers
-	return params
+	out["_headers"] = headers
+	return out
 }
 
 func existingHeaders(params map[string]any) map[string]any {

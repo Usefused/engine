@@ -127,3 +127,34 @@ test("recovery policy defaults to manual and bounds both trigger modes", () => {
   }
   assert.throws(() => validateRecoveryPolicy({ backoffSeconds: 0 }), /backoffSeconds/);
 });
+
+// Automatic snapshots run ordinary authored code without issuing explicit state loads or saves.
+test("snapshot opt-in delegates checkpoints to Engine", async () => {
+  const app = buildUnifiedApp({
+    snapshot: true,
+    input: z.object({}), output: z.object({ value: z.number() }),
+    // No snapshot API is needed to execute a snapshot-enabled app.
+    execute() { return { value: 7 }; },
+  });
+  assert.equal(app.snapshot, true);
+  assert.deepEqual(await runUnifiedApp(app, {}), { value: 7 });
+  assert.throws(() => buildUnifiedApp({ ...app, snapshot: "yes" } as never), /snapshot/);
+});
+
+// Bundle verification must retain the opt-in bit across compilation and immutable manifest admission.
+test("compiler preserves automatic snapshot mode", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fused-auto-snapshot-"));
+  try {
+    const entryFile = path.join(directory, "app.ts");
+    fs.writeFileSync(entryFile, `import * as z from "zod/mini";
+import {buildUnifiedApp} from "@fused/unified-app";
+export default buildUnifiedApp({snapshot:true,input:z.object({}),output:z.object({ok:z.boolean()}),
+// Ordinary execution has no manual checkpoint responsibility.
+execute(){return {ok:true};}});`);
+    const bundle = await buildExecutionBundle({entryFile,selectedOperations:[]});
+    const context=vm.createContext({});
+    vm.runInContext(bundle.code,context);
+    assert.equal(context.FusedExecutionManifest.snapshot,true);
+    assert.equal((await context.FusedUnifiedApp.execute({input:{}})).ok,true);
+  } finally { fs.rmSync(directory,{recursive:true,force:true}); }
+});

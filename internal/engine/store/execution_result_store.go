@@ -35,6 +35,7 @@ var (
 // ExecutionResult is the durable record for one exact unified app version.
 // Input and read-handle hashes are deliberately omitted from JSON projections.
 type ExecutionResult struct {
+	RecoveryOrigin       *ExecutionRecoveryOrigin `json:"-"`
 	RunID                *uuid.UUID               `json:"runId,omitempty"`
 	Attempt              int                      `json:"attempt,omitempty"`
 	Recovery             *ExecutionRecoveryPolicy `json:"-"`
@@ -135,6 +136,10 @@ func validateNewExecutionResult(record ExecutionResult) error {
 	if err := validateExecutionTrigger(record); err != nil {
 		return err
 	}
+	// Recovery must retain a bounded, contiguous path to this exact app.
+	if !validRecoveryOrigin(record) {
+		return ErrExecutionResultInvalid
+	}
 	// The exact app version is the authored operation identity; no second capability name is needed.
 	if !boundedExecutionName(record.AppVersion) {
 		return ErrExecutionResultInvalid
@@ -149,7 +154,7 @@ func validateNewExecutionResult(record ExecutionResult) error {
 // validateExecutionTrigger distinguishes Engine-owned events from authenticated caller invocations.
 func validateExecutionTrigger(record ExecutionResult) error {
 	// Only explicit Engine-owned automation may omit caller-token attribution.
-	if record.AppTokenID == uuid.Nil && record.SourceWebhookEventID == "" && record.SourceScheduleID == nil {
+	if record.AppTokenID == uuid.Nil && record.SourceWebhookEventID == "" && record.SourceScheduleID == nil && !record.RecoveryOrigin.HasAutomation() {
 		return ErrExecutionResultInvalid
 	}
 	// Schedule provenance is explicit on an original occurrence or inherited by its recovery attempts.
@@ -226,10 +231,10 @@ func (s *postgresStore) CreateExecutionResult(ctx context.Context, record Execut
 	}
 	// Each attempt owns a fresh terminal document; durable snapshots use separate recovery storage.
 	_, err = s.db.Exec(ctx, `INSERT INTO fused_unified_app_results
-		(id, account_id, app_family_id, app_id, app_version, app_token_id, read_handle_hash, idempotency_key_hash, status, input, data, source_execution_id, mode, source_webhook_event_id, source_schedule_id, runtime_bucket_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),'queued',$9,'null'::jsonb,$10,$11,NULLIF($12,''),$13,$14)`,
+		(id, account_id, app_family_id, app_id, app_version, app_token_id, read_handle_hash, idempotency_key_hash, status, input, data, source_execution_id, mode, source_webhook_event_id, source_schedule_id, runtime_bucket_id, recovery_origin)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),'queued',$9,'null'::jsonb,$10,$11,NULLIF($12,''),$13,$14,$15)`,
 		record.ID, record.AccountID, record.AppFamilyID, record.AppID, record.AppVersion,
-		record.AppTokenID, record.ReadHandleHash, record.IdempotencyKeyHash, input, record.SourceExecutionID, record.Mode, record.SourceWebhookEventID, record.SourceScheduleID, record.BucketID)
+		record.AppTokenID, record.ReadHandleHash, record.IdempotencyKeyHash, input, record.SourceExecutionID, record.Mode, record.SourceWebhookEventID, record.SourceScheduleID, record.BucketID, record.RecoveryOrigin)
 	return err
 }
 
@@ -322,11 +327,12 @@ func (s *postgresStore) CompleteExecutionResult(ctx context.Context, accountID, 
 	if len(errorCode) > 128 || len(errorMessage) > 65536 {
 		return ErrExecutionResultInvalid
 	}
+	// A zero retention period omits expiry; all terminal payloads follow the operator setting.
 	tag, err := s.db.Exec(ctx, `UPDATE fused_unified_app_results
 		SET status=$4, output=$5::jsonb, data=$6::jsonb, error_code=$7, error_message=$8, updated_at=NOW(),
-			completed_at=NOW(), expires_at=NOW()+INTERVAL '24 hours'
+			completed_at=NOW(), expires_at=CASE WHEN $9::int=0 THEN NULL ELSE NOW()+make_interval(days=>$9) END
 		WHERE id=$1 AND account_id=$2 AND app_id=$3 AND status IN ('queued','running') AND NOT EXISTS(SELECT 1 FROM fused_unified_app_recovery c WHERE c.execution_id=$1 AND (NOT c.current OR c.ready OR c.lease_until<=clock_timestamp()))`,
-		executionID, accountID, appID, status, output, data, errorCode, errorMessage)
+		executionID, accountID, appID, status, output, data, errorCode, errorMessage, s.resultRetentionDays())
 	if err != nil {
 		return err
 	}
@@ -344,7 +350,7 @@ func scanExecutionResult(row pgx.Row) (*ExecutionResult, error) {
 	err := row.Scan(&record.ID, &record.AccountID, &record.AppFamilyID, &record.AppID, &record.AppVersion,
 		&record.AppTokenID, &record.ReadHandleHash, &record.Status,
 		&input, &output, &data, &record.ErrorCode, &record.ErrorMessage,
-		&record.SourceExecutionID, &record.Mode, &record.CreatedAt, &record.UpdatedAt, &record.CompletedAt, &record.ExpiresAt, &record.SourceWebhookEventID, &record.SourceScheduleID, &record.BucketID)
+		&record.SourceExecutionID, &record.Mode, &record.CreatedAt, &record.UpdatedAt, &record.CompletedAt, &record.ExpiresAt, &record.SourceWebhookEventID, &record.SourceScheduleID, &record.BucketID, &record.RecoveryOrigin)
 	// A partial row cannot be exposed as a valid retained result.
 	if err != nil {
 		return nil, err
@@ -355,7 +361,7 @@ func scanExecutionResult(row pgx.Row) (*ExecutionResult, error) {
 
 const executionResultColumns = `id, account_id, app_family_id, app_id, app_version,
 	app_token_id, read_handle_hash, status, input, output, data, error_code, error_message,
-	source_execution_id, mode, created_at, updated_at, completed_at, expires_at, COALESCE(source_webhook_event_id,''), source_schedule_id, runtime_bucket_id`
+	source_execution_id, mode, created_at, updated_at, completed_at, expires_at, COALESCE(source_webhook_event_id,''), source_schedule_id, runtime_bucket_id, recovery_origin`
 
 const executionSearchColumns = `id, app_id, app_version, status, output, data,
 	error_code, error_message, source_execution_id, mode, created_at, completed_at, COALESCE(source_webhook_event_id,''), source_schedule_id, runtime_bucket_id`
@@ -547,6 +553,10 @@ func (s *postgresStore) DeleteExpiredExecutionResults(ctx context.Context, befor
 	)`, before, limit)
 	if err != nil {
 		return 0, err
+	}
+	// Provider responses use the same retention boundary as their current logical run.
+	if err := s.expireIdempotentExecutions(ctx, limit); err != nil {
+		return tag.RowsAffected(), err
 	}
 	return tag.RowsAffected(), nil
 }

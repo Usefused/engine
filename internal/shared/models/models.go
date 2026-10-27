@@ -1468,20 +1468,21 @@ const IdempotencyTTL = 24 * time.Hour
 // loop -- replays this row instead of re-hitting the vendor. RequestBodyHash
 // guards against key reuse across two genuinely different requests: a
 // mismatch is a caller error (ErrIdempotencyKeyConflict), not a cache hit.
-// Only successful executions are cached -- see recordEngineExecutionAudit's
-// caller in sandbox -- so a transient failure never gets "stuck" behind a
-// replayed error for the TTL window.
+// Pending reservations fence uncertain effects; completed rows retain successful
+// provider responses for replay. Run-bound rows follow result retention.
 type IdempotentExecution struct {
-	ID                  uuid.UUID `db:"id"`
-	AppID               uuid.UUID `db:"app_id"`
-	IdempotencyKeyHash  string    `db:"idempotency_key_hash"`
-	RequestBodyHash     string    `db:"request_body_hash"`
-	Environment         string    `db:"environment"`
-	ResponseBody        []byte    `db:"response_body"`
-	ResponseStatus      int       `db:"response_status"`
-	ResponseMediaFamily string    `db:"response_media_family"`
-	CreatedAt           time.Time `db:"created_at"`
-	ExpiresAt           time.Time `db:"expires_at"`
+	RunID               *uuid.UUID `db:"run_id"`
+	Pending             bool       `db:"pending"`
+	ID                  uuid.UUID  `db:"id"`
+	AppID               uuid.UUID  `db:"app_id"`
+	IdempotencyKeyHash  string     `db:"idempotency_key_hash"`
+	RequestBodyHash     string     `db:"request_body_hash"`
+	Environment         string     `db:"environment"`
+	ResponseBody        []byte     `db:"response_body"`
+	ResponseStatus      int        `db:"response_status"`
+	ResponseMediaFamily string     `db:"response_media_family"`
+	CreatedAt           time.Time  `db:"created_at"`
+	ExpiresAt           time.Time  `db:"expires_at"`
 }
 
 // ─── Lead (Waitlist) ──────────────────────────────────────────────────────────

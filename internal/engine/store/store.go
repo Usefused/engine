@@ -1112,13 +1112,18 @@ type Store interface {
 
 	// GetIdempotentExecution looks up a cached response for (appID,
 	// idempotencyKeyHash). Returns ErrIdempotentExecutionNotFound if there's
-	// no unexpired row, or ErrIdempotencyKeyConflict if a row exists but its
-	// stored request body hash doesn't match requestBodyHash (both non-empty).
+	// no retained row, ErrIdempotencyKeyConflict for different inputs, or
+	// ErrIdempotencyInProgress when the previous provider outcome is unresolved.
 	GetIdempotentExecution(ctx context.Context, appID uuid.UUID, idempotencyKeyHash, requestBodyHash string) (*models.IdempotentExecution, error)
-	// SaveIdempotentExecution caches a successful execution's response for
-	// later replay. Concurrent duplicate writes for the same key are
-	// harmless: the first one to land wins, later ones are no-ops.
+	// SaveIdempotentExecution durably completes an owned reservation for
+	// later replay. A different reservation owner cannot overwrite the response.
 	SaveIdempotentExecution(ctx context.Context, exec *models.IdempotentExecution) error
+	// ReserveIdempotentExecution claims a key before any provider effect.
+	ReserveIdempotentExecution(context.Context, *models.IdempotentExecution) error
+	// RetainIdempotentExecution attaches another run without duplicating response bytes.
+	RetainIdempotentExecution(context.Context, uuid.UUID, uuid.UUID) error
+	// ReleaseIdempotentExecution removes only the matching owner after safely repeatable work.
+	ReleaseIdempotentExecution(context.Context, uuid.UUID) error
 
 	// GetServiceChangelogCursor returns the poll cursor for one service --
 	// see plans/plan-service-changelog.md's "## Phase 2" for why this is one

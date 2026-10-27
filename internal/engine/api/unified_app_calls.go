@@ -64,6 +64,10 @@ func descendUnifiedAppCall(ctx context.Context, caller, target uuid.UUID) (conte
 
 // callUnifiedApp delegates only an authored alias and records its envelope through the ordinary fetch transcript.
 func (host *executionCapabilityHost) callUnifiedApp(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	// Provider checkpoints cannot yet preserve a nested app execution; reject before it can create effects.
+	if host.automaticSnapshot {
+		return nil, errors.New("automatic snapshots do not support nested app calls")
+	}
 	var request struct {
 		Alias string         `json:"unifiedApp"`
 		Input map[string]any `json:"input"`

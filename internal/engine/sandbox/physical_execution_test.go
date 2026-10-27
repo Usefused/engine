@@ -61,6 +61,7 @@ func awaitSDKQueueResults(t *testing.T, ctx context.Context, results <-chan erro
 
 // TestExecuteResolvedPhysicalJSONAccountsCollectorFailureOnce protects the one durable receipt used for downstream accounting.
 func TestExecuteResolvedPhysicalJSONAccountsCollectorFailureOnce(t *testing.T) {
+	withIdempotencyStore(t, newFakeIdempotencyStore())
 	vendor := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
 		_, _ = response.Write([]byte(`not-json`))

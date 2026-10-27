@@ -194,7 +194,7 @@ func (s *postgresStore) ReserveScheduledExecution(ctx context.Context, item Unif
 	if tag.RowsAffected() != 1 {
 		return false, nil
 	}
-	writer := &postgresStore{db: workspaceTransaction{Tx: tx}}
+	writer := &postgresStore{db: workspaceTransaction{Tx: tx}, executionResultRetentionDays: s.executionResultRetentionDays}
 	// A result failure rolls back schedule advancement, allowing a later safe admission attempt.
 	if err := writer.CreateExecutionResult(ctx, record); err != nil {
 		return false, err
@@ -222,14 +222,15 @@ func (s *postgresStore) FinishScheduledExecution(ctx context.Context, id, execut
 
 // RecoverScheduledExecutions pauses abandoned work unless its explicit bounded policy authorizes automatic recovery.
 func (s *postgresStore) RecoverScheduledExecutions(ctx context.Context) ([]ExecutionResult, error) {
+	// Interrupted schedules share the operator retention policy, including explicit indefinite storage.
 	rows, err := s.db.Query(ctx, `WITH abandoned AS (
 		UPDATE fused_unified_app_schedules SET last_status='indeterminate',
  enabled=CASE WHEN EXISTS(SELECT 1 FROM fused_unified_app_recovery c WHERE c.execution_id=last_execution_id AND c.current AND c.mode='automatic' AND c.attempt<c.max_attempts) THEN enabled ELSE false END,revision=revision+1
 		WHERE last_status='running' AND last_started_at<NOW()-INTERVAL '5 minutes'
 AND NOT EXISTS(SELECT 1 FROM fused_unified_app_recovery c WHERE c.execution_id=last_execution_id AND c.current AND (c.ready OR c.lease_until>clock_timestamp())) RETURNING last_execution_id
 	) UPDATE fused_unified_app_results SET status='indeterminate',error_code='scheduled_run_interrupted',
-		error_message='Scheduled run was interrupted; review provider state before retrying',completed_at=NOW(),updated_at=NOW(),expires_at=NOW()+INTERVAL '24 hours'
-		WHERE id IN (SELECT last_execution_id FROM abandoned) AND status IN ('queued','running') RETURNING `+executionResultColumns)
+		error_message='Scheduled run was interrupted; review provider state before retrying',completed_at=NOW(),updated_at=NOW(),expires_at=CASE WHEN $1::int=0 THEN NULL ELSE NOW()+make_interval(days=>$1) END
+		WHERE id IN (SELECT last_execution_id FROM abandoned) AND status IN ('queued','running') RETURNING `+executionResultColumns, s.resultRetentionDays())
 	// Recovered terminal records feed the same canonical publisher as normal completed runs.
 	if err != nil {
 		return nil, err

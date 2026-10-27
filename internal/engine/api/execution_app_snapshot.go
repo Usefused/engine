@@ -20,7 +20,7 @@ func (host *executionCapabilityHost) executeSnapshot(ctx context.Context, raw js
 	defer host.snapshotMu.Unlock()
 	var request snapshotRequest
 	// Snapshot effects require a recovery-enabled bundle and an admitted owner.
-	if host.recovery == nil || json.Unmarshal(raw, &request) != nil {
+	if host.automaticSnapshot || host.recovery == nil || json.Unmarshal(raw, &request) != nil {
 		return nil, errors.New("snapshot is unavailable")
 	}
 	snapshot, err := host.recovery.ReadExecutionSnapshot(ctx, host.identity.AccountID, host.identity.AppID, host.executionID, host.apps.masterKey)

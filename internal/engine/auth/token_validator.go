@@ -36,12 +36,13 @@ type AppAuthorizer interface {
 // opaque database identity; bearer values, hashes, and user-auth selectors
 // remain inside their dedicated authorization and persistence boundaries.
 type RuntimeIdentity struct {
-	AccountID   uuid.UUID
-	AppFamilyID uuid.UUID
-	AppID       uuid.UUID
-	TokenID     uuid.UUID
-	AppVersion  string
-	Kind        store.AppKind
+	RecoveryOrigin *store.ExecutionRecoveryOrigin
+	AccountID      uuid.UUID
+	AppFamilyID    uuid.UUID
+	AppID          uuid.UUID
+	TokenID        uuid.UUID
+	AppVersion     string
+	Kind           store.AppKind
 	// HostedMCP is the immutable entitlement for SDK kind versions exposed over MCP.
 	HostedMCP   bool
 	Status      store.AppStatus

@@ -113,7 +113,7 @@ func (s *postgresStore) ReserveUnifiedAppWebhookExecution(ctx context.Context, r
 	if err != nil || !created {
 		return id, false, err
 	}
-	writer := &postgresStore{db: workspaceTransaction{Tx: tx}}
+	writer := &postgresStore{db: workspaceTransaction{Tx: tx}, executionResultRetentionDays: s.executionResultRetentionDays}
 	// Shared validation and insertion retain the normal execution-record contract.
 	if err := writer.CreateExecutionResult(ctx, record); err != nil {
 		return uuid.Nil, false, err

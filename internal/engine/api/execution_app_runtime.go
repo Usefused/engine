@@ -3,8 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +18,7 @@ import (
 )
 
 type unifiedAppManifest struct {
+	Snapshot           bool                           `json:"snapshot,omitempty"`
 	Recovery           *store.ExecutionRecoveryPolicy `json:"recovery,omitempty"`
 	SchemaVersion      int                            `json:"schemaVersion"`
 	InputSchema        json.RawMessage                `json:"inputSchema"`
@@ -37,11 +36,12 @@ type unifiedAppManifestOperation struct {
 }
 
 type capabilityHostFetchRequest struct {
-	Service    string                      `json:"service"`
-	Operation  string                      `json:"operation"`
-	Input      map[string]any              `json:"input"`
-	Selector   capabilityHostFetchSelector `json:"selector"`
-	Pagination *capabilityHostPagination   `json:"pagination,omitempty"`
+	IdempotencyKey string                      `json:"idempotencyKey,omitempty"`
+	Service        string                      `json:"service"`
+	Operation      string                      `json:"operation"`
+	Input          map[string]any              `json:"input"`
+	Selector       capabilityHostFetchSelector `json:"selector"`
+	Pagination     *capabilityHostPagination   `json:"pagination,omitempty"`
 }
 
 type capabilityHostPagination struct {
@@ -57,17 +57,19 @@ type capabilityHostFetchSelector struct {
 }
 
 type executionCapabilityHost struct {
-	recovery      store.ExecutionRecoveryStore
-	snapshotMu    sync.Mutex
-	cancelAttempt context.CancelFunc
-	apps          *EngineGRPCServer
-	runtime       *sandbox.EngineGRPCServer
-	identity      auth.RuntimeIdentity
-	executionID   uuid.UUID
-	bindings      map[string]sandbox.ExactOperationBinding
-	mu            sync.Mutex
-	callCount     int
-	called        bool
+	automaticSnapshot bool
+	snapshotRunID     uuid.UUID
+	recovery          store.ExecutionRecoveryStore
+	snapshotMu        sync.Mutex
+	cancelAttempt     context.CancelFunc
+	apps              *EngineGRPCServer
+	runtime           *sandbox.EngineGRPCServer
+	identity          auth.RuntimeIdentity
+	executionID       uuid.UUID
+	bindings          map[string]sandbox.ExactOperationBinding
+	mu                sync.Mutex
+	callCount         int
+	called            bool
 }
 
 // parseUnifiedAppManifest admits one bounded app-level execute descriptor shared by deployment and execution.
@@ -95,6 +97,10 @@ func parseUnifiedAppManifest(raw json.RawMessage) (*unifiedAppManifest, error) {
 
 // validateUnifiedAppManifest requires one typed execute contract and a bounded physical method set.
 func validateUnifiedAppManifest(manifest *unifiedAppManifest) error {
+	// Automatic provider checkpoints require a durable logical run.
+	if manifest.Snapshot && manifest.Recovery == nil {
+		return errors.New("snapshot requires recovery")
+	}
 	// Authored retry policy must be finite before an immutable bundle can be accepted.
 	if manifest.Recovery != nil {
 		if err := manifest.Recovery.Validate(); err != nil {
@@ -157,20 +163,17 @@ func (host *executionCapabilityHost) Fetch(ctx context.Context, raw json.RawMess
 	return host.fetchWorkspaceOperation(ctx, raw)
 }
 
-// fetchWorkspaceOperation preserves exact provider selection and per-execution idempotency.
+// fetchWorkspaceOperation preserves exact provider selection and supplies opt-in replay identity.
 func (host *executionCapabilityHost) fetchWorkspaceOperation(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	request, err := decodeCapabilityWorkspaceRequest(raw)
 	// Malformed inputs cannot reach either binding lookup or physical dispatch.
 	if err != nil {
 		return nil, err
 	}
-	var pagination *engine.PaginationIntent
-	// Only a caller-owned page bound may cross the sandbox; operation policy remains Engine-owned.
-	if request.Pagination != nil {
-		pagination = &engine.PaginationIntent{MaxPages: request.Pagination.MaxPages}
-		if err := engine.ValidatePaginationIntent(pagination); err != nil {
-			return nil, err
-		}
+	pagination, err := capabilityProviderPagination(request)
+	// Invalid page limits cannot reach provider resolution.
+	if err != nil {
+		return nil, err
 	}
 	binding, allowed := host.bindings[executionOperationKey(request.Service, request.Operation)]
 	// Manifest admission precedes any physical resolver or outbound traffic.
@@ -185,11 +188,6 @@ func (host *executionCapabilityHost) fetchWorkspaceOperation(ctx context.Context
 	if callNumber > maxCapabilityFetchCalls {
 		return nil, errors.New("unified app workspace operation limit exceeded")
 	}
-	canonical, err := json.Marshal(request.Input)
-	if err != nil {
-		return nil, errors.New("unified app workspace operation input is invalid")
-	}
-	digest := sha256.Sum256(canonical)
 	selectors := sandbox.PhysicalExecutionSelectors{
 		Environment: request.Selector.Environment, EndUserRef: request.Selector.EndUserRef,
 		AuthType: request.Selector.AuthType, AuthName: request.Selector.AuthName, ResourceID: request.Selector.ResourceID,
@@ -207,10 +205,24 @@ func (host *executionCapabilityHost) fetchWorkspaceOperation(ctx context.Context
 		ordinal = callNumber
 	}
 	ctx = executionevent.WithUnifiedChild(ctx, host.executionID, fmt.Sprintf("call_%d", ordinal), "forward")
-	return host.runtime.ExecuteCapabilityWorkspaceOperation(ctx, host.identity, sandbox.CapabilityWorkspaceOperationRequest{
+	key, err := host.providerIdempotencyKey(request, ordinal)
+	// Invalid authored keys cannot dispatch or alias another call's retained response.
+	if err != nil {
+		return nil, err
+	}
+	// Retention belongs to the logical run, independently of its individual attempt IDs.
+	if host.automaticSnapshot {
+		ctx = sandbox.WithIdempotencyRun(ctx, host.snapshotRunID)
+	}
+	result, callErr := host.runtime.ExecuteCapabilityWorkspaceOperation(ctx, host.identity, sandbox.CapabilityWorkspaceOperationRequest{
 		Binding: binding, Input: request.Input, Selectors: selectors, Pagination: pagination,
-		IdempotencyKey: fmt.Sprintf("%s:%d", host.executionID, callNumber), RequestBodyHash: hex.EncodeToString(digest[:]),
+		IdempotencyKey: key,
 	})
+	// A caught provider/checkpoint error cannot turn an uncertain automatic attempt into success.
+	if host.automaticSnapshot && callErr != nil {
+		host.cancelAttempt()
+	}
+	return result, callErr
 }
 
 // decodeCapabilityWorkspaceRequest admits named provider input without caller-controlled routing fields.
@@ -242,4 +254,14 @@ func (host *executionCapabilityHost) providerCallsStarted() bool {
 	host.mu.Lock()
 	defer host.mu.Unlock()
 	return host.called
+}
+
+// capabilityProviderPagination translates the caller's page ceiling without changing Engine-owned pagination policy.
+func capabilityProviderPagination(request capabilityHostFetchRequest) (*engine.PaginationIntent, error) {
+	// Omission preserves the selected operation's default page policy.
+	if request.Pagination == nil {
+		return nil, nil
+	}
+	pagination := &engine.PaginationIntent{MaxPages: request.Pagination.MaxPages}
+	return pagination, engine.ValidatePaginationIntent(pagination)
 }

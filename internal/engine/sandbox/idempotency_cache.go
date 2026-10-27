@@ -24,6 +24,9 @@ import (
 type idempotencyStore interface {
 	GetIdempotentExecution(ctx context.Context, appID uuid.UUID, idempotencyKeyHash, requestBodyHash string) (*models.IdempotentExecution, error)
 	SaveIdempotentExecution(ctx context.Context, exec *models.IdempotentExecution) error
+	ReserveIdempotentExecution(context.Context, *models.IdempotentExecution) error
+	ReleaseIdempotentExecution(context.Context, uuid.UUID) error
+	RetainIdempotentExecution(context.Context, uuid.UUID, uuid.UUID) error
 }
 
 var globalIdempotencyStore idempotencyStore
@@ -36,8 +39,7 @@ var idempotencyReplayedAttr = attribute.Bool("idempotency_replayed", true)
 
 // SetIdempotencyStore wires the store used for idempotent-execution
 // cache-and-replay. Called once at boot (see cmd/engine/cmd/start.go),
-// alongside SetExecutionAuditRecorder. Until this is called, idempotency
-// caching is a no-op and every call dispatches to the vendor normally.
+// alongside SetExecutionAuditRecorder. Keyed calls fail closed until storage is available.
 func SetIdempotencyStore(s idempotencyStore) {
 	globalIdempotencyStore = s
 }
@@ -48,9 +50,11 @@ func SetIdempotencyStore(s idempotencyStore) {
 // matched; the tee then discards streamed bytes while finite alternatives on
 // the same operation remain cacheable.
 func idempotencyEligible(ctx context.Context, obj *models.IntegrationObject) bool {
+	// Only explicit or snapshot-supplied keys activate deduplication.
 	if idempotencyKeyFromContext(ctx) == "" {
 		return false
 	}
+	// No resolved operation means no safe cached-response shape.
 	if obj == nil {
 		return false
 	}
@@ -63,55 +67,46 @@ func idempotencyEligible(ctx context.Context, obj *models.IntegrationObject) boo
 // idempotency key was reused with a different request body) means the
 // caller should fail the request without dispatching.
 func lookupCachedExecution(ctx context.Context, appID uuid.UUID) (exec *models.IdempotentExecution, ok bool, err error) {
+	// Keyed calls cannot safely bypass unavailable persistence.
 	if globalIdempotencyStore == nil {
-		return nil, false, nil
+		return nil, false, errors.New("idempotency storage unavailable")
 	}
 	keyHash := hashExecutionValue(idempotencyKeyFromContext(ctx))
+	// Empty keys preserve ordinary non-deduplicated execution.
 	if keyHash == "" {
 		return nil, false, nil
 	}
 	bodyHash := requestBodyHashFromContext(ctx)
 	found, err := globalIdempotencyStore.GetIdempotentExecution(ctx, appID, keyHash, bodyHash)
+	// Only an authoritative miss permits dispatch.
 	if err != nil {
+		// Not-found is distinct from unavailable or uncertain state.
 		if errors.Is(err, store.ErrIdempotentExecutionNotFound) {
 			return nil, false, nil
 		}
+		// Conflicting inputs cannot reuse a successful result.
 		if errors.Is(err, store.ErrIdempotencyKeyConflict) {
 			return nil, false, errors.New("idempotency key already used with a different request body")
 		}
-		// Store errors (e.g. a transient DB blip) shouldn't block execution --
-		// fall through to a normal dispatch rather than fail the call.
-		return nil, false, nil
+		return nil, false, err
+	}
+	// A shared business key must remain available for every run that consumes its response.
+	if err := retainCachedExecution(ctx, found); err != nil {
+		return nil, false, err
 	}
 	return found, true, nil
 }
 
-// saveCachedExecution persists a successful execution's response for later
-// replay. Only called after a successful (execErr == nil) dispatch -- a
-// transient failure is never cached, so it can't get "stuck" replaying an
-// error for the TTL window. Best-effort: a save failure is not surfaced to
-// the caller, who already has their real response.
-func saveCachedExecution(ctx context.Context, appID uuid.UUID, responseBody []byte, environment string, responseStatus int, responseMediaFamily string) {
-	if globalIdempotencyStore == nil {
-		return
-	}
-	keyHash := hashExecutionValue(idempotencyKeyFromContext(ctx))
-	if keyHash == "" {
-		return
-	}
+// reserveCachedExecution establishes durable ownership before the provider receives a request.
+func reserveCachedExecution(ctx context.Context, appID uuid.UUID) (*models.IdempotentExecution, error) {
 	now := time.Now()
-	_ = globalIdempotencyStore.SaveIdempotentExecution(ctx, &models.IdempotentExecution{
-		ID:                  uuid.New(),
-		AppID:               appID,
-		IdempotencyKeyHash:  keyHash,
-		RequestBodyHash:     requestBodyHashFromContext(ctx),
-		Environment:         environment,
-		ResponseBody:        responseBody,
-		ResponseStatus:      responseStatus,
-		ResponseMediaFamily: responseMediaFamily,
-		CreatedAt:           now,
-		ExpiresAt:           now.Add(models.IdempotencyTTL),
-	})
+	record := &models.IdempotentExecution{ID: uuid.New(), AppID: appID, IdempotencyKeyHash: hashExecutionValue(idempotencyKeyFromContext(ctx)), RequestBodyHash: requestBodyHashFromContext(ctx), CreatedAt: now, ExpiresAt: now.Add(models.IdempotencyTTL)}
+	runID, ok := ctx.Value(idempotencyRunKey{}).(uuid.UUID)
+	// Logical-run retention overrides the standalone cache lifetime without copying provider responses.
+	if ok {
+		record.RunID = &runID
+	}
+	return record, globalIdempotencyStore.ReserveIdempotentExecution(ctx, record)
 }
 
 // tryReplayFromIdempotencyCache is engineExecuteCore's first move once the
@@ -136,6 +131,11 @@ func tryReplayFromIdempotencyCache(
 	stream engine.ResponseStream,
 	auditState *executionAuditState,
 ) (replayed bool, err error) {
+	// Unsupported call shapes cannot silently bypass an automatic checkpoint.
+	if err := validateSnapshotProvider(ctx, obj); err != nil {
+		return false, err
+	}
+	// Calls without a key keep the existing dispatcher behavior.
 	if !idempotencyEligible(ctx, obj) {
 		return false, nil
 	}
@@ -167,80 +167,143 @@ func tryReplayFromIdempotencyCache(
 	return true, nil
 }
 
-// dispatchAndCache runs the normal vendor dispatch and, when this call is
-// idempotency-eligible, tees the response into the cache on success so a
-// future retry or duplicate with the same key can replay it instead of
-// hitting the vendor again. Splitting this out of engineExecuteCore keeps
-// "how do we dispatch and remember the result" as one cohesive unit distinct
-// from scope resolution and cache lookup.
-func dispatchAndCache(
-	ctx context.Context,
-	dispatcher *engine.Dispatcher,
-	match *scopedEndpoint,
-	obj *models.IntegrationObject,
-	params, credentials map[string]any,
-	bucketValues []store.BucketValue,
-	environment string,
-	stream engine.ResponseStream,
-	span trace.Span,
-	appID uuid.UUID,
+// dispatchAndCache buffers keyed finite responses until their durable result is acknowledged.
+func dispatchAndCache(ctx context.Context, dispatcher *engine.Dispatcher, match *scopedEndpoint, obj *models.IntegrationObject,
+	params, credentials map[string]any, bucketValues []store.BucketValue, environment string, stream engine.ResponseStream, span trace.Span, appID uuid.UUID,
 ) (resolution RuntimeEnvironmentResolution, providerHTTPStatus int, err error) {
-	eligible := idempotencyEligible(ctx, obj)
-	dispatchStream := stream
-	var tee *teeResponseStream
-	if eligible {
-		tee = &teeResponseStream{inner: stream, cacheable: true}
-		dispatchStream = tee
+	// Unkeyed or unsupported ordinary calls retain their normal streaming path.
+	if !idempotencyEligible(ctx, obj) {
+		return dispatchRuntimeEnvironment(ctx, dispatcher, match, obj, params, credentials, bucketValues, environment, stream, span)
 	}
-	resolution, providerHTTPStatus, err = dispatchRuntimeEnvironment(ctx, dispatcher, match, obj, params, credentials, bucketValues, environment, dispatchStream, span)
+	record, err := reserveCachedExecution(ctx, appID)
+	// A concurrent owner, unavailable store, or unknown previous outcome must not reach the provider.
 	if err != nil {
-		return resolution, providerHTTPStatus, err
+		return resolution, 0, err
 	}
-	if tee != nil && tee.Cacheable() && providerHTTPStatus >= 200 && providerHTTPStatus < 400 {
-		saveCachedExecution(ctx, appID, tee.Bytes(), resolution.Environment, providerHTTPStatus, tee.MediaFamily())
-	}
-	return resolution, providerHTTPStatus, nil
+	_, automatic := ctx.Value(idempotencyRunKey{}).(uuid.UUID)
+	tee := &teeResponseStream{inner: stream, cacheable: true, requireFinite: automatic}
+	resolution, providerHTTPStatus, err = dispatchRuntimeEnvironment(ctx, dispatcher, match, obj, params, credentials, bucketValues, environment, tee, span)
+	return resolution, providerHTTPStatus, completeCachedDispatch(ctx, record, obj, tee, resolution.Environment, providerHTTPStatus, err)
 }
 
-// teeResponseStream forwards every chunk to the real stream while also
-// accumulating it, so a successful execution's full response body can be
-// captured for the idempotency cache without changing what the caller (gRPC
-// edge or MCP buffer) actually receives.
+// completeCachedDispatch keeps uncertain writes reserved and publishes finite success only after persistence.
+func completeCachedDispatch(ctx context.Context, record *models.IdempotentExecution, obj *models.IntegrationObject, tee *teeResponseStream, environment string, status int, dispatchErr error) error {
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	// Failed read-only requests and live streams can safely release their reservation.
+	if dispatchErr != nil || !tee.Cacheable() || status < 200 || status >= 400 {
+		// Mutating requests with unknown outcomes must remain fenced even after an Engine restart.
+		if !tee.Cacheable() || safeIdempotentRetry(obj) {
+			if err := globalIdempotencyStore.ReleaseIdempotentExecution(finishCtx, record.ID); err != nil {
+				return err
+			}
+		}
+		// A failed dispatch has no acknowledged response to publish.
+		if dispatchErr != nil {
+			return dispatchErr
+		}
+		return tee.flush(status)
+	}
+	record.Environment, record.ResponseStatus, record.ResponseMediaFamily = environment, status, tee.MediaFamily()
+	record.ResponseBody = tee.Bytes()
+	// This write is the acknowledgement boundary; losing it leaves the original reservation intact.
+	if err := globalIdempotencyStore.SaveIdempotentExecution(finishCtx, record); err != nil {
+		return err
+	}
+	return tee.flush(status)
+}
+
+// teeResponseStream holds finite bytes until commit while allowing ordinary SSE streams to remain live.
 type teeResponseStream struct {
-	inner       engine.ResponseStream
-	buf         bytes.Buffer
-	mediaFamily string
-	cacheable   bool
+	inner         engine.ResponseStream
+	buf           bytes.Buffer
+	mediaFamily   string
+	cacheable     bool
+	requireFinite bool
 }
 
+// Send bounds pending response memory and withholds bytes until persistence succeeds.
 func (t *teeResponseStream) Send(chunk []byte) error {
-	if t.cacheable {
-		t.buf.Write(chunk)
+	// Live SSE is deliberately outside the finite-response cache contract.
+	if !t.cacheable {
+		return t.inner.Send(chunk)
 	}
-	return t.inner.Send(chunk)
+	// A bounded buffer cannot exhaust Engine memory on an unexpected provider response.
+	if t.buf.Len()+len(chunk) > 16<<20 {
+		return errors.New("idempotent response exceeds 16 MiB")
+	}
+	_, err := t.buf.Write(chunk)
+	return err
 }
 
+// SendStatus defers finite status delivery until the response has committed.
 func (t *teeResponseStream) SendStatus(status int) error {
+	// Streaming calls retain their immediate transport status.
+	if !t.cacheable {
+		return engine.SendResponseStatus(t.inner, status)
+	}
+	return nil
+}
+
+// SendResponseContract switches to live transport only for an actual SSE response.
+func (t *teeResponseStream) SendResponseContract(status int, mediaFamily string) error {
+	t.mediaFamily = mediaFamily
+	// SSE is unbounded and cannot be represented by a stored finite result.
+	if mediaFamily == "sse" {
+		// An undeclared streaming response cannot bypass automatic checkpoint acknowledgement.
+		if t.requireFinite {
+			return errors.New("snapshot provider returned an unsupported stream")
+		}
+		t.cacheable = false
+		t.buf.Reset()
+		return engine.SendResponseContract(t.inner, status, mediaFamily)
+	}
+	return nil
+}
+
+// flush preserves the original response contract, body, and status ordering after commit.
+func (t *teeResponseStream) flush(status int) error {
+	// Live streams have already delivered their bytes.
+	if !t.cacheable {
+		return nil
+	}
+	// Contract delivery must precede bytes for typed consumers.
+	if err := engine.SendResponseContract(t.inner, status, t.MediaFamily()); err != nil {
+		return err
+	}
+	// A disconnected caller may retry the already committed result.
+	if err := t.inner.Send(t.Bytes()); err != nil {
+		return err
+	}
 	return engine.SendResponseStatus(t.inner, status)
 }
 
-func (t *teeResponseStream) SendResponseContract(status int, mediaFamily string) error {
-	t.mediaFamily = mediaFamily
-	if mediaFamily == "sse" {
-		// Runtime media selection is authoritative for mixed operations. SSE is
-		// live and potentially unbounded, so it must never enter the one-body
-		// idempotency cache.
-		t.cacheable = false
-		t.buf.Reset()
-	}
-	return engine.SendResponseContract(t.inner, status, mediaFamily)
-}
+// Bytes exposes the finite response only to the synchronous persistence boundary.
+func (t *teeResponseStream) Bytes() []byte { return t.buf.Bytes() }
 
-func (t *teeResponseStream) Bytes() []byte   { return t.buf.Bytes() }
+// Cacheable distinguishes finite responses from live streams.
 func (t *teeResponseStream) Cacheable() bool { return t.cacheable }
+
+// MediaFamily preserves the contract for providers without explicit response metadata.
 func (t *teeResponseStream) MediaFamily() string {
+	// Historical providers use the existing unknown-media contract.
 	if t.mediaFamily == "" {
 		return "unknown"
 	}
 	return t.mediaFamily
+}
+
+// safeIdempotentRetry recognizes only contract-declared reads whose repetition cannot write provider state.
+func safeIdempotentRetry(obj *models.IntegrationObject) bool {
+	return obj.Method == "GET" || obj.Method == "HEAD" || obj.Method == "OPTIONS" || (obj.ProviderProtocol == models.ProviderProtocolGraphQL && obj.OperationKind == models.OperationKindQuery)
+}
+
+// retainCachedExecution adds retention metadata only when an authored key is shared across logical runs.
+func retainCachedExecution(ctx context.Context, record *models.IdempotentExecution) error {
+	run, automatic := ctx.Value(idempotencyRunKey{}).(uuid.UUID)
+	// The original run already owns retention; ordinary callers keep the existing standalone TTL.
+	if !automatic || (record.RunID != nil && *record.RunID == run) {
+		return nil
+	}
+	return globalIdempotencyStore.RetainIdempotentExecution(ctx, record.ID, run)
 }

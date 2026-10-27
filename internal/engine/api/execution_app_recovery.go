@@ -92,6 +92,7 @@ func (s *EngineGRPCServer) recoveryRunSpec(ctx context.Context, source store.Exe
 	if !found {
 		return capabilityRunSpec{}, newRESTExecutionError(404, "bundle_not_found", "unified app bundle is unavailable")
 	}
+	identity = recoveryOriginIdentity(source, identity)
 	transport := "rest"
 	// Original automation provenance survives retries in canonical activity.
 	if source.SourceScheduleID != nil {
@@ -100,7 +101,7 @@ func (s *EngineGRPCServer) recoveryRunSpec(ctx context.Context, source store.Exe
 	if source.SourceWebhookEventID != "" {
 		transport = "webhook"
 	} // Provider event runs keep their original trigger.
-	return capabilityRunSpec{identity: identity, version: source.AppVersion, bundle: bundle, manifest: manifest, input: source.Input, mode: "rerun", transport: transport, bucketID: source.BucketID, sourceExecutionID: &source.ID}, nil
+	return capabilityRunSpec{identity: identity, version: source.AppVersion, bundle: bundle, manifest: manifest, input: source.Input, mode: "rerun", transport: transport, bucketID: source.BucketID, sourceExecutionID: &source.ID, webhookEventID: source.SourceWebhookEventID}, nil
 }
 
 // finishRecoverySchedule updates only the scheduled occurrence still owned by this attempt.

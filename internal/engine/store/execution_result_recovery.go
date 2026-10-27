@@ -21,6 +21,7 @@ func (s *postgresStore) RecoverStaleExecutionResults(ctx context.Context, before
 	if limit < 1 || limit > 1000 {
 		return 0, ErrExecutionResultInvalid
 	}
+	// Crash completion uses the same retention policy as an ordinary terminal result.
 	tag, err := s.db.Exec(ctx, `WITH abandoned AS (
 		SELECT id FROM fused_unified_app_results
 		WHERE status IN ('queued','running') AND updated_at<$1
@@ -31,8 +32,8 @@ AND NOT EXISTS(SELECT 1 FROM fused_unified_app_recovery c WHERE c.execution_id=f
 		status=CASE WHEN result.status='running' THEN 'indeterminate' ELSE 'failed' END,
 		error_code=CASE WHEN result.status='running' THEN 'execution_interrupted' ELSE 'runtime_unavailable' END,
 		error_message='capability execution did not complete successfully',
-		updated_at=NOW(), completed_at=NOW(), expires_at=NOW()+INTERVAL '24 hours'
-	FROM abandoned WHERE result.id=abandoned.id`, before, limit)
+		updated_at=NOW(), completed_at=NOW(), expires_at=CASE WHEN $3::int=0 THEN NULL ELSE NOW()+make_interval(days=>$3) END
+	FROM abandoned WHERE result.id=abandoned.id`, before, limit, s.resultRetentionDays())
 	if err != nil {
 		return 0, err
 	}

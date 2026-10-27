@@ -35,7 +35,7 @@ func (s *postgresStore) createRecoverableExecution(ctx context.Context, record E
 		return err
 	}
 	defer tx.Rollback(ctx)
-	writer := &postgresStore{db: workspaceTransaction{Tx: tx}}
+	writer := &postgresStore{db: workspaceTransaction{Tx: tx}, executionResultRetentionDays: s.executionResultRetentionDays}
 	record.Recovery = nil
 	// The shared writer still owns input validation and ordinary result identity.
 	if err := writer.CreateExecutionResult(ctx, record); err != nil {
@@ -65,8 +65,7 @@ const attemptAuthority = `EXISTS (SELECT 1 FROM fused_unified_app_results r
  JOIN fused_apps a ON a.app_id=r.app_id
  WHERE r.id=execution_id AND r.status IN ('queued','running') AND f.archived_at IS NULL
  AND f.unified_active_app_id=r.app_id AND a.status IN ('active','deprecated')
- AND (r.app_token_id='00000000-0000-0000-0000-000000000000' OR EXISTS
- (SELECT 1 FROM fused_app_tokens t WHERE t.id=r.app_token_id AND (t.expires_at IS NULL OR t.expires_at>clock_timestamp()))))`
+ AND ` + recoveryOriginAuthority + `)`
 
 // CheckExecutionAttempt fences host effects after supersession, expiry, revocation, or deployment changes.
 func (s *postgresStore) CheckExecutionAttempt(ctx context.Context, account, app, id uuid.UUID) error {
@@ -130,8 +129,7 @@ func (s *postgresStore) DueExecutionRecoveries(ctx context.Context) ([]Execution
  AND EXISTS(SELECT 1 FROM fused_app_families f JOIN fused_apps a ON a.app_id=r.app_id
  WHERE f.app_family_id=r.app_family_id AND f.account_id=r.account_id AND f.archived_at IS NULL
  AND f.unified_active_app_id=r.app_id AND a.status IN ('active','deprecated'))
- AND (r.app_token_id='00000000-0000-0000-0000-000000000000' OR EXISTS(SELECT 1 FROM fused_app_tokens t
- WHERE t.id=r.app_token_id AND t.app_family_id=r.app_family_id AND (t.expires_at IS NULL OR t.expires_at>NOW())))
+ AND `+recoveryOriginAuthority+`
  AND ((c.ready AND r.status='queued') OR (c.mode='automatic' AND c.attempt<c.max_attempts AND ((r.status IN ('failed','indeterminate') AND r.completed_at+make_interval(secs=>c.backoff_seconds)<=NOW())
  OR (r.status IN ('queued','running') AND c.lease_until<=NOW())))) ORDER BY c.lease_until LIMIT 32)`)
 	// An unavailable queue must not be represented as a successful empty scan.
@@ -179,14 +177,13 @@ func (s *postgresStore) ListExecutionAttempts(ctx context.Context, account, app,
 func (s *postgresStore) AuthorizeExecutionRecovery(ctx context.Context, account, app, id uuid.UUID) (*AuthProjection, error) {
 	var projection AuthProjection
 	err := s.db.QueryRow(ctx, `SELECT r.account_id,r.app_family_id,r.app_id,r.app_token_id,r.app_version,f.kind,a.hosted_mcp,a.status,
- COALESCE(t.allow_all,true),COALESCE(t.allowed_operations,'{}'::text[]),t.expires_at,COALESCE(t.binding_mode,'dynamic')
+ CASE WHEN r.recovery_origin IS NOT NULL THEN true ELSE COALESCE(t.allow_all,true) END,COALESCE(t.allowed_operations,'{}'::text[]),t.expires_at,CASE WHEN r.recovery_origin IS NOT NULL THEN 'dynamic' ELSE COALESCE(t.binding_mode,'dynamic') END
  FROM fused_unified_app_results r JOIN fused_app_families f ON f.app_family_id=r.app_family_id AND f.account_id=r.account_id
  JOIN fused_apps a ON a.app_id=r.app_id LEFT JOIN fused_app_tokens t ON t.id=r.app_token_id AND t.app_family_id=r.app_family_id
  WHERE r.id=$1 AND r.account_id=$2 AND r.app_id=$3 AND f.archived_at IS NULL AND f.unified_active_app_id=r.app_id
  AND a.status IN ('active','deprecated') AND (r.expires_at IS NULL OR r.expires_at>NOW())
- AND ((r.app_token_id='00000000-0000-0000-0000-000000000000' AND (r.source_schedule_id IS NOT NULL OR r.source_webhook_event_id IS NOT NULL))
- OR (t.id IS NOT NULL AND (t.expires_at IS NULL OR t.expires_at>NOW())))`, id, account, app).Scan(&projection.AccountID, &projection.AppFamilyID, &projection.AppID, &projection.TokenID, &projection.Version, &projection.Kind, &projection.HostedMCP, &projection.AppStatus, &projection.TokenPolicy.AllowAll, &projection.TokenPolicy.AllowedOperations, &projection.TokenPolicy.ExpiresAt, &projection.BindingMode)
-	// A revoked token or ambiguous delegated origin cannot authorize autonomous provider calls.
+ AND `+recoveryOriginAuthority, id, account, app).Scan(&projection.AccountID, &projection.AppFamilyID, &projection.AppID, &projection.TokenID, &projection.Version, &projection.Kind, &projection.HostedMCP, &projection.AppStatus, &projection.TokenPolicy.AllowAll, &projection.TokenPolicy.AllowedOperations, &projection.TokenPolicy.ExpiresAt, &projection.BindingMode)
+	// A revoked token or invalid delegated origin cannot authorize autonomous provider calls.
 	if err != nil {
 		return nil, err
 	}
@@ -202,26 +199,4 @@ func (s *postgresStore) ClaimQueuedExecutionAttempt(ctx context.Context, account
 		return false, err
 	}
 	return tag.RowsAffected() == 1, nil
-}
-
-// validateRecoveryOrigin rejects autonomous delegated work whose original consumer version was not retained.
-func (s *postgresStore) validateRecoveryOrigin(ctx context.Context, record ExecutionResult) error {
-	// Manual recovery can be authorized later by a fresh direct app token.
-	if record.Recovery.Mode != "automatic" {
-		return nil
-	}
-	// Engine-owned automation carries explicit durable provenance instead of a runtime token.
-	if record.AppTokenID == uuid.Nil && (record.SourceScheduleID != nil || record.SourceWebhookEventID != "") {
-		return nil
-	}
-	var direct bool
-	err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM fused_app_tokens WHERE id=$1 AND app_family_id=$2 AND (expires_at IS NULL OR expires_at>NOW()))`, record.AppTokenID, record.AppFamilyID).Scan(&direct)
-	// Storage uncertainty cannot authorize a second execution after a crash.
-	if err != nil {
-		return err
-	}
-	if !direct {
-		return ErrExecutionRecoveryOrigin
-	} // A consumer token alone cannot reconstruct its original delegation.
-	return nil
 }

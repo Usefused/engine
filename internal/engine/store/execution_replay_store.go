@@ -72,13 +72,13 @@ func (s *postgresStore) SaveReplayEvidence(ctx context.Context, accountID, appID
 	if err != nil {
 		return err
 	}
-	// The SELECT binds evidence to one unexpired terminal result and enforces the same minimum window.
+	// The SELECT binds evidence to one unexpired terminal result and enforces the same operator-configured window, including indefinite retention.
 	tag, err := s.db.Exec(ctx, `INSERT INTO fused_unified_app_replay_evidence
 		(execution_id, account_id, app_id, encrypted_dek, encrypted_history, expires_at)
-		SELECT id, account_id, app_id, $4, $5, GREATEST(expires_at, NOW()+INTERVAL '24 hours')
+		SELECT id, account_id, app_id, $4, $5, expires_at
 		FROM fused_unified_app_results
 		WHERE id=$1 AND account_id=$2 AND app_id=$3 AND status IN ('succeeded','failed','indeterminate')
-			AND expires_at>NOW() AND mode<>'replay'
+			AND (expires_at IS NULL OR expires_at>NOW()) AND mode<>'replay'
 		ON CONFLICT (execution_id) DO NOTHING`, executionID, accountID, appID, wrapped, ciphertext)
 	if err != nil {
 		return err
@@ -98,7 +98,7 @@ func (s *postgresStore) GetReplayEvidence(ctx context.Context, accountID, appID,
 		JOIN fused_unified_app_results result ON result.id=evidence.execution_id
 		WHERE evidence.execution_id=$1 AND evidence.account_id=$2 AND evidence.app_id=$3
 			AND result.account_id=$2 AND result.app_id=$3
-			AND evidence.expires_at>NOW() AND result.expires_at>NOW()`, executionID, accountID, appID).
+			AND (evidence.expires_at IS NULL OR evidence.expires_at>NOW()) AND (result.expires_at IS NULL OR result.expires_at>NOW())`, executionID, accountID, appID).
 		Scan(&wrapped, &ciphertext)
 	// Expired, missing, and cross-tenant recordings share one unavailable result.
 	if errors.Is(err, pgx.ErrNoRows) {

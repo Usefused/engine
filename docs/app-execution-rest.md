@@ -113,7 +113,9 @@ An accepted execution receives `appFamilyId`, the executed `version`, a durable
 HTTP 202; a terminal execution may return HTTP 200 with `status: "failed"`, so
 check the recorded status. The stored data document remains searchable but is
 not returned in execution responses. It is limited to 512 KiB, and terminal
-results are retained for at least 24 hours.
+results are retained for seven days by default. Operators can set
+`engine.execution_result_retention_days` to a positive number of days or `0`
+for indefinite retention. Results without an expiry omit `expiresAt`.
 
 ```http
 GET /v1/apps/{app_family_id}/executions/{execution_id}

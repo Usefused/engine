@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-var ErrExecutionRecoveryOrigin = errors.New("automatic recovery requires a direct app token or an Engine schedule/webhook trigger")
+var ErrExecutionRecoveryOrigin = errors.New("execution recovery origin no longer has valid authority")
 
 var ErrExecutionRecoveryConflict = errors.New("execution is active, completed, superseded, or has exhausted its attempts")
 

@@ -70,7 +70,8 @@ func (s *EngineGRPCServer) ExecuteAttachedUnifiedApp(ctx context.Context, identi
 		return nil, err
 	}
 	// Plan-time app.use delegates the target's selected provider scope; the caller's token ID retains attribution.
-	delegated := auth.RuntimeIdentity{AccountID: identity.AccountID, AppFamilyID: scope.AppFamilyID, AppID: scope.AppID, TokenID: identity.TokenID, AppVersion: scope.Version, Kind: scope.Kind, Status: scope.Status, TokenPolicy: store.AppTokenPolicy{AllowAll: true}}
+	origin := attachedRecoveryOrigin(identity, alias, scope.AppID)
+	delegated := auth.RuntimeIdentity{RecoveryOrigin: origin, AccountID: identity.AccountID, AppFamilyID: scope.AppFamilyID, AppID: scope.AppID, TokenID: identity.TokenID, AppVersion: scope.Version, Kind: scope.Kind, Status: scope.Status, TokenPolicy: store.AppTokenPolicy{AllowAll: true}}
 	result, requestErr := s.executeCapabilityRun(ctx, capabilityRunSpec{transport: string(identity.Kind), identity: delegated, version: scope.Version, bundle: bundle, manifest: manifest, input: input, mode: "live"})
 	// Control-plane details stay private when durable child execution cannot start.
 	if requestErr != nil {

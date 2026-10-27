@@ -147,7 +147,7 @@ func runEngine(cmd *cobra.Command) {
 	envLicense := requireRegistryLicense(ctx)
 
 	// ─── Engine Bootstrap ───
-	postgresStore := store.NewPostgresStore(database)
+	postgresStore := store.NewPostgresStore(database, store.WithExecutionResultRetentionDays(cfg.Engine.ExecutionResultRetentionDays))
 	masterKey := loadMasterKey(ctx)
 	connectRedirectURI, err := configuredConnectRedirectURI(cfg.Engine.PublicURL)
 	// A configured public identity must be safe because request hosts never participate in OAuth redirects.

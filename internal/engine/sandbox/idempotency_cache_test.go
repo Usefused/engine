@@ -49,27 +49,68 @@ func (f *fakeIdempotencyStore) key(appID uuid.UUID, keyHash string) string {
 	return appID.String() + ":" + keyHash
 }
 
-func (f *fakeIdempotencyStore) GetIdempotentExecution(ctx context.Context, appID uuid.UUID, idempotencyKeyHash, requestBodyHash string) (*models.IdempotentExecution, error) {
+// GetIdempotentExecution models the persistent conflict and pending-outcome gates.
+func (f *fakeIdempotencyStore) GetIdempotentExecution(ctx context.Context, appID uuid.UUID, keyHash, bodyHash string) (*models.IdempotentExecution, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	row, ok := f.rows[f.key(appID, idempotencyKeyHash)]
-	if !ok || time.Now().After(row.ExpiresAt) {
+	row, ok := f.rows[f.key(appID, keyHash)]
+	// Only completed standalone rows expire by their TTL.
+	if !ok || (!row.Pending && row.RunID == nil && time.Now().After(row.ExpiresAt)) {
 		return nil, store.ErrIdempotentExecutionNotFound
 	}
-	if requestBodyHash != "" && row.RequestBodyHash != "" && row.RequestBodyHash != requestBodyHash {
+	// Changing inputs cannot borrow an existing result.
+	if row.RequestBodyHash != bodyHash {
 		return nil, store.ErrIdempotencyKeyConflict
 	}
-	return row, nil
+	// Pending outcomes cannot authorize a second dispatch.
+	if row.Pending {
+		return nil, store.ErrIdempotencyInProgress
+	}
+	copy := *row
+	return &copy, nil
 }
 
-func (f *fakeIdempotencyStore) SaveIdempotentExecution(ctx context.Context, exec *models.IdempotentExecution) error {
+// ReserveIdempotentExecution gives exactly one concurrent caller ownership of a key.
+func (f *fakeIdempotencyStore) ReserveIdempotentExecution(ctx context.Context, execution *models.IdempotentExecution) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	k := f.key(exec.AppID, exec.IdempotencyKeyHash)
-	if _, exists := f.rows[k]; exists {
-		return nil // first writer wins, matching the real ON CONFLICT DO NOTHING
+	key := f.key(execution.AppID, execution.IdempotencyKeyHash)
+	// The fake shares PostgreSQL's unique-key fence.
+	if _, ok := f.rows[key]; ok {
+		return store.ErrIdempotencyInProgress
 	}
-	f.rows[k] = exec
+	copy := *execution
+	copy.Pending = true
+	f.rows[key] = &copy
+	return nil
+}
+
+// SaveIdempotentExecution completes only the caller's existing reservation.
+func (f *fakeIdempotencyStore) SaveIdempotentExecution(ctx context.Context, execution *models.IdempotentExecution) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := f.key(execution.AppID, execution.IdempotencyKeyHash)
+	previous := f.rows[key]
+	// Persistence cannot acknowledge a worker that lost ownership.
+	if previous == nil || previous.ID != execution.ID || !previous.Pending {
+		return store.ErrIdempotencyInProgress
+	}
+	copy := *execution
+	copy.Pending = false
+	f.rows[key] = &copy
+	return nil
+}
+
+// ReleaseIdempotentExecution removes only the owned pending record after repeatable work.
+func (f *fakeIdempotencyStore) ReleaseIdempotentExecution(ctx context.Context, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for key, row := range f.rows {
+		// Other keys and completed responses must survive a failed read.
+		if row.ID == id && row.Pending {
+			delete(f.rows, key)
+		}
+	}
 	return nil
 }
 
@@ -201,4 +242,9 @@ func TestIdempotency_SameKeyDifferentBody_Conflicts(t *testing.T) {
 	if vendorCalls != 1 {
 		t.Errorf("expected the conflicting second call to never reach the vendor, got %d vendor calls", vendorCalls)
 	}
+}
+
+// RetainIdempotentExecution leaves run lifetime to PostgreSQL tests while satisfying the shared cache contract.
+func (f *fakeIdempotencyStore) RetainIdempotentExecution(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
 }

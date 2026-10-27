@@ -20,7 +20,7 @@ func (s *postgresStore) ReserveExecutionAttempt(ctx context.Context, request Exe
 		return nil, false, err
 	}
 	defer tx.Rollback(ctx)
-	writer := &postgresStore{db: workspaceTransaction{Tx: tx}}
+	writer := &postgresStore{db: workspaceTransaction{Tx: tx}, executionResultRetentionDays: s.executionResultRetentionDays}
 	current, err := scanRecovery(tx.QueryRow(ctx, `SELECT `+recoveryColumns+` FROM fused_unified_app_recovery WHERE current AND account_id=$1 AND app_id=$2 AND run_id=(SELECT run_id FROM fused_unified_app_recovery WHERE execution_id=$3 AND account_id=$1 AND app_id=$2) FOR UPDATE`, request.AccountID, request.AppID, request.SourceID))
 	// Missing metadata and races cannot manufacture another logical run.
 	if err != nil {
@@ -83,7 +83,7 @@ func (s *postgresStore) lockRecoverableResult(ctx context.Context, request Execu
  AND c.attempt<c.max_attempts AND r.status<>'succeeded'
  AND (r.status IN ('failed','indeterminate') OR c.lease_until<=clock_timestamp())
  AND (NOT $4 OR (c.mode='automatic' AND (r.completed_at IS NULL OR r.completed_at+make_interval(secs=>c.backoff_seconds)<=NOW())))
- AND ($5::uuid='00000000-0000-0000-0000-000000000000' OR EXISTS(SELECT 1 FROM fused_app_tokens t WHERE t.id=$5 AND t.app_family_id=r.app_family_id AND (t.expires_at IS NULL OR t.expires_at>NOW())))
+ AND (($5::uuid=r.app_token_id AND `+recoveryOriginAuthority+`) OR (NOT $4 AND EXISTS(SELECT 1 FROM fused_app_tokens t WHERE t.id=$5 AND t.app_family_id=r.app_family_id AND (t.expires_at IS NULL OR t.expires_at>NOW()))))
  FOR UPDATE OF r`, state.ExecutionID, request.AccountID, request.AppID, request.Automatic, request.TokenID).Scan(&id)
 	// Pending owners, exhausted budgets and changed deployment authority are explicit conflicts.
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -97,7 +97,8 @@ func (s *postgresStore) lockRecoverableResult(ctx context.Context, request Execu
 
 // replaceExecutionAttempt retains the latest encrypted snapshot while assigning a fresh execution identity.
 func (s *postgresStore) replaceExecutionAttempt(ctx context.Context, request ExecutionRerunRequest, state ExecutionRecovery, previous ExecutionResult) (*ExecutionResult, error) {
-	_, err := s.db.Exec(ctx, `UPDATE fused_unified_app_results SET status='indeterminate',error_code='execution_interrupted',error_message='Execution was interrupted',completed_at=NOW(),updated_at=NOW(),expires_at=NOW()+INTERVAL '24 hours' WHERE id=$1 AND status IN ('queued','running')`, previous.ID)
+	// Interrupted owners retain their payloads for the operator-selected window, including no expiry.
+	_, err := s.db.Exec(ctx, `UPDATE fused_unified_app_results SET status='indeterminate',error_code='execution_interrupted',error_message='Execution was interrupted',completed_at=NOW(),updated_at=NOW(),expires_at=CASE WHEN $2::int=0 THEN NULL ELSE NOW()+make_interval(days=>$2) END WHERE id=$1 AND status IN ('queued','running')`, previous.ID, s.resultRetentionDays())
 	// Expired owners become terminal before a replacement result can be created.
 	if err != nil {
 		return nil, err
@@ -107,7 +108,11 @@ func (s *postgresStore) replaceExecutionAttempt(ctx context.Context, request Exe
 	if err != nil {
 		return nil, err
 	}
-	next := ExecutionResult{ID: uuid.New(), AccountID: previous.AccountID, AppFamilyID: previous.AppFamilyID, AppID: previous.AppID, AppVersion: previous.AppVersion, AppTokenID: request.TokenID, ReadHandleHash: previous.ReadHandleHash, IdempotencyKeyHash: request.KeyHash, Status: "queued", Input: previous.Input, Mode: "rerun", SourceExecutionID: &previous.ID, SourceScheduleID: previous.SourceScheduleID, SourceWebhookEventID: previous.SourceWebhookEventID, BucketID: previous.BucketID}
+	next := ExecutionResult{ID: uuid.New(), AccountID: previous.AccountID, AppFamilyID: previous.AppFamilyID, AppID: previous.AppID, AppVersion: previous.AppVersion, AppTokenID: request.TokenID, ReadHandleHash: previous.ReadHandleHash, IdempotencyKeyHash: request.KeyHash, Status: "queued", Input: previous.Input, Mode: "rerun", SourceExecutionID: &previous.ID, SourceScheduleID: previous.SourceScheduleID, SourceWebhookEventID: previous.SourceWebhookEventID, BucketID: previous.BucketID, RecoveryOrigin: previous.RecoveryOrigin}
+	// A fresh direct target token replaces delegation; automatic attempts retain their original chain.
+	if request.TokenID != previous.AppTokenID {
+		next.RecoveryOrigin = nil
+	}
 	// The shared result writer keeps ordinary history, retention and provider attribution intact.
 	if err := s.CreateExecutionResult(ctx, next); err != nil {
 		return nil, err

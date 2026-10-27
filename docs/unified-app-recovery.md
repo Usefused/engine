@@ -1,6 +1,45 @@
 # Unified App snapshots and reruns
 
-Unified Apps can save explicit JSON progress and use it on another attempt of the same logical run. This uses the existing Engine scheduler, PostgreSQL, confined TypeScript executor, credentials, and execution history. It does not require a separate worker service.
+Enable `snapshot: true` to checkpoint provider calls automatically. Your function runs normally, without `snapshot.save()` or a resume cursor:
+
+```typescript
+import * as z from "zod/mini";
+import { buildUnifiedApp } from "@fused/unified-app";
+import { fused } from "@fused/operations";
+
+export default buildUnifiedApp({
+  snapshot: true,
+  recovery: { mode: "automatic", maxAttempts: 3, backoffSeconds: 5 },
+  input: z.object({ orderId: z.string() }),
+  output: z.object({ ok: z.boolean() }),
+  // Select these provider operations in the app configuration before compiling.
+  async execute({ input }) {
+    await fused.orders.create({ orderId: input.orderId });
+    await fused.orders.confirm({ orderId: input.orderId });
+    return { ok: true };
+  },
+});
+```
+
+If `create` succeeds and a later call fails, the next attempt starts the function again. Engine returns the saved `create` response without calling the provider again, then continues. The app's original clock and random seed are restored too. Each attempt has a new execution ID; generated provider keys use the stable logical `runId` and call ordinal. Two intentional calls with identical input have distinct keys. Keep call ordering deterministic across retries; a changed request at the same call position is rejected.
+
+Engine uses its existing provider-response store for every keyed call, whether it comes from an SDK, MCP, or a Unified App. It reserves the key before dispatch and acknowledges a successful finite response only after saving it. A repeated key with changed operation, input, token scope, or routing fails instead of returning an unrelated response. Database failures never turn into cache misses.
+
+To supply a business key, pass `idempotencyKey` in the operation options:
+
+```typescript
+await fused.orders.create({ orderId }, { idempotencyKey: `order:${orderId}` });
+```
+
+The same option is available on `fused.fetch({ service, operation, input, idempotencyKey })`. An explicit key takes precedence over a generated key and works even when `snapshot` is disabled. Keys are scoped to the exact app version. Omitting `snapshot`, or setting it to `false`, generates no automatic provider keys.
+
+Automatic checkpoints currently support finite, non-paginated provider calls with responses up to 16 MiB; existing app response limits still apply. SOAP, streaming contracts, and nested `fused.callApp` calls are rejected before dispatch in this mode. A snapshot-enabled app can itself be invoked through an SDK, MCP server, or another app. Buffered `fused.db` data retains its existing terminal-commit behavior. Manual `snapshot.load()` and `snapshot.save()` cannot be mixed with automatic provider checkpoints. Publish a new immutable version to enable the opt-in.
+
+A provider may commit a write before Engine saves its response. Engine leaves that key pending and refuses to repeat the uncertain write, including after a restart. This prevents a blind duplicate but does **not** provide exactly-once completion or automatic resolution of an unknown outcome. Provider-supported idempotency remains necessary to resolve that crash window safely. Failed contract-declared reads can be retried; uncertain writes require reconciliation. Standalone pending keys are not expired automatically. Completed standalone keys retain their existing 24-hour lifetime; snapshot-bound responses follow the current run's configured retention, including indefinite retention. When runs share an explicit key, Engine keeps one response until every dependent run expires.
+
+## Explicit progress checkpoints
+
+Existing apps can continue using explicit JSON checkpoints with automatic provider snapshots disabled. This mode lets authored code choose where to resume:
 
 ```ts
 import * as z from "zod/mini";
@@ -45,7 +84,7 @@ Newly compiled apps default to `mode: "manual"`, `maxAttempts: 3`, and `backoffS
 
 A completed successful run cannot be rerun as recovery. Submit a new execution to start over with empty progress. Each attempt retains its own execution ID and canonical receipt; all attempts share a `runId`. POST execution responses include `runId` and `attempt`. Attempt history identifies the current attempt; an older execution's result remains immutable.
 
-Automatic recovery requires a direct token belonging to the Unified App family or an Engine-owned cron/webhook trigger. An automatic policy on a delegated SDK/MCP/nested-app invocation is rejected before execution because the original consumer-version authorization cannot be reconstructed from its token ID alone. Manual recovery can use a fresh direct app token and the retained read handle.
+Automatic recovery works for direct calls, SDK consumers, MCP servers, nested app calls, schedules and webhooks. Engine retains the exact consumer versions and aliases in the caller chain, without retaining bearer tokens. Each retry and host effect rechecks the original token, its alias grant, applied bindings and current app versions. Revoking the token, removing its alias grant, or retiring any caller or target stops recovery. The synchronous caller receives its attempt’s result; a later automatic attempt runs in Engine and does not replace that response. Manual recovery can use a fresh direct app token and the retained read handle.
 
 ## Trigger and inspect a rerun
 
@@ -85,15 +124,27 @@ PostgreSQL permits one current attempt per logical run. Revision checks and atte
 
 Recoverable attempts have a maximum 45-second context budget, including admission, and a two-minute ownership lease; existing sandbox limits may be stricter. Abandoned work becomes eligible when its lease expires, then follows the scheduler's polling and bounded batches. Queued management work survives Engine restart and is not mistaken for an already-running attempt. This does not add long-running execution, durable sleep, or autoscaling infrastructure.
 
-Recovery preserves the original input, runtime bucket, and immutable app version. Promoting another version blocks execution of the older run; it never interprets an old snapshot using replacement code. Snapshots expire with their retained attempt records under the existing result-retention cleanup.
+Recovery preserves the original input, runtime bucket, and immutable app version. Promoting another version blocks execution of the older run; it never interprets an old snapshot using replacement code. Results, private diagnostics, replay evidence and snapshots share the operator-configured result-retention window.
 
-An external operation can succeed immediately before a crash and before the next snapshot commits. Recovery does not guarantee exactly-once provider effects. Use provider-supported stable idempotency keys or operations that are safe to repeat when enabling automatic recovery.
+For explicit progress checkpoints, an external operation can succeed immediately before a crash and before the next snapshot commits. Recovery does not guarantee exactly-once provider effects. Use provider-supported stable idempotency keys or operations that are safe to repeat when enabling automatic recovery. Derive a write key from a stable business operation and item identity, pass the same key on every attempt, then save the snapshot after the provider confirms success. A fresh random key on each attempt defeats deduplication. The provider’s deduplication window must cover the retry window. The `Idempotency-Key` on the rerun endpoint only deduplicates the rerun request; it does not make provider writes exactly-once.
+
+## Result retention
+
+Hosted Engines default to seven days after each attempt completes. Database operators can set any longer period, or use `0` to disable expiry:
+
+```yaml
+engine:
+  # Keep results, diagnostics, replay history and snapshots until explicitly removed.
+  execution_result_retention_days: 0
+```
+
+Set this to a positive number of days, such as `90`, for finite retention. Negative values are rejected. Restart Engine after changing the configuration. The setting applies when attempts complete, including interrupted attempts; already-completed records keep their recorded expiry. It is independent of activity-event retention (`execution_retention_days`) and is not capped by a Registry entitlement. An indefinite result omits `expiresAt`. Keeping a result does not restore a retired version's permission to execute.
 
 ## Verification
 
 The PostgreSQL tests cover encrypted progress, tenant/version isolation, token revocation, retry bounds, backoff, queued ownership, and concurrent manual/automatic reservations. The compiled TypeScript integration test saves progress, fails, closes its executor, and resumes in a replacement confined process through both the management API and the scheduler. Lost-acknowledgement tests verify that catching a save error cannot turn the attempt into success.
 
-The process test requires an isolated `DATABASE_URL`, the built TypeScript compiler, and an available confined execution worker. It tests authored failure followed by process replacement; it does not claim to kill the whole Engine or to test external provider side effects.
+The process test requires an isolated `DATABASE_URL`, the built TypeScript compiler, and an available confined execution worker. It tests authored failure followed by process replacement; it does not claim to kill the whole Engine. `TestAutomaticSnapshotProviderRecovery` additionally uses a local HTTP provider and PostgreSQL: one write succeeds, the next read fails, and a replacement worker completes with one provider write total. Reservation tests cover concurrent callers and lost persistence acknowledgements. Retention tests expire the original attempt while preserving responses needed by the current attempt.
 
 `TestUnifiedAppRecoveryLiveService` additionally calls the public JSONPlaceholder API over HTTPS through the production operation resolver, credential resolver, and dispatcher. For each recovery mode, the compiled app fetches `/todos/1`, commits that response to a snapshot, and deliberately fails. A replacement worker loads the snapshot and fetches `/todos/2`. Assertions decrypt PostgreSQL replay evidence to verify exactly one selected provider operation per attempt, then check that the final output combines both responses. The fixture replaces the runtime cache as well as the worker; provider responses are not mocked. Initial attempts use the production webhook identity builder and scheduled worker entry point, so a missing trigger operation policy cannot be hidden by fixture-created identities.
 

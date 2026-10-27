@@ -1651,6 +1651,8 @@ func engineSchemaQueries() []string {
 		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS source_webhook_event_id text;`,
 		// Scheduled inputs are encrypted; occurrence advancement and result reservation share a transaction.
 		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS source_schedule_id uuid;`,
+		// Credential-free caller chains allow safe recovery through SDK, MCP and nested apps.
+		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS recovery_origin jsonb;`,
 		// Retain runtime routing independently of authored input and mutable family defaults.
 		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS runtime_bucket_id uuid;`,
 		`CREATE TABLE IF NOT EXISTS fused_unified_app_schedules (
@@ -1728,6 +1730,8 @@ func engineSchemaQueries() []string {
 			expires_at timestamptz NOT NULL,
 			CHECK (octet_length(encrypted_history) <= 1572864)
 		);`,
+		// Indefinite operator retention uses NULL consistently for results and their evidence.
+		`ALTER TABLE fused_unified_app_replay_evidence ALTER COLUMN expires_at DROP NOT NULL;`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_replay_expiry
 			ON fused_unified_app_replay_evidence(expires_at);`,
 		// Existing Engines gain one stable MCP pointer in place. The initialization
@@ -1979,6 +1983,16 @@ func engineSchemaQueries() []string {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_engine_idempotency_keys_expires
 			ON fused_engine_idempotency_keys(expires_at);`,
+		// Existing response rows are complete; new reservations share the same unique key and retention path.
+		`ALTER TABLE fused_engine_idempotency_keys ADD COLUMN IF NOT EXISTS pending boolean NOT NULL DEFAULT false;`,
+		`ALTER TABLE fused_engine_idempotency_keys ADD COLUMN IF NOT EXISTS run_id uuid;`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_engine_idempotency_run ON fused_engine_idempotency_keys(run_id) WHERE run_id IS NOT NULL;`,
+		// Shared authored keys retain one response while each dependent logical run remains available.
+		`CREATE TABLE IF NOT EXISTS fused_engine_idempotency_runs (
+          idempotency_id uuid NOT NULL REFERENCES fused_engine_idempotency_keys(id) ON DELETE CASCADE,
+          run_id uuid NOT NULL,
+          PRIMARY KEY (idempotency_id,run_id)
+        );`,
 		// MCP sessions are declared after app/token identity so both foreign keys are direct clean-schema constraints.
 		`CREATE TABLE IF NOT EXISTS fused_mcp_sessions (
 			id uuid PRIMARY KEY,

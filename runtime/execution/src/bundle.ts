@@ -25,6 +25,7 @@ export interface BundleSpec {
 }
 
 export interface ExecutionBundleManifest {
+  snapshot?: boolean;
   recovery?: Readonly<RecoveryPolicy>;
   schemaVersion: 1;
   inputSchema: Record<string, unknown>;
@@ -110,6 +111,7 @@ const outputSchema = toPublicSchema(app.output);
 const searchable = app.fetch.searchable;
 const selectedOperations = ${selections};
 const recovery = app.recovery;
+const snapshot = app.snapshot;
 globalThis.FusedUnifiedApp = {
   input: app.input,
   output: app.output,
@@ -118,7 +120,7 @@ globalThis.FusedUnifiedApp = {
   // Restore Engine-owned progress on every attempt before entering authored code.
   execute: ({ input }) => executeWithSnapshot(app, input)
 };
-globalThis.FusedExecutionManifest = { schemaVersion: 1, inputSchema, outputSchema, searchable, selectedOperations, recovery };
+globalThis.FusedExecutionManifest = { schemaVersion: 1, inputSchema, outputSchema, searchable, selectedOperations, recovery, snapshot };
 `;
   const result = await build({
     stdin: { contents: source, resolveDir: path.dirname(entryFile), sourcefile: "fused-execution-entry.ts", loader: "ts" },
@@ -195,7 +197,7 @@ export function parseExecutionManifest(raw: unknown): ExecutionBundleManifest {
   const selectedOperations = raw.selectedOperations as SelectedOperation[];
   validateSelections(selectedOperations);
   // Historical manifests omit recovery; newly compiled builders carry an explicit finite policy.
-  return { schemaVersion: 1, inputSchema: raw.inputSchema, outputSchema: raw.outputSchema, searchable, selectedOperations: exactSelections(selectedOperations), ...manifestRecovery(raw.recovery) };
+  return { schemaVersion: 1, inputSchema: raw.inputSchema, outputSchema: raw.outputSchema, searchable, selectedOperations: exactSelections(selectedOperations), ...manifestRecovery(raw.recovery), ...manifestSnapshot(raw.snapshot) };
 }
 
 // Let the caller's isolated build worker evaluate top-level code without invoking execute.
@@ -220,4 +222,13 @@ function manifestRecovery(value: unknown): Pick<ExecutionBundleManifest, "recove
   // A policy must be a structured declaration, never a primitive coerced into defaults.
   if (!isRecord(value)) throw new Error("Invalid Unified App recovery policy");
   return { recovery: validateRecoveryPolicy(value as Partial<RecoveryPolicy>) };
+}
+
+// Snapshot opt-in must survive compilation without changing historical manifests.
+function manifestSnapshot(value: unknown): Pick<ExecutionBundleManifest, "snapshot"> {
+  // Older immutable bundles did not declare automatic provider checkpoints.
+  if (value === undefined) return {};
+  // Coercing strings or objects would silently change provider execution semantics.
+  if (typeof value !== "boolean") throw new Error("Invalid Unified App snapshot setting");
+  return { snapshot: value };
 }

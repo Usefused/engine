@@ -18,13 +18,20 @@ import (
 )
 
 type postgresStore struct {
-	db storeDatabase
+	db                           storeDatabase
+	executionResultRetentionDays *int
 }
 
 var ErrWorkspaceOwnerMismatch = errors.New("engine workspace belongs to a different Registry account")
 
-func NewPostgresStore(db *pgxpool.Pool) Store {
-	return &postgresStore{db: db}
+// NewPostgresStore applies operator-owned result retention independently of activity entitlements.
+func NewPostgresStore(db *pgxpool.Pool, options ...PostgresStoreOption) Store {
+	result := &postgresStore{db: db}
+	// Options are applied once before the store is shared by concurrent workers.
+	for _, option := range options {
+		option(result)
+	}
+	return result
 }
 
 func (s *postgresStore) LoadEngineInstallationID(ctx context.Context) (uuid.UUID, error) {
@@ -1073,49 +1080,50 @@ func (s *postgresStore) GetWebhookAnalytics(ctx context.Context, accountID, serv
 	return analytics, err
 }
 
-// GetIdempotentExecution looks up a cached response for (appID,
-// idempotencyKeyHash). expires_at > NOW() makes TTL expiry a plain read-time
-// filter -- expired rows just stop matching, no sweep job required for
-// correctness (though one could trim storage over time as a follow-up).
-func (s *postgresStore) GetIdempotentExecution(ctx context.Context, appID uuid.UUID, idempotencyKeyHash, requestBodyHash string) (*models.IdempotentExecution, error) {
-	query := `
-		SELECT id, app_id, idempotency_key_hash, request_body_hash, environment, response_body, response_status, response_media_family, created_at, expires_at
-		FROM fused_engine_idempotency_keys
-		WHERE app_id = $1 AND idempotency_key_hash = $2 AND expires_at > NOW()
-	`
+// GetIdempotentExecution returns retained results and refuses unresolved reservations rather than repeating effects.
+func (s *postgresStore) GetIdempotentExecution(ctx context.Context, appID uuid.UUID, keyHash, bodyHash string) (*models.IdempotentExecution, error) {
 	var exec models.IdempotentExecution
-	err := s.db.QueryRow(ctx, query, appID, idempotencyKeyHash).Scan(
-		&exec.ID, &exec.AppID, &exec.IdempotencyKeyHash, &exec.RequestBodyHash,
-		&exec.Environment, &exec.ResponseBody, &exec.ResponseStatus, &exec.ResponseMediaFamily, &exec.CreatedAt, &exec.ExpiresAt,
-	)
+	err := s.db.QueryRow(ctx, `SELECT id,app_id,idempotency_key_hash,COALESCE(request_body_hash,''),COALESCE(environment,''),response_body,response_status,response_media_family,created_at,expires_at,pending,run_id
+ FROM fused_engine_idempotency_keys k WHERE app_id=$1 AND idempotency_key_hash=$2 AND `+retainedIdempotentExecution, appID, keyHash).Scan(
+		&exec.ID, &exec.AppID, &exec.IdempotencyKeyHash, &exec.RequestBodyHash, &exec.Environment, &exec.ResponseBody, &exec.ResponseStatus, &exec.ResponseMediaFamily, &exec.CreatedAt, &exec.ExpiresAt, &exec.Pending, &exec.RunID)
+	// A confirmed miss is the only read outcome that permits a new reservation.
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrIdempotentExecutionNotFound
 	}
+	// Database failures never imply that a provider was not called.
 	if err != nil {
 		return nil, fmt.Errorf("get idempotent execution: %w", err)
 	}
-	if requestBodyHash != "" && exec.RequestBodyHash != "" && exec.RequestBodyHash != requestBodyHash {
+	// Bind the entire admitted request, even when the caller reused a key accidentally.
+	if exec.RequestBodyHash != bodyHash {
 		return nil, ErrIdempotencyKeyConflict
+	}
+	// Another worker or a crashed write owns this key until its outcome is known.
+	if exec.Pending {
+		return nil, ErrIdempotencyInProgress
 	}
 	return &exec, nil
 }
 
-// SaveIdempotentExecution caches a successful execution's response.
-// ON CONFLICT DO NOTHING: if two concurrent requests with the same key both
-// reach here, the first write wins and the second is a harmless no-op --
-// both callers already have their (equivalent) response in hand from their
-// own dispatch, this table only serves future lookups.
+// SaveIdempotentExecution acknowledges only the reservation owner's durable response.
 func (s *postgresStore) SaveIdempotentExecution(ctx context.Context, exec *models.IdempotentExecution) error {
-	_, err := s.db.Exec(ctx, saveIdempotentExecutionQuery, idempotentExecutionInsertArgs(exec)...)
+	tag, err := s.db.Exec(ctx, saveIdempotentExecutionQuery, idempotentExecutionInsertArgs(exec)...)
+	// A lost reservation must not acknowledge a response that was never persisted.
+	if err == nil && tag.RowsAffected() != 1 {
+		return ErrIdempotencyInProgress
+	}
 	return err
 }
 
 const saveIdempotentExecutionQuery = `
-		INSERT INTO fused_engine_idempotency_keys
-			(id, app_id, idempotency_key_hash, request_body_hash, environment, response_body, response_status, response_media_family, created_at, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9)
-		ON CONFLICT (app_id, idempotency_key_hash) DO NOTHING
-	`
+ INSERT INTO fused_engine_idempotency_keys
+ (id,app_id,idempotency_key_hash,request_body_hash,environment,response_body,response_status,response_media_family,created_at,expires_at)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW(),$9)
+ ON CONFLICT(app_id,idempotency_key_hash) DO UPDATE SET
+ environment=EXCLUDED.environment,response_body=EXCLUDED.response_body,response_status=EXCLUDED.response_status,
+ response_media_family=EXCLUDED.response_media_family,pending=false
+ WHERE fused_engine_idempotency_keys.id=EXCLUDED.id AND fused_engine_idempotency_keys.pending
+`
 
 // idempotentExecutionInsertArgs keeps INSERT argument order aligned with the persisted replay media contract.
 func idempotentExecutionInsertArgs(exec *models.IdempotentExecution) []any {

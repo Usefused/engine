@@ -764,6 +764,8 @@ func TestMcpCallHandlerRejectsOversizedPhysicalResult(t *testing.T) {
 // configureMCPPhysicalCallTest wires one real physical dispatch through the
 // production cache, validator, resolver, dispatcher, and session boundaries.
 func configureMCPPhysicalCallTest(t *testing.T, vendorURL string) (string, string, *mockSecretResolver) {
+	// MCP supplies provider keys, so fixtures must supply the same required persistence boundary as production.
+	withIdempotencyStore(t, newFakeIdempotencyStore())
 	t.Helper()
 	// The shared cache fixture keeps handler tests on the canonical execution path.
 	cache, endpointName := makePassthroughCache(t, vendorURL)

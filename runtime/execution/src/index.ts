@@ -7,6 +7,7 @@ export interface WorkspaceOperationRequest {
   service: string;
   operation: string;
   input: JsonObject;
+  idempotencyKey?: string;
   pagination?: { maxPages: number };
   selector?: {
     environment?: string;
@@ -39,7 +40,7 @@ declare global {
 
 export interface ExecutionContext<Input> {
   input: Input;
-  /** Engine-restored progress for this run, or null when no snapshot has been saved. */
+  /** Explicitly saved progress, or null in automatic provider-checkpoint mode. */
   snapshot: JsonValue;
 }
 
@@ -50,6 +51,7 @@ export interface RecoveryPolicy {
 }
 
 export interface UnifiedApp<Input extends $ZodType, Output extends $ZodType> {
+  readonly snapshot: boolean;
   readonly recovery: Readonly<RecoveryPolicy>;
   readonly input: Input;
   readonly output: Output;
@@ -58,6 +60,8 @@ export interface UnifiedApp<Input extends $ZodType, Output extends $ZodType> {
 }
 
 export interface UnifiedAppConfig<Input extends $ZodType, Output extends $ZodType> {
+  /** Automatically checkpoint finite provider calls in Engine; defaults to false. */
+  snapshot?: boolean;
   recovery?: Partial<RecoveryPolicy>;
   input: Input;
   output: Output;
@@ -112,8 +116,10 @@ export function buildUnifiedApp<Input extends $ZodType, Output extends $ZodType>
   }
   // An omitted fetch policy exposes only Engine-owned metadata search fields.
   const searchable = validateSearchablePaths(config.fetch?.searchable ?? []);
+  // Automatic provider checkpoints are explicit; accidental truthy values must not enable them.
+  if (config.snapshot !== undefined && typeof config.snapshot !== "boolean") throw new Error("snapshot must be a boolean");
   const recovery = validateRecoveryPolicy(config.recovery);
-  return Object.freeze({ input: config.input, output: config.output, fetch: Object.freeze({ searchable }), recovery, execute: config.execute });
+  return Object.freeze({ input: config.input, output: config.output, fetch: Object.freeze({ searchable }), snapshot: config.snapshot === true, recovery, execute: config.execute });
 }
 
 // Validate immutable retry policy before an app can be published with automatic effects.
@@ -140,9 +146,10 @@ async function saveSnapshot(state: JsonValue): Promise<void> {
 
 export const snapshot = Object.freeze({ load: loadSnapshot, save: saveSnapshot });
 
-// Restore progress before authored code can perform effects; failed reads must abort the attempt.
+// Restore explicit progress only in manual checkpoint mode; automatic provider replay stays inside Engine.
 export async function executeWithSnapshot<Input extends $ZodType, Output extends $ZodType>(app: UnifiedApp<Input, Output>, input: output<Input>): Promise<input<Output>> {
-  const snapshot = await loadSnapshot();
+  // Automatic checkpoints live in Engine provider results; authored code always restarts with ordinary input.
+  const snapshot = app.snapshot ? null : await loadSnapshot();
   return app.execute({ input, snapshot });
 }
 

@@ -35,7 +35,7 @@ import {fused} from "@fused/operations";
 export default buildUnifiedApp({input:z.object({email:z.string()}),output:z.object({count:z.number()}),
 // All variants share the same selected operation and provider execution path.
 async execute({input}) {
- await fused.stripe.getCustomers(input, {pagination:{maxPages:2}, selector:{environment:"prod"}});
+ await fused.stripe.getCustomers(input, {pagination:{maxPages:2}, selector:{environment:"prod"}, idempotencyKey:"customer-lookup"});
  await fused.forUserRef("alice").stripe.getCustomers(input);
  const result = await fused.forServiceUserRefs({"@public/stripe":"bob"}).stripe.getCustomers(input);
  await fused.db.set({count:result.count});
@@ -65,6 +65,7 @@ async execute({input}) {
       assert.deepEqual(request.input, { email: "test@example.com" });
     }
     assert.deepEqual(requests[0].pagination, { maxPages: 2 });
+    assert.equal(requests[0].idempotencyKey, "customer-lookup");
     assert.equal(requests[0].selector.environment, "prod");
     assert.equal(requests[1].selector.endUserRef, "alice");
     assert.equal(requests[2].selector.endUserRef, "bob");

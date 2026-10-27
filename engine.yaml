@@ -36,6 +36,8 @@ engine:
     queue_capacity: 256
     queue_timeout_seconds: 5
   registry_endpoint: "http://127.0.0.1:8090/graphql"
+  # Run payload retention is independent of activity history; zero keeps it indefinitely.
+  execution_result_retention_days: 7
   execution_retention_days: 30
   execution_cleanup_batch: 1000
   # Bounded OAuth refresh concurrency. Override with

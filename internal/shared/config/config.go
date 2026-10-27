@@ -51,16 +51,17 @@ const DefaultInitialCreditBalance = 10_000_000.0
 var GlobalEncryptionKey []byte
 
 type EngineConfig struct {
-	AI                     AgentConfig               `yaml:"ai"`
-	UnifiedApps            UnifiedAppAdmissionConfig `yaml:"unified_apps"`
-	RegistryEndpoint       string                    `yaml:"registry_endpoint"`
-	PublicURL              string                    `yaml:"public_url"`
-	PublicGRPCURL          string                    `yaml:"public_grpc_url"`
-	AccountID              string                    `yaml:"account_id"`
-	LicenseKey             string                    `yaml:"license_key"`
-	LicenseKeySource       string                    `yaml:"-"`
-	ExecutionRetentionDays int                       `yaml:"execution_retention_days"`
-	ExecutionCleanupBatch  int                       `yaml:"execution_cleanup_batch"`
+	AI                           AgentConfig               `yaml:"ai"`
+	UnifiedApps                  UnifiedAppAdmissionConfig `yaml:"unified_apps"`
+	RegistryEndpoint             string                    `yaml:"registry_endpoint"`
+	PublicURL                    string                    `yaml:"public_url"`
+	PublicGRPCURL                string                    `yaml:"public_grpc_url"`
+	AccountID                    string                    `yaml:"account_id"`
+	LicenseKey                   string                    `yaml:"license_key"`
+	LicenseKeySource             string                    `yaml:"-"`
+	ExecutionResultRetentionDays int                       `yaml:"execution_result_retention_days"`
+	ExecutionRetentionDays       int                       `yaml:"execution_retention_days"`
+	ExecutionCleanupBatch        int                       `yaml:"execution_cleanup_batch"`
 	// ConnectedAuthRefreshWorkers is the exact bounded OAuth refresh pool size
 	// selected by the Engine operator.
 	ConnectedAuthRefreshWorkers int `yaml:"connected_auth_refresh_workers"`
@@ -177,6 +178,10 @@ func Load(path string, options ...LoadOption) (*Config, error) {
 	if cfg.WorkerPool.Size <= 0 {
 		cfg.WorkerPool.Size = 1
 	}
+	// Negative retention is a typo; zero deliberately keeps run payloads indefinitely.
+	if cfg.Engine.ExecutionResultRetentionDays < 0 {
+		return nil, fmt.Errorf("engine.execution_result_retention_days must be zero or positive")
+	}
 	// Refresh concurrency must remain bounded before any worker starts.
 	if err := validateConnectedAuthRefreshWorkers(cfg.Engine.ConnectedAuthRefreshWorkers); err != nil {
 		return nil, err
@@ -227,12 +232,13 @@ func defaultConfig() *Config {
 			},
 		},
 		Engine: EngineConfig{
-			AI:                          AgentConfig{Enabled: true},
-			UnifiedApps:                 DefaultUnifiedAppAdmissionConfig(),
-			RegistryEndpoint:            "https://registry.usefused.com/graphql",
-			ExecutionRetentionDays:      30,
-			ExecutionCleanupBatch:       1000,
-			ConnectedAuthRefreshWorkers: DefaultConnectedAuthRefreshWorkers,
+			AI:                           AgentConfig{Enabled: true},
+			UnifiedApps:                  DefaultUnifiedAppAdmissionConfig(),
+			RegistryEndpoint:             "https://registry.usefused.com/graphql",
+			ExecutionRetentionDays:       30,
+			ExecutionResultRetentionDays: 7,
+			ExecutionCleanupBatch:        1000,
+			ConnectedAuthRefreshWorkers:  DefaultConnectedAuthRefreshWorkers,
 		},
 	}
 }

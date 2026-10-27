@@ -68,7 +68,7 @@ func (s *EngineGRPCServer) runAdmittedCapability(ctx context.Context, spec capab
 	// Every terminal authored run shares the canonical Requests and Analytics event path.
 	var recorder *recordingCapabilityHost
 	defer func() { s.publishUnifiedAppReceipt(ctx, spec, admitted.id, recorder) }()
-	controls, err := sandbox.NewCapabilityDeterminism()
+	controls, runID, err := s.capabilityRunDeterminism(ctx, spec, admitted.id)
 	// No provider work may start if replay controls could not be generated for this invocation.
 	if err != nil {
 		return s.failCapabilityRuntimeStart(ctx, admitted, spec, err)
@@ -85,9 +85,10 @@ func (s *EngineGRPCServer) runAdmittedCapability(ctx context.Context, spec capab
 	if err := admitted.results.StartExecutionResult(ctx, spec.identity.AccountID, spec.identity.AppID, admitted.id); err != nil {
 		return capabilityExecutionEnvelope{}, newRESTExecutionError(http.StatusServiceUnavailable, "result_unavailable", "execution result is unavailable")
 	}
+	spec.identity = capabilityOriginIdentity(spec)
 	host := &executionCapabilityHost{
 		apps: s, runtime: s.runtime, identity: spec.identity,
-		executionID: admitted.id, bindings: admitted.bindings,
+		executionID: admitted.id, bindings: admitted.bindings, automaticSnapshot: spec.manifest.Snapshot, snapshotRunID: runID,
 	}
 	s.prepareAttemptHost(spec, host, cancelAttempt)
 	// Buffering the JSON document keeps the final state and output in one terminal SQL update.
@@ -147,9 +148,9 @@ func (s *EngineGRPCServer) admitCapabilityRun(ctx context.Context, spec capabili
 	id, handle, created, err := reserveCapabilityRun(ctx, results, spec)
 	// A rejected reservation cannot acquire a cache reference or start provider work.
 	if err != nil {
-		// Automatic recovery requires a durable direct origin rather than guessed consumer delegation.
+		// Recovery cannot start from missing or revoked caller authority.
 		if errors.Is(err, store.ErrExecutionRecoveryOrigin) {
-			return admittedCapabilityRun{}, newRESTExecutionError(400, "recovery_origin_unsupported", err.Error())
+			return admittedCapabilityRun{}, newRESTExecutionError(http.StatusForbidden, "recovery_origin_unauthorized", err.Error())
 		}
 		// The same caller key cannot name two different retained inputs or app versions.
 		if errors.Is(err, store.ErrExecutionResultIdempotencyConflict) {
@@ -213,7 +214,7 @@ func reserveCapabilityRun(ctx context.Context, results store.ExecutionResultStor
 		BucketID: spec.bucketID,
 		ID:       id, AccountID: spec.identity.AccountID, AppFamilyID: spec.identity.AppFamilyID,
 		AppID: spec.identity.AppID, AppVersion: spec.version,
-		AppTokenID: spec.identity.TokenID, ReadHandleHash: readHash,
+		AppTokenID: spec.identity.TokenID, ReadHandleHash: readHash, RecoveryOrigin: spec.identity.RecoveryOrigin,
 		IdempotencyKeyHash: spec.idempotencyKeyHash, Status: "queued", Input: spec.input,
 		Mode: spec.mode, SourceExecutionID: spec.sourceExecutionID,
 		SourceWebhookEventID: spec.webhookEventID,

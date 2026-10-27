@@ -212,6 +212,11 @@ func executeResolvedProviderOperation(
 		span.SetStatus(codes.Error, "dispatcher not initialized")
 		return errors.New("engine dispatcher not initialized")
 	}
+	ctx, err = bindIdempotentRequest(ctx, identity, match, request)
+	// Reusing a caller key must remain bound to the complete server-admitted request.
+	if err != nil {
+		return err
+	}
 	params, obj := prepareResolvedProviderInputs(ctx, match, request.Params)
 	if replayed, replayErr := tryReplayFromIdempotencyCache(ctx, span, identity.AppID, obj, stream, auditState); replayErr != nil || replayed {
 		engine.MeasureExecutionTiming(ctx, "engine_resolution_total", resolutionStarted)

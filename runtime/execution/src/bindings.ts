@@ -53,7 +53,7 @@ export function generateExecutionBindingsSource(operations: readonly SelectedOpe
   const exact = [...serviceGroups(operations)].map(([service, entries]) => serviceSource(service, entries, false)).join(", ");
   return `import { fused as runtime, type JsonObject, type WorkspaceOperationRequest } from "@fused/unified-app";
 ${types}
-type OperationOptions = Pick<WorkspaceOperationRequest, "selector" | "pagination">;
+type OperationOptions = Pick<WorkspaceOperationRequest, "selector" | "pagination" | "idempotencyKey">;
 // Each facade binds exact selected operations to one existing Engine transport.
 function bindOperations(transport: Pick<typeof runtime, "fetch">) {
   const services = Object.freeze({ ${exact} });
@@ -76,7 +76,7 @@ export function generateExecutionBindingsDeclaration(operations: readonly Select
   return `declare module "@fused/operations" {
 import { fused as runtime, type WorkspaceOperationRequest } from "@fused/unified-app";
 ${types}
-export type OperationOptions = Pick<WorkspaceOperationRequest, "selector" | "pagination">;
+export type OperationOptions = Pick<WorkspaceOperationRequest, "selector" | "pagination" | "idempotencyKey">;
 type ExactServices = { ${exact} };
 type SelectedServices = { ${aliasedServices(operations, true)} };
 type BoundFused = ReturnType<typeof runtime.forUserRef> & SelectedServices;
