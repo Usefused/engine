@@ -1755,14 +1755,15 @@ func unresolvedWorkspaceServiceSlugs(services map[string]workspaceConfigService)
 	return slugs
 }
 
+// decodeWorkspaceApplyRequest admits plan references while keeping credential setup in the connect workflow.
 func decodeWorkspaceApplyRequest(r *http.Request) (ConfigApplyRequest, uuid.UUID, error) {
 	var req ConfigApplyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return req, uuid.Nil, errors.New("invalid request body")
 	}
-	// Service credential material moved to bucket secret commands and is no longer accepted by workspace apply.
+	// Service credential material belongs to connect and is no longer accepted by workspace apply.
 	if len(req.AuthMaterials) != 0 {
-		return req, uuid.Nil, errors.New("auth_materials is no longer supported; configure bucket credentials with secret set")
+		return req, uuid.Nil, errors.New("auth_materials is no longer supported; configure bucket credentials with fused-cli connect")
 	}
 	planID, err := uuid.Parse(req.PlanID)
 	if err != nil {
@@ -1816,10 +1817,11 @@ func validateWorkspaceConfigDocument(doc workspaceConfigDocument) error {
 	if doc.Services == nil {
 		return errors.New("config.services is required")
 	}
-	// Workspace owns enablement and policy only; app auth refs and secret commands own credential routing/material.
+	// Workspace owns enablement and policy only; app auth refs and connect own credential routing/material.
 	for bucketName, bucket := range doc.Buckets {
+		// Legacy credential configuration must point to the supported setup command.
 		if len(bucket.ServiceConfig) != 0 {
-			return fmt.Errorf("bucket %q service_config is no longer supported; configure credentials with secret set and app services.<name>.auth.ref", bucketName)
+			return fmt.Errorf("bucket %q service_config is no longer supported; configure credentials with fused-cli connect and app services.<name>.auth.ref", bucketName)
 		}
 	}
 	return validateWorkspaceExecutionPolicyTimeouts(doc.Services)

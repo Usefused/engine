@@ -324,7 +324,7 @@ func migrateLegacyConnectConfigRow(masterKey []byte, config legacyConnectConfigR
 	return encryptMigratedOAuthApplication(masterKey, config, credentialType, clientIDKey, clientSecretKey, clientID, clientSecret)
 }
 
-// encryptMigratedOAuthApplication creates independently wrapped rows matching normal secret-set writes.
+// encryptMigratedOAuthApplication creates independently wrapped rows matching normal credential writes.
 func encryptMigratedOAuthApplication(masterKey []byte, config legacyConnectConfigRow, credentialType, clientIDKey, clientSecretKey, clientID, clientSecret string) ([]WorkspaceSecret, error) {
 	inputs := []struct{ key, value string }{{clientIDKey, clientID}, {clientSecretKey, clientSecret}}
 	secrets := make([]WorkspaceSecret, 0, len(inputs))

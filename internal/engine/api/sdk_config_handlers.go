@@ -4183,7 +4183,7 @@ func missingAppBucketMaterial(selection models.SDKSelection, serviceNames map[uu
 	missing := make([]appMissingCredential, 0)
 	for _, required := range selection.RequiredAuth {
 		if required.AuthType == "oauth" || required.AuthType == "oidc" {
-			// A failed exact-family readiness check reports the complete atomic pair expected by secret set.
+			// A failed exact-family readiness check reports the complete atomic pair expected by connect.
 			if !ready[appConnectReadinessKey(selection.ServiceID, required.AuthType, required.AuthName)] {
 				serviceID, reported := appReadinessCredentialIdentity(selection, required)
 				missing = append(missing, newAppMissingCredential(serviceID, serviceNames[serviceID], reported, appRequiredOAuthSecretFields(reported.AuthName)))

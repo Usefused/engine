@@ -1998,7 +1998,7 @@ func TestWorkspaceConfigRejectsServiceConfig(t *testing.T) {
 	}
 }
 
-// TestWorkspaceApplyRejectsAuthMaterials keeps credential values on secret-set mutations.
+// TestWorkspaceApplyRejectsAuthMaterials keeps credential values on credential mutations.
 func TestWorkspaceApplyRejectsAuthMaterials(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/workspace/config/apply", strings.NewReader(`{
 		"plan_id":"`+uuid.NewString()+`",

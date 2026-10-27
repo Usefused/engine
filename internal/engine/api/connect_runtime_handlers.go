@@ -22,6 +22,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/authevent"
 	"github.com/Usefused/engine/internal/engine/connectauth"
 	"github.com/Usefused/engine/internal/engine/connectresource"
+	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/authselector"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -397,7 +398,7 @@ func connectRegistrationUnavailable(call connectAdminCall, authType, authName st
 }
 
 // connectApplicationCredentialRemediation targets the direct or referenced
-// application family selected for this consent attempt without exposing values.
+// application family selected for this consent attempt using the runtime's shared safe command builder.
 func connectApplicationCredentialRemediation(call connectAdminCall, authType, authName string) string {
 	serviceID := call.serviceID
 	// An explicit app auth reference stores the pair under its source service and family.
@@ -406,17 +407,10 @@ func connectApplicationCredentialRemediation(call connectAdminCall, authType, au
 		authType = call.credentialSource.AuthType
 		authName = call.credentialSource.AuthName
 	}
-	command := fmt.Sprintf(
-		"fused-cli secret set %s --bucket %s --type %s --auth-name %s --interactive",
-		serviceID.String(), call.bucketID.String(), shellQuoteCLIArgument(authType), shellQuoteCLIArgument(authName),
-	)
-	return "Run " + command + ", then retry the connection."
-}
-
-// shellQuoteCLIArgument renders reviewed provider metadata as one POSIX shell
-// word so remediation text cannot create an additional command or argument.
-func shellQuoteCLIArgument(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+	missing := &sandbox.CredentialMaterialMissingError{
+		ServiceID: serviceID, BucketID: call.bucketID, AuthType: authType, AuthName: authName,
+	}
+	return "Run " + missing.Command() + ", then retry the connection."
 }
 
 // resolveExplicitConnectCredentialSource admits one enabled source scheme through the planner's set-based local snapshot path.
@@ -1890,7 +1884,7 @@ func connectRuntimeErrorRemediation(status int) string {
 	case http.StatusForbidden:
 		return "Use an authorized app and bucket binding with the required connect scope."
 	case http.StatusNotFound:
-		return "Store the complete OAuth/OIDC application credential pair in the selected bucket with secret set."
+		return "Store the complete OAuth/OIDC application credential pair in the selected bucket using fused-cli connect."
 	case http.StatusConflict:
 		return "Reapply the app or service configuration before starting a new connection."
 	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:

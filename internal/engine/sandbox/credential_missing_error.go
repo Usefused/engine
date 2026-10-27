@@ -44,8 +44,8 @@ func (e *CredentialMaterialMissingError) Error() string {
 	return "bucket_credentials_missing: provider credentials are not configured; run: " + e.Command()
 }
 
-// Command returns the canonical interactive CLI remediation without embedding
-// a credential value in argv, logs, telemetry, or the error payload.
+// Command uses connect's built-in credential prompts and preserves the exact
+// missing auth scheme without embedding credential values in the command.
 func (e *CredentialMaterialMissingError) Command() string {
 	service, bucket := e.ServiceID.String(), e.BucketID.String()
 	// UUIDs remain a reliable fallback when a deleted or older service has no readable identity.
@@ -57,7 +57,7 @@ func (e *CredentialMaterialMissingError) Command() string {
 		bucket = shellQuoteCredentialArgument(e.BucketName)
 	}
 	return fmt.Sprintf(
-		"fused-cli secret set %s --bucket %s --type %s --auth-name %s --interactive",
+		"fused-cli connect %s --bucket %s --type %s --auth-name %s",
 		service, bucket, shellQuoteCredentialArgument(e.AuthType), shellQuoteCredentialArgument(e.AuthName),
 	)
 }

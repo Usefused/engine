@@ -250,7 +250,8 @@ func TestEncodeRuntimeErrorPreservesCredentialSetup(t *testing.T) {
 	if err := json.Unmarshal([]byte(encoded), &got); err != nil {
 		t.Fatalf("decode credential error %q: %v", encoded, err)
 	}
-	if got.Code != "bucket_credentials_missing" || got.BucketID != bucketID.String() || got.ServiceID != serviceID.String() || !strings.Contains(got.Command, "fused-cli secret set "+serviceID.String()) {
+	// Every generated SDK must receive a command supported by the current CLI.
+	if got.Code != "bucket_credentials_missing" || got.BucketID != bucketID.String() || got.ServiceID != serviceID.String() || !strings.Contains(got.Command, "fused-cli connect "+serviceID.String()) {
 		t.Fatalf("encoded credential contract = %#v", got)
 	}
 }

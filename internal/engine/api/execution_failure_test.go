@@ -57,7 +57,7 @@ func TestCredentialFailureReplaysReadableCommand(t *testing.T) {
 	}
 	_, replayErr := replay.Fetch(context.Background(), request)
 	// Live and replayed code must see the same message, including readable targets.
-	if failure == nil || replayErr == nil || failure.Error() != replayErr.Error() || !strings.Contains(failure.Error(), "secret set 'stripe' --bucket 'production'") {
+	if failure == nil || replayErr == nil || failure.Error() != replayErr.Error() || !strings.Contains(failure.Error(), "fused-cli connect 'stripe' --bucket 'production'") {
 		t.Fatalf("live %v replay %v", failure, replayErr)
 	}
 }
@@ -135,7 +135,7 @@ func TestCredentialFailureReachesAuthoredException(t *testing.T) {
 	_, runErr := executionappvm.RunInProcess(context.Background(), []byte(bundle), json.RawMessage(`{}`), host)
 	message := capabilityPublicError("execution_failed", runErr)
 	// A failed await must deliver actionable guidance instead of either generic masking layer.
-	if !strings.Contains(message, "secret set 'stripe' --bucket 'production'") {
+	if !strings.Contains(message, "fused-cli connect 'stripe' --bucket 'production'") {
 		t.Fatalf("masked credential failure: %s", message)
 	}
 }

@@ -204,7 +204,7 @@ describe("runExecute -- call() wiring", () => {
       status: 409,
       json: async () => ({
         code: "bucket_credentials_missing",
-        error: "bucket_credentials_missing: provider credentials are not configured; run: fused-cli secret set service-id --bucket bucket-id --interactive",
+        error: "bucket_credentials_missing: provider credentials are not configured; run: fused-cli connect service-id --bucket bucket-id",
         recovery_action: "complete_authentication",
         execute_request: "retry_after_auth",
         provider_execution: "not_started",
@@ -221,7 +221,7 @@ describe("runExecute -- call() wiring", () => {
       provider_execution: "not_started",
       automatic_replay: false,
     });
-    expect(failure.message).toContain("fused-cli secret set service-id --bucket bucket-id --interactive");
+    expect(failure.message).toContain("fused-cli connect service-id --bucket bucket-id");
   });
 
   /** A first-call auth challenge carries a browser URL and safe exact-tool replay decision outside model text. */

@@ -419,7 +419,7 @@ func TestRESTExecutionProjectsActionableErrorsWithSafeDetails(t *testing.T) {
 			t.Fatalf("actionable error leaked provider data: %s", recorder.Body.String())
 		}
 		// Credential absence must include a copyable value-free CLI command.
-		if test.code == "bucket_credentials_missing" && (!strings.Contains(recorder.Body.String(), `"command":"fused-cli secret set `+missingService.String()) || !strings.Contains(recorder.Body.String(), `--bucket `+missingBucket.String())) {
+		if test.code == "bucket_credentials_missing" && (!strings.Contains(recorder.Body.String(), `"command":"fused-cli connect `+missingService.String()) || !strings.Contains(recorder.Body.String(), `--bucket `+missingBucket.String())) {
 			t.Fatalf("credential remediation = %s", recorder.Body.String())
 		}
 	}

@@ -223,8 +223,8 @@ func assertConnectResolutionError(t *testing.T, response *httptest.ResponseRecor
 	if response.Code != http.StatusNotFound || decodeErr != nil || envelope.Error.Code != "oauth_application_credentials_not_found" || envelope.Error.Category != "not_found" || envelope.Error.Retryable {
 		t.Fatalf("resolution response = %d %#v decode=%v", response.Code, envelope.Error, decodeErr)
 	}
-	// Credential resolution precedes mutation and points callers to the canonical secret path.
-	if envelope.Error.Phase != "connect_resolution" || envelope.Error.CommitState != "not_committed" || !strings.Contains(envelope.Error.Remediation, "secret set") {
+	// Credential resolution precedes mutation and points callers to the supported credential setup command.
+	if envelope.Error.Phase != "connect_resolution" || envelope.Error.CommitState != "not_committed" || !strings.Contains(envelope.Error.Remediation, "fused-cli connect ") || strings.Contains(envelope.Error.Remediation, "--interactive") {
 		t.Fatalf("resolution metadata = %#v", envelope.Error)
 	}
 }

@@ -195,7 +195,7 @@ describe("remoteCall", () => {
         status: 409,
         json: async () => ({
           code: "bucket_credentials_missing",
-          error: "bucket_credentials_missing: provider credentials are not configured; run: fused-cli secret set service-id --bucket bucket-id --interactive",
+          error: "bucket_credentials_missing: provider credentials are not configured; run: fused-cli connect service-id --bucket bucket-id",
           recovery_action: "complete_authentication",
           execute_request: "retry_after_auth",
           provider_execution: "not_started",
@@ -211,7 +211,7 @@ describe("remoteCall", () => {
       // The trusted bridge error owns both the value-free command and the safe deliberate retry decision.
       failure = error;
     }
-    expect((failure as Error).message).toContain("fused-cli secret set service-id --bucket bucket-id --interactive");
+    expect((failure as Error).message).toContain("fused-cli connect service-id --bucket bucket-id");
     expect(bridgeRecoveryForError(failure)).toEqual({ recovery_action: "complete_authentication", execute_request: "retry_after_auth", provider_execution: "not_started", automatic_replay: false });
   });
 

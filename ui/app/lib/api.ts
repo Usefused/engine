@@ -1541,7 +1541,7 @@ export const api = {
     // were removed: webhooks are Engine-owned now (engine_owned_webhooks_plan.md,
     // Task 7 dropped account_webhooks and these Registry routes entirely).
     // Equivalent read-only visibility lives on Engine GraphQL; secrets are set via the CLI
-    // (`fused secret set`), which is write-only by design.
+    // (`fused-cli connect`), which is write-only by design.
 
     createLead: (lead: {
       name: string;

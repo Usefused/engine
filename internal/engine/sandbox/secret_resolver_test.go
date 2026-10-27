@@ -209,7 +209,8 @@ func TestSecretResolverReturnsActionableMissingStaticCredential(t *testing.T) {
 		t.Fatalf("missing credential error = %#v / %v", missing, err)
 	}
 	command := missing.Command()
-	if !strings.Contains(command, "fused-cli secret set "+serviceID.String()) || !strings.Contains(command, "--bucket "+bucketID.String()) || !strings.Contains(command, "--interactive") {
+	// connect prompts for missing values itself; the removed interactive flag must never be suggested.
+	if !strings.Contains(command, "fused-cli connect "+serviceID.String()) || !strings.Contains(command, "--bucket "+bucketID.String()) || strings.Contains(command, "--interactive") {
 		t.Fatalf("remediation command = %q", command)
 	}
 }
@@ -1395,7 +1396,7 @@ func encryptedAuthConnection(t *testing.T, masterKey []byte, bucketID, serviceID
 	}
 }
 
-// encryptedResolverApplicationSecrets mirrors atomic secret-set encryption for refresh tests.
+// encryptedResolverApplicationSecrets mirrors atomic credential encryption for refresh tests.
 func encryptedResolverApplicationSecrets(t *testing.T, masterKey []byte, bucketID, serviceID uuid.UUID) []store.WorkspaceSecret {
 	t.Helper()
 	inputs := []struct{ key, value string }{{"bearerAuth_client_id", "client-id"}, {"bearerAuth_client_secret", "client-secret"}}

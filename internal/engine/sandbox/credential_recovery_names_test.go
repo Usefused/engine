@@ -35,7 +35,7 @@ func TestCredentialRecoveryUsesNames(t *testing.T) {
 	}
 	command := missing.Command()
 	// Apostrophes must stay inside one shell argument, not terminate the bucket name.
-	if !strings.Contains(command, "secret set '@stripe/payments' --bucket 'team'\"'\"'s production'") {
+	if !strings.Contains(command, "fused-cli connect '@stripe/payments' --bucket 'team'\"'\"'s production'") {
 		t.Fatalf("wrong command: %s", command)
 	}
 	raw, _ := json.Marshal(missing)

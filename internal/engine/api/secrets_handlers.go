@@ -644,7 +644,7 @@ func validateSingleSecretRequest(w http.ResponseWriter, ctx context.Context, pay
 	}
 	// Paired credentials must use the atomic bulk endpoint to avoid partial state.
 	if credentialTypeRequiresPair(payload.CredentialType) {
-		writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "paired_credentials_required", "Paired credentials must be saved together.", "Use the paired credential fields in one secret-set command.", "secret_upsert", "", "not_committed", "")
+		writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "paired_credentials_required", "Paired credentials must be saved together.", "Use the paired credential fields in one connect command.", "secret_upsert", "", "not_committed", "")
 		return false
 	}
 

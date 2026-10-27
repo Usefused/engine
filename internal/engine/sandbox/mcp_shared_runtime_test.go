@@ -705,7 +705,7 @@ func assertMCPMissingCredentialRecovery(t *testing.T, statusCode int, response m
 func assertMCPMissingCredentialCommand(t *testing.T, response mcpCallResponse, bucketID, serviceID uuid.UUID) {
 	t.Helper()
 	// Both immutable identifiers are required for an operator to configure the selected app bucket without guessing.
-	if !strings.Contains(response.Error, "fused-cli secret set "+serviceID.String()) || !strings.Contains(response.Error, "--bucket "+bucketID.String()) {
+	if !strings.Contains(response.Error, "fused-cli connect "+serviceID.String()) || !strings.Contains(response.Error, "--bucket "+bucketID.String()) {
 		t.Fatalf("missing credential command = %q", response.Error)
 	}
 }
