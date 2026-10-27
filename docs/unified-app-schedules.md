@@ -23,33 +23,34 @@ Schedules are stored in Engine's PostgreSQL database. Input is encrypted with th
 - Engine must be running with its Unified App worker available. Scheduling starts automatically with Engine; no separate cron service or environment flag is required. Polling occurs every five seconds, and execution capacity may delay a run. This is not a real-time deadline guarantee.
 - Each occurrence is reserved with its execution record in one database transaction. Multiple Engine replicas cannot dispatch the same occurrence. A schedule does not overlap its previous run.
 - A missed one-time run executes when Engine becomes available. Missed recurring times are combined into one catch-up run, then advance to the next future occurrence. Resuming a recurring schedule starts from its next future time without replaying paused occurrences.
-- Failed runs are not automatically retried. Recurring schedules still reach their next scheduled occurrence. Runs with uncertain outcomes pause the schedule. Abandoned runs are marked indeterminate after five minutes; review provider state before resuming. Engine does not promise exactly-once provider side effects.
+- The schedule itself never retries a run. A failed run is recorded and the next occurrence still runs at its normal time. If the app declares `recovery: { mode: "automatic" }`, Engine's recovery worker retries the failed or interrupted attempt with its saved snapshot, within the app's `maxAttempts` and `backoffSeconds`; see [Unified App snapshots and reruns](unified-app-recovery.md). Manual-recovery apps can be rerun through the management rerun route.
+- A run whose outcome is uncertain (indeterminate) pauses the schedule, unless the app uses automatic recovery and still has attempts left. A run still marked running after five minutes is treated as abandoned, marked indeterminate, and follows the same rule. Review provider state before resuming a paused schedule. Engine does not promise exactly-once provider side effects.
 - A completed one-time schedule has no next run. To run again, edit it with a future time. Changes and deletion are rejected while that schedule is running. Editing preserves history, and deletion removes only future automation.
-- Scheduled runs use the ordinary Requests and Analytics history, shared execution capacity, account suspension, heartbeat verification, buckets, and provider policies. Each invocation has a one-minute overall deadline. A family can retain up to 100 schedules.
+- Scheduled runs use the ordinary Requests and Analytics history, shared execution capacity, account suspension, heartbeat verification, buckets, and provider policies. Each scheduled invocation has a one-minute overall deadline; recovery attempts have a 45-second budget. A family can retain up to 100 schedules.
 
 ## CLI
 
-Requires an Engine and CLI build containing scheduling support. Use the ordinary saved Engine login. An explicit app name takes precedence over `-f`; omit the name to select the app from a Unified App YAML config.
+Requires an Engine and CLI build containing scheduling support. Schedule commands live under `fused-cli app schedule`. Use the ordinary saved Engine login. An explicit app name takes precedence over `-f`; omit the name to select the app from a Unified App YAML config.
 
 ```sh
 # One-time run, with an explicit timestamp offset.
-fused-cli unified-app schedule create "Billing report" \
+fused-cli app schedule create "Billing report" \
   --name "December report" \
   --at '2026-12-01T09:00:00Z' \
   --input-file ./report-input.json
 
 # Recurring local-time run.
-fused-cli unified-app schedule create "Billing report" \
+fused-cli app schedule create "Billing report" \
   --name "Weekday report" \
   --cron '0 9 * * 1-5' \
   --timezone Europe/London \
   --input-file ./report-input.json
 
-fused-cli unified-app schedule list "Billing report"
-fused-cli unified-app schedule update "Billing report" --id SCHEDULE_ID --input-file ./revised-input.json
-fused-cli unified-app schedule pause "Billing report" --id SCHEDULE_ID
-fused-cli unified-app schedule resume "Billing report" --id SCHEDULE_ID
-fused-cli unified-app schedule delete "Billing report" --id SCHEDULE_ID
+fused-cli app schedule list "Billing report"
+fused-cli app schedule update "Billing report" --id SCHEDULE_ID --input-file ./revised-input.json
+fused-cli app schedule pause "Billing report" --id SCHEDULE_ID
+fused-cli app schedule resume "Billing report" --id SCHEDULE_ID
+fused-cli app schedule delete "Billing report" --id SCHEDULE_ID
 ```
 
 Use `--input '{"month":"2026-12"}'` for inline JSON, or `--input-file -` for stdin. Prefer a file or stdin for private inputs. Omitted input defaults to `{}` on creation. Updates preserve fields whose flags are omitted. `--paused` creates a disabled schedule; `--paused=false` explicitly enables an edited one. Changing `--at` clears recurrence, and changing `--cron` clears the one-time date. CLI recurrence defaults to `UTC`.

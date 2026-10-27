@@ -115,7 +115,7 @@ for local file imports and other supported formats.
 ## Scheduled Unified App runs
 
 Create one-time or recurring runs with saved JSON input from a Unified App's
-**Schedules** tab or `fused-cli unified-app schedule`. Schedules persist across
+**Schedules** tab or `fused-cli app schedule`. Schedules persist across
 Engine restarts and use the app's active version and configured credentials.
 See [scheduled runs](docs/unified-app-schedules.md) for timezone behavior,
 CLI examples, permissions, and interruption handling.
