@@ -109,22 +109,25 @@ function workspaceListProjection(page: { data: ActivatedService[]; total: number
   return { integrations: data.map(fromActivatedService), total, pages: Math.ceil(total / 10) || 1 };
 }
 
-// ServicesTabs renders authenticated navigation without coupling its decisions to page state management.
+// ServicesTabs uses the inner underline treatment beneath the segmented integration source navigation.
 function ServicesTabs({ isAuth, view, activeSessions, setView }: {
   isAuth: boolean;
   view: ServicesView;
   activeSessions: DiscoverySnapshot[];
   setView: (view: ServicesView) => void;
 }) {
+  // Workspace and import management are available only to signed-in visitors.
   if (!isAuth) return null;
   return (
-    <div className="fused-tabs-scroll bg-slate-100 p-1 rounded-lg w-full sm:w-fit mb-6">
+    <div className="fused-tabs-scroll mb-6 -mt-1 items-center gap-1 border-b border-slate-200">
       <button data-track="view_workspace_tab" type="button" onClick={() => setView("workspace")}
-        className={`shrink-0 px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition-all ${view === "workspace" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"} cursor-pointer`}>
+        // Underlines mark the selected service view without competing with the outer source selector.
+        className={`shrink-0 min-h-11 border-b-2 px-4 py-2.5 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-950 ${view === "workspace" ? "border-slate-900 text-slate-900" : "border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300"} cursor-pointer`}>
         Workspace
       </button>
       <button data-track="view_imports_tab" type="button" onClick={() => setView("pending")}
-        className={`relative shrink-0 px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition-all ${view === "pending" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"} cursor-pointer`}>
+        // Keep the same inner selection treatment when the import queue is active.
+        className={`relative shrink-0 min-h-11 border-b-2 px-4 py-2.5 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-950 ${view === "pending" ? "border-slate-900 text-slate-900" : "border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300"} cursor-pointer`}>
         Imports
         {activeSessions.length > 0 && <span className="ml-2 text-[10px] font-bold text-amber-700">{activeSessions.length}</span>}
       </button>
