@@ -76,7 +76,7 @@ function BridgeManager({ canManage }: { canManage: boolean }) {
   }
 
   return <div className="min-w-0 space-y-6">
-    <CataloguePageHeader title="Bridges" icon={Cable} description="Access local services and devices through the Fused Bridges connected to your workspace." actions={<BridgeDownloadLink />} />
+    <CataloguePageHeader title="Bridges" icon={Cable} description="Connect hardware and services through Fused Bridge, including non-web protocols." actions={<BridgeDownloadLink />} />
 
     <section aria-label="Connected Bridges" className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 sm:px-5">
