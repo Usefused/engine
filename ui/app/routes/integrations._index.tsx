@@ -612,7 +612,7 @@ export default function IntegrationsIndex() {
     <div>
       <IntegrationSourceTabs />
       <div className="mb-6">
-        <CataloguePageHeader title="Services" icon={Layers} description="Choose and configure the services your apps and MCP servers can use." actions={
+        <CataloguePageHeader title="Services" icon={Layers} description="Services are APIs your apps can connect to, such as Stripe, Slack, or your own backend." actions={
           <button
             type="button"
             data-track="open_new_service_panel"

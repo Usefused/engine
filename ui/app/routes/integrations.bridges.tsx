@@ -1,7 +1,8 @@
 import { IntegrationSourceTabs } from "~/components/layout/IntegrationSourceTabs";
+import { CataloguePageHeader, catalogueActionClassName } from "~/components/layout/CataloguePageHeader";
 import { useEffect, useState } from "react";
 import { Link, type MetaFunction } from "@remix-run/react";
-import { Cable, ChevronRight, Loader2, RefreshCw, Unlink } from "lucide-react";
+import { Cable, ChevronRight, Download, Loader2, RefreshCw, Unlink } from "lucide-react";
 import { WorkspacePermissionGate, useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { useToast } from "~/components/Toast";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
@@ -11,6 +12,14 @@ import { api, type BridgeInstallation } from "~/lib/api";
 export const meta: MetaFunction = () => [{ title: "Bridges - Fused" }];
 
 const secondaryButton = "inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500";
+
+/** Share the official download destination while keeping the current Engine page open. */
+function BridgeDownloadLink() {
+  return <a href="https://github.com/Usefused/bridge/pkgs/container/fused-bridge" target="_blank" rel="noopener noreferrer" className={catalogueActionClassName} aria-label="Download Fused Bridge (opens in a new tab)">
+    <Download className="h-3.5 w-3.5" aria-hidden="true" />
+    <span>Download<span className="hidden sm:inline"> Fused Bridge</span></span>
+  </a>;
+}
 
 /** Keep installation discovery behind the existing workspace permission boundary. */
 export default function BridgesPage() {
@@ -23,7 +32,7 @@ export default function BridgesPage() {
   </>;
 }
 
-/** Keep installation management consistent with the shared integration catalogue shell. */
+/** Use the shared Services header with a download entry point for both new and existing Bridge users. */
 function BridgeManager({ canManage }: { canManage: boolean }) {
   const toast = useToast();
   const [items, setItems] = useState<BridgeInstallation[]>([]);
@@ -67,11 +76,7 @@ function BridgeManager({ canManage }: { canManage: boolean }) {
   }
 
   return <div className="min-w-0 space-y-6">
-    <header>
-      <p className="text-sm font-medium text-blue-600">Integrations</p>
-      <h1 className="flex items-center gap-2 text-2xl font-bold text-slate-900"><Cable className="h-6 w-6" aria-hidden="true" /> Bridges</h1>
-      <p className="mt-1 text-slate-500">Connect local services and devices to your workspace through Fused Bridge.</p>
-    </header>
+    <CataloguePageHeader title="Bridges" icon={Cable} description="Access local services and devices through the Fused Bridges connected to your workspace." actions={<BridgeDownloadLink />} />
 
     <section aria-label="Connected Bridges" className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 sm:px-5">
@@ -93,12 +98,13 @@ function BridgeManager({ canManage }: { canManage: boolean }) {
   </div>;
 }
 
-/** Mirror the calm, icon-led empty states used by other integration pages. */
+/** Give first-time users a download action before explaining how their Bridge appears here. */
 function BridgeEmptyState() {
   return <div className="flex flex-col items-center px-5 py-10 text-center">
     <span className="mb-4 rounded-2xl bg-slate-100 p-3 text-slate-400"><Cable className="h-6 w-6" aria-hidden="true" /></span>
     <h3 className="text-sm font-semibold text-slate-900">No Bridges connected yet</h3>
-    <p className="mt-2 max-w-sm text-sm leading-6 text-slate-500">Connect your Bridge workspace to see its profiles and available operations here.</p>
+    <p className="mt-2 max-w-sm text-sm leading-6 text-slate-500">Download and run Fused Bridge, then connect it to this workspace from Bridge Studio → Fused.</p>
+    <div className="mt-4"><BridgeDownloadLink /></div>
   </div>;
 }
 
