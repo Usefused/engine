@@ -320,6 +320,16 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodPost, "/integrations/versions/resolve", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionCatalogueRead),
 	}},
+	// Registry lifecycle reads are visible to service readers; mutations still require workspace management and Registry ownership.
+	{http.MethodGet, "/integrations/{service_id}/lifecycle", false, []routeRequirement{
+		pathRequirement(accesscontrol.PermissionServiceRead, accesscontrol.ResourceService, "service_id"),
+	}},
+	{http.MethodPut, "/integrations/{service_id}/lifecycle", false, []routeRequirement{
+		pathRequirement(accesscontrol.PermissionServiceManage, accesscontrol.ResourceService, "service_id"),
+	}},
+	{http.MethodDelete, "/integrations/{service_id}/lifecycle", false, []routeRequirement{
+		pathRequirement(accesscontrol.PermissionServiceManage, accesscontrol.ResourceService, "service_id"),
+	}},
 	{http.MethodDelete, "/integrations/{service_id}", false, []routeRequirement{
 		pathRequirement(accesscontrol.PermissionServiceManage, accesscontrol.ResourceService, "service_id"),
 	}},

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -15,21 +16,21 @@ import (
 // Embeds store.Store so unrelated methods don't need stubs.
 type deleteInterceptMockStore struct {
 	store.Store
+	store.ServiceLifecycleStore
 	accountID uuid.UUID
 
-	removeCalls   int
+	applyCalls    int
 	lastServiceID uuid.UUID
-	removeErr     error
+	deleted       bool
+	observedAt    time.Time
 }
 
-func (m *deleteInterceptMockStore) GetAccountByAPIKey(_ context.Context, _ string) (uuid.UUID, error) {
-	return m.accountID, nil
-}
-
-func (m *deleteInterceptMockStore) RemoveWorkspaceService(_ context.Context, serviceID uuid.UUID) error {
-	m.removeCalls++
+// ApplyServiceLifecycle records confirmed compaction, leaving membership-only removal unstubbed so accidental fallback fails.
+func (m *deleteInterceptMockStore) ApplyServiceLifecycle(_ context.Context, serviceID uuid.UUID, _ string, _ *time.Time, deleted bool, observedAt time.Time) error {
+	m.applyCalls++
 	m.lastServiceID = serviceID
-	return m.removeErr
+	m.deleted, m.observedAt = deleted, observedAt
+	return nil
 }
 
 // ─── isIntegrationDeletePath ───────────────────────────────────────────────
@@ -80,6 +81,7 @@ func (m *mockDeleteForwarder) ForwardAndInspect(w http.ResponseWriter, _ *http.R
 	fn(&http.Response{StatusCode: m.status}, nil)
 }
 
+// TestDeleteIntercept_CleanupCalledOnSuccess requires durable compaction rather than the retired membership-only cleanup.
 func TestDeleteIntercept_CleanupCalledOnSuccess(t *testing.T) {
 	svcID := uuid.New()
 	s := &deleteInterceptMockStore{
@@ -94,14 +96,17 @@ func TestDeleteIntercept_CleanupCalledOnSuccess(t *testing.T) {
 
 	forwardIntegrationDeleteWithWorkspaceCleanup(fwd, s, rec, req, s.accountID)
 
-	if s.removeCalls != 1 {
-		t.Fatalf("expected RemoveWorkspaceService to be called once, got %d", s.removeCalls)
+	// A confirmed Registry removal must produce one terminal lifecycle receipt.
+	if s.applyCalls != 1 || !s.deleted || s.observedAt.IsZero() {
+		t.Fatalf("expected one confirmed deletion receipt, got %+v", s)
 	}
+	// Cleanup must remain scoped to the exact deleted Registry identity.
 	if s.lastServiceID != svcID {
 		t.Errorf("expected serviceID %s, got %s", svcID, s.lastServiceID)
 	}
 }
 
+// TestDeleteIntercept_NoCleanupOnRegistryFailure preserves local definitions until Registry confirms removal.
 func TestDeleteIntercept_NoCleanupOnRegistryFailure(t *testing.T) {
 	// When the Registry returns 404 (service didn't exist), the local workspace
 	// must not be touched -- the caller is handling a stale ID.
@@ -117,11 +122,13 @@ func TestDeleteIntercept_NoCleanupOnRegistryFailure(t *testing.T) {
 
 	forwardIntegrationDeleteWithWorkspaceCleanup(fwd, s, rec, req, s.accountID)
 
-	if s.removeCalls != 0 {
-		t.Errorf("expected no RemoveWorkspaceService call on 404, got %d", s.removeCalls)
+	// A missing definition response alone is not an authenticated deletion receipt.
+	if s.applyCalls != 0 {
+		t.Errorf("expected no lifecycle compaction on 404, got %d", s.applyCalls)
 	}
 }
 
+// TestDeleteIntercept_RequiresAuthenticatedActorBeforeCleanup keeps deletion propagation inside the control authorization boundary.
 func TestDeleteIntercept_RequiresAuthenticatedActorBeforeCleanup(t *testing.T) {
 	svcID := uuid.New()
 	s := &deleteInterceptMockStore{
@@ -135,7 +142,8 @@ func TestDeleteIntercept_RequiresAuthenticatedActorBeforeCleanup(t *testing.T) {
 
 	forwardIntegrationDeleteWithWorkspaceCleanup(fwd, s, rec, req, s.accountID)
 
-	if s.removeCalls != 0 {
-		t.Errorf("expected no cleanup without an authenticated Actor, got %d", s.removeCalls)
+	// A credential string cannot replace the actor admitted by authentication middleware.
+	if s.applyCalls != 0 {
+		t.Errorf("expected no cleanup without an authenticated Actor, got %d", s.applyCalls)
 	}
 }

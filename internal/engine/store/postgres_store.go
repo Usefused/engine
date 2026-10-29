@@ -501,12 +501,13 @@ func queryMCPToolUsage(ctx context.Context, db storeDatabase, appID uuid.UUID) (
 // queryMCPServiceUsage preserves provider-only analytics through the enclosing store's database executor.
 func queryMCPServiceUsage(ctx context.Context, db storeDatabase, appID uuid.UUID) ([]models.MCPServiceUsage, error) {
 	query := `
-		SELECT COALESCE(workspace_service.service_name, event.service_id::text), COUNT(*),
+		SELECT COALESCE(workspace_service.service_name, NULLIF(lifecycle.service_name,''), event.service_id::text), COUNT(*),
 			COUNT(*) FILTER (WHERE event.status = 'failed'), COALESCE(AVG(event.latency_ms), 0)
 		FROM fused_engine_execution_events event
 		LEFT JOIN fused_workspace_services workspace_service ON workspace_service.service_id = event.service_id
+		LEFT JOIN fused_service_lifecycle lifecycle ON lifecycle.service_id=event.service_id
 		WHERE event.app_id = $1 AND event.transport = 'mcp' AND event.service_id IS NOT NULL AND event.execution_kind = 'physical'
-		GROUP BY COALESCE(workspace_service.service_name, event.service_id::text)
+		GROUP BY COALESCE(workspace_service.service_name, NULLIF(lifecycle.service_name,''), event.service_id::text)
 		ORDER BY COUNT(*) DESC
 	`
 	rows, err := db.Query(ctx, query, appID)
@@ -866,9 +867,9 @@ func (s *postgresStore) listEngineExecutionEvents(ctx context.Context, filter En
 		COALESCE(event.app_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		COALESCE(event.app_token_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(event.app_version, ''),
 		event.transport, COALESCE(event.provider_protocol, ''), event.direction, COALESCE(event.service_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(event.service_version_id, ''),
-		COALESCE(service.service_name, ''), COALESCE(service.service_slug, ''), COALESCE(version.version, ''),
+		COALESCE(service.service_name, lifecycle.service_name, ''), COALESCE(service.service_slug, ''), COALESCE(version.version, deleted_version.name, ''),
 		COALESCE(event.operation_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(event.webhook_id, '00000000-0000-0000-0000-000000000000'::uuid),
-		event.endpoint_name, COALESCE(event.external_id, ''), COALESCE(event.event_name, ''), COALESCE(event.http_method, ''), COALESCE(event.request_path, ''), COALESCE(event.environment, ''),
+		COALESCE(NULLIF(event.endpoint_name,''),deleted_operation.name,''), COALESCE(event.external_id, ''), COALESCE(event.event_name, ''), COALESCE(event.http_method, ''), COALESCE(event.request_path, ''), COALESCE(event.environment, ''),
 		COALESCE(event.environment_source, ''), COALESCE(event.provider_host, ''), event.provider_http_status, COALESCE(event.provider_status_class, ''),
 		event.status, COALESCE(event.failure_reason, ''), COALESCE(event.failure_category, ''), COALESCE(event.failure_code, ''), event.latency_ms, event.provider_latency_ms,
 		event.attempt_count, event.auth_scheme_names, event.auth_scheme_types, event.auth_scheme_count, COALESCE(event.auth_selection_outcome, ''),
@@ -882,6 +883,9 @@ func (s *postgresStore) listEngineExecutionEvents(ctx context.Context, filter En
 		event.unified_target, event.execution_phase, event.unified_steps
 	FROM event_page event
 	LEFT JOIN fused_workspace_services service ON service.service_id = event.service_id
+	LEFT JOIN fused_service_lifecycle lifecycle ON lifecycle.service_id=event.service_id
+	LEFT JOIN fused_deleted_service_versions deleted_version ON deleted_version.service_id=event.service_id AND deleted_version.id::text=event.service_version_id
+	LEFT JOIN fused_deleted_service_operations deleted_operation ON deleted_operation.service_id=event.service_id AND deleted_operation.id=event.operation_id
 	LEFT JOIN fused_workspace_service_versions version
 		ON version.service_id = event.service_id AND version.service_version_id::text = event.service_version_id
 	ORDER BY event.started_at DESC, event.id DESC`

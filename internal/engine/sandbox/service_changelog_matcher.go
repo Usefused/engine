@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -186,6 +187,19 @@ func matchedConfigKeys(
 // event affects every config on that version, regardless of which specific
 // endpoints it selected). `changed` narrows further by endpoint selection.
 func matchedVersionConfigKeys(versions []store.WorkspaceService, selections map[uuid.UUID]map[uuid.UUID][]store.WorkspaceSDKSelectionMatch, entry models.ServiceChangelogEntry) ([]string, bool) {
+	// Service-level schedules and cancellations affect all activated versions, even before an app uses them.
+	var lifecycle struct {
+		Lifecycle bool `json:"lifecycle"`
+	}
+	_ = json.Unmarshal(entry.Diff, &lifecycle)
+	if entry.Version == nil && lifecycle.Lifecycle {
+		var keys []string
+		for _, version := range versions {
+			keys = append(keys, configKeysForVersion(selections, entry.ServiceID, version.ServiceVersionID)...)
+		}
+		return dedupSortedStrings(keys), len(versions) > 0
+	}
+
 	if entry.ChangelogType == models.ServiceChangelogTypeRemoved {
 		var keys []string
 		for _, v := range versions {
@@ -456,6 +470,20 @@ func createChangelogNotification(ctx context.Context, configStore store.ConfigRe
 }
 
 func changelogNotificationMessage(entry models.ServiceChangelogEntry, notifyType store.WorkspaceNotificationType, configKeys []string) string {
+	// Scheduled service removal has a concrete deadline rather than a vague eventual-removal warning.
+	var lifecycle struct {
+		Lifecycle bool       `json:"lifecycle"`
+		DeleteAt  *time.Time `json:"delete_at"`
+	}
+	_ = json.Unmarshal(entry.Diff, &lifecycle)
+	// Cancellation is not an endpoint definition change and must not imply a breaking contract update.
+	if lifecycle.Lifecycle {
+		if lifecycle.DeleteAt == nil {
+			return "The scheduled Registry deletion was cancelled."
+		}
+		return fmt.Sprintf("This service is deprecated and will be deleted from the Registry on %s. Update apps that use it before then.", lifecycle.DeleteAt.UTC().Format(time.RFC3339))
+	}
+
 	version := "the service"
 	if entry.Version != nil {
 		version = fmt.Sprintf("version %s", *entry.Version)

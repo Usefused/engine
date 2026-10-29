@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -63,14 +65,19 @@ func forwardIntegrationDeleteWithWorkspaceCleanup(proxy Forwarder, s store.Store
 	)
 }
 
+// cleanupDeletedService applies the same compaction as remote removal notifications.
 func cleanupDeletedService(ctx context.Context, s store.Store, serviceID uuid.UUID) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.workspace.cleanup_deleted_service")
 	defer span.End()
-
-	// ErrWorkspaceServiceNotFound is fine -- the service may simply not have been
-	// activated in this workspace, which is not an error worth surfacing.
-	err := s.RemoveWorkspaceService(ctx, serviceID)
-	if err != nil && err != store.ErrWorkspaceServiceNotFound {
+	lifecycle, ok := s.(store.ServiceLifecycleStore)
+	// Membership-only cleanup cannot release stored definitions or preserve audit names.
+	if !ok {
+		span.RecordError(errors.New("service lifecycle store unavailable"))
+		span.SetAttributes(attribute.String("outcome", "error"))
+		return
+	}
+	// Failed compaction remains recoverable through the Registry changelog poller.
+	if err := lifecycle.ApplyServiceLifecycle(ctx, serviceID, "", nil, true, time.Now()); err != nil {
 		span.RecordError(err)
 		span.SetAttributes(attribute.String("outcome", "error"))
 		return

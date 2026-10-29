@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -404,7 +405,13 @@ func (c *LocalObjectCache) DisconnectSDK(appID string) {
 	}
 }
 
+// GetOrFetchServiceMetadata rechecks deletion authority before exposing a cached execution contract.
 func (c *LocalObjectCache) GetOrFetchServiceMetadata(ctx context.Context, appID string, serviceID string) (*fusedobject.ServiceMetadata, error) {
+	// A live session cannot bypass a received deletion or an elapsed scheduled deadline.
+	if err := c.checkServiceLifecycle(ctx, serviceID); err != nil {
+		return nil, err
+	}
+
 	c.mu.RLock()
 	versions, ok := c.sdkVersions[appID]
 	if !ok {
@@ -442,7 +449,13 @@ func (c *LocalObjectCache) GetOrFetchServiceMetadata(ctx context.Context, appID 
 	return nil, fmt.Errorf("service metadata not found in connection cache")
 }
 
+// GetEndpoint rejects deleted services even when their operations are already warm in memory.
 func (c *LocalObjectCache) GetEndpoint(ctx context.Context, appID string, serviceID string, endpointName string) (*fusedobject.Endpoint, error) {
+	// A live session cannot bypass a received deletion or an elapsed scheduled deadline.
+	if err := c.checkServiceLifecycle(ctx, serviceID); err != nil {
+		return nil, err
+	}
+
 	c.mu.RLock()
 	versions, ok := c.sdkVersions[appID]
 	if !ok {
@@ -769,4 +782,58 @@ func (c *LocalObjectCache) GetAppRuntime(ctx context.Context, appID string) (str
 	}
 
 	return "", nil, fmt.Errorf("scope not found in connection cache")
+}
+
+// checkServiceLifecycle evicts definition payloads when durable state no longer permits execution.
+func (c *LocalObjectCache) checkServiceLifecycle(ctx context.Context, id string) error {
+	lifecycle, ok := c.db.(store.ServiceLifecycleStore)
+	// Production stores provide this capability; legacy test caches remain independent of lifecycle persistence.
+	if !ok {
+		return nil
+	}
+	serviceID, err := uuid.Parse(id)
+	// Malformed identities cannot be used to skip the durable authority check.
+	if err != nil {
+		return err
+	}
+	deleted, err := lifecycle.IsServiceDeleted(ctx, serviceID)
+	// Unavailable lifecycle authority fails closed rather than executing a potentially removed service.
+	if err != nil {
+		return err
+	}
+	// Eviction releases the full cached payload as soon as any live consumer observes removal.
+	if deleted {
+		c.Invalidate(id)
+		return store.ErrServiceDeleted
+	}
+	return nil
+}
+
+// StartLifecycleEviction releases idle cached schemas as well as rejecting active calls after deletion.
+func (c *LocalObjectCache) StartLifecycleEviction(ctx context.Context) {
+	// The Engine owns this goroutine's lifetime; read-only failures leave payloads blocked by the per-call guard.
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			// Cancellation stops both idle scanning and future cache access work.
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			ids := make(map[string]struct{})
+			c.mu.RLock()
+			for key := range c.serviceMetadataCache {
+				id, _, _ := strings.Cut(key, ":")
+				ids[id] = struct{}{}
+			}
+			c.mu.RUnlock()
+			pass, cancel := context.WithTimeout(ctx, 10*time.Second)
+			for id := range ids {
+				_ = c.checkServiceLifecycle(pass, id)
+			}
+			cancel()
+		}
+	}()
 }

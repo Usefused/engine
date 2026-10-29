@@ -1,3 +1,4 @@
+import { ServiceLifecycleEditor, ServiceLifecycleNotice } from "~/components/integration-details/ServiceLifecycleEditor";
 import { ServiceDetailsEditor } from "~/components/integration-details/ServiceDetailsEditor";
 import { PageBackLink } from "~/components/layout/PageBackLink";
 import { AgentServiceImport } from "~/components/integration-details/AgentServiceImport";
@@ -732,10 +733,10 @@ function useIntegrationDetailModel() {
     };
   }, [isAuth, serviceId]);
 
-  /** Removes only local workspace membership while preserving the Registry service definition. */
+  /** Confirms consumer removal; owners manage deletion through Registry lifecycle instead. */
   async function handleRemoveFromWorkspace() {
-    // Membership and identity must both be authoritative before offering a destructive workspace change.
-    if (!serviceId || workspaceServiceActive !== true || removingWorkspaceService) return;
+    // Require resolved non-owner identity so a stale action cannot remove an owner's local membership.
+    if (!serviceId || !res || res.service.is_owner !== false || workspaceServiceActive !== true || removingWorkspaceService) return;
     const confirmed = await toast.confirm("Remove this service from the workspace? Apps using it may stop working.");
     // Cancelling leaves membership and the current detail context untouched.
     if (!confirmed) return;
@@ -1604,11 +1605,12 @@ function VisibilityMenu({ srv }: { srv: Service }) {
   );
 }
 
-/** Keeps service configuration and workspace membership separate from tab-local catalog imports. */
+/** Shares one removal label while routing owners to lifecycle options and consumers to confirmation. */
 function WorkspaceMembershipControl({ srv }: { srv: Service }) {
   const detail = useDetail();
   const [menuOpen, setMenuOpen] = useState(false);
   const [editingDetails, setEditingDetails] = useState(false);
+  const [editingLifecycle, setEditingLifecycle] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
@@ -1641,7 +1643,7 @@ function WorkspaceMembershipControl({ srv }: { srv: Service }) {
   // Anonymous and unresolved membership states must not expose a speculative mutation.
   if (!detail.isAuth || detail.workspaceServiceActive === null) return null;
   // Services outside the workspace retain the existing version-pinned activation control.
-  if (detail.workspaceServiceActive === false) {
+  if (detail.workspaceServiceActive === false && !srv.is_owner) {
     return <AddToWorkspaceButton serviceId={srv.id} serviceName={srv.name} versionTag={srv.current_service_version} onAdded={() => detail.setWorkspaceServiceActive(true)} />;
   }
   // Narrow the resolved identity before checking its workspace-management grant.
@@ -1653,6 +1655,7 @@ function WorkspaceMembershipControl({ srv }: { srv: Service }) {
   function toggleActionsMenu() {
     // The actions menu and its edit popover share an anchor and must not overlap.
     setEditingDetails(false);
+    setEditingLifecycle(false);
     setMenuOpen((open) => !open);
   }
 
@@ -1664,6 +1667,13 @@ function WorkspaceMembershipControl({ srv }: { srv: Service }) {
 
   // Reload the canonical service projection after a successful owner edit.
   function detailsSaved() { setEditingDetails(false); void detail.loadData(); }
+
+  // Lifecycle controls remain distinct from local membership and never mutate on opening.
+  function editLifecycle() { setMenuOpen(false); setEditingLifecycle(true); }
+  // Closing the lifecycle editor discards unsaved date input.
+  function closeLifecycle() { setEditingLifecycle(false); }
+  // Reload the service and advisory notice after a persisted schedule change.
+  function lifecycleSaved() { setEditingLifecycle(false); window.location.reload(); }
 
   // A selected destructive action closes the disclosure before confirmation begins.
   function requestWorkspaceRemoval() {
@@ -1691,7 +1701,10 @@ function WorkspaceMembershipControl({ srv }: { srv: Service }) {
           <ServiceConfigurationMenuItems srv={srv} onClose={() => setMenuOpen(false)} />
           {/* Workspace management alone does not confer ownership of a provider's service. */}
           {srv.is_owner && <button type="button" role="menuitem" onClick={editDetails} className="block w-full rounded-md px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">Edit details</button>}
-          <button
+          {/* Owners manage the service lifecycle rather than removing only their workspace copy. */}
+          {srv.is_owner && <button type="button" role="menuitem" onClick={editLifecycle} className="block w-full rounded-md px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">Remove from Workspace</button>}
+          {/* Only confirmed non-owners receive the workspace-only removal action. */}
+          {srv.is_owner === false && detail.workspaceServiceActive && <button
             type="button"
             role="menuitem"
             data-track="remove_workspace_service"
@@ -1701,11 +1714,12 @@ function WorkspaceMembershipControl({ srv }: { srv: Service }) {
             className="flex w-full items-center gap-2 whitespace-nowrap rounded-md px-3 py-2 text-left text-sm font-medium text-slate-950 hover:bg-slate-50 focus:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
           >
             {detail.removingWorkspaceService ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-            {detail.removingWorkspaceService ? "Removing…" : "Remove from workspace"}
-          </button>
+            {detail.removingWorkspaceService ? "Removing…" : "Remove from Workspace"}
+          </button>}
         </div>
       )}
       {/* Recheck ownership while the editor is open if permissions refresh. */}
+      {editingLifecycle && srv.is_owner && <ServiceLifecycleEditor service={srv} anchor={triggerRef} onClose={closeLifecycle} onSaved={lifecycleSaved} />}
       {editingDetails && srv.is_owner && <ServiceDetailsEditor service={srv} anchor={triggerRef} onClose={closeDetails} onSaved={detailsSaved} />}
     </div>
   );
@@ -1727,11 +1741,13 @@ function ServiceConfigurationMenuItems({ srv, onClose }: { srv: Service; onClose
   </>;
 }
 
+// DetailNotices combines service-wide lifecycle warnings with existing import and notification notices.
 function DetailNotices({ srv, importWarnings }: { srv: Service; importWarnings: NonNullable<Service["import_warnings"]> }) {
   const detail = useDetail();
   const canManage = canManageService(detail.isAuth, srv.is_owner, detail.paramId, detail.provider);
   return (
     <>
+      <ServiceLifecycleNotice serviceId={srv.id} />
       <ImportMethodBadge method={srv.import_method} canManage={canManage} />
       {srv.description && <p className="text-sm text-slate-600">{srv.description}</p>}
       <ImportWarningPanel warnings={importWarnings} onClear={detail.handleClearImportWarnings} />

@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"strings"
@@ -16,12 +17,12 @@ import (
 // serviceChangelogPollInterval matches the general cadence of this
 // codebase's periodic workers (see plans/plan-service-changelog.md,
 // "## Phase 2"). A plain, easily-adjusted constant, not a hard requirement.
-const serviceChangelogPollInterval = 5 * time.Minute
+const serviceChangelogPollInterval = 30 * time.Second
 
 // serviceChangelogPollIntervalEnvVar overrides serviceChangelogPollInterval
 // when set to a valid time.ParseDuration string (e.g. "5s"). Exists so
 // live-stack e2e/smoke tests (see changelog-notification-e2e-test.sh) don't
-// have to sleep out a real 5-minute cadence to observe a poll tick; unset in
+// have to wait for the normal polling cadence to observe a tick; unset in
 // production, so normal deployments get the default unchanged.
 const serviceChangelogPollIntervalEnvVar = "FUSED_CHANGELOG_POLL_INTERVAL"
 
@@ -52,29 +53,20 @@ func serviceChangelogPollIntervalFromEnv() time.Duration {
 // notifications; engineStore/registryClient/apiKey are unchanged from
 // Phase 2.
 func StartServiceChangelogPoller(ctx context.Context, engineStore store.Store, configStore store.ConfigRepository, registryClient RegistryClient, apiKey string) {
-	interval := serviceChangelogPollIntervalFromEnv()
-	ticker := time.NewTicker(interval)
+	// A single loop avoids concurrent cursor advances; the local runtime gate independently enforces received deadlines.
 	go func() {
+		pollTicker := time.NewTicker(serviceChangelogPollIntervalFromEnv())
+		defer pollTicker.Stop()
+		pollServiceChangelogs(ctx, engineStore, configStore, registryClient, apiKey)
 		for {
+			// Shutdown cancels the only reconciliation loop, including future ticks.
 			select {
 			case <-ctx.Done():
-				ticker.Stop()
 				return
-			case <-ticker.C:
+			case <-pollTicker.C:
 				pollServiceChangelogs(ctx, engineStore, configStore, registryClient, apiKey)
 			}
 		}
-	}()
-
-	// Run an initial poll shortly after startup so a fresh Engine doesn't wait a
-	// full interval before its first capture. Deliberately reuses interval (not
-	// the serviceChangelogPollInterval constant) so overriding the env var
-	// also shortens this first-run wait -- otherwise a fresh e2e-test Engine
-	// process would still sit through a real 5-minute delay before its very
-	// first poll, even with a fast ticker configured.
-	go func() {
-		time.Sleep(interval)
-		pollServiceChangelogs(ctx, engineStore, configStore, registryClient, apiKey)
 	}()
 }
 
@@ -153,6 +145,10 @@ func pollServiceChangelogForService(ctx context.Context, engineStore store.Store
 	}
 
 	matchAndNotifyServiceChangelog(ctx, engineStore, configStore, versions, entries)
+	// Persist lifecycle receipts before advancing the cursor so a failed purge is retried.
+	if err := applyServiceLifecycleEntries(ctx, engineStore, serviceID, versions, entries); err != nil {
+		return err
+	}
 
 	return engineStore.UpsertServiceChangelogCursor(ctx, serviceID, maxRegistryCreatedAt(entries))
 }
@@ -170,4 +166,53 @@ func maxRegistryCreatedAt(entries []models.ServiceChangelogEntry) time.Time {
 		}
 	}
 	return max
+}
+
+// applyServiceLifecycleEntries preserves the existing notification path while enforcing service-wide removal and scheduled deadlines.
+func applyServiceLifecycleEntries(ctx context.Context, engineStore store.Store, id uuid.UUID, versions []store.WorkspaceService, entries []models.ServiceChangelogEntry) error {
+	lifecycle, ok := engineStore.(store.ServiceLifecycleStore)
+	// Lightweight test adapters can exercise notifications independently of durable lifecycle storage.
+	if !ok {
+		return nil
+	}
+	name := ""
+	// Workspace identity remains available here even when Registry already compacted its definition.
+	if len(versions) > 0 {
+		name = versions[0].ServiceName
+	}
+	latest, latestDeadline := latestServiceLifecycleEntry(entries)
+	// No lifecycle event means this page of changelog needs only the ordinary notification path.
+	if latest == nil {
+		return nil
+	}
+	return lifecycle.ApplyServiceLifecycle(ctx, id, name, latestDeadline, latest.ChangelogType == "removed", latest.CreatedAt)
+}
+
+// latestServiceLifecycleEntry coalesces an offline backlog before any obsolete schedule can affect stored definitions.
+func latestServiceLifecycleEntry(entries []models.ServiceChangelogEntry) (*models.ServiceChangelogEntry, *time.Time) {
+	// A reconnect can deliver a schedule and its cancellation together; apply only the latest state before considering compaction.
+	var latest *models.ServiceChangelogEntry
+	var latestDeadline *time.Time
+	for index := range entries {
+		entry := &entries[index]
+		// A version-only change has no authority over the entire service.
+		if entry.Version != nil || entry.ConfigType != "version" {
+			continue
+		}
+		var diff struct {
+			Lifecycle bool       `json:"lifecycle"`
+			DeleteAt  *time.Time `json:"delete_at"`
+		}
+		_ = json.Unmarshal(entry.Diff, &diff)
+		// Ignore ordinary contract changes and advisory deprecations without a deletion schedule.
+		if entry.ChangelogType != "removed" && !diff.Lifecycle {
+			continue
+		}
+		// Timestamp ordering also protects reconnects whose transport did not preserve row order.
+		if latest == nil || !entry.CreatedAt.Before(latest.CreatedAt) {
+			latest = entry
+			latestDeadline = diff.DeleteAt
+		}
+	}
+	return latest, latestDeadline
 }

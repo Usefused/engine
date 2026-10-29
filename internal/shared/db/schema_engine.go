@@ -833,6 +833,17 @@ func engineSchemaQueries() []string {
 		// deliberately keyed by service_version_id, not workspace/bucket/SDK, so
 		// the singleton Engine workspace stores each activated provider version
 		// once and every runtime surface reads the same pinned contract.
+		// Lifecycle receipts retain names and deadlines independently from executable snapshots.
+		`CREATE TABLE IF NOT EXISTS fused_service_lifecycle (
+			service_id uuid PRIMARY KEY, service_name text NOT NULL DEFAULT '',
+			delete_at timestamptz, deleted_at timestamptz, observed_at timestamptz NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS fused_deleted_service_versions (
+			service_id uuid NOT NULL, id uuid PRIMARY KEY, name text NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS fused_deleted_service_operations (
+			service_id uuid NOT NULL, id uuid NOT NULL, name text NOT NULL, PRIMARY KEY(service_id,id)
+		);`,
 		`CREATE TABLE IF NOT EXISTS fused_service_contract_snapshots (
 			id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 			service_id         uuid NOT NULL,
@@ -865,6 +876,26 @@ func engineSchemaQueries() []string {
 			PRIMARY KEY (snapshot_id, endpoint_id),
 			UNIQUE (snapshot_id, name)
 		);`,
+		// Admission and deletion share a service-scoped transaction lock so stale refreshes cannot restore purged content.
+		`CREATE OR REPLACE FUNCTION fused_guard_deleted_service_contract() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			PERFORM pg_advisory_xact_lock(hashtextextended(NEW.service_id::text, 731));
+			IF EXISTS (SELECT 1 FROM fused_service_lifecycle WHERE service_id=NEW.service_id
+				AND (deleted_at IS NOT NULL OR delete_at<=clock_timestamp())) THEN
+				RAISE EXCEPTION 'service has been deleted' USING ERRCODE='23514';
+			END IF;
+			RETURN NEW;
+		END $$;`,
+		`DROP TRIGGER IF EXISTS fused_guard_deleted_contract ON fused_service_contract_snapshots;`,
+		`CREATE TRIGGER fused_guard_deleted_contract BEFORE INSERT OR UPDATE ON fused_service_contract_snapshots
+		FOR EACH ROW EXECUTE FUNCTION fused_guard_deleted_service_contract();`,
+		// Stale activation plans must not recreate workspace membership after their contract has been purged.
+		`DROP TRIGGER IF EXISTS fused_guard_deleted_service ON fused_workspace_services;`,
+		`CREATE TRIGGER fused_guard_deleted_service BEFORE INSERT OR UPDATE ON fused_workspace_services
+		FOR EACH ROW EXECUTE FUNCTION fused_guard_deleted_service_contract();`,
+		`DROP TRIGGER IF EXISTS fused_guard_deleted_version ON fused_workspace_service_versions;`,
+		`CREATE TRIGGER fused_guard_deleted_version BEFORE INSERT OR UPDATE ON fused_workspace_service_versions
+		FOR EACH ROW EXECUTE FUNCTION fused_guard_deleted_service_contract();`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_contract_endpoints_lookup
 		ON fused_service_contract_endpoints(snapshot_id, name);`,
 

@@ -241,6 +241,8 @@ func runEngine(cmd *cobra.Command) {
 	sandbox.StartServiceChangelogPoller(ctx, engineStore, configStore, registryClient, envLicense)
 
 	localObjectCache := sandbox.NewLocalObjectCache(engineStore)
+	// Idle SDK sessions must release removed service schemas as well as rejecting subsequent calls.
+	localObjectCache.StartLifecycleEviction(ctx)
 	subscribeCacheInvalidation(natsClient, localObjectCache, webhookStreams)
 
 	// Billing returns use the configured Engine origin, never the browser Host or Referer.

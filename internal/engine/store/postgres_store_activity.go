@@ -50,15 +50,16 @@ func (s *postgresStore) scanWorkspaceExecutionSummary(ctx context.Context, accou
 			FROM filtered
 		), service_usage AS (
 			SELECT event.service_id::text AS key,
-			       COALESCE(NULLIF(service.service_name, ''), NULLIF(service.service_slug, ''), 'Service metadata unavailable') AS label,
+			       COALESCE(NULLIF(service.service_name, ''), NULLIF(service.service_slug, ''), NULLIF(lifecycle.service_name,''), 'Service metadata unavailable') AS label,
 			       COUNT(*) AS total_calls,
 			       COUNT(*) FILTER (WHERE event.direction = 'inbound') AS inbound_calls,
 			       COUNT(*) FILTER (WHERE event.status = 'failed') AS failed_calls,
 			       COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY event.latency_ms), 0) AS p95_latency_ms
 			FROM filtered event
 			LEFT JOIN fused_workspace_services service ON service.service_id = event.service_id
+		LEFT JOIN fused_service_lifecycle lifecycle ON lifecycle.service_id=event.service_id
 			WHERE event.service_id IS NOT NULL
-			GROUP BY event.service_id, service.service_name, service.service_slug
+			GROUP BY event.service_id, service.service_name, service.service_slug, lifecycle.service_name
 		), sdk_usage AS (
 			SELECT event.app_family_id::text AS key,
 			       COALESCE(NULLIF(family.display_name, ''), 'SDK metadata unavailable') AS label,
@@ -134,15 +135,16 @@ func nonEmptyExecutionBreakdown(item models.EngineExecutionBreakdown) *models.En
 func (s *postgresStore) listWorkspaceServiceExecutionBreakdown(ctx context.Context, accountID uuid.UUID, startDate, endDate time.Time) ([]models.EngineExecutionBreakdown, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT event.service_id::text,
-		       COALESCE(NULLIF(service.service_name, ''), NULLIF(service.service_slug, ''), 'Service metadata unavailable'),
+		       COALESCE(NULLIF(service.service_name, ''), NULLIF(service.service_slug, ''), NULLIF(lifecycle.service_name,''), 'Service metadata unavailable'),
 		       COUNT(*), COUNT(*) FILTER (WHERE event.direction = 'inbound'),
 		       COUNT(*) FILTER (WHERE event.status = 'failed'),
 		       COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY event.latency_ms), 0)
 		FROM fused_engine_execution_events event
 		LEFT JOIN fused_workspace_services service ON service.service_id = event.service_id
+		LEFT JOIN fused_service_lifecycle lifecycle ON lifecycle.service_id=event.service_id
 		WHERE event.account_id = $1 AND event.started_at >= $2 AND event.started_at <= $3
 		  AND event.service_id IS NOT NULL AND event.execution_kind = 'physical'
-		GROUP BY event.service_id, service.service_name, service.service_slug
+		GROUP BY event.service_id, service.service_name, service.service_slug, lifecycle.service_name
 		ORDER BY COUNT(*) DESC, 2, 1
 		LIMIT $4`, accountID, startDate, endDate, workspaceExecutionBreakdownLimit)
 	if err != nil {

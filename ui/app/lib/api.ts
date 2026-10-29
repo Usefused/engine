@@ -179,6 +179,9 @@ export interface CreditsPricing {
 
 // ─── Account Settings ─────────────────────────────────────────────────────────
 
+// ServiceLifecycle deliberately omits definition payloads and private owner metadata.
+export interface ServiceLifecycle { service_id: string; name: string; delete_at: string | null; deleted_at: string | null; }
+
 export interface Service {
   current_service_version?: string;
   service_version_id?: string;
@@ -1476,6 +1479,12 @@ export const api = {
   },
 
   integrations: {
+    // Read fresh deadline authority independently from cached service details.
+    lifecycle: (id: string) => req<ServiceLifecycle>(`/integrations/${encodeURIComponent(id)}/lifecycle`),
+    // Undefined is an explicit schedule cancellation, never a request to delete now.
+    scheduleDeletion: (id: string, deleteAt?: string) => req<void>(`/integrations/${encodeURIComponent(id)}/lifecycle`, { method: deleteAt ? "PUT" : "DELETE", ...(deleteAt ? { body: JSON.stringify({ delete_at: deleteAt }) } : {}) }),
+    // Delete every Registry version while keeping workspace removal a separate API.
+    deleteFromRegistry: (id: string) => req<void>(`/integrations/${encodeURIComponent(id)}`, { method: "DELETE" }),
     // Owner-only display edits share the CLI endpoint and cannot change service identity.
     updateDetails: (id: string, details: { name: string; description: string }) =>
       req<void>(`/integrations/${encodeURIComponent(id)}/details`, { method: "PATCH", body: JSON.stringify(details) }),
@@ -1539,9 +1548,6 @@ export const api = {
       });
       return req<DiscoveryReviewSummary>(`/integrations/session/${encodeURIComponent(sessionId)}/review-summary?${query.toString()}`);
     },
-
-    delete: (id: string) =>
-      req<void>(`/integrations/${id}`, { method: "DELETE" }),
 
     updateDriftWatch: (id: string, watch: boolean) =>
       req<{ status: string }>(`/integrations/${id}/drift-watch`, {
