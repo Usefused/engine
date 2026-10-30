@@ -36,8 +36,12 @@ type routedCall struct {
 	Call    *bridgev1.Call `json:"call"`
 }
 
-// StartRouting subscribes only this replica's private live-call subject, with bounded concurrency.
+// StartRouting watches committed revocations before subscribing to this replica's bounded live-call route.
 func (s *Server) StartRouting(ctx context.Context) error {
+	// Every live transport, including local-only routing, needs cross-replica revocation delivery.
+	if err := s.startRevocations(ctx); err != nil {
+		return err
+	}
 	// Unit fixtures without a broker still exercise local dispatch.
 	if s.conn == nil {
 		return nil

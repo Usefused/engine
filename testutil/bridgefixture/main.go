@@ -73,6 +73,12 @@ func run(ctx context.Context, dsn, output, profile string) error {
 		return err
 	}
 	host := bridgehost.New(pool, nil)
+	// The disposable fixture uses the same cross-replica revocation listener as production.
+	if err = host.StartRouting(ctx); err != nil {
+		listener.Close()
+		httpListener.Close()
+		return err
+	}
 	rpc := grpc.NewServer()
 	bridgev1.RegisterBridgeServiceServer(rpc, host)
 	go rpc.Serve(listener)

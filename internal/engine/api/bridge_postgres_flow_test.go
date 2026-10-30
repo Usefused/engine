@@ -105,7 +105,8 @@ func seedBridgePostgresManifest(t *testing.T, ctx context.Context, pool *pgxpool
 	hash := bridgehost.Digest(raw)
 	_, err = bridgehost.ValidateManifest(&bridgev1.Manifest{ProfileId: "echo-live", Revision: "1", Hash: hash, ManifestJson: raw})
 	require.NoError(t, err)
-	_, err = pool.Exec(ctx, `INSERT INTO fused_bridge_pairings(id,account_id,workspace_id,subject_id,installation_id,destination_id,name,credential_hash,scope) VALUES($1,$2,$3,$4,$5,$6,'test','test-credential','workspace')`, pairing, actor.AccountID, actor.WorkspaceID, actor.SubjectID, uuid.New(), uuid.New())
+	// This fixture represents a direct control pairing with explicit authorization provenance.
+	_, err = pool.Exec(ctx, `INSERT INTO fused_bridge_pairings(id,account_id,workspace_id,subject_id,installation_id,destination_id,name,credential_hash,scope,credential_source) VALUES($1,$2,$3,$4,$5,$6,'test','test-credential','workspace','control')`, pairing, actor.AccountID, actor.WorkspaceID, actor.SubjectID, uuid.New(), uuid.New())
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `INSERT INTO fused_bridge_manifests(pairing_id,profile_id,revision,hash,document) VALUES($1,'echo-live','1',$2,$3)`, pairing, hash, raw)
 	require.NoError(t, err)

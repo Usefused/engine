@@ -37,8 +37,11 @@ type Pairing struct {
 // Repository uses shared database state so replica changes cannot widen identity or replay scope.
 type Repository struct{ Pool *pgxpool.Pool }
 
-// ownerAuthorized checks live subject/team/workspace grants in one bounded set-based query.
-const ownerAuthorized = `EXISTS (
+// ownerAuthorized requires recorded consent provenance plus live subject/team/workspace authority.
+const ownerAuthorized = `(p.credential_source='control' OR
+ (p.credential_source='oauth_client' AND EXISTS (
+  SELECT 1 FROM fused_oauth_user_consents consent WHERE consent.client_id=p.oauth_client_id
+  AND consent.subject_id=p.subject_id AND 'bridge.manage'=ANY(consent.granted_scope)))) AND EXISTS (
  SELECT 1 FROM fused_subjects s JOIN fused_role_bindings b ON
  ((b.subject_type='subject' AND b.subject_id=s.id) OR
   (b.subject_type='workspace' AND b.subject_id=p.workspace_id) OR
@@ -48,7 +51,7 @@ const ownerAuthorized = `EXISTS (
  WHERE s.id=p.subject_id AND s.status='active' AND b.resource_type='workspace'
  AND b.resource_id=p.workspace_id AND permission.permission='bridge.manage')`
 
-// Create issues a non-general-purpose credential only after ordinary control authorization.
+// Create binds delegated installations to locked consent before issuing a non-general-purpose credential.
 func (r *Repository) Create(ctx context.Context, actor accesscontrol.Actor, installation, name string, scope string) (Pairing, string, error) {
 	// Reject ambiguous identities before issuing irreversible secret material.
 	if _, err := uuid.Parse(installation); err != nil || len(name) == 0 || len(name) > 200 || scope != "workspace" {
@@ -61,12 +64,49 @@ func (r *Repository) Create(ctx context.Context, actor accesscontrol.Actor, inst
 	}
 	secret := "fbc_" + base64.RawURLEncoding.EncodeToString(secretBytes)
 	p := Pairing{ID: uuid.NewString(), DestinationID: uuid.NewString(), InstallationID: installation, Name: name, Scope: "workspace", Profiles: []string{}, AccountID: actor.AccountID.String(), WorkspaceID: actor.WorkspaceID.String()}
-	_, err := r.Pool.Exec(ctx, `INSERT INTO fused_bridge_pairings(id,account_id,workspace_id,subject_id,installation_id,destination_id,name,credential_hash,profile_ids,scope) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'{}',$9)`, p.ID, p.AccountID, p.WorkspaceID, actor.SubjectID, installation, p.DestinationID, name, Digest([]byte(secret)), scope)
+	tx, err := r.Pool.Begin(ctx)
+	// Consent validation and credential creation must serialize with consent deletion.
+	if err != nil {
+		return Pairing{}, "", err
+	}
+	defer tx.Rollback(ctx)
+	clientID, source, err := pairingConsent(ctx, tx, actor)
+	// A stale cached OAuth actor cannot mint a credential after consent removal.
+	if err != nil {
+		return Pairing{}, "", err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO fused_bridge_pairings(id,account_id,workspace_id,subject_id,installation_id,destination_id,name,credential_hash,profile_ids,scope,oauth_client_id,credential_source) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'{}',$9,$10,$11)`, p.ID, p.AccountID, p.WorkspaceID, actor.SubjectID, installation, p.DestinationID, name, Digest([]byte(secret)), scope, clientID, source)
 	// Never expose a credential whose pairing failed to commit.
 	if err != nil {
 		return Pairing{}, "", err
 	}
+	// Commit failure must never expose an installation secret to the caller.
+	if err = tx.Commit(ctx); err != nil {
+		return Pairing{}, "", err
+	}
 	return p, secret, nil
+}
+
+// pairingConsent locks the exact client/subject grant so revocation cannot race installation creation.
+func pairingConsent(ctx context.Context, tx pgx.Tx, actor accesscontrol.Actor) (*uuid.UUID, string, error) {
+	// Non-OAuth control credentials retain their existing workspace-authorized pairing path.
+	if actor.CredentialSource != "oauth_client" && actor.AuthenticationMethod != "oauth2" {
+		return nil, "control", nil
+	}
+	var clientID uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT consent.client_id
+ FROM fused_oauth_tokens token
+ JOIN fused_oauth_clients client ON client.id=token.client_id
+ JOIN fused_oauth_user_consents consent ON consent.client_id=token.client_id AND consent.subject_id=token.subject_id
+ WHERE token.id=$1 AND token.subject_id=$2 AND token.revoked_at IS NULL AND token.access_expires_at>now()
+ AND client.revoked_at IS NULL AND (client.expires_at IS NULL OR client.expires_at>now())
+ AND 'bridge.manage'=ANY(token.scope) AND 'bridge.manage'=ANY(consent.granted_scope)
+ FOR SHARE OF consent, token, client`, actor.CredentialID, actor.SubjectID).Scan(&clientID)
+	// Missing, expired or revoked grants cannot become durable installation authority.
+	if err != nil {
+		return nil, "", ErrDenied
+	}
+	return &clientID, "oauth_client", nil
 }
 
 // Authenticate checks revocation and current owner permissions without token caching.

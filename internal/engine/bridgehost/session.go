@@ -21,13 +21,14 @@ import (
 // Server owns bounded live sessions; all durable identities remain in PostgreSQL.
 type Server struct {
 	bridgev1.UnimplementedBridgeServiceServer
-	repo           *Repository
-	instance       string
-	grpcURL        string
-	discoveryReady bool
-	conn           *nats.Conn
-	mu             sync.Mutex
-	sessions       map[string]*session
+	repo             *Repository
+	instance         string
+	grpcURL          string
+	discoveryReady   bool
+	conn             *nats.Conn
+	mu               sync.Mutex
+	sessions         map[string]*session
+	revocationsReady bool
 }
 type session struct {
 	pairing Pairing
@@ -35,6 +36,7 @@ type session struct {
 	results map[string]chan *bridgev1.CallResult
 	mu      sync.Mutex
 	done    chan struct{}
+	cancel  context.CancelCauseFunc
 }
 
 // New shares the Engine pool and internal broker while assigning a distinct replica identity.
@@ -55,11 +57,27 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[bridgev1.BridgeFrame, b
 		return status.Error(codes.Unavailable, "bridge ownership unavailable")
 	}
 	p.Generation = generation
-	current := &session{pairing: p, out: make(chan *bridgev1.EngineFrame, 64), results: map[string]chan *bridgev1.CallResult{}, done: make(chan struct{})}
+	ctx, cancel := context.WithCancelCause(stream.Context())
+	defer cancel(nil)
+	stream = &revocableStream{BidiStreamingServer: stream, ctx: ctx}
+	current := &session{pairing: p, out: make(chan *bridgev1.EngineFrame, 64), results: map[string]chan *bridgev1.CallResult{}, done: make(chan struct{}), cancel: cancel}
 	s.mu.Lock()
+	// A disconnected notification listener cannot admit sessions that might miss revocation.
+	if !s.revocationsReady {
+		s.mu.Unlock()
+		return status.Error(codes.Unavailable, "bridge revocation listener unavailable")
+	}
+	// Replacing a local generation also cancels its pending calls and blocked writer.
+	if previous := s.sessions[p.ID]; previous != nil && previous.cancel != nil {
+		previous.cancel(status.Error(codes.PermissionDenied, "bridge session replaced"))
+	}
 	s.sessions[p.ID] = current
 	s.mu.Unlock()
 	defer s.detach(current)
+	// Recheck after registration so a revocation between Claim and registration cannot be missed.
+	if err = s.repo.Renew(ctx, p.ID, generation); err != nil {
+		return status.Error(codes.PermissionDenied, "bridge session revoked")
+	}
 	// Readiness is sent only after ownership is committed.
 	if err = sendBounded(stream, &bridgev1.EngineFrame{Message: &bridgev1.EngineFrame_Welcome{Welcome: &bridgev1.Welcome{ProtocolMajor: 1, ProtocolMinor: 1, Generation: generation, DestinationId: p.DestinationID, MaxInflightEvents: 32, MaxPayloadBytes: MaxPayload}}}); err != nil {
 		return err
@@ -117,7 +135,7 @@ func (s *Server) runSession(stream grpc.BidiStreamingServer[bridgev1.BridgeFrame
 		// Every selected event either advances the session or returns a terminal authorization/transport failure.
 		select {
 		case <-stream.Context().Done():
-			return stream.Context().Err()
+			return context.Cause(stream.Context())
 		case <-ticker.C:
 			err = s.sendAuthorized(stream, current, &bridgev1.EngineFrame{Message: &bridgev1.EngineFrame_Heartbeat{Heartbeat: &bridgev1.Heartbeat{Generation: current.pairing.Generation}}})
 		case frame := <-current.out:
@@ -155,7 +173,7 @@ func sendBounded(stream grpc.BidiStreamingServer[bridgev1.BridgeFrame, bridgev1.
 	case err := <-done:
 		return err
 	case <-stream.Context().Done():
-		return stream.Context().Err()
+		return context.Cause(stream.Context())
 	case <-timer.C:
 		return status.Error(codes.DeadlineExceeded, "bridge peer is not reading")
 	}

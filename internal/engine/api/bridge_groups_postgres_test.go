@@ -45,7 +45,8 @@ func TestBridgeGroupedPostgresResolution(t *testing.T) {
 	require.NoError(t, verifyBridgeAttachments(ctx, s, doc, payload))
 	// A second active installation of the same name is ambiguous even if it has no matching profile.
 	duplicate := uuid.New()
-	_, err = pool.Exec(ctx, `INSERT INTO fused_bridge_pairings(id,account_id,workspace_id,subject_id,installation_id,destination_id,name,credential_hash,scope) VALUES($1,$2,$3,$4,$5,$6,'test',$7,'workspace')`, duplicate, actor.AccountID, actor.WorkspaceID, actor.SubjectID, uuid.New(), uuid.New(), uuid.NewString())
+	// This fixture represents a direct control pairing with explicit authorization provenance.
+	_, err = pool.Exec(ctx, `INSERT INTO fused_bridge_pairings(id,account_id,workspace_id,subject_id,installation_id,destination_id,name,credential_hash,scope,credential_source) VALUES($1,$2,$3,$4,$5,$6,'test',$7,'workspace','control')`, duplicate, actor.AccountID, actor.WorkspaceID, actor.SubjectID, uuid.New(), uuid.New(), uuid.NewString())
 	require.NoError(t, err)
 	_, err = resolveBridgeAttachments(ctx, s, actor.AccountID, doc)
 	require.ErrorContains(t, err, "ambiguous")
