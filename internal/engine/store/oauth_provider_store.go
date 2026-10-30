@@ -208,15 +208,24 @@ func isLoopbackRedirectHost(host string) bool {
 	return strings.EqualFold(host, "localhost") || host == "127.0.0.1" || host == "::1"
 }
 
+// validateOAuthScopes isolates runtime consent from the management permission vocabulary.
 func validateOAuthScopes(scopes []string) error {
+	// Runtime-only clients cannot combine execution with control-plane grants.
+	if OAuthMCPOnly(scopes) {
+		return nil
+	}
+	// Bound management scopes before validation and duplicate detection.
 	if len(scopes) == 0 || len(scopes) > maxOAuthScopeCount {
 		return fmt.Errorf("%w: between 1 and %d scopes are required", ErrInvalidOAuthClient, maxOAuthScopeCount)
 	}
 	seen := make(map[string]struct{}, len(scopes))
+	// Each management scope must remain a canonical permission.
 	for _, scope := range scopes {
+		// Unknown and mixed runtime scopes cannot cross the management boundary.
 		if err := accesscontrol.ValidatePermission(accesscontrol.Permission(scope)); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalidOAuthClient, err)
 		}
+		// Duplicate grants are invalid rather than silently normalized.
 		if _, duplicate := seen[scope]; duplicate {
 			return fmt.Errorf("%w: duplicate scope %q", ErrInvalidOAuthClient, scope)
 		}

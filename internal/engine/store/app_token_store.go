@@ -351,7 +351,12 @@ func (s *postgresStore) RevokeAppToken(ctx context.Context, appFamilyID uuid.UUI
 	return revocation, nil
 }
 
+// revokeAppTokenTx retires a manual credential or its complete OAuth refresh grant atomically.
 func revokeAppTokenTx(ctx context.Context, tx pgx.Tx, appFamilyID uuid.UUID, name string) (*AppTokenRevocation, error) {
+	// A renewable access token must not reappear after the user revokes it here.
+	if err := revokeOAuthForAppToken(ctx, tx, appFamilyID, name); err != nil {
+		return nil, err
+	}
 	actor, _ := accesscontrol.ActorFromContext(ctx)
 	var revocation AppTokenRevocation
 	err := tx.QueryRow(ctx, `

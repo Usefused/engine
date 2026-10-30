@@ -164,6 +164,22 @@ func TestEmbeddedUIMiddleware(t *testing.T) {
 	}
 }
 
+// TestEmbeddedUIMCPBrowserRoutes preserves OAuth handlers under real browser Accept headers.
+func TestEmbeddedUIMCPBrowserRoutes(t *testing.T) {
+	handler := testEmbeddedUIHandler()
+	// Each discovery and consent route must bypass the embedded SPA shell.
+	for _, path := range []string{"/mcp/oauth/authorize?client_id=test", "/.well-known/oauth-authorization-server/mcp/oauth", "/.well-known/oauth-protected-resource/mcp/test"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Accept", "text/html,application/xhtml+xml")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		// A SPA success would hide an authorization or discovery failure from the client.
+		if response.Code != http.StatusTeapot || response.Body.String() != "next" {
+			t.Fatalf("%s: status=%d body=%q", path, response.Code, response.Body.String())
+		}
+	}
+}
+
 func TestEmbeddedUIMiddlewareNilFilesystemPassesThrough(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTeapot)

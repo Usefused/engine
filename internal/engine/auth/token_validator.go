@@ -36,6 +36,8 @@ type AppAuthorizer interface {
 // opaque database identity; bearer values, hashes, and user-auth selectors
 // remain inside their dedicated authorization and persistence boundaries.
 type RuntimeIdentity struct {
+	// OAuthGrantID allows a rotated credential to retire only its own transport session.
+	OAuthGrantID   uuid.UUID
 	RecoveryOrigin *store.ExecutionRecoveryOrigin
 	AccountID      uuid.UUID
 	AppFamilyID    uuid.UUID
@@ -141,17 +143,25 @@ func newTokenValidator(s AppAuthorizer, now func() time.Time) *CachedTokenValida
 	}
 }
 
+// Validate keeps OAuth revocation and live user permissions on the database path.
 func (v *CachedTokenValidator) Validate(ctx context.Context, appID uuid.UUID, token string) (RuntimeIdentity, error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.auth.app_token.validate")
 	defer span.End()
 
 	token = strings.TrimSpace(token)
+	// Empty credentials cannot enter either authorization path.
 	if token == "" {
 		span.SetAttributes(attribute.String(tokenCacheResultAttribute, string(tokenCacheResultBypass)))
 		return RuntimeIdentity{}, ErrUnauthorized
 	}
 
 	key := tokenCacheKey{appID: appID, tokenDigest: digestToken(token)}
+	// OAuth disconnect, refresh expiry, and RBAC changes must apply on the next execution.
+	if strings.HasPrefix(token, "foat_") {
+		identity, _, err := v.load(ctx, key)
+		span.SetAttributes(attribute.String(tokenCacheResultAttribute, string(tokenCacheResultBypass)))
+		return identity, err
+	}
 	identity, result, err := v.validateKey(ctx, key)
 	span.SetAttributes(attribute.String(tokenCacheResultAttribute, string(result)))
 	return identity, err
@@ -197,6 +207,7 @@ func (v *CachedTokenValidator) loadAndFinish(ctx context.Context, key tokenCache
 	v.finishLoad(key, load, identity, expiresAt, err)
 }
 
+// load projects the database's current runtime authority, including the OAuth rotation family.
 func (v *CachedTokenValidator) load(ctx context.Context, key tokenCacheKey) (RuntimeIdentity, time.Time, error) {
 	// PostgreSQL stores the portable hex encoding, while the hot in-memory path
 	// keeps the fixed-size digest to avoid allocating a string on every hit.
@@ -206,7 +217,8 @@ func (v *CachedTokenValidator) load(ctx context.Context, key tokenCacheKey) (Run
 		return RuntimeIdentity{}, time.Time{}, ErrUnauthorized
 	}
 	identity := RuntimeIdentity{
-		AccountID: projection.AccountID, AppFamilyID: projection.AppFamilyID,
+		OAuthGrantID: projection.OAuthGrantID,
+		AccountID:    projection.AccountID, AppFamilyID: projection.AppFamilyID,
 		AppID: projection.AppID, TokenID: projection.TokenID, AppVersion: projection.Version,
 		Kind: projection.Kind, HostedMCP: projection.HostedMCP, Status: projection.AppStatus, TokenPolicy: projection.TokenPolicy,
 		BindingMode: projection.BindingMode,

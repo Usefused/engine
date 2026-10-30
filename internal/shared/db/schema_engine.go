@@ -2061,6 +2061,7 @@ func engineSchemaQueries() []string {
 // scope-limited token only after a Fused user authorizes them with consent and
 // Authorization Code + PKCE. This is the inverse of the existing hosted-connect flow, where Fused
 // brokers a workspace's OAuth connection TO a third-party provider.
+// oauthProviderSchemaQueries persists management and audience-bound MCP grants in the shared OAuth lifecycle.
 func oauthProviderSchemaQueries() []string {
 	return []string{
 		// The public client_id is opaque and unique; client_secret_hash stays NULL
@@ -2089,6 +2090,8 @@ func oauthProviderSchemaQueries() []string {
 		// Ephemeral clients minted by POST /oauth/register carry an absolute
 		// expiry so unauthenticated registration cannot create permanent credentials.
 		`ALTER TABLE fused_oauth_clients ADD COLUMN IF NOT EXISTS expires_at timestamptz;`,
+		// Retain registration provenance after an approved MCP client becomes durable.
+		`ALTER TABLE fused_oauth_clients ADD COLUMN IF NOT EXISTS is_dynamic boolean NOT NULL DEFAULT false;`,
 
 		// A code is single-use and short-lived; consumed_at is set atomically by
 		// the same statement that issues its token pair, matching the CLI login
@@ -2129,6 +2132,11 @@ func oauthProviderSchemaQueries() []string {
 			revoked_at            timestamptz,
 			created_at            timestamptz NOT NULL DEFAULT NOW()
 		);`,
+		// Consent metadata survives rotation without expanding the approved operation set.
+		`ALTER TABLE fused_oauth_authorization_codes ADD COLUMN IF NOT EXISTS mcp_grant jsonb;`,
+		`ALTER TABLE fused_oauth_tokens ADD COLUMN IF NOT EXISTS mcp_grant jsonb;`,
+		// OAuth cleanup must remove the executable projection rather than turn it into a manual token.
+		`ALTER TABLE fused_app_tokens ADD COLUMN IF NOT EXISTS oauth_token_id uuid REFERENCES fused_oauth_tokens(id) ON DELETE CASCADE;`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_oauth_tokens_access_hash ON fused_oauth_tokens(access_token_hash);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_oauth_tokens_refresh_hash ON fused_oauth_tokens(refresh_token_hash);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_oauth_tokens_family ON fused_oauth_tokens(token_family_id);`,

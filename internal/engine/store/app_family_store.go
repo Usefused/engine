@@ -859,12 +859,14 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 		WITH matched AS (
 			SELECT a.account_id, f.app_family_id, a.app_id, a.version, f.kind, a.hosted_mcp, a.status,
 			       t.id AS token_id, t.allow_all, t.allowed_operations, t.expires_at,
-			       t.binding_mode
+			       t.binding_mode, COALESCE(oauth.token_family_id, '00000000-0000-0000-0000-000000000000'::uuid) AS oauth_grant_id
 			FROM fused_apps a
 			JOIN fused_app_families f
 			  ON f.app_family_id = a.app_family_id AND f.account_id = a.account_id
 			JOIN fused_app_tokens t ON t.app_family_id = f.app_family_id
-			WHERE a.app_id = $1 AND t.token_hash = $2
+			LEFT JOIN fused_oauth_tokens oauth ON oauth.id = t.oauth_token_id
+			WHERE (t.oauth_token_id IS NULL OR (`+oauthMCPRuntimeAuthoritySQL+`))
+			  AND a.app_id = $1 AND t.token_hash = $2
 			  AND f.archived_at IS NULL
 			  AND a.status IN ('active', 'deprecated')
 			  AND (t.expires_at IS NULL OR t.expires_at > NOW())
@@ -876,13 +878,13 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 			RETURNING token.id
 		)
 		SELECT account_id, app_family_id, app_id, token_id, version, kind, hosted_mcp, status,
-		       allow_all, allowed_operations, expires_at, binding_mode
+		       allow_all, allowed_operations, expires_at, binding_mode, oauth_grant_id
 		FROM matched
 		WHERE EXISTS (SELECT 1 FROM touched)
 	`, appID, tokenHash).Scan(
 		&proj.AccountID, &proj.AppFamilyID, &proj.AppID, &proj.TokenID, &proj.Version, &proj.Kind, &proj.HostedMCP, &proj.AppStatus,
 		&proj.TokenPolicy.AllowAll, &proj.TokenPolicy.AllowedOperations, &proj.TokenPolicy.ExpiresAt,
-		&proj.BindingMode,
+		&proj.BindingMode, &proj.OAuthGrantID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		span.SetAttributes(attribute.String("outcome", "denied"))

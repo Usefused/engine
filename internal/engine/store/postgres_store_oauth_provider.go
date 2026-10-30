@@ -46,8 +46,7 @@ func (s *postgresStore) RegisterOAuthClient(ctx context.Context, input OAuthClie
 		return OAuthClientMutationResult{}, err
 	}
 	// Anonymous registration must never create permanent or overlong credentials.
-	now := time.Now().UTC()
-	if input.ExpiresAt == nil || !input.ExpiresAt.After(now) || input.ExpiresAt.After(now.Add(OAuthDynamicClientMaxTTL)) {
+	if !validOAuthRegistrationExpiry(input.ExpiresAt, time.Now().UTC()) {
 		return OAuthClientMutationResult{}, fmt.Errorf("%w: dynamic clients must expire within one hour", ErrInvalidOAuthClient)
 	}
 
@@ -58,9 +57,17 @@ func (s *postgresStore) RegisterOAuthClient(ctx context.Context, input OAuthClie
 		return OAuthClientMutationResult{}, fmt.Errorf("begin OAuth client registration: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Bound anonymous registrations before issuing a client identity.
+	if err := limitOAuthRegistrations(ctx, tx); err != nil {
+		return OAuthClientMutationResult{}, err
+	}
 	client, err := createOAuthClientTx(ctx, tx, input)
 	// Roll back the transaction when the client cannot be persisted.
 	if err != nil {
+		return OAuthClientMutationResult{}, err
+	}
+	// Dynamic provenance survives promotion after successful MCP consent.
+	if _, err := tx.Exec(ctx, `UPDATE fused_oauth_clients SET is_dynamic=true WHERE id=$1`, client.ID); err != nil {
 		return OAuthClientMutationResult{}, err
 	}
 	// A client identity must never outlive a failed registration audit.
@@ -72,6 +79,11 @@ func (s *postgresStore) RegisterOAuthClient(ctx context.Context, input OAuthClie
 		return OAuthClientMutationResult{}, fmt.Errorf("commit OAuth client registration: %w", err)
 	}
 	return OAuthClientMutationResult{Client: client}, nil
+}
+
+// validOAuthRegistrationExpiry bounds provisional credentials until explicit browser consent.
+func validOAuthRegistrationExpiry(expiry *time.Time, now time.Time) bool {
+	return expiry != nil && expiry.After(now) && !expiry.After(now.Add(OAuthDynamicClientMaxTTL))
 }
 
 func createOAuthClientTx(ctx context.Context, tx pgx.Tx, input OAuthClientRegistration) (OAuthClient, error) {
@@ -222,8 +234,15 @@ func (s *postgresStore) GetOAuthUserConsent(ctx context.Context, clientID, subje
 // RecordOAuthConsentAndIssueCode persists (or refreshes) the user's consent
 // and mints the single-use authorization code in one transaction, so a code
 // is never issued without a matching consent record on file.
+// The reviewed MCP policy is committed with the code in that same transaction.
 func (s *postgresStore) RecordOAuthConsentAndIssueCode(ctx context.Context, consent OAuthConsentGrant, code OAuthAuthorizationCodeIssue) error {
+	rawGrant, err := oauthMCPCodeGrant(ctx, code.Scope)
+	// Missing or mismatched MCP consent cannot mint an executable code.
+	if err != nil {
+		return err
+	}
 	tx, err := s.db.Begin(ctx)
+	// Failed validation or persistence aborts this grant transaction.
 	if err != nil {
 		return fmt.Errorf("begin OAuth consent: %w", err)
 	}
@@ -239,21 +258,32 @@ func (s *postgresStore) RecordOAuthConsentAndIssueCode(ctx context.Context, cons
 		ON CONFLICT (client_id, subject_id) DO UPDATE SET
 			granted_scope = EXCLUDED.granted_scope, updated_at = NOW()
 	`, consent.ClientID, consent.SubjectID, nonNilStrings(consent.GrantedScope))
+	// A code must never outlive failed consent persistence.
 	if err != nil {
 		return fmt.Errorf("record OAuth consent: %w", err)
 	}
 	command, err := tx.Exec(ctx, `
 		INSERT INTO fused_oauth_authorization_codes (
-			id, client_id, subject_id, redirect_uri, scope, code_hash, code_challenge, expires_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			id, client_id, subject_id, redirect_uri, scope, code_hash, code_challenge, expires_at, mcp_grant
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`, code.ID, code.ClientID, code.SubjectID, code.RedirectURI, nonNilStrings(code.Scope),
-		code.CodeHash, code.CodeChallenge, code.ExpiresAt)
+		code.CodeHash, code.CodeChallenge, code.ExpiresAt, rawGrant)
+	// Failed code persistence must roll back the accompanying consent.
 	if err != nil {
 		return fmt.Errorf("issue OAuth authorization code: %w", err)
 	}
+	// Issuance requires exactly one persisted code.
 	if command.RowsAffected() != 1 {
 		return ErrOAuthGrantDenied
 	}
+	// A reviewed MCP connection promotes its provisional client; failed consent leaves the hour-long expiry intact.
+	if OAuthMCPOnly(code.Scope) {
+		// Failed promotion must also roll back the code and consent.
+		if _, err := tx.Exec(ctx, `UPDATE fused_oauth_clients SET expires_at=NULL WHERE id=$1 AND is_dynamic`, code.ClientID); err != nil {
+			return err
+		}
+	}
+	// Commit code, grant, and client promotion together.
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit OAuth consent: %w", err)
 	}
@@ -276,11 +306,11 @@ func enforceOAuthDynamicClientLimit(ctx context.Context, tx pgx.Tx, consent OAut
 	if err != nil {
 		return fmt.Errorf("lock OAuth consent subject: %w", err)
 	}
-	var expiresAt *time.Time
+	var dynamic bool
 	err = tx.QueryRow(ctx, `
-		SELECT expires_at FROM fused_oauth_clients WHERE id = $1 AND revoked_at IS NULL
+		SELECT (is_dynamic OR expires_at IS NOT NULL) FROM fused_oauth_clients WHERE id = $1 AND revoked_at IS NULL
 			AND (expires_at IS NULL OR expires_at > clock_timestamp())
-	`, consent.ClientID).Scan(&expiresAt)
+	`, consent.ClientID).Scan(&dynamic)
 	// Re-check liveness after waiting for the user lock.
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrOAuthGrantDenied
@@ -290,7 +320,7 @@ func enforceOAuthDynamicClientLimit(ctx context.Context, tx pgx.Tx, consent OAut
 		return fmt.Errorf("check OAuth consent client: %w", err)
 	}
 	// Admin-managed integrations are outside the dynamic-client quota.
-	if expiresAt == nil {
+	if !dynamic {
 		return nil
 	}
 	var count int
@@ -298,7 +328,8 @@ func enforceOAuthDynamicClientLimit(ctx context.Context, tx pgx.Tx, consent OAut
 		SELECT COUNT(*) FROM fused_oauth_user_consents consent
 		JOIN fused_oauth_clients client ON client.id = consent.client_id
 		WHERE consent.subject_id = $1 AND consent.client_id <> $2
-			AND client.revoked_at IS NULL AND client.expires_at > clock_timestamp()
+			AND client.revoked_at IS NULL AND (client.is_dynamic OR client.expires_at IS NOT NULL)
+			AND (client.expires_at IS NULL OR client.expires_at > clock_timestamp())
 	`, consent.SubjectID, consent.ClientID).Scan(&count)
 	// Keep the quota closed if its authoritative count is unavailable.
 	if err != nil {
@@ -312,6 +343,7 @@ func enforceOAuthDynamicClientLimit(ctx context.Context, tx pgx.Tx, consent OAut
 }
 
 type lockedOAuthCode struct {
+	mcpGrant      []byte
 	id            uuid.UUID
 	clientID      uuid.UUID
 	subjectID     uuid.UUID
@@ -338,43 +370,56 @@ func (s *postgresStore) ExchangeOAuthAuthorizationCode(ctx context.Context, inpu
 	return metadata, nil
 }
 
+// exchangeOAuthAuthorizationCodeTx binds PKCE, audience, and runtime policy in one transaction.
 func exchangeOAuthAuthorizationCodeTx(ctx context.Context, tx pgx.Tx, input OAuthCodeExchange, at time.Time) (OAuthTokenMetadata, error) {
 	code, err := lockOAuthAuthorizationCode(ctx, tx, input.CodeHash)
+	// Failed validation or persistence aborts this grant transaction.
 	if err != nil {
 		return OAuthTokenMetadata{}, err
 	}
-	if !validOAuthCodeForExchange(code, input, at) {
+	// Both protocol proof and resource identity must match before consumption.
+	if !validOAuthCodeForExchange(code, input, at) || validateOAuthMCPExchange(ctx, code.scope, code.mcpGrant) != nil {
 		return OAuthTokenMetadata{}, ErrOAuthGrantDenied
 	}
+	// Single-use consumption must roll back if the complete exchange cannot commit.
 	if err := markOAuthAuthorizationCodeConsumed(ctx, tx, code.id, at); err != nil {
 		return OAuthTokenMetadata{}, err
 	}
 	metadata, err := insertOAuthTokenPair(ctx, tx, code.clientID, code.subjectID, uuid.New(), code.scope, input.Issue)
+	// Failed validation or persistence aborts this grant transaction.
 	if err != nil {
 		return OAuthTokenMetadata{}, err
 	}
+	// A runtime token must use the same atomic policy and fixed-binding store as manual tokens.
+	if err := issueOAuthMCPAppToken(ctx, tx, metadata, input.Issue, code.mcpGrant); err != nil {
+		return OAuthTokenMetadata{}, err
+	}
+	// A successful credential change must retain its audit record.
 	if err := auditOAuthTokenLifecycle(ctx, tx, code.clientID, code.subjectID, metadata.ID, "oauth.token.issue"); err != nil {
 		return OAuthTokenMetadata{}, err
 	}
 	return metadata, nil
 }
 
+// lockOAuthAuthorizationCode locks the code and its immutable consent snapshot together.
 func lockOAuthAuthorizationCode(ctx context.Context, tx pgx.Tx, codeHash string) (lockedOAuthCode, error) {
 	var code lockedOAuthCode
 	err := tx.QueryRow(ctx, `
 		SELECT code.id, code.client_id, code.subject_id, code.redirect_uri, code.scope,
-			code.code_challenge, code.expires_at, code.consumed_at
+			code.code_challenge, code.expires_at, code.consumed_at, code.mcp_grant
 		FROM fused_oauth_authorization_codes code
 		JOIN fused_oauth_clients client ON client.id = code.client_id AND client.revoked_at IS NULL
 		WHERE code.code_hash = $1
 		FOR UPDATE OF code
 	`, codeHash).Scan(
 		&code.id, &code.clientID, &code.subjectID, &code.redirectURI, &code.scope,
-		&code.codeChallenge, &code.expiresAt, &code.consumedAt,
+		&code.codeChallenge, &code.expiresAt, &code.consumedAt, &code.mcpGrant,
 	)
+	// Unknown credentials are denied without revealing persistence details.
 	if errors.Is(err, pgx.ErrNoRows) {
 		return lockedOAuthCode{}, ErrOAuthGrantDenied
 	}
+	// Failed validation or persistence aborts this grant transaction.
 	if err != nil {
 		return lockedOAuthCode{}, fmt.Errorf("lock OAuth authorization code: %w", err)
 	}
@@ -417,6 +462,7 @@ func markOAuthAuthorizationCodeConsumed(ctx context.Context, tx pgx.Tx, id uuid.
 }
 
 type lockedOAuthToken struct {
+	mcpGrant         []byte
 	id               uuid.UUID
 	clientID         uuid.UUID
 	subjectID        uuid.UUID
@@ -453,53 +499,75 @@ func (s *postgresStore) RotateOAuthRefreshToken(ctx context.Context, input OAuth
 	return metadata, nil
 }
 
+// rotateOAuthRefreshTokenTx preserves the original audience and consent through every rotation.
 func rotateOAuthRefreshTokenTx(ctx context.Context, tx pgx.Tx, input OAuthRefreshExchange, at time.Time) (OAuthTokenMetadata, error) {
 	token, err := lockOAuthTokenByRefreshHash(ctx, tx, input.RefreshTokenHash)
+	// Failed validation or persistence aborts this grant transaction.
 	if err != nil {
 		return OAuthTokenMetadata{}, err
 	}
-	if token.revokedAt != nil {
-		return OAuthTokenMetadata{}, ErrOAuthGrantDenied
+	// Validation owns replay revocation before a fresh token can be inserted.
+	if err := validateOAuthRefreshGrant(ctx, tx, token, input, at); err != nil {
+		return OAuthTokenMetadata{}, err
 	}
-	if token.consumedAt != nil {
-		// The same refresh token was already exchanged once. A second use is
-		// either a stolen-token replay or a client bug; either way the entire
-		// rotation family is cut off immediately, not just this one row.
-		if err := revokeOAuthTokenFamily(ctx, tx, token.tokenFamilyID, "oauth.token.reuse_detected"); err != nil {
-			return OAuthTokenMetadata{}, err
-		}
-		return OAuthTokenMetadata{}, ErrOAuthGrantReuseDetected
-	}
-	if token.clientID != input.ClientID || !token.refreshExpiresAt.After(at) {
-		return OAuthTokenMetadata{}, ErrOAuthGrantDenied
-	}
+	// Rotation must consume the predecessor atomically with its replacement.
 	if err := markOAuthTokenConsumed(ctx, tx, token.id, at); err != nil {
 		return OAuthTokenMetadata{}, err
 	}
 	metadata, err := insertOAuthTokenPair(ctx, tx, token.clientID, token.subjectID, token.tokenFamilyID, token.scope, input.Issue)
+	// Failed validation or persistence aborts this grant transaction.
 	if err != nil {
 		return OAuthTokenMetadata{}, err
 	}
+	// Rotation copies the immutable allowlist; it never inherits newly published operations.
+	if err := issueOAuthMCPAppToken(ctx, tx, metadata, input.Issue, token.mcpGrant); err != nil {
+		return OAuthTokenMetadata{}, err
+	}
+	// A successful credential change must retain its audit record.
 	if err := auditOAuthTokenLifecycle(ctx, tx, token.clientID, token.subjectID, metadata.ID, "oauth.token.refresh"); err != nil {
 		return OAuthTokenMetadata{}, err
 	}
 	return metadata, nil
 }
 
+// validateOAuthRefreshGrant protects other clients before applying family-wide replay revocation.
+func validateOAuthRefreshGrant(ctx context.Context, tx pgx.Tx, token lockedOAuthToken, input OAuthRefreshExchange, at time.Time) error {
+	// Client and audience mismatches must not let an attacker revoke a victim's token family.
+	if token.revokedAt != nil || token.clientID != input.ClientID || validateOAuthMCPExchange(ctx, token.scope, token.mcpGrant) != nil {
+		return ErrOAuthGrantDenied
+	}
+	// A previously consumed refresh token signals replay; the outer transaction commits this revocation.
+	if token.consumedAt != nil {
+		// The replay error must not mask failure to persist revocation.
+		if err := revokeOAuthTokenFamily(ctx, tx, token.tokenFamilyID, "oauth.token.reuse_detected"); err != nil {
+			return err
+		}
+		return ErrOAuthGrantReuseDetected
+	}
+	// Absolute refresh expiry cannot be extended by merely presenting the old token again.
+	if !token.refreshExpiresAt.After(at) {
+		return ErrOAuthGrantDenied
+	}
+	return nil
+}
+
+// lockOAuthTokenByRefreshHash serializes refresh and carries its original consent snapshot.
 func lockOAuthTokenByRefreshHash(ctx context.Context, tx pgx.Tx, refreshTokenHash string) (lockedOAuthToken, error) {
 	var token lockedOAuthToken
 	err := tx.QueryRow(ctx, `
-		SELECT id, client_id, subject_id, token_family_id, scope, consumed_at, revoked_at, refresh_expires_at
+		SELECT id, client_id, subject_id, token_family_id, scope, consumed_at, revoked_at, refresh_expires_at, mcp_grant
 		FROM fused_oauth_tokens
 		WHERE refresh_token_hash = $1
 		FOR UPDATE
 	`, refreshTokenHash).Scan(
 		&token.id, &token.clientID, &token.subjectID, &token.tokenFamilyID, &token.scope,
-		&token.consumedAt, &token.revokedAt, &token.refreshExpiresAt,
+		&token.consumedAt, &token.revokedAt, &token.refreshExpiresAt, &token.mcpGrant,
 	)
+	// Unknown credentials are denied without revealing persistence details.
 	if errors.Is(err, pgx.ErrNoRows) {
 		return lockedOAuthToken{}, ErrOAuthGrantDenied
 	}
+	// Failed validation or persistence aborts this grant transaction.
 	if err != nil {
 		return lockedOAuthToken{}, fmt.Errorf("lock OAuth refresh token: %w", err)
 	}

@@ -450,9 +450,13 @@ func adaptMCPModernToolList(result map[string]any) error {
 		}
 		description, _ := tool["description"].(string)
 		tool["description"] = description + " " + mcpModernSessionInstructions
+		// Structured-result clients must receive provider output as well as the continuation handle.
 		tool["outputSchema"] = map[string]any{
-			"type": "object", "properties": map[string]any{mcpModernStateHandleArgument: map[string]any{"type": "string"}},
-			"required": []string{mcpModernStateHandleArgument}, "additionalProperties": false,
+			"type": "object", "properties": map[string]any{
+				mcpModernStateHandleArgument: map[string]any{"type": "string"},
+				"content":                    map[string]any{"type": "array", "items": map[string]any{"type": "object", "additionalProperties": true}},
+			},
+			"required": []string{mcpModernStateHandleArgument, "content"}, "additionalProperties": false,
 		}
 		metadata, _ := tool["_meta"].(map[string]any)
 		// The legacy implicit-session extension must not be advertised to a stateless 2026 client.
@@ -471,7 +475,7 @@ func adaptMCPModernToolList(result map[string]any) error {
 	return nil
 }
 
-// attachMCPModernStateHandle adds explicit continuation state without changing an ordinary provider result body.
+// attachMCPModernStateHandle preserves tool output for clients that prefer structuredContent over text content.
 func attachMCPModernStateHandle(result map[string]any, handle string) {
 	metadata, _ := result["_meta"].(map[string]any)
 	// Child execution metadata remains intact beside the modern explicit-state contract.
@@ -482,8 +486,13 @@ func attachMCPModernStateHandle(result map[string]any, handle string) {
 		"schema_version": 1, "handle": handle, "ttl_ms": int(mcpSessionIdleTimeout().Milliseconds()),
 	}
 	result["_meta"] = metadata
-	result["structuredContent"] = map[string]any{mcpModernStateHandleArgument: handle}
 	rewriteMCPModernContinuation(result, handle)
+	content, _ := result["content"].([]any)
+	// Keep the advertised array shape even when a child returns no content blocks.
+	if content == nil {
+		content = []any{}
+	}
+	result["structuredContent"] = map[string]any{mcpModernStateHandleArgument: handle, "content": content}
 }
 
 // rewriteMCPModernContinuation makes a retained-result next_request directly executable on its owning explicit state.

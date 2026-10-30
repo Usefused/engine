@@ -57,6 +57,10 @@ type scopeCatalog struct{}
 
 // ValidateScope lets the protocol core use Fused's canonical permission vocabulary.
 func (scopeCatalog) ValidateScope(scope string) error {
+	// Runtime client registration is permitted; only the MCP adapter can grant it.
+	if scope == store.OAuthMCPScope {
+		return nil
+	}
 	return accesscontrol.ValidatePermission(accesscontrol.Permission(scope))
 }
 

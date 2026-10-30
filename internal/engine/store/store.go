@@ -333,12 +333,14 @@ type AppFamilyBucket struct {
 // authorization. Runtime scope remains in the object cache, so authentication
 // does not load selections or capability documents merely to discard them.
 type AuthProjection struct {
-	AccountID   uuid.UUID
-	AppFamilyID uuid.UUID
-	AppID       uuid.UUID
-	TokenID     uuid.UUID
-	Version     string
-	Kind        AppKind
+	// OAuthGrantID relates rotated tokens without exposing a bearer value.
+	OAuthGrantID uuid.UUID
+	AccountID    uuid.UUID
+	AppFamilyID  uuid.UUID
+	AppID        uuid.UUID
+	TokenID      uuid.UUID
+	Version      string
+	Kind         AppKind
 	// HostedMCP is bound to the exact authorized version, never inferred from the request transport.
 	HostedMCP   bool
 	AppStatus   AppStatus

@@ -44,12 +44,19 @@ type OAuthProviderService interface {
 // (ordinary control-plane REST, actor already resolved by the shared
 // middleware), and the RFC 8414 discovery document.
 func MountOAuthProviderRoutes(router chi.Router, service OAuthProviderService, s store.Store, sessions BrowserSessionService, cookies *browserauth.CookieManager, loginPath, publicURL string) {
+	var flow oauthBrowserFlow
+	var exchange oauthTokenExchange
+	// A missing provider keeps the shared handlers' explicit unavailable response.
+	if service != nil {
+		control := oauthControlFlow{service, s}
+		flow, exchange = control, control.exchangeToken
+	}
 	router.With(limitAuthenticationRequests(browserauth.NewRequestLimiter(30, 300, time.Minute))).
-		Get("/oauth/authorize", oauthAuthorizeHandler(service, s, sessions, cookies, loginPath))
+		Get("/oauth/authorize", oauthAuthorizeHandler(flow, s, sessions, cookies, loginPath))
 	router.With(limitAuthenticationRequests(browserauth.NewRequestLimiter(30, 300, time.Minute))).
-		Post("/oauth/authorize/consent", oauthConsentHandler(service, s, sessions, cookies))
+		Post("/oauth/authorize/consent", oauthConsentHandler(flow, s, sessions, cookies, maxOAuthFormBytes))
 	router.With(limitAuthenticationRequests(browserauth.NewRequestLimiter(60, 600, time.Minute))).
-		Post("/oauth/token", oauthTokenHandler(service))
+		Post("/oauth/token", oauthTokenHandler(exchange))
 	router.With(limitAuthenticationRequests(browserauth.NewRequestLimiter(60, 600, time.Minute))).
 		Post("/oauth/revoke", oauthRevokeHandler(service))
 	router.With(limitAuthenticationRequests(browserauth.NewRequestLimiter(30, 300, time.Minute))).
@@ -59,24 +66,82 @@ func MountOAuthProviderRoutes(router chi.Router, service OAuthProviderService, s
 	router.Get("/.well-known/oauth-authorization-server", oauthMetadataHandler(publicURL))
 }
 
+var (
+	errOAuthTarget         = errors.New("invalid OAuth resource")
+	errOAuthClientMetadata = errors.New("invalid OAuth client metadata")
+	errOAuthUnavailable    = errors.New("OAuth provider unavailable")
+	errOAuthSelection      = errors.New("invalid MCP consent selection")
+)
+
+// oauthBrowserFlow supplies only issuer policy and consent presentation; shared handlers own browser security and redirects.
+type oauthBrowserFlow interface {
+	authorizeRequest(*http.Request, accesscontrol.Actor, oauthprovider.AuthorizeRequest) (oauthprovider.AuthorizeResult, error)
+	consentRedirect(*http.Request, accesscontrol.Actor, oauthprovider.ConsentRequest) (string, error)
+	renderAuthorization(http.ResponseWriter, *http.Request, accesscontrol.Actor, oauthprovider.AuthorizeResult, oauthprovider.AuthorizeRequest)
+}
+
+type oauthControlFlow struct {
+	service OAuthProviderService
+	store   store.Store
+}
+
+// authorizeRequest preserves management scope checks and existing-consent behavior.
+func (h oauthControlFlow) authorizeRequest(r *http.Request, actor accesscontrol.Actor, req oauthprovider.AuthorizeRequest) (oauthprovider.AuthorizeResult, error) {
+	return h.service.Authorize(r.Context(), actor, req)
+}
+
+// consentRedirect preserves the management consent contract behind the common browser guard.
+func (h oauthControlFlow) consentRedirect(r *http.Request, actor accesscontrol.Actor, req oauthprovider.ConsentRequest) (string, error) {
+	// Only explicit approval can mint a credential.
+	if r.PostForm.Get("decision") != "allow" {
+		return oauthDeniedRedirect(req)
+	}
+	return h.service.Consent(r.Context(), actor, req)
+}
+
+// renderAuthorization keeps management permissions in their existing consent template.
+func (h oauthControlFlow) renderAuthorization(w http.ResponseWriter, r *http.Request, _ accesscontrol.Actor, result oauthprovider.AuthorizeResult, req oauthprovider.AuthorizeRequest) {
+	renderOAuthConsentPage(w, r, h.store, result, req, nil)
+}
+
+// exchangeToken delegates management tokens without attaching an MCP audience.
+func (h oauthControlFlow) exchangeToken(r *http.Request, req oauthprovider.TokenRequest) (oauthprovider.TokenResponse, error) {
+	return h.service.Token(r.Context(), req)
+}
+
+// oauthDeniedRedirect preserves client state while declining consent; issuer adapters own callback validation.
+func oauthDeniedRedirect(req oauthprovider.ConsentRequest) (string, error) {
+	target, ok := oauthErrorRedirect(req.RedirectURI, "access_denied", req.State)
+	// An unusable callback must remain a local browser error.
+	if !ok {
+		return "", oauthprovider.ErrInvalidRequest
+	}
+	return target, nil
+}
+
 // -- GET /oauth/authorize --
 
 // oauthAuthorizeHandler starts consent or reports a policy denial in the browser.
-func oauthAuthorizeHandler(service OAuthProviderService, s store.Store, sessions BrowserSessionService, cookies *browserauth.CookieManager, loginPath string) http.HandlerFunc {
+func oauthAuthorizeHandler(flow oauthBrowserFlow, s store.Store, sessions BrowserSessionService, cookies *browserauth.CookieManager, loginPath string) http.HandlerFunc {
+	// The shared browser boundary applies before either issuer can inspect a request.
 	return func(w http.ResponseWriter, r *http.Request) {
 		setOAuthResponseHeaders(w)
-		if service == nil || sessions == nil || cookies == nil {
+		// Browser authorization cannot fall back to bearer credentials or an absent provider.
+		if flow == nil || sessions == nil || cookies == nil {
 			renderOAuthErrorPage(r, s, w, http.StatusServiceUnavailable, "OAuth is not available on this Engine.")
 			return
 		}
 		actor, ok := resolveOAuthBrowserActor(r, sessions, cookies)
+		// Preserve the original OAuth request across browser login.
 		if !ok {
 			http.Redirect(w, r, oauthLoginRedirectURL(loginPath, r), http.StatusFound)
 			return
 		}
 		req := parseOAuthAuthorizeQuery(r)
-		result, err := service.Authorize(r.Context(), actor, req)
+		result, err := flow.authorizeRequest(r, actor, req)
+		// Only protocol errors with an already-validated callback may leave this origin.
 		if err != nil {
+			// Invalid client identities and callbacks remain local errors.
 			if target, redirectable := oauthRedirectableAuthorizeError(err, req); redirectable {
 				http.Redirect(w, r, target, http.StatusFound)
 				return
@@ -84,11 +149,12 @@ func oauthAuthorizeHandler(service OAuthProviderService, s store.Store, sessions
 			renderOAuthErrorPage(r, s, w, http.StatusBadRequest, oauthConsentFailureMessage(err))
 			return
 		}
+		// Management consent may be reused; MCP policy always requests fresh action review.
 		if !result.RequiresConsent {
 			http.Redirect(w, r, result.RedirectURL, http.StatusFound)
 			return
 		}
-		renderOAuthConsentPage(w, r, s, result, req)
+		flow.renderAuthorization(w, r, actor, result, req)
 	}
 }
 
@@ -171,14 +237,17 @@ func oauthErrorCode(err error) string {
 // -- POST /oauth/authorize/consent --
 
 // oauthConsentHandler authorizes a browser-approved grant and explains quota failures.
-func oauthConsentHandler(service OAuthProviderService, s store.Store, sessions BrowserSessionService, cookies *browserauth.CookieManager) http.HandlerFunc {
+func oauthConsentHandler(flow oauthBrowserFlow, s store.Store, sessions BrowserSessionService, cookies *browserauth.CookieManager, maxFormBytes int64) http.HandlerFunc {
+	// Both consent forms use the same cookie and origin checks before processing grants.
 	return func(w http.ResponseWriter, r *http.Request) {
 		setOAuthResponseHeaders(w)
-		if service == nil || sessions == nil || cookies == nil {
+		// Browser authorization cannot fall back to bearer credentials or an absent provider.
+		if flow == nil || sessions == nil || cookies == nil {
 			renderOAuthErrorPage(r, s, w, http.StatusServiceUnavailable, "OAuth is not available on this Engine.")
 			return
 		}
 		actor, ok := resolveOAuthBrowserActor(r, sessions, cookies)
+		// An expired browser session cannot approve or deny a delegation.
 		if !ok {
 			renderOAuthErrorPage(r, s, w, http.StatusUnauthorized, "Your session has expired. Sign in again and retry from the original link.")
 			return
@@ -191,7 +260,8 @@ func oauthConsentHandler(service OAuthProviderService, s store.Store, sessions B
 			renderOAuthErrorPage(r, s, w, http.StatusForbidden, "This request could not be verified. Return to the application and try again.")
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
+		r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
+		// Bound selection size before any issuer policy reads form fields.
 		if err := r.ParseForm(); err != nil {
 			renderOAuthErrorPage(r, s, w, http.StatusBadRequest, "The consent request was invalid.")
 			return
@@ -201,26 +271,23 @@ func oauthConsentHandler(service OAuthProviderService, s store.Store, sessions B
 			Scope: splitOAuthScope(r.PostForm.Get("scope")), State: r.PostForm.Get("state"),
 			CodeChallenge: r.PostForm.Get("code_challenge"), CodeChallengeMethod: r.PostForm.Get("code_challenge_method"),
 		}
-		if r.PostForm.Get("decision") != "allow" {
-			target, ok := oauthErrorRedirect(req.RedirectURI, "access_denied", req.State)
-			if !ok {
-				renderOAuthErrorPage(r, s, w, http.StatusBadRequest, "The connection request was invalid.")
-				return
-			}
-			http.Redirect(w, r, target, http.StatusFound)
-			return
-		}
-		redirectURL, err := service.Consent(r.Context(), actor, req)
+		redirectURL, err := flow.consentRedirect(r, actor, req)
+		// Policy or persistence failures cannot produce a successful client callback.
 		if err != nil {
 			renderOAuthErrorPage(r, s, w, http.StatusBadRequest, oauthConsentFailureMessage(err))
 			return
 		}
-		http.Redirect(w, r, redirectURL, http.StatusFound)
+		// End the native form navigation before the client callback so self-only form CSP does not block its redirect chain.
+		writeConnectInputProviderPage(w, redirectURL, loadHostedConnectBranding(r.Context(), s))
 	}
 }
 
 // oauthConsentFailureMessage gives users a way to free capacity without exposing internal errors.
 func oauthConsentFailureMessage(err error) string {
+	// A rejected runtime selection requires fresh action/account review rather than broader fallback access.
+	if errors.Is(err, errOAuthSelection) {
+		return "Choose at least one available action and supply its connected account when required. If the server changed, restart the connection."
+	}
 	// A full quota is actionable through the user's existing Connected Apps page.
 	if errors.Is(err, store.ErrOAuthDynamicClientLimit) {
 		return fmt.Sprintf("You already have %d active temporary OAuth clients. Disconnect one in Access → Connected Apps, or wait for it to expire, then try again.", store.MaxActiveOAuthDynamicClientsPerUser)
@@ -231,6 +298,7 @@ func oauthConsentFailureMessage(err error) string {
 // -- Consent page rendering (server-rendered, mirrors connect_input_handlers.go) --
 
 type oauthConsentPage struct {
+	MCP                 *mcpOAuthConsentPage
 	Branding            hostedConnectBranding
 	ClientName          string
 	ScopeLabels         []string
@@ -258,14 +326,18 @@ var oauthConsentTemplate = parseHostedConnectTemplate("oauth-consent", `<!doctyp
     .oauth-actions button{flex:1;min-height:46px;border-radius:.7rem;font:inherit;font-size:1rem;font-weight:750;cursor:pointer}
     .oauth-allow{border:1px solid rgba(21,18,28,.18);background:var(--connect-accent);color:var(--connect-accent-foreground)}
     .oauth-deny{border:1px solid #b8b1bc;background:#fff;color:#15121c}
+    fieldset{border:1px solid #dedbe2;border-radius:12px;margin:20px 0;padding:16px;min-width:0}legend{font-weight:700;padding:0 6px}.action{display:flex;gap:10px;padding:8px 0;overflow-wrap:anywhere}.action input{flex:none;width:18px;height:18px}select{width:100%;box-sizing:border-box;padding:10px;margin:6px 0 12px;border:1px solid #b8b1bc;border-radius:6px}.hint{font-size:.9rem;line-height:1.5;overflow-wrap:anywhere}
   </style>
 </head>
 <body><main style="--connect-accent:{{.Branding.PrimaryColor}};--connect-accent-foreground:{{.Branding.AccentForeground}}">
   <header class="connect-brand">{{if .Branding.LogoURL}}<img class="connect-logo" src="{{.Branding.LogoURL}}" width="48" height="48" alt="" referrerpolicy="no-referrer">{{end}}<span>{{.Branding.DisplayName}}</span></header>
-  <p class="connect-eyebrow">Authorize application</p>
+  {{/* Runtime consent names the server; management consent retains its permission summary. */}}
+  {{if .MCP}}<p class="connect-eyebrow">Connect MCP server</p><h1>Allow {{.ClientName}} to use {{.MCP.Name}}?</h1>
+  <p class="connect-copy">Choose the actions this connection can perform. New actions added later will need your approval.</p>
+  {{else}}<p class="connect-eyebrow">Authorize application</p>
   <h1>{{.ClientName}} wants to access your account</h1>
   <p class="connect-copy">This application will be able to:</p>
-  <ul class="oauth-scopes">{{range .ScopeLabels}}<li>{{.}}</li>{{end}}</ul>
+  <ul class="oauth-scopes">{{range .ScopeLabels}}<li>{{.}}</li>{{end}}</ul>{{end}}
   <form method="post" action="{{.FormAction}}">
     <input type="hidden" name="client_id" value="{{.ClientID}}">
     <input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
@@ -273,31 +345,53 @@ var oauthConsentTemplate = parseHostedConnectTemplate("oauth-consent", `<!doctyp
     <input type="hidden" name="state" value="{{.State}}">
     <input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
     <input type="hidden" name="code_challenge_method" value="{{.CodeChallengeMethod}}">
+    {{/* Only MCP grants carry exact server identity and selectable service/action authority. */}}
+    {{if .MCP}}
+    <input type="hidden" name="resource" value="{{.MCP.Resource}}"><input type="hidden" name="app_id" value="{{.MCP.AppID}}">
+    {{range .MCP.Services}}{{if .Operations}}<fieldset><legend>{{.Name}}</legend>
+      {{range .Operations}}<label class="action"><input type="checkbox" name="operation" value="{{.}}"><span>{{.}}</span></label>{{end}}
+      {{/* Connected credentials are chosen explicitly, never inferred from a caller-supplied user reference. */}}
+      {{if .Connected}}<p class="hint">For selected actions, choose the existing connected account in Fused. This connection will stay bound to that account.</p>
+      <label for="account_{{.Index}}">Connected account</label><select id="account_{{.Index}}" name="account_{{.Index}}"><option value="">Choose an account</option>{{range .Connections}}<option value="{{.Value}}">{{.Label}}</option>{{end}}</select>
+      {{if not .Connections}}<p class="hint">Connect an account for this service in Fused first, then restart this connection.</p>{{end}}{{end}}
+    </fieldset>{{end}}{{end}}
+    <p class="hint">You can disconnect this application from Fused’s Connected apps page. Provider credentials stay in Fused.</p>
+    {{end}}
     <div class="oauth-actions">
       <button class="oauth-deny" type="submit" name="decision" value="deny">Deny</button>
-      <button class="oauth-allow" type="submit" name="decision" value="allow">Allow</button>
+      <button class="oauth-allow" type="submit" name="decision" value="allow">{{if .MCP}}Allow selected actions{{else}}Allow{{end}}</button>
     </div>
   </form>
 </main></body></html>`)
 
-func renderOAuthConsentPage(w http.ResponseWriter, r *http.Request, s store.Store, result oauthprovider.AuthorizeResult, req oauthprovider.AuthorizeRequest) {
+// renderOAuthConsentPage shares branding, security headers, protocol fields, and the page shell across both consent policies.
+func renderOAuthConsentPage(w http.ResponseWriter, r *http.Request, s store.Store, result oauthprovider.AuthorizeResult, req oauthprovider.AuthorizeRequest, mcp *mcpOAuthConsentPage) {
 	branding := loadHostedConnectBranding(r.Context(), s)
 	labels := make([]string, 0, len(result.Scope))
+	// Display only the protocol-validated scope labels.
 	for _, scope := range result.Scope {
 		labels = append(labels, oauthScopeDescription(scope))
 	}
 	page := oauthConsentPage{
-		Branding: branding, ClientName: result.Client.Name, ScopeLabels: labels,
+		MCP: mcp, Branding: branding, ClientName: result.Client.Name, ScopeLabels: labels,
 		FormAction: "/oauth/authorize/consent", ClientID: req.ClientID, RedirectURI: req.RedirectURI,
 		Scope: strings.Join(result.Scope, " "), State: req.State,
 		CodeChallenge: req.CodeChallenge, CodeChallengeMethod: req.CodeChallengeMethod,
 	}
+	// MCP consent submits to its isolated issuer while sharing every browser-facing protocol field.
+	if mcp != nil {
+		page.FormAction = "/mcp/oauth/consent"
+	}
+	writeConnectInputSecurityHeaders(w, "", branding.LogoOrigin)
+	// Native form POSTs need a real Origin for CSRF validation; cross-origin referrers still stay private.
+	w.Header().Set("Referrer-Policy", "same-origin")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_ = oauthConsentTemplate.Execute(w, page)
 }
 
 var oauthScopeDescriptions = map[string]string{
+	store.OAuthMCPScope:             "Connect to an MCP server with individually approved actions",
 	"workspace.read":                "View workspace details",
 	"workspace.update":              "Update workspace settings",
 	"service.read":                  "View connected services",
@@ -366,24 +460,32 @@ func renderOAuthErrorPage(r *http.Request, s store.Store, w http.ResponseWriter,
 
 // -- POST /oauth/token --
 
-func oauthTokenHandler(service OAuthProviderService) http.HandlerFunc {
+// oauthTokenExchange leaves issuer-specific audience checks behind the common form and client-credential parser.
+type oauthTokenExchange func(*http.Request, oauthprovider.TokenRequest) (oauthprovider.TokenResponse, error)
+
+// oauthTokenHandler owns bounded parsing, client credentials, protocol errors, and token responses for both issuers.
+func oauthTokenHandler(exchange oauthTokenExchange) http.HandlerFunc {
+	// No browser session is involved in this client-authenticated back-channel exchange.
 	return func(w http.ResponseWriter, r *http.Request) {
 		setOAuthResponseHeaders(w)
-		if service == nil {
+		// Unconfigured issuers cannot exchange credentials.
+		if exchange == nil {
 			writeOAuthTokenError(w, http.StatusServiceUnavailable, "server_error")
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
+		// Oversized or malformed forms cannot reach either issuer.
 		if err := r.ParseForm(); err != nil {
 			writeOAuthTokenError(w, http.StatusBadRequest, "invalid_request")
 			return
 		}
 		clientID, clientSecret := oauthClientCredentials(r)
-		response, err := service.Token(r.Context(), oauthprovider.TokenRequest{
+		response, err := exchange(r, oauthprovider.TokenRequest{
 			GrantType: r.PostForm.Get("grant_type"), Code: r.PostForm.Get("code"),
 			RedirectURI: r.PostForm.Get("redirect_uri"), CodeVerifier: r.PostForm.Get("code_verifier"),
 			RefreshToken: r.PostForm.Get("refresh_token"), ClientID: clientID, ClientSecret: clientSecret,
 		})
+		// Protocol errors must never echo private token or persistence details.
 		if err != nil {
 			writeOAuthTokenError(w, oauthTokenErrorStatus(err), oauthTokenErrorCode(err))
 			return
@@ -403,8 +505,15 @@ func oauthClientCredentials(r *http.Request) (string, string) {
 	return r.PostForm.Get("client_id"), r.PostForm.Get("client_secret")
 }
 
+// oauthTokenErrorCode maps both issuer contracts to bounded, secret-safe protocol errors.
 func oauthTokenErrorCode(err error) string {
+	// Issuer-specific validation uses standard errors without exposing backend details.
 	switch {
+	// Audience and registration metadata are request errors shared by the MCP adapters.
+	case errors.Is(err, errOAuthTarget):
+		return "invalid_target"
+	case errors.Is(err, errOAuthClientMetadata):
+		return "invalid_client_metadata"
 	case errors.Is(err, oauthprovider.ErrUnauthorizedClient):
 		return "invalid_client"
 	case errors.Is(err, oauthprovider.ErrInvalidGrant):
@@ -418,11 +527,15 @@ func oauthTokenErrorCode(err error) string {
 	}
 }
 
+// oauthTokenErrorStatus distinguishes invalid requests from unavailable providers.
 func oauthTokenErrorStatus(err error) int {
+	// Unavailable configuration differs from client authentication and malformed grants.
 	switch {
+	case errors.Is(err, errOAuthUnavailable):
+		return http.StatusServiceUnavailable
 	case errors.Is(err, oauthprovider.ErrUnauthorizedClient):
 		return http.StatusUnauthorized
-	case errors.Is(err, oauthprovider.ErrInvalidGrant), errors.Is(err, oauthprovider.ErrUnsupportedGrantType), errors.Is(err, oauthprovider.ErrInvalidRequest):
+	case errors.Is(err, errOAuthTarget), errors.Is(err, errOAuthClientMetadata), errors.Is(err, oauthprovider.ErrInvalidGrant), errors.Is(err, oauthprovider.ErrUnsupportedGrantType), errors.Is(err, oauthprovider.ErrInvalidRequest):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError
@@ -448,33 +561,39 @@ type oauthRegisterRequest struct {
 
 // oauthRegisterHandler issues temporary credentials before user login and consent.
 func oauthRegisterHandler(service OAuthProviderService) http.HandlerFunc {
+	// CLI registration keeps its loopback-only schema and response contract.
+	return oauthRegistrationHandler(maxOAuthFormBytes, func(r *http.Request) (any, error) {
+		// Unconfigured Engines cannot mint a client identity.
+		if service == nil {
+			return nil, errOAuthUnavailable
+		}
+		var body oauthRegisterRequest
+		// CLI input remains strict; remote registration extensions do not relax this endpoint.
+		if err := decodeOneStrictJSON(r.Body, &body); err != nil {
+			return nil, oauthprovider.ErrInvalidRequest
+		}
+		result, err := service.RegisterClient(r.Context(), oauthprovider.RegisterClientRequest{RedirectURI: body.RedirectURI, Scopes: body.Scopes, Name: body.Name})
+		// A failed registration must never expose a partial credential pair.
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"client_id": result.ClientID, "client_secret": result.ClientSecret, "client_id_expires_at": result.ClientIDExpiresAt.Format(time.RFC3339)}, nil
+	})
+}
+
+// oauthRegistrationHandler shares body bounds, secret-response headers, and error handling across registration dialects.
+func oauthRegistrationHandler(maxBytes int64, register func(*http.Request) (any, error)) http.HandlerFunc {
+	// Registration is public; no user or execution authority is granted by this handler.
 	return func(w http.ResponseWriter, r *http.Request) {
 		setOAuthResponseHeaders(w)
-		// Unconfigured Engines cannot issue credentials.
-		if service == nil {
-			writeOAuthTokenError(w, http.StatusServiceUnavailable, "server_error")
-			return
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
-		var body oauthRegisterRequest
-		// Reject malformed or extra input before any client is minted.
-		if err := decodeOneStrictJSON(r.Body, &body); err != nil {
-			writeOAuthTokenError(w, http.StatusBadRequest, "invalid_request")
-			return
-		}
-		result, err := service.RegisterClient(r.Context(), oauthprovider.RegisterClientRequest{
-			RedirectURI: body.RedirectURI, Scopes: body.Scopes, Name: body.Name,
-		})
-		// Return protocol errors without leaking persistence details.
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		response, err := register(r)
+		// Both dialects use the same bounded protocol error projection.
 		if err != nil {
 			writeOAuthTokenError(w, oauthTokenErrorStatus(err), oauthTokenErrorCode(err))
 			return
 		}
-		writeOAuthJSON(w, http.StatusCreated, map[string]any{
-			"client_id":            result.ClientID,
-			"client_secret":        result.ClientSecret,
-			"client_id_expires_at": result.ClientIDExpiresAt.Format(time.RFC3339),
-		})
+		writeOAuthJSON(w, http.StatusCreated, response)
 	}
 }
 
@@ -561,21 +680,26 @@ func oauthConnectedAppsRevokeHandler(service OAuthProviderService) http.HandlerF
 
 // -- RFC 8414 discovery metadata --
 
+// oauthMetadataHandler preserves the management issuer's existing discovery contract.
 func oauthMetadataHandler(publicURL string) http.HandlerFunc {
 	issuer := strings.TrimRight(publicURL, "/")
-	return func(w http.ResponseWriter, r *http.Request) {
-		writeOAuthJSON(w, http.StatusOK, map[string]any{
-			"issuer":                                issuer,
-			"authorization_endpoint":                issuer + "/oauth/authorize",
-			"token_endpoint":                        issuer + "/oauth/token",
-			"revocation_endpoint":                   issuer + "/oauth/revoke",
-			"response_types_supported":              []string{"code"},
-			"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
-			"code_challenge_methods_supported":      []string{"S256"},
-			"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post", "none"},
-			"scopes_supported":                      accesscontrol.AllPermissions(),
-		})
+	return oauthIssuerMetadataHandler(issuer, issuer+"/oauth", accesscontrol.AllPermissions(), "")
+}
+
+// oauthIssuerMetadataHandler advertises the shared protocol implementation without mixing issuer scopes.
+func oauthIssuerMetadataHandler(issuer, endpoints string, scopes any, registration string) http.HandlerFunc {
+	metadata := map[string]any{
+		"issuer": issuer, "authorization_endpoint": endpoints + "/authorize", "token_endpoint": endpoints + "/token",
+		"revocation_endpoint": endpoints + "/revoke", "response_types_supported": []string{"code"},
+		"grant_types_supported": []string{"authorization_code", "refresh_token"}, "code_challenge_methods_supported": []string{"S256"},
+		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post", "none"}, "scopes_supported": scopes,
 	}
+	// Only standards-based remote registration is advertised as RFC 7591.
+	if registration != "" {
+		metadata["registration_endpoint"] = registration
+	}
+	// Discovery contains only public configuration and uses the same JSON serializer as token responses.
+	return func(w http.ResponseWriter, r *http.Request) { writeOAuthJSON(w, http.StatusOK, metadata) }
 }
 
 func writeOAuthJSON(w http.ResponseWriter, status int, payload any) {

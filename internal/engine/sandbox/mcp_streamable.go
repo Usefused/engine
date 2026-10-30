@@ -274,7 +274,7 @@ func startMCPRuntimeSession(ctx context.Context, routeID, appID, token, protocol
 	}
 	sess := &mcpSession{
 		clientMetadata: metadata,
-		appID:          appID, routeID: routeID, sessionID: sessionID, tokenID: identity.TokenID,
+		appID:          appID, routeID: routeID, sessionID: sessionID, tokenID: identity.TokenID, oauthGrantID: identity.OAuthGrantID,
 		protocolVersion: protocolVersion, transport: transport, suppressLifecycle: suppressLifecycle, urlElicitation: urlElicitation,
 		cmd: cmd, stdin: stdin, cancel: cancel, responses: make(chan string, 32),
 		serverNotifications: make(chan string, maxMCPServerNotifications),
@@ -576,8 +576,11 @@ func authenticateMCPStreamableSession(ctx context.Context, routeID, token, sessi
 	if !ok || sess.transport != mcpStreamableTransport || sess.routeID != routeID {
 		return nil, http.StatusNotFound, errMCPSessionUnavailable
 	}
+	// A refreshed credential must negotiate a fresh child runtime and expiry context.
 	if subtle.ConstantTimeCompare([]byte(token), []byte(sess.token)) != 1 {
-		return nil, http.StatusUnauthorized, errors.New("invalid Authorization header")
+		// Only a live replacement from the same grant may retire this session; unrelated tokens remain denied.
+		status, err := mcpReplacementSessionResponse(ctx, sess, token)
+		return nil, status, err
 	}
 	identity, err := validateMCPToken(ctx, sess.appID, token)
 	if err != nil || identity.TokenID != sess.tokenID {

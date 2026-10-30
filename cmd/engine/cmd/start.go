@@ -1064,6 +1064,8 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	}))
 	// Serve the static sign-in/settings shell during suspension; API and execution traffic still pass through the license gate.
 	r.Use(enginemiddleware.LicenseEnforcement)
+	// MCP clients discover the runtime issuer before supplying an execution credential.
+	r.Use(api.MCPAuthDiscovery(deps.cfg.Engine.PublicURL, deps.engineStore))
 	auditRecorder, _ := deps.engineStore.(accesscontrol.AuditRecorder)
 	r.Use(controlActorMiddlewareWithAudit(deps.controlAuth, auditRecorder, deps.browserCookies))
 	r.Use(controlGraphQLAuditMiddleware(auditRecorder))
@@ -1078,6 +1080,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	api.MountManagedIdentityRoutes(r, deps.managedLogin, deps.browserCookies)
 	api.MountCLILoginRoutes(r, deps.cliLogin, deps.browserSession)
 	api.MountOAuthProviderRoutes(r, deps.oauthProvider, deps.engineStore, deps.browserSession, deps.browserCookies, "/login", deps.cfg.Engine.PublicURL)
+	api.MountMCPOAuthRoutes(r, deps.oauthProvider, deps.engineStore, deps.browserSession, deps.browserCookies, deps.cfg.Engine.PublicURL)
 	if deps.managedAuthBroker != nil {
 		managedauthbroker.MountRoutes(r, deps.managedAuthBroker)
 		managedauthbroker.MountConnectRoutes(r, deps.managedAuthConnect, deps.managedAuthInstalls)

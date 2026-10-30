@@ -165,7 +165,12 @@ func isControlPlaneRequest(r *http.Request) bool {
 	return classifyEngineRequest(r) == requestClassControl
 }
 
+// classifyEngineRequest separates public discovery, runtime credentials, and management authentication.
 func classifyEngineRequest(r *http.Request) engineRequestClass {
+	// RFC 9728 metadata and the MCP issuer must be discoverable without a control credential.
+	if r.URL.Path == "/.well-known/oauth-authorization-server/mcp/oauth" || strings.HasPrefix(r.URL.Path, "/.well-known/oauth-protected-resource/mcp/") {
+		return requestClassPublic
+	}
 	// Browser preflight and health probes cannot carry workspace credentials and
 	// must stay public; business endpoints are classified below instead.
 	_, publicRoute := publicEngineRoutes[r.URL.Path]

@@ -120,6 +120,8 @@ function McpOverviewDetails({ server, onCopied }: { server: McpServerDetail; onC
   return (
     <><AppDetailSection title="Connection endpoints">
       <McpTransportEndpoints endpoints={server} enabled={enabled} onCopied={onCopied} />
+      <p className="mt-4 text-sm text-muted-foreground">Connect from Claude or ChatGPT using OAuth and this Streamable HTTP URL. Fused will ask you to choose which services and actions to allow. You can also continue using an execution token.</p>
+      <p className="mt-2 text-sm text-muted-foreground">For a pre-registered OAuth client, select only the MCP connection scope in <a className="underline" href="/integrations/settings/oauth-clients">OAuth clients</a>, then enter its client ID and secret in your MCP client.</p>
     </AppDetailSection><AppExecutionTokens familyID={server.app_family_id} kind="mcp" /></>
   );
 }

@@ -35,6 +35,7 @@ import (
 )
 
 type mcpSession struct {
+	oauthGrantID        uuid.UUID  // Immutable OAuth rotation-family identity; never a bearer credential.
 	lifecycleMu         sync.Mutex // Serializes initialization, child-write admission, and terminal lifecycle transitions.
 	metadataMu          sync.Mutex
 	clientMetadata      mcpsession.Metadata

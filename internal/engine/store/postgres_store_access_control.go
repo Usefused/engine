@@ -127,7 +127,7 @@ func (s *postgresStore) loadOAuthTokenPrincipal(ctx context.Context, credentialH
 			WHERE t.access_token_hash = $1
 				AND t.revoked_at IS NULL
 				-- Retired broad app scopes require fresh, type-specific consent.
-				AND NOT (t.scope && ARRAY['app.read','app.use','app.create','app.manage','app.tokens.manage']::text[])
+				AND NOT (t.scope && ARRAY['mcp.execute','app.read','app.use','app.create','app.manage','app.tokens.manage']::text[])
 				AND t.access_expires_at > NOW()
 				AND (client.expires_at IS NULL OR client.expires_at > NOW())
 				AND s.status = 'active'

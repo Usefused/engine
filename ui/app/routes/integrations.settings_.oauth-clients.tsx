@@ -52,11 +52,10 @@ function OAuthClientsManager({ canManage }: { canManage: boolean }) {
     listOAuthScopeCatalog().catch(() => []).then((catalog) => setScopeCatalog(catalog ?? []));
   }, []);
 
-  // Restrict the scope picker to permissions the actor actually holds on this
-  // workspace (least-privilege default) instead of free text, so a client can
-  // never be registered with a scope the registering admin can't themselves
-  // exercise, and the admin never has to guess a scope's exact spelling.
+  // Management scopes follow workspace grants; MCP registration only declares
+  // a client type, with server and action permissions checked during consent.
   const availableScopes = useMemo<OAuthScope[]>(() => {
+    // Wait for the permission snapshot before offering any registration scope.
     if (!access) return [];
     const labels = new Map(scopeCatalog.map((scope) => [scope.value, scope.label]));
     const granted = new Set(
@@ -64,12 +63,14 @@ function OAuthClientsManager({ canManage }: { canManage: boolean }) {
         .filter((grant) => grant.resource_type === "WORKSPACE" && grant.resource_id === access.workspace_id)
         .map((grant) => grant.permission)
     );
+    // Client administrators can register MCP clients without granting access to a server.
+    if (canManage && labels.has("mcp.execute")) granted.add("mcp.execute");
     // Retired or unknown grants must not reappear as selectable OAuth scopes.
     return Array.from(granted)
       .filter((value) => labels.has(value))
       .map((value) => ({ value, label: labels.get(value) ?? value }))
       .sort((a, b) => a.label.localeCompare(b.label));
-  }, [access, scopeCatalog]);
+  }, [access, canManage, scopeCatalog]);
 
   const refresh = useCallback(async () => {
     const items = await listOAuthClients();
@@ -194,6 +195,7 @@ function OAuthClientCreateForm(props: {
         <div className="flex min-w-0 flex-col gap-1 md:col-span-2">
           <span className="text-xs font-medium text-slate-700">Allowed scopes</span>
           <ScopeMultiSelect value={props.allowedScopes} options={props.availableScopes} onChange={props.onAllowedScopes} />
+          <p className="text-xs leading-5 text-slate-500">For an MCP connection, select only the MCP connection scope. Services, actions, and accounts are chosen when the user connects.</p>
           {props.availableScopes.length === 0 && (
             <p className="text-xs text-amber-600">You have no workspace scopes to grant yet.</p>
           )}
@@ -232,7 +234,11 @@ function ScopeMultiSelect({
   // admin types instead of requiring an exact scope string up front.
   const needle = query.trim().toLowerCase();
   const suggestions = options.filter((option) => {
+    // The two issuers have separate authority; never offer a mixed runtime/management client.
+    if (value.length > 0 && value.includes("mcp.execute") !== (option.value === "mcp.execute")) return false;
+    // Already-selected scopes must not produce duplicate grants.
     if (value.includes(option.value)) return false;
+    // An empty search shows every remaining compatible scope.
     if (!needle) return true;
     return option.value.toLowerCase().includes(needle) || option.label.toLowerCase().includes(needle);
   });

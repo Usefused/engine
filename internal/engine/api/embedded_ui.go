@@ -56,18 +56,25 @@ func EmbeddedUIMiddleware(uiFS http.FileSystem, runtimeConfigs ...EmbeddedUIRunt
 
 // isEmbeddedUIRuntimeBrowserRoute reserves exact Engine-owned browser paths
 // without weakening SPA navigation behavior for neighboring workspace routes.
-// GET /oauth/authorize and the RFC 8414 discovery document are server-rendered
+// Management and MCP authorization and discovery routes are server-rendered
 // full-page responses just like the hosted-connect routes above -- a real
 // browser navigation to either one sends Accept: text/html with no
 // X-API-Key, which is indistinguishable from an ordinary SPA page load, so
 // without this exact-path reservation the SPA fallback claims the request
 // and oauthAuthorizeHandler/oauthMetadataHandler are never reached.
 func isEmbeddedUIRuntimeBrowserRoute(rawPath string) bool {
+	// Resource metadata has one route per MCP audience and must remain JSON for browsers too.
+	if strings.HasPrefix(rawPath, "/.well-known/oauth-protected-resource/mcp/") {
+		return true
+	}
+	// Reserve only Engine-owned handoffs, leaving ordinary UI navigation intact.
 	switch rawPath {
 	case "/workspace/connect/input", "/workspace/connect/callback",
-		"/oauth/authorize", "/.well-known/oauth-authorization-server":
+		"/oauth/authorize", "/.well-known/oauth-authorization-server",
+		"/mcp/oauth/authorize", "/.well-known/oauth-authorization-server/mcp/oauth":
 		return true
 	default:
+		// Unreserved routes retain the normal static-asset and SPA fallback behavior.
 		return false
 	}
 }
