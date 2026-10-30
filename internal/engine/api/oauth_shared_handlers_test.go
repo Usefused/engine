@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -122,7 +124,14 @@ func TestOAuthSharedConsentPreservesMCPGrant(t *testing.T) {
 	require.Equal(t, "same-origin", response.Header().Get("Referrer-Policy"))
 	require.Contains(t, response.Body.String(), "customers.list")
 	require.Contains(t, response.Body.String(), "tickets.create")
-	require.NotContains(t, response.Body.String(), " checked")
+	require.NotRegexp(t, `<input\b[^>]*\schecked(?:\s|=|>)`, response.Body.String())
+	// Hash the rendered bytes so template processing cannot silently disable the permission picker under CSP.
+	_, script, found := strings.Cut(response.Body.String(), "<script>")
+	require.True(t, found)
+	script, _, found = strings.Cut(script, "</script>")
+	require.True(t, found)
+	digest := sha256.Sum256([]byte(script))
+	require.Contains(t, response.Header().Get("Content-Security-Policy"), "script-src 'sha256-"+base64.StdEncoding.EncodeToString(digest[:])+"'")
 	response = f.request(http.MethodPost, "/mcp/oauth/consent", "https://example.com", true)
 	require.Equal(t, http.StatusOK, response.Code)
 	// A no-store handoff ends form submission before navigating to the validated client callback.

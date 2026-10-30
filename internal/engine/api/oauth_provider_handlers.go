@@ -2,9 +2,12 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,6 +17,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/browserauth"
 	"github.com/Usefused/engine/internal/engine/oauthprovider"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/ui/branding"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -299,6 +303,7 @@ func oauthConsentFailureMessage(err error) string {
 
 type oauthConsentPage struct {
 	MCP                 *mcpOAuthConsentPage
+	PickerScript        template.JS
 	Branding            hostedConnectBranding
 	ClientName          string
 	ScopeLabels         []string
@@ -318,18 +323,9 @@ var oauthConsentTemplate = parseHostedConnectTemplate("oauth-consent", `<!doctyp
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Authorize {{.ClientName}} · {{.Branding.DisplayName}}</title>
   {{template "hosted-connect-shell-style"}}
-  <style>
-    .oauth-scopes{margin:1.25rem 0 0;padding:0;list-style:none}
-    .oauth-scopes li{padding:.55rem 0;border-top:1px solid #f0edf2;font-size:.9rem;color:#15121c}
-    .oauth-scopes li:first-child{border-top:none}
-    .oauth-actions{display:flex;gap:.75rem;margin-top:1.5rem}
-    .oauth-actions button{flex:1;min-height:46px;border-radius:.7rem;font:inherit;font-size:1rem;font-weight:750;cursor:pointer}
-    .oauth-allow{border:1px solid rgba(21,18,28,.18);background:var(--connect-accent);color:var(--connect-accent-foreground)}
-    .oauth-deny{border:1px solid #b8b1bc;background:#fff;color:#15121c}
-    fieldset{border:1px solid #dedbe2;border-radius:12px;margin:20px 0;padding:16px;min-width:0}legend{font-weight:700;padding:0 6px}.action{display:flex;gap:10px;padding:8px 0;overflow-wrap:anywhere}.action input{flex:none;width:18px;height:18px}select{width:100%;box-sizing:border-box;padding:10px;margin:6px 0 12px;border:1px solid #b8b1bc;border-radius:6px}.hint{font-size:.9rem;line-height:1.5;overflow-wrap:anywhere}
-  </style>
+  <style>`+branding.OAuthConsentStyles+`</style>
 </head>
-<body><main style="--connect-accent:{{.Branding.PrimaryColor}};--connect-accent-foreground:{{.Branding.AccentForeground}}">
+<body><main class="oauth-consent" style="--connect-accent:{{.Branding.PrimaryColor}};--connect-accent-foreground:{{.Branding.AccentForeground}}">
   <header class="connect-brand">{{if .Branding.LogoURL}}<img class="connect-logo" src="{{.Branding.LogoURL}}" width="48" height="48" alt="" referrerpolicy="no-referrer">{{end}}<span>{{.Branding.DisplayName}}</span></header>
   {{/* Runtime consent names the server; management consent retains its permission summary. */}}
   {{if .MCP}}<p class="connect-eyebrow">Connect MCP server</p><h1>Allow {{.ClientName}} to use {{.MCP.Name}}?</h1>
@@ -348,32 +344,55 @@ var oauthConsentTemplate = parseHostedConnectTemplate("oauth-consent", `<!doctyp
     {{/* Only MCP grants carry exact server identity and selectable service/action authority. */}}
     {{if .MCP}}
     <input type="hidden" name="resource" value="{{.MCP.Resource}}"><input type="hidden" name="app_id" value="{{.MCP.AppID}}">
-    {{range .MCP.Services}}{{if .Operations}}<fieldset><legend>{{.Name}}</legend>
-      {{range .Operations}}<label class="action"><input type="checkbox" name="operation" value="{{.}}"><span>{{.}}</span></label>{{end}}
-      {{/* Connected credentials are chosen explicitly, never inferred from a caller-supplied user reference. */}}
-      {{if .Connected}}<p class="hint">For selected actions, choose the existing connected account in Fused. This connection will stay bound to that account.</p>
-      <label for="account_{{.Index}}">Connected account</label><select id="account_{{.Index}}" name="account_{{.Index}}"><option value="">Choose an account</option>{{range .Connections}}<option value="{{.Value}}">{{.Label}}</option>{{end}}</select>
-      {{if not .Connections}}<p class="hint">Connect an account for this service in Fused first, then restart this connection.</p>{{end}}{{end}}
-    </fieldset>{{end}}{{end}}
-    <p class="hint">You can disconnect this application from Fused’s Connected apps page. Provider credentials stay in Fused.</p>
+    <section class="oauth-picker" aria-label="Service and operation permissions">
+      <label class="oauth-search" hidden>Search services or operations<input type="search" placeholder="Search operations..." autocomplete="off"></label>
+      <div class="oauth-services">
+      {{/* Service disclosures keep the builder's card hierarchy and work without JavaScript. */}}
+      {{range .MCP.Services}}{{if .Operations}}<details class="oauth-service" data-service="{{.Name}}">
+        <summary><span><span class="oauth-service-name">{{.Name}}<span class="oauth-badge" hidden></span></span><span class="oauth-service-meta">{{len .Operations}} available operations</span></span></summary>
+        <div class="oauth-service-body">
+          {{/* Connected credentials stay explicitly bound to their original service input names. */}}
+          {{if .Connected}}<div class="oauth-account"><p class="oauth-hint">Selected actions will use this connected account.</p>
+          <label for="account_{{.Index}}">Connected account</label><select id="account_{{.Index}}" name="account_{{.Index}}"><option value="">Choose an account</option>{{range .Connections}}<option value="{{.Value}}">{{.Label}}</option>{{end}}</select>
+          {{/* Missing connections must not imply that selecting an action creates account access. */}}
+          {{if not .Connections}}<p class="oauth-hint">Connect an account for this service in Fused first, then restart this connection.</p>{{end}}</div>{{end}}
+          <div class="oauth-operation-toolbar"><strong>Operations ({{len .Operations}})</strong><button type="button" class="oauth-select-all" hidden>Select shown</button></div>
+          <div class="oauth-operation-list">
+          {{range .Operations}}<label class="oauth-operation"><input type="checkbox" name="operation" value="{{.}}"><span>{{.}}</span></label>{{end}}
+          </div>
+
+        </div>
+      </details>{{end}}{{end}}
+      <p class="oauth-empty" role="status" hidden>No matching services or operations.</p>
+      </div>
+      <p class="oauth-selection-count" role="status" aria-live="polite" hidden></p>
+    </section>
+    <p class="oauth-hint">You can disconnect this application from Fused’s Connected apps page. Provider credentials stay in Fused.</p>
     {{end}}
     <div class="oauth-actions">
       <button class="oauth-deny" type="submit" name="decision" value="deny">Deny</button>
       <button class="oauth-allow" type="submit" name="decision" value="allow">{{if .MCP}}Allow selected actions{{else}}Allow{{end}}</button>
     </div>
   </form>
-</main></body></html>`)
+</main>
+{{/* Only the MCP picker needs the fixed, CSP-hashed progressive enhancement. */}}
+{{if .MCP}}<script>{{.PickerScript}}</script>{{end}}
+</body></html>`)
+
+// Pin the compiled asset bytes rather than allowing arbitrary inline consent-page scripts.
+var oauthConsentScriptDigest = sha256.Sum256([]byte(branding.OAuthConsentScript))
+var oauthConsentScriptHash = base64.StdEncoding.EncodeToString(oauthConsentScriptDigest[:])
 
 // renderOAuthConsentPage shares branding, security headers, protocol fields, and the page shell across both consent policies.
 func renderOAuthConsentPage(w http.ResponseWriter, r *http.Request, s store.Store, result oauthprovider.AuthorizeResult, req oauthprovider.AuthorizeRequest, mcp *mcpOAuthConsentPage) {
-	branding := loadHostedConnectBranding(r.Context(), s)
+	pageBranding := loadHostedConnectBranding(r.Context(), s)
 	labels := make([]string, 0, len(result.Scope))
 	// Display only the protocol-validated scope labels.
 	for _, scope := range result.Scope {
 		labels = append(labels, oauthScopeDescription(scope))
 	}
 	page := oauthConsentPage{
-		MCP: mcp, Branding: branding, ClientName: result.Client.Name, ScopeLabels: labels,
+		MCP: mcp, Branding: pageBranding, ClientName: result.Client.Name, ScopeLabels: labels,
 		FormAction: "/oauth/authorize/consent", ClientID: req.ClientID, RedirectURI: req.RedirectURI,
 		Scope: strings.Join(result.Scope, " "), State: req.State,
 		CodeChallenge: req.CodeChallenge, CodeChallengeMethod: req.CodeChallengeMethod,
@@ -381,8 +400,14 @@ func renderOAuthConsentPage(w http.ResponseWriter, r *http.Request, s store.Stor
 	// MCP consent submits to its isolated issuer while sharing every browser-facing protocol field.
 	if mcp != nil {
 		page.FormAction = "/mcp/oauth/consent"
+		// Only the compiled asset is trusted as JavaScript, preserving its exact CSP hash after template escaping.
+		page.PickerScript = template.JS(branding.OAuthConsentScript)
 	}
-	writeConnectInputSecurityHeaders(w, "", branding.LogoOrigin)
+	writeConnectInputSecurityHeaders(w, "", pageBranding.LogoOrigin)
+	// Admit only the compiled picker script; all other scripts and external connections remain blocked.
+	if mcp != nil {
+		w.Header().Set("Content-Security-Policy", w.Header().Get("Content-Security-Policy")+"; script-src 'sha256-"+oauthConsentScriptHash+"'")
+	}
 	// Native form POSTs need a real Origin for CSRF validation; cross-origin referrers still stay private.
 	w.Header().Set("Referrer-Policy", "same-origin")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

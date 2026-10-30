@@ -1,0 +1,49 @@
+/* Mirror AppServiceBuilder and EndpointSelectionList without loading the admin SPA into consent. */
+.oauth-consent{width:min(100%,42rem);margin:2rem auto;color:#0f172a}
+.oauth-consent .connect-brand{margin-bottom:1.5rem}
+.oauth-consent h1{font-size:1.5rem;line-height:1.3}
+.oauth-consent .connect-copy{font-size:.875rem}
+.oauth-scopes{margin:1.25rem 0 0;padding:0;list-style:none}
+.oauth-scopes li{padding:.55rem 0;border-top:1px solid #f1f5f9;font-size:.875rem}
+.oauth-scopes li:first-child{border-top:none}
+.oauth-picker{margin-top:1.5rem}
+.oauth-search{display:block;margin-bottom:.75rem;font-size:.875rem;font-weight:600}
+.oauth-search input{display:block;margin-top:.5rem;min-height:36px;padding:.5rem .75rem;border:1px solid #cbd5e1;border-radius:.5rem;box-shadow:none;font-size:.875rem}
+.oauth-services{max-height:min(26rem,50svh);overflow-y:auto;overscroll-behavior:contain;padding:3px;scrollbar-gutter:stable}
+.oauth-service{border:1px solid #e2e8f0;border-radius:.75rem;background:white;overflow:hidden}
+.oauth-service+.oauth-service{margin-top:.75rem}
+.oauth-service summary{display:flex;align-items:center;justify-content:space-between;gap:.75rem;padding:1rem;cursor:pointer;list-style:none}
+.oauth-service summary::-webkit-details-marker{display:none}
+.oauth-service summary:hover{background:#f8fafc}
+.oauth-service summary::after{content:"";width:7px;height:7px;flex:none;border-right:1.5px solid #94a3b8;border-bottom:1.5px solid #94a3b8;transform:rotate(-45deg);margin-right:4px}
+.oauth-service[open] summary::after{transform:rotate(45deg)}
+.oauth-service-name{display:flex;align-items:center;flex-wrap:wrap;gap:.5rem;font-size:.9375rem;font-weight:600;overflow-wrap:anywhere}
+.oauth-service-meta{display:block;margin-top:.25rem;font-size:.75rem;font-weight:400;color:#64748b}
+.oauth-badge{background:#f1f5f9;color:#64748b;padding:.125rem .375rem;border-radius:.25rem;font-size:.625rem;font-weight:500}
+.oauth-service-body{border-top:1px solid #f1f5f9;padding:.5rem}
+.oauth-operation-toolbar{display:flex;align-items:center;justify-content:space-between;gap:.5rem;padding:.25rem .25rem .5rem;color:#64748b}
+.oauth-operation-toolbar strong{font-size:.6875rem;text-transform:uppercase;letter-spacing:.06em}
+.oauth-select-all{border:0;border-radius:.25rem;background:transparent;color:#64748b;padding:.25rem .5rem;font:inherit;font-size:.6875rem;font-weight:500;cursor:pointer}
+.oauth-select-all:hover{background:#e2e8f0;color:#334155}
+.oauth-operation-list{max-height:18rem;overflow-y:auto;border:1px solid #e2e8f0;border-radius:.5rem}
+.oauth-operation{display:flex;align-items:center;gap:.75rem;padding:.75rem;cursor:pointer;font-size:.8125rem;line-height:1.4;overflow-wrap:anywhere}
+.oauth-operation+.oauth-operation{border-top:1px solid #f1f5f9}
+.oauth-operation:hover{background:#f8fafc}
+.oauth-operation:has(input:checked){background:#eff6ff;color:#1e3a8a}
+/* Checkbox dimensions must override the shared text-field minimum height, padding, and shadow. */
+.oauth-operation input{appearance:auto;flex:0 0 16px;width:16px;height:16px;min-height:16px;margin:0;padding:0;border-radius:3px;box-shadow:none;accent-color:#2563eb}
+.oauth-operation span{min-width:0}
+.oauth-account{padding:.75rem .25rem .25rem}
+.oauth-account label{font-size:.8125rem;font-weight:600}
+.oauth-account select{min-height:36px;margin-top:.375rem;padding:.5rem .625rem;font-size:.8125rem;border-radius:.375rem}
+.oauth-hint{font-size:.75rem;line-height:1.5;color:#64748b;overflow-wrap:anywhere}
+.oauth-empty{padding:1.5rem;text-align:center;color:#64748b;font-size:.875rem}
+.oauth-selection-count{margin:.75rem 0;font-size:.75rem;color:#64748b}
+.oauth-actions{display:flex;justify-content:flex-end;align-items:center;gap:.5rem;margin-top:1.25rem;padding-top:1rem;border-top:1px solid #e2e8f0}
+.oauth-actions button{flex:none;min-height:36px;width:auto;padding:.5rem .875rem;border-radius:.5rem;font:inherit;font-size:.875rem;line-height:1.25;font-weight:500;white-space:nowrap;cursor:pointer}
+.oauth-allow{border:1px solid transparent;background:var(--connect-accent);color:var(--connect-accent-foreground)}
+.oauth-deny{border:1px solid #cbd5e1;background:#fff;color:#334155}
+.oauth-actions button:hover{filter:brightness(.96)}
+/* The HTML hidden state must win over flex rows when searching or progressively enhancing. */
+.oauth-consent [hidden]{display:none!important}
+@media(max-width:36rem){.oauth-consent{margin:1rem auto;padding:1.25rem}.oauth-service summary{padding:.75rem}.oauth-services{max-height:50svh}.oauth-actions button{padding:.5rem .75rem;font-size:.8125rem}}
