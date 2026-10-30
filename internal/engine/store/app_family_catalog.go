@@ -65,7 +65,7 @@ func normalizeAppFamilyCatalogueView(kind string) (string, bool) {
 	}
 }
 
-// ListAuthorizedAppFamilies filters account and RBAC scope before grouping versions, ordering, and pagination.
+// ListAuthorizedAppFamilies applies account/RBAC filters and newest-activity ordering before pagination.
 func (s *postgresStore) ListAuthorizedAppFamilies(ctx context.Context, accountID uuid.UUID, scope accesscontrol.AuthorizedScope, kind, search string, archived bool, limit, offset int) ([]AppFamilyCatalogItem, int, error) {
 	kind, valid := normalizeAppFamilyCatalogueView(kind)
 	// Invalid kinds must not silently broaden the catalogue to other adapters.
@@ -98,7 +98,8 @@ func (s *postgresStore) ListAuthorizedAppFamilies(ctx context.Context, accountID
  LEFT JOIN fused_apps stable ON stable.app_id = family.mcp_stable_app_id
    AND stable.app_family_id = family.app_family_id AND stable.account_id = family.account_id
  `+appFamilyCatalogWhere+`
- ORDER BY family.canonical_name, family.app_family_id
+ -- Publication, family changes, and archival share one stable newest-first catalogue order.
+ ORDER BY GREATEST(family.archived_at, family.updated_at, latest.created_at) DESC, family.app_family_id DESC
  LIMIT $7 OFFSET $8`, append(args, limit, offset)...)
 	// Query failures must never be presented as an empty successful catalogue.
 	if err != nil {

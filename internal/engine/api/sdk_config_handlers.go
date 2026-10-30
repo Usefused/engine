@@ -2777,12 +2777,13 @@ func previousSDKDocument(state *store.ConfigState) sdkConfigDocument {
 	return previous
 }
 
+// sdkGenerateRequest preserves authored app metadata in the immutable publication payload.
 func sdkGenerateRequest(doc sdkConfigDocument, selections []models.SDKSelection, bindings []sdkContractBinding, defaultEngineURL string) GenerateSDKRequest {
 	// Both optional Unified App fields resolve to the same hosted-only runtime contract.
 	canonical := canonicalAppDocument(doc)
 	return GenerateSDKRequest{
 		Name:             doc.Name,
-		Description:      fmt.Sprintf("GitOps managed SDK %s", doc.Name),
+		Description:      canonical.Description,
 		Version:          doc.Version,
 		Selections:       selections,
 		IncludeMCP:       false,

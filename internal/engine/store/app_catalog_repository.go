@@ -52,11 +52,12 @@ type AppCatalogRepository interface {
 	ListAuthorizedAppServiceSummaries(context.Context, uuid.UUID, uuid.UUID, accesscontrol.AuthorizedScope) ([]AppServiceSummary, error)
 }
 
+// appCatalogSelect shares exact-plan description recovery with runtime identity reads.
 const appCatalogSelect = `
 	SELECT app.app_family_id, app.app_id,
 	       COALESCE(family.mcp_stable_app_id, '00000000-0000-0000-0000-000000000000'::uuid),
 	       family.display_name,
-	       COALESCE(plan.resolved_payload->>'description', ''), COALESCE((plan.resolved_payload->>'fused-intelligent-classifier')::boolean, false), app.version,
+	       COALESCE(plan.description, ''), COALESCE((plan.resolved_payload->>'fused-intelligent-classifier')::boolean, false), app.version,
 	       family.kind, COALESCE(family.delivery_mode, 'sdk'), app.status, app.hosted_mcp, app.created_at, COALESCE(family.target_language, ''),
 	       COALESCE(app.generator_version, ''), COALESCE(plan.resolved_payload->>'readme', ''), app.selections,
 	       app.planned_deactivation_at
@@ -64,7 +65,7 @@ const appCatalogSelect = `
 	JOIN fused_app_families family
 	  ON family.app_family_id = app.app_family_id AND family.account_id = app.account_id
 	LEFT JOIN LATERAL (
-		SELECT applied.resolved_payload
+		SELECT applied.resolved_payload, ` + appliedAppDescriptionSQL + ` AS description
 		FROM fused_config_plans applied
 		WHERE applied.config_key = app.config_key AND applied.source_hash = app.source_hash
 		  AND applied.status = 'applied'

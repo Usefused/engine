@@ -160,13 +160,15 @@ func (s *postgresStore) GetLatestWorkspaceServiceVersionID(ctx context.Context, 
 // ListMCPAppsByAccount so their SELECT lists and Scan order can't drift
 // apart from each other. Description stays in the applied immutable plan so
 // legacy rows need no schema backfill and every runtime reads its exact source hash.
+// Recover historical generated placeholders from that same plan's authored metadata,
+// preserving immutable payloads and never borrowing a different version's description.
 const appRuntimeSelectColumns = `a.account_id, a.app_family_id, a.app_id,
 COALESCE(f.mcp_stable_app_id, '00000000-0000-0000-0000-000000000000'::uuid),
 f.owner_subject_id, f.owner_team_id,
 fb.bucket_id, a.scope_schema_version, a.selections,
 a.status, f.kind, a.hosted_mcp, f.display_name,
 COALESCE((
-	SELECT applied.resolved_payload->>'description'
+	SELECT ` + appliedAppDescriptionSQL + `
 	FROM fused_config_plans applied
 	WHERE applied.config_key = a.config_key AND applied.source_hash = a.source_hash
 	  AND applied.status = 'applied'

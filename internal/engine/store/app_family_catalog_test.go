@@ -162,3 +162,62 @@ func testAppFamilyCataloguePostgres(t *testing.T, view string) {
 		t.Fatalf("version selector: count %d, error %v", len(siblings), err)
 	}
 }
+
+// TestAppFamilyCatalogueRecency verifies newest-first ordering independently of display names and page boundaries.
+func TestAppFamilyCatalogueRecency(t *testing.T) {
+	fixture := newAppTokenPolicyFixture(t)
+	var accountID, ownerID uuid.UUID
+	// Use only identities owned by this disposable fixture.
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT account_id, owner_team_id FROM fused_app_families WHERE app_family_id=$1`, fixture.familyID).Scan(&accountID, &ownerID); err != nil {
+		t.Fatal(err)
+	}
+	_, err := fixture.pool.Exec(fixture.ctx, `UPDATE fused_app_families SET kind='sdk', target_language='typescript', delivery_mode='sdk', display_name='Alpha:Tools', canonical_name='alpha:tools' WHERE app_family_id=$1`, fixture.familyID)
+	// Alphabetical order must deliberately disagree with the newer beta family.
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.New()
+	_, err = fixture.pool.Exec(fixture.ctx, `INSERT INTO fused_app_families(app_family_id,account_id,kind,canonical_name,display_name,owner_team_id,target_language,delivery_mode) VALUES ($1,$2,'sdk','beta','beta',$3,'typescript','sdk')`, id, accountID, ownerID)
+	// The additional family has no version, exercising metadata-only recency.
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { // Remove only the family created by this ordering fixture.
+		_, _ = fixture.pool.Exec(context.Background(), `DELETE FROM fused_app_families WHERE app_family_id=$1`, id)
+	})
+	assertCatalogueRecency(t, fixture, accountID, "sdk", time.Now().Add(time.Hour))
+}
+
+// assertCatalogueRecency makes alphabetical and recency order disagree, then verifies pagination and tied timestamps.
+func assertCatalogueRecency(t *testing.T, fixture appTokenPolicyFixture, accountID uuid.UUID, view string, newest time.Time) {
+	t.Helper()
+	_, err := fixture.pool.Exec(fixture.ctx, `UPDATE fused_app_families SET updated_at=$2 WHERE account_id=$1 AND canonical_name='beta'`, accountID, newest)
+	// A family without versions must still move first when its metadata is newer.
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := accesscontrol.AuthorizedScope{All: true}
+	for offset, name := range []string{"beta", "Alpha:Tools"} {
+		items, total, err := fixture.repository.ListAuthorizedAppFamilies(fixture.ctx, accountID, scope, view, "", false, 1, offset)
+		// Sorting must happen before LIMIT/OFFSET, not independently within each UI page.
+		if err != nil || total != 2 || len(items) != 1 || items[0].Name != name {
+			t.Fatalf("offset %d: items=%+v total=%d err=%v", offset, items, total, err)
+		}
+	}
+	_, err = fixture.pool.Exec(fixture.ctx, `UPDATE fused_app_families SET updated_at=$2 WHERE app_family_id=$1`, fixture.familyID, newest)
+	// Equal timestamps must not cause families to repeat or disappear between pages.
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCatalogueTiedOrder(t, fixture, accountID, view)
+}
+
+// assertCatalogueTiedOrder requires deterministic pagination even when all timestamp keys match.
+func assertCatalogueTiedOrder(t *testing.T, fixture appTokenPolicyFixture, accountID uuid.UUID, view string) {
+	t.Helper()
+	items, _, err := fixture.repository.ListAuthorizedAppFamilies(fixture.ctx, accountID, accesscontrol.AuthorizedScope{All: true}, view, "", false, 2, 0)
+	// UUID descending is the deterministic secondary order used by PostgreSQL.
+	if err != nil || len(items) != 2 || items[0].AppFamilyID.String() <= items[1].AppFamilyID.String() {
+		t.Fatalf("unstable tied order: items=%+v err=%v", items, err)
+	}
+}
