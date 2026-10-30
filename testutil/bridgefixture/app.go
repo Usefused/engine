@@ -10,6 +10,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/bridgehost"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/capability"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -42,10 +43,15 @@ func invokeConsumerFixture(ctx context.Context, pool *pgxpool.Pool, repository s
 	return result.Body.Bytes(), nil
 }
 
-// publishConsumerFixture creates test-only immutable publication rows using a manifest accepted by the real Bridge host.
+// publishConsumerFixture atomically publishes accepted Bridge contracts and their canonical app capabilities.
 func publishConsumerFixture(ctx context.Context, pool *pgxpool.Pool, repository store.Store, actor accesscontrol.Actor, pin bridgehost.Pin) (uuid.UUID, string, error) {
 	bindings, err := repository.(store.BridgeBindingStore).ResolveBridgeBindings(ctx, actor.AccountID, map[string]models.BridgeReference{"fixture": {PairingID: pin.PairingID, ProfileID: pin.ProfileID, ManifestHash: pin.ManifestHash, ConnectionID: pin.ConnectionID, OperationID: pin.OperationID}})
 	// Fixture control authority cannot invent operation contracts absent from accepted storage.
+	if err != nil {
+		return uuid.Nil, "", err
+	}
+	keys, capabilityHash, err := capability.KeysAndHashWithBridges([]byte(`[]`), bindings)
+	// Fixture publication must use the same capability identity as production app apply.
 	if err != nil {
 		return uuid.Nil, "", err
 	}
@@ -65,7 +71,8 @@ func publishConsumerFixture(ctx context.Context, pool *pgxpool.Pool, repository 
 		{`INSERT INTO fused_buckets(id,name) VALUES($1,$2)`, []any{bucket, name}},
 		{`INSERT INTO fused_app_families(app_family_id,account_id,kind,canonical_name,display_name,target_language,owner_subject_id,delivery_mode) VALUES($1,$2,'sdk',$3,'Bridge fixture','typescript',$4,'api')`, []any{family, actor.AccountID, name, actor.SubjectID}},
 		{`INSERT INTO fused_app_family_buckets(app_family_id,bucket_id) VALUES($1,$2)`, []any{family, bucket}},
-		{`INSERT INTO fused_apps(app_id,app_family_id,account_id,version,config_key,source_hash,status,selections,scope_schema_version) VALUES($1,$2,$3,'1.0.0',$4,'fixture','active','[]',$5)`, []any{id, family, actor.AccountID, name, models.AppScopeSchemaVersion}},
+		{`INSERT INTO fused_apps(app_id,app_family_id,account_id,version,config_key,source_hash,status,selections,scope_schema_version,capability_hash) VALUES($1,$2,$3,'1.0.0',$4,'fixture','active','[]',$5,$6)`, []any{id, family, actor.AccountID, name, models.AppScopeSchemaVersion, capabilityHash}},
+		{`INSERT INTO fused_app_capabilities(app_id,capability_key) SELECT $1,unnest($2::text[])`, []any{id, keys}},
 		{`INSERT INTO fused_config_plans(id,config_key,config_type,source_hash,status,resolved_payload,required_permissions,owner_subject_id) VALUES($1,$2,'sdk','fixture','applied',$3,'[]',$4)`, []any{plan, name, payload, actor.SubjectID}},
 	}
 	for _, statement := range statements {
