@@ -28,7 +28,13 @@ type InvocationError struct {
 }
 
 // Error exposes only bounded protocol vocabulary to execution adapters.
-func (e *InvocationError) Error() string { return "bridge " + e.Code + " (" + e.Outcome + ")" }
+func (e *InvocationError) Error() string {
+	// Profile rejection has a fixed explanation containing no provider input or private policy details.
+	if IsProfileConstraintViolation(e) {
+		return ProfileConstraintMessage
+	}
+	return "bridge " + e.Code + " (" + e.Outcome + ")"
+}
 
 type routedCall struct {
 	Account string         `json:"account"`
@@ -81,6 +87,10 @@ func (s *Server) handleRoutedCall(parent context.Context, raw []byte) *bridgev1.
 	ctx, cancel := context.WithDeadline(parent, time.UnixMilli(request.Call.DeadlineUnixMs))
 	defer cancel()
 	p, owner, _, err := s.resolvePin(ctx, request.Account, request.Pin, request.Call.InputJson)
+	// An owner-side policy check must preserve its explicit no-effect classification across replicas.
+	if IsProfileConstraintViolation(err) {
+		return &bridgev1.CallResult{RequestId: request.Call.RequestId, Generation: request.Call.Generation, Outcome: "not_started", ErrorCode: "profile_constraint_violation"}
+	}
 	// Routing is generation-bound; a stale owner never forwards to its successor automatically.
 	if err != nil || owner != s.instance || p.Generation != request.Call.Generation {
 		return &bridgev1.CallResult{RequestId: request.Call.RequestId, Outcome: "not_started", ErrorCode: "session_unavailable"}
@@ -91,6 +101,10 @@ func (s *Server) handleRoutedCall(parent context.Context, raw []byte) *bridgev1.
 // Invoke routes one authorized immutable selection without retrying uncertain provider execution.
 func (s *Server) Invoke(ctx context.Context, account string, pin Pin, input []byte) ([]byte, error) {
 	p, owner, contract, err := s.resolvePin(ctx, account, pin, input)
+	// Profile policy is checked from authenticated contracts before contacting the Bridge.
+	if IsProfileConstraintViolation(err) {
+		return nil, err
+	}
 	// Contract and current permission checks precede every local or remote dispatch.
 	if err != nil {
 		return nil, &InvocationError{Outcome: "not_started", Code: "unavailable"}
@@ -140,6 +154,7 @@ func (s *Server) resolvePin(ctx context.Context, account string, pin Pin, input 
 	return s.resolveAdmittedPin(ctx, account, pin, input, true)
 }
 
+// resolveAdmittedPin binds current permission and immutable schemas for live dispatch and snapshot access.
 func (s *Server) resolveAdmittedPin(ctx context.Context, account string, pin Pin, input []byte, online bool) (Pairing, string, Contract, error) {
 	var p Pairing
 	var owner string
@@ -166,7 +181,8 @@ func (s *Server) resolveAdmittedPin(ctx context.Context, account string, pin Pin
 	if _, err = operation(liveDoc, pin.ConnectionID, pin.OperationID, pin.ContractHash); err != nil {
 		return p, "", Contract{}, err
 	}
-	if err = ValidatePayload(contract.InputSchema, input); err != nil {
+	// Preserve known profile denials while ordinary invalid connector input remains a contract error.
+	if err = validateBridgeInput(contract.InputSchema, input); err != nil {
 		return p, "", Contract{}, err
 	}
 	return p, owner, contract, nil
@@ -234,6 +250,15 @@ func validateResult(result *bridgev1.CallResult, call *bridgev1.Call, contract C
 	if result == nil {
 		return nil, &InvocationError{Outcome: "unknown", Code: "invalid_result"}
 	}
+	// Only a correlated pre-dispatch profile denial may become this actionable public failure.
+	if result.Outcome == "not_started" && result.ErrorCode == "profile_constraint_violation" {
+		// A stale or unrelated response cannot be treated as proof that this call was denied.
+		if result.RequestId != call.RequestId || result.Generation != call.Generation {
+			return nil, &InvocationError{Outcome: "unknown", Code: "invalid_result"}
+		}
+		return nil, &InvocationError{Outcome: "not_started", Code: "profile_constraint_violation"}
+	}
+	// Other pre-dispatch failures retain their existing generic classification.
 	if result.Outcome == "not_started" {
 		return nil, &InvocationError{Outcome: "not_started", Code: "rejected"}
 	}

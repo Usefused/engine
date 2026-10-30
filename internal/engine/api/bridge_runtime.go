@@ -88,7 +88,7 @@ func (s *EngineGRPCServer) tryBridgeRun(w http.ResponseWriter, r *http.Request, 
 	result, err := s.ExecuteAttachedBridge(sandbox.ContextWithRESTExecutionTransport(r.Context()), identity, strings.TrimPrefix(decoded.Operation, "bridge:"), decoded.Input)
 	// Uncertainty is never translated into an automatic retry suggestion.
 	if err != nil {
-		writeRESTExecutionError(w, newRESTExecutionError(409, "bridge_unavailable", "Bridge execution failed or its outcome is unknown; do not automatically retry commands"))
+		writeRESTExecutionError(w, bridgeRESTExecutionError(err))
 		return true
 	}
 	// Local results use the shared REST envelope so clients can verify app and operation identity.
@@ -110,7 +110,20 @@ func (s *EngineGRPCServer) executeBridgeGRPC(req *enginev1.ExecuteRequest, strea
 	result, err := s.ExecuteAttachedBridge(stream.Context(), identity, strings.TrimPrefix(req.EndpointName, "bridge:"), req.Params)
 	// A transport error cannot prove that a local command did not run.
 	if err != nil {
+		// Explicit profile denials are input constraints, not transport uncertainty.
+		if bridgehost.IsProfileConstraintViolation(err) {
+			return status.Error(codes.InvalidArgument, bridgehost.ProfileConstraintMessage)
+		}
 		return status.Error(codes.FailedPrecondition, "Bridge execution failed or its outcome is unknown; do not automatically retry commands")
 	}
 	return stream.Send(&enginev1.ExecuteResponse{Result: result, StatusCode: 200})
+}
+
+// bridgeRESTExecutionError preserves known profile refusals without reclassifying disconnects or connector validation.
+func bridgeRESTExecutionError(err error) *restExecutionError {
+	// The Bridge must explicitly attest both the category and absence of dispatched work.
+	if bridgehost.IsProfileConstraintViolation(err) {
+		return newRESTExecutionError(http.StatusBadRequest, bridgehost.ProfileConstraintCode, bridgehost.ProfileConstraintMessage)
+	}
+	return newRESTExecutionError(http.StatusConflict, "bridge_unavailable", "Bridge execution failed or its outcome is unknown; do not automatically retry commands")
 }

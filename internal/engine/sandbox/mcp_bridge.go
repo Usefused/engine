@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/bridgehost"
 	"github.com/Usefused/engine/internal/shared/models"
 	"net/http"
 	"strings"
@@ -93,6 +94,11 @@ func handleBridgeMCPCall(ctx context.Context, w http.ResponseWriter, r *http.Req
 	result, err := adapter.ExecuteAttachedBridge(ContextWithMCPExecutionTransport(ctx), admission.identity, strings.TrimPrefix(args.Operation, "bridge:"), args.Input)
 	// Failed local commands are never retried by the adapter.
 	if err != nil {
+		// Known profile refusals expose a fixed category without implying that the Bridge is offline.
+		if bridgehost.IsProfileConstraintViolation(err) {
+			writeMCPModernError(w, request.ID, -32602, bridgehost.ProfileConstraintMessage, 400, map[string]string{"code": bridgehost.ProfileConstraintCode})
+			return true
+		}
 		writeMCPModernError(w, request.ID, -32602, "Bridge execution unavailable or outcome unknown; do not automatically retry commands", 400, nil)
 		return true
 	}

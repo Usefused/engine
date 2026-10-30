@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/bridgehost"
 	"github.com/Usefused/engine/internal/engine/executionevent"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -42,6 +43,12 @@ func RunBridgeInvocation(ctx context.Context, identity auth.RuntimeIdentity, ali
 	}
 	event.IdempotencyReplayed, _ = ctx.Value(bridgeReplayKey{}).(bool)
 	event.FailureCategory, event.FailureCode = classifyExecutionFailure(err, 0)
+	// Activity must not describe a known policy refusal as a disconnected Bridge.
+	if bridgehost.IsProfileConstraintViolation(err) {
+		event.FailureReason = bridgehost.ProfileConstraintMessage
+		event.FailureCategory = "validation"
+		event.FailureCode = bridgehost.ProfileConstraintCode
+	}
 	event.LatencyMs = event.EndedAt.Sub(started).Milliseconds()
 	event.TraceID, event.SpanID = span.SpanContext().TraceID().String(), span.SpanContext().SpanID().String()
 	executionevent.AttachUnifiedChild(ctx, &event)

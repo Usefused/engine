@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Usefused/engine/internal/engine/bridgehost"
 	"sort"
 	"strings"
 	"sync"
@@ -148,6 +149,10 @@ func (host *recordingCapabilityHost) Fetch(ctx context.Context, raw json.RawMess
 
 // capabilityAuthoredOperationFailure selects explanations without exposing arbitrary infrastructure errors.
 func capabilityAuthoredOperationFailure(err error) error {
+	// Only the explicit no-effect profile category crosses the worker boundary as public guidance.
+	if bridgehost.IsProfileConstraintViolation(err) {
+		return &executionappvm.OperationError{Message: bridgehost.ProfileConstraintMessage}
+	}
 	var missing *sandbox.CredentialMaterialMissingError
 	// Credential absence contains metadata and a repair command, never credential values.
 	if errors.As(err, &missing) {
