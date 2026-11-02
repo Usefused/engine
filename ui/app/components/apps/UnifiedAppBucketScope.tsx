@@ -40,7 +40,7 @@ export function UnifiedAppBucketScope({ value, buckets, bucket, lockedBucketName
   }
 
   return <div className="rounded-lg border border-slate-300 bg-white focus-within:border-violet-400">
-    <Select id="unified-credential-bucket" required className="w-full rounded-lg border-0 px-3 py-2.5 text-sm focus-visible:outline-offset-[-2px]" value={dynamic ? runtimeChoice : bucket} onChange={(event) => choose(event.target.value)}>
+    <Select searchable searchPlaceholder="Search buckets…" id="unified-credential-bucket" required className="w-full rounded-lg border-0 px-3 py-2.5 text-sm focus-visible:outline-offset-[-2px]" value={dynamic ? runtimeChoice : bucket} onChange={(event) => choose(event.target.value)}>
       {defaultOptions()}
       <option value={runtimeChoice} disabled={!names.length && !defaultName}>Choose at runtime</option>
     </Select>

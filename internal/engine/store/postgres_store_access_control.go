@@ -110,6 +110,11 @@ func (s *postgresStore) loadControlCredentialPrincipal(ctx context.Context, cred
 // never authorizes anything beyond what its consent covered, even if the
 // authorizing user's own permissions have since grown.
 func (s *postgresStore) loadOAuthTokenPrincipal(ctx context.Context, credentialHash string) (accesscontrol.ControlPrincipal, error) {
+	return s.loadOAuthPrincipal(ctx, credentialHash, false)
+}
+
+// loadOAuthPrincipal exposes deployment actors only to the separately fenced deployment endpoint.
+func (s *postgresStore) loadOAuthPrincipal(ctx context.Context, credentialHash string, deployment bool) (accesscontrol.ControlPrincipal, error) {
 	// Enforce client expiry on every lookup and propagate it into the identity cache.
 	query := `
 		WITH candidate AS (
@@ -126,8 +131,8 @@ func (s *postgresStore) loadOAuthTokenPrincipal(ctx context.Context, credentialH
 			JOIN fused_authorization_state state ON state.singleton_key = 1
 			WHERE t.access_token_hash = $1
 				AND t.revoked_at IS NULL
-				-- Retired broad app scopes require fresh, type-specific consent.
-				AND NOT (t.scope && ARRAY['mcp.execute','app.read','app.use','app.create','app.manage','app.tokens.manage']::text[])
+				-- Runtime-only and retired broad app scopes cannot authenticate management.
+				AND (($2 AND t.scope=ARRAY['app.api.deploy']::text[] AND t.runtime_grant IS NOT NULL) OR (NOT $2 AND NOT (t.scope && ARRAY['mcp.execute','api.execute','app.api.deploy','app.read','app.use','app.create','app.manage','app.tokens.manage']::text[])))
 				AND t.access_expires_at > NOW()
 				AND (client.expires_at IS NULL OR client.expires_at > NOW())
 				AND s.status = 'active'
@@ -151,7 +156,7 @@ func (s *postgresStore) loadOAuthTokenPrincipal(ctx context.Context, credentialH
 			JOIN fused_role_permissions permission ON permission.role_id = role.id
 			JOIN candidate ON true
 			WHERE (binding.resource_type <> 'workspace' OR binding.resource_id = candidate.workspace_id)
-				AND permission.permission = ANY(candidate.token_scope)
+				AND ($2 OR permission.permission = ANY(candidate.token_scope))
 		)
 		SELECT candidate.account_id, candidate.workspace_id, candidate.subject_id, candidate.display_name,
 			candidate.email_display, candidate.credential_id, candidate.kind, candidate.access_expires_at,
@@ -162,7 +167,7 @@ func (s *postgresStore) loadOAuthTokenPrincipal(ctx context.Context, credentialH
 		LEFT JOIN effective_grants effective ON true
 		ORDER BY effective.permission, effective.resource_type, effective.resource_id
 	`
-	rows, err := s.db.Query(ctx, query, credentialHash)
+	rows, err := s.db.Query(ctx, query, credentialHash, deployment)
 	if err != nil {
 		return accesscontrol.ControlPrincipal{}, fmt.Errorf("load OAuth token principal: %w", err)
 	}

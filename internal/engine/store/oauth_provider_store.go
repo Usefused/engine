@@ -211,7 +211,7 @@ func isLoopbackRedirectHost(host string) bool {
 // validateOAuthScopes isolates runtime consent from the management permission vocabulary.
 func validateOAuthScopes(scopes []string) error {
 	// Runtime-only clients cannot combine execution with control-plane grants.
-	if OAuthMCPOnly(scopes) {
+	if OAuthMCPOnly(scopes) || OAuthRuntimeOnly(scopes) {
 		return nil
 	}
 	// Bound management scopes before validation and duplicate detection.

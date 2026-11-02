@@ -1081,6 +1081,7 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	api.MountCLILoginRoutes(r, deps.cliLogin, deps.browserSession)
 	api.MountOAuthProviderRoutes(r, deps.oauthProvider, deps.engineStore, deps.browserSession, deps.browserCookies, "/login", deps.cfg.Engine.PublicURL)
 	api.MountMCPOAuthRoutes(r, deps.oauthProvider, deps.engineStore, deps.browserSession, deps.browserCookies, deps.cfg.Engine.PublicURL)
+	api.MountRuntimeOAuthRoutes(r, deps.oauthProvider, deps.engineStore, deps.configStore, deps.registryClient, deps.browserSession, deps.browserCookies, deps.cfg.Engine.PublicURL)
 	if deps.managedAuthBroker != nil {
 		managedauthbroker.MountRoutes(r, deps.managedAuthBroker)
 		managedauthbroker.MountConnectRoutes(r, deps.managedAuthConnect, deps.managedAuthInstalls)

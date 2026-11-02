@@ -54,9 +54,10 @@ WITH candidate AS (
    ORDER BY applied.applied_at DESC, applied.created_at DESC LIMIT 1
  ) plan ON true
  WHERE app.account_id=$1 AND app.app_id=$2 AND app.status IN ('active','deprecated')
-   AND family.kind='unified_app' AND family.archived_at IS NULL AND family.unified_active_app_id=app.app_id
+   AND ((family.kind='sdk' AND family.delivery_mode='api') OR (family.kind='unified_app' AND family.unified_active_app_id=app.app_id))
+   AND family.archived_at IS NULL
    AND token.binding_mode='dynamic' AND (token.expires_at IS NULL OR token.expires_at>NOW())
-   AND (token.allow_all OR 'execute'=ANY(token.allowed_operations))
+   AND ((family.kind='sdk' AND family.delivery_mode='api') OR token.allow_all OR 'execute'=ANY(token.allowed_operations))
    AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(plan.resolved_payload->'runtime_buckets','[]'::jsonb)) ref
                WHERE ref->>'bucket_id'=$4::text)
 ), principals(subject_type, subject_id) AS (
@@ -99,7 +100,7 @@ func (s *postgresStore) ReadUnifiedAppRuntimeBuckets(ctx context.Context, accoun
  ORDER BY applied.applied_at DESC, applied.created_at DESC LIMIT 1
  ) plan ON true
  CROSS JOIN LATERAL jsonb_array_elements(COALESCE(plan.resolved_payload->'runtime_buckets','[]'::jsonb)) ref
- WHERE app.account_id=$1 AND app.app_id=$2 AND family.kind='unified_app'
+ WHERE app.account_id=$1 AND app.app_id=$2 AND (family.kind='unified_app' OR (family.kind='sdk' AND family.delivery_mode='api'))
  ORDER BY ref->>'bucket_name' LIMIT 33`, accountID, appID)
 	// Scope read errors cannot be presented as a static app contract.
 	if err != nil {

@@ -126,7 +126,7 @@ func TestOAuthSharedConsentPreservesMCPGrant(t *testing.T) {
 	require.Contains(t, response.Body.String(), "tickets.create")
 	require.NotRegexp(t, `<input\b[^>]*\schecked(?:\s|=|>)`, response.Body.String())
 	// Hash the rendered bytes so template processing cannot silently disable the permission picker under CSP.
-	_, script, found := strings.Cut(response.Body.String(), "<script>")
+	_, script, found := strings.Cut(response.Body.String(), `<script type="module">`)
 	require.True(t, found)
 	script, _, found = strings.Cut(script, "</script>")
 	require.True(t, found)

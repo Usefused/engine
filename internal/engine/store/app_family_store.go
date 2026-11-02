@@ -866,7 +866,8 @@ func (s *postgresStore) AuthorizeApp(ctx context.Context, appID uuid.UUID, token
 			JOIN fused_app_tokens t ON t.app_family_id = f.app_family_id
 			LEFT JOIN fused_oauth_tokens oauth ON oauth.id = t.oauth_token_id
 			WHERE (t.oauth_token_id IS NULL OR (`+oauthMCPRuntimeAuthoritySQL+`))
-			  AND a.app_id = $1 AND t.token_hash = $2
+			  AND (t.runtime_client_id IS NULL OR (`+runtimeTokenAuthoritySQL+`))
+              AND a.app_id = $1 AND t.token_hash = $2
 			  AND f.archived_at IS NULL
 			  AND a.status IN ('active', 'deprecated')
 			  AND (t.expires_at IS NULL OR t.expires_at > NOW())

@@ -217,6 +217,10 @@ func executeResolvedProviderOperation(
 	if err != nil {
 		return err
 	}
+	// Bucket revocation applies before both cached replay and new provider effects.
+	if err := authorizeRuntimeBucketBeforeReplay(ctx, identity); err != nil {
+		return err
+	}
 	params, obj := prepareResolvedProviderInputs(ctx, match, request.Params)
 	if replayed, replayErr := tryReplayFromIdempotencyCache(ctx, span, identity.AppID, obj, stream, auditState); replayErr != nil || replayed {
 		engine.MeasureExecutionTiming(ctx, "engine_resolution_total", resolutionStarted)

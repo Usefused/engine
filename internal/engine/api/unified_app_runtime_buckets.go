@@ -18,9 +18,9 @@ func validateRuntimeBuckets(doc sdkConfigDocument) error {
 	if len(doc.RuntimeBuckets) == 0 {
 		return nil
 	}
-	// Other adapters cannot enforce this capability, and scopes must remain bounded.
-	if doc.Kind != "unified_app" || len(doc.RuntimeBuckets) > 32 {
-		return fmt.Errorf("runtime_buckets requires a Unified App and at most 32 bucket names")
+	// Existing API apps share the gRPC credential boundary; generated packages and MCP retain static routing.
+	if !supportsRuntimeBuckets(doc) || len(doc.RuntimeBuckets) > 32 {
+		return fmt.Errorf("runtime_buckets requires an API or Unified App and at most 32 bucket names")
 	}
 	seen := make(map[string]bool)
 	for _, name := range doc.RuntimeBuckets {
@@ -31,6 +31,11 @@ func validateRuntimeBuckets(doc sdkConfigDocument) error {
 		seen[name] = true
 	}
 	return nil
+}
+
+// supportsRuntimeBuckets limits caller-selected credentials to adapters with authoritative per-request checks.
+func supportsRuntimeBuckets(doc sdkConfigDocument) bool {
+	return doc.Kind == "unified_app" || (doc.Kind == "sdk" && doc.Generate != nil && !*doc.Generate && doc.MCP == nil)
 }
 
 // resolveRuntimeBuckets uses one bounded lookup and pins IDs rather than mutable bucket names.

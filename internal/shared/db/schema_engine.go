@@ -2132,6 +2132,14 @@ func oauthProviderSchemaQueries() []string {
 			revoked_at            timestamptz,
 			created_at            timestamptz NOT NULL DEFAULT NOW()
 		);`,
+		// Compiler manifests remain byte-exact and runtime codes pin one immutable API app.
+		`ALTER TABLE fused_oauth_clients ADD COLUMN IF NOT EXISTS runtime_manifest bytea;`,
+		`ALTER TABLE fused_oauth_authorization_codes ADD COLUMN IF NOT EXISTS runtime_grant jsonb;`,
+		// Deployment management retains its immutable family ceiling across token rotation.
+		`ALTER TABLE fused_oauth_tokens ADD COLUMN IF NOT EXISTS runtime_grant jsonb;`,
+		`ALTER TABLE fused_app_tokens ADD COLUMN IF NOT EXISTS runtime_app_id uuid REFERENCES fused_apps(app_id) ON DELETE CASCADE;`,
+		`ALTER TABLE fused_app_tokens ADD COLUMN IF NOT EXISTS runtime_client_id uuid REFERENCES fused_oauth_clients(id) ON DELETE CASCADE;`,
+		`ALTER TABLE fused_app_tokens ADD COLUMN IF NOT EXISTS runtime_default_bucket_id uuid REFERENCES fused_buckets(id) ON DELETE CASCADE;`,
 		// Consent metadata survives rotation without expanding the approved operation set.
 		`ALTER TABLE fused_oauth_authorization_codes ADD COLUMN IF NOT EXISTS mcp_grant jsonb;`,
 		`ALTER TABLE fused_oauth_tokens ADD COLUMN IF NOT EXISTS mcp_grant jsonb;`,

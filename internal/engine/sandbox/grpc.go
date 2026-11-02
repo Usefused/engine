@@ -147,6 +147,7 @@ func (g *grpcResponseStream) SendResponseContract(status int, mediaFamily string
 	))
 }
 
+// Execute binds caller routing controls before the canonical authenticated execution path.
 func (s *EngineGRPCServer) Execute(req *enginev1.ExecuteRequest, stream enginev1.EngineService_ExecuteServer) error {
 	requestStarted := time.Now()
 	timings := engine.NewExecutionTimings()
@@ -157,14 +158,19 @@ func (s *EngineGRPCServer) Execute(req *enginev1.ExecuteRequest, stream enginev1
 		return status.Error(codes.InvalidArgument, "pagination intent is invalid")
 	}
 	requestHash := engine.BindPaginationIntentRequestHash(req.RequestBodyHash, intent)
+	appID, token := authFromIncomingContext(ctx)
+	ctx, selectedBucket, err := bindGRPCRuntimeBucket(ctx, appID, req.BucketId)
+	// Invalid selections cannot continue with the configured default bucket.
+	if err != nil {
+		return status.Error(codes.InvalidArgument, "runtime bucket selection is invalid")
+	}
+	requestHash = bindRuntimeBucketRequestHash(requestHash, selectedBucket)
 	ctx = contextWithExecutionIdentity(ctx, req.IdempotencyKey, requestHash)
 	ctx = engine.ContextWithPaginationIntent(ctx, intent)
 	ctx = contextWithExecutionTransport(ctx, models.EngineExecutionTransportSDK)
 	ctx = engine.ContextWithIdempotencyKeyPresent(ctx, strings.TrimSpace(req.IdempotencyKey) != "")
 
 	decodeStarted := time.Now()
-	appID, token := authFromIncomingContext(ctx)
-
 	var params map[string]any
 	if len(req.Params) > 0 {
 		if err := json.Unmarshal(req.Params, &params); err != nil {

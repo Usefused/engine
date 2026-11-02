@@ -88,6 +88,10 @@ message ExecuteRequest {
   // pagination is optional caller intent that may only tighten the immutable
   // provider pagination policy. max_pages=1 requests the first page only.
   PaginationIntent pagination = 10;
+
+  // bucket_id selects one immutable app-approved runtime bucket. Omission keeps
+  // configured routing; Engine rechecks the live bucket authority before use.
+  string bucket_id = 11;
 }
 
 message ExecuteResponse {

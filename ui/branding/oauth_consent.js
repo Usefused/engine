@@ -1,3 +1,6 @@
+// The standalone consent page uses the same select enhancement as the React adapter.
+for (const select of document.querySelectorAll('select[data-searchable]')) enhanceSearchableSelect(select);
+
 // Enhance the native form without changing its submitted operation or account identities.
 (() => {
   const picker = document.querySelector('.oauth-picker');

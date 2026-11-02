@@ -110,8 +110,8 @@ func TestMCPConsentRendering(t *testing.T) {
 	html := response.Body.String()
 	require.Equal(t, http.StatusOK, response.Code)
 	// Search is trusted code, but an operation label must never introduce another executable script.
-	require.Equal(t, 1, strings.Count(html, "<script>"))
-	require.Contains(t, html, "<script>"+branding.OAuthConsentScript+"</script>")
+	require.Equal(t, 1, strings.Count(html, `<script type="module">`))
+	require.Contains(t, html, `<script type="module">`+branding.OAuthConsentScript+"</script>")
 	require.Contains(t, html, "Send email &lt;script&gt;")
 	// Check native input attributes rather than matching JavaScript variables such as `const checked`.
 	require.NotRegexp(t, `<input\b[^>]*\schecked(?:\s|=|>)`, html)

@@ -13,7 +13,20 @@ var HostedConnectStyles string
 //go:embed oauth_consent.css
 var OAuthConsentStyles string
 
-// OAuthConsentScript only filters and counts existing native inputs; its exact bytes are CSP-hashed.
+// SearchableSelectScript is the same module imported by the React Select adapter.
+//
+//go:embed searchable_select.js
+var SearchableSelectScript string
+
+// SelectStyles is shared by the dashboard and standalone consent page.
+//
+//go:embed select.css
+var SelectStyles string
+
+// oauthConsentScript initializes shared controls and enhances the operation picker.
 //
 //go:embed oauth_consent.js
-var OAuthConsentScript string
+var oauthConsentScript string
+
+// OAuthConsentScript embeds the shared control without a separate build or a copied implementation.
+var OAuthConsentScript = SearchableSelectScript + "\n" + oauthConsentScript

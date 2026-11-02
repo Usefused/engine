@@ -56,7 +56,7 @@ func EmbeddedUIMiddleware(uiFS http.FileSystem, runtimeConfigs ...EmbeddedUIRunt
 
 // isEmbeddedUIRuntimeBrowserRoute reserves exact Engine-owned browser paths
 // without weakening SPA navigation behavior for neighboring workspace routes.
-// Management and MCP authorization and discovery routes are server-rendered
+// Management, Minion and MCP authorization and discovery routes are server-rendered
 // full-page responses just like the hosted-connect routes above -- a real
 // browser navigation to either one sends Accept: text/html with no
 // X-API-Key, which is indistinguishable from an ordinary SPA page load, so
@@ -70,7 +70,7 @@ func isEmbeddedUIRuntimeBrowserRoute(rawPath string) bool {
 	// Reserve only Engine-owned handoffs, leaving ordinary UI navigation intact.
 	switch rawPath {
 	case "/workspace/connect/input", "/workspace/connect/callback",
-		"/oauth/authorize", "/.well-known/oauth-authorization-server",
+		"/oauth/authorize", "/oauth/runtime/authorize", "/.well-known/oauth-authorization-server",
 		"/mcp/oauth/authorize", "/.well-known/oauth-authorization-server/mcp/oauth":
 		return true
 	default:

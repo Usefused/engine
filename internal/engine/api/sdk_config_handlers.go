@@ -72,7 +72,7 @@ type sdkConfigDocument struct {
 	FusedIntelligentClassifier bool   `json:"fused-intelligent-classifier,omitempty"`
 	Language                   string `json:"language"`
 	Bucket                     string `json:"bucket,omitempty"`
-	// RuntimeBuckets explicitly opts this immutable Unified App into a finite bucket scope.
+	// RuntimeBuckets opts an immutable API or Unified App into a finite credential-bucket scope.
 	RuntimeBuckets []string `json:"runtime_buckets,omitempty"`
 	// Generate is tri-state on purpose: absent means the historical default of
 	// building a package. Only an explicit false suppresses codegen, leaving a
@@ -215,8 +215,10 @@ func (b appBucketSet) distinct() []store.Bucket {
 // selections used by both SDK and MCP config apply. SDK generation adds its
 // Registry-specific fields separately, while MCP never carries a target.
 type appResolvedPayload struct {
-	Bridges        []models.BridgeBinding `json:"bridges,omitempty"`
-	RuntimeBuckets []appResolvedBucketRef `json:"runtime_buckets,omitempty"`
+	// Authorization identity never selects the new immutable generation identity.
+	AuthorizationAppID uuid.UUID              `json:"authorization_app_id,omitempty"`
+	Bridges            []models.BridgeBinding `json:"bridges,omitempty"`
+	RuntimeBuckets     []appResolvedBucketRef `json:"runtime_buckets,omitempty"`
 	// UnifiedApps pins attachment identity alongside the reviewed provider selections.
 	UnifiedApps []models.UnifiedAppBinding `json:"unified_apps,omitempty"`
 	AppID       uuid.UUID                  `json:"app_id,omitempty"`
@@ -248,12 +250,14 @@ type appResolvedPayload struct {
 }
 
 type sdkPlanCall struct {
-	apiKey           string
-	accountID        uuid.UUID
-	actor            accesscontrol.Actor
-	request          SDKConfigPlanRequest
-	document         sdkConfigDocument
-	defaultEngineURL string
+	// Only the dedicated deployment adapter supplies this existing-family authorization anchor.
+	authorizationAppID uuid.UUID
+	apiKey             string
+	accountID          uuid.UUID
+	actor              accesscontrol.Actor
+	request            SDKConfigPlanRequest
+	document           sdkConfigDocument
+	defaultEngineURL   string
 }
 
 type sdkPlanResult struct {
@@ -1111,8 +1115,13 @@ func createSDKConfigPlan(
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
+	authorizationState, authorizationID, err := deploymentPlanAuthorization(ctx, s, call, currentState, appID)
+	// New versions inherit only the original family's authority, not its immutable version state.
+	if err != nil {
+		return sdkPlanResult{}, err
+	}
 	owner, bucket, bucketOverrides, err := resolveAppPlanOwnerAndBucket(
-		ctx, s, currentState, call.actor, call.request.OwnerTeamSlug, call.document,
+		ctx, s, authorizationState, call.actor, call.request.OwnerTeamSlug, call.document,
 	)
 	// Bucket and owner authorization remain independent of contract retention.
 	if err != nil {
@@ -1130,7 +1139,7 @@ func createSDKConfigPlan(
 	}
 	notifications := sdkPlanNotifications(ctx, configStore, registryClient, call, definition.resolvedServices, definition.noop)
 	requiredPermissions, requiredCount, err := configPlanRequiredPermissionsWithBuckets(
-		ctx, s, appPermissionState(currentState, appID), serviceNamesFromResolved(definition.resolvedServices), definition.buckets.distinct(), call.document.Name, appConfigPermissionType(call.document), call.document.MCP != nil,
+		ctx, s, appPermissionState(authorizationState, authorizationID), serviceNamesFromResolved(definition.resolvedServices), definition.buckets.distinct(), call.document.Name, appConfigPermissionType(call.document), call.document.MCP != nil,
 	)
 	// A retained contract grants no additional control-plane permissions.
 	if err != nil {
@@ -1141,12 +1150,20 @@ func createSDKConfigPlan(
 	if err := json.Unmarshal(definition.resolvedPayload, &attachmentPayload); err != nil {
 		return sdkPlanResult{}, err
 	}
+	// Persist the approved family anchor for apply-time ownership checks without reusing its version ID.
+	if call.authorizationAppID != uuid.Nil {
+		attachmentPayload.AuthorizationAppID = authorizationID
+		definition.resolvedPayload, err = json.Marshal(attachmentPayload)
+		if err != nil {
+			return sdkPlanResult{}, err
+		}
+	}
 	requiredPermissions, requiredCount, err = attachmentPermissions(requiredPermissions, attachmentPayload.UnifiedApps, attachmentPayload.Bridges)
 	if err != nil {
 		return sdkPlanResult{}, err
 	}
 	// Planning must prove the same ownership that apply will enforce again.
-	if err := preflightConfigOwnership(ctx, s, call.actor, owner, optionalAppID(appID), requiredPermissions); err != nil {
+	if err := preflightConfigOwnership(ctx, s, call.actor, owner, optionalAppID(authorizationID), requiredPermissions); err != nil {
 		return sdkPlanResult{}, err
 	}
 	plan, err := configStore.CreateConfigPlan(ctx, store.CreateConfigPlanParams{

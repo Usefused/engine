@@ -79,3 +79,70 @@ function nativeSelects(directory) {
 test("all application dropdowns use the shared select", () => {
   assert.deepEqual(nativeSelects(new URL("../", import.meta.url)), []);
 });
+
+// Exercise the actual React adapter, including controlled props, native events and StrictMode cleanup.
+test("searchable select keeps React values, option updates, disabled state and native refs synchronized", async () => {
+  const { JSDOM } = await import("jsdom");
+  const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost' });
+  const previous = Object.getOwnPropertyDescriptors(globalThis);
+  // React's event system must observe the same DOM as the shared enhancement.
+  for (const key of ['window', 'document', 'HTMLElement', 'Node', 'navigator']) Object.defineProperty(globalThis, key, { configurable: true, value: dom.window[key] });
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  dom.window.HTMLElement.prototype.scrollIntoView = function () {};
+  const { createRoot } = await import("react-dom/client");
+  const { act } = await import("react-dom/test-utils");
+  const { useState, StrictMode } = await import("react");
+  const ref = createRef();
+  const changes = [];
+  let update;
+  // A real controlled parent, rather than a mocked change callback, owns the selected identity.
+  function App() {
+    const [state, setState] = useState({ value: 'one', disabled: false, label: 'Demo' });
+    update = setState;
+    return createElement('form', null,
+      createElement('label', { htmlFor: 'shared-bucket' }, 'Credential bucket'),
+      createElement(Select, { id: 'shared-bucket', name: 'bucket', searchable: true, required: true, ref, value: state.value, disabled: state.disabled, onChange(event) { changes.push(event.target); setState({ ...state, value: event.target.value }); } },
+        createElement('option', { value: '' }, 'Choose a bucket'),
+        createElement('option', { value: 'one' }, 'Default'),
+        createElement('optgroup', { label: 'Blocked', disabled: true }, createElement('option', { value: 'blocked' }, 'Disabled bucket')),
+        createElement('option', { value: 'two' }, state.label)));
+  }
+  const root = createRoot(dom.window.document.getElementById('root'));
+  try {
+    await act(async () => root.render(createElement(StrictMode, null, createElement(App))));
+    const input = dom.window.document.querySelector('[role=combobox]');
+    assert.equal(dom.window.document.querySelectorAll('[role=combobox]').length, 1);
+    assert.equal(input.value, 'Default');
+    assert.equal(ref.current.tagName, 'SELECT');
+    assert.equal(ref.current.hidden, true);
+    await act(async () => ref.current.focus());
+    assert.equal(dom.window.document.activeElement, input);
+    await act(async () => { input.value = 'Demo'; input.dispatchEvent(new dom.window.Event('input')); });
+    await act(async () => dom.window.document.querySelector('[role=option]').click());
+    assert.equal(changes[0], ref.current);
+    assert.equal(ref.current.value, 'two');
+    assert.deepEqual([...new dom.window.FormData(dom.window.document.querySelector('form')).entries()], [['bucket', 'two']]);
+    await act(async () => update({ value: 'two', disabled: true, label: 'Renamed' }));
+    assert.equal(input.disabled, true);
+    assert.equal(input.value, 'Renamed');
+    await act(async () => update({ value: 'one', disabled: false, label: 'New label' }));
+    assert.equal(input.value, 'Default');
+    await act(async () => input.click());
+    const blocked = dom.window.document.querySelector('[aria-disabled=true]');
+    assert.ok(blocked);
+    await act(async () => blocked.click());
+    assert.equal(ref.current.value, 'one');
+    await act(async () => input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowDown', cancelable: true })));
+    assert.equal(dom.window.document.getElementById(input.getAttribute('aria-activedescendant')).textContent, 'New label');
+    await act(async () => input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', cancelable: true })));
+    assert.equal(ref.current.value, 'two');
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    // Restore process globals so later tests do not inherit a closed document or act setting.
+    for (const key of ['window', 'document', 'HTMLElement', 'Node', 'navigator', 'IS_REACT_ACT_ENVIRONMENT']) {
+      if (previous[key]) Object.defineProperty(globalThis, key, previous[key]);
+      else delete globalThis[key];
+    }
+  }
+});

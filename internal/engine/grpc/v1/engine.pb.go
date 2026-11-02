@@ -211,7 +211,10 @@ type ExecuteRequest struct {
 	RequestBodyHash string `protobuf:"bytes,8,opt,name=request_body_hash,json=requestBodyHash,proto3" json:"request_body_hash,omitempty"`
 	// pagination is optional caller intent that may only tighten the immutable
 	// provider pagination policy. max_pages=1 requests the first page only.
-	Pagination    *PaginationIntent `protobuf:"bytes,10,opt,name=pagination,proto3" json:"pagination,omitempty"`
+	Pagination *PaginationIntent `protobuf:"bytes,10,opt,name=pagination,proto3" json:"pagination,omitempty"`
+	// bucket_id selects one immutable app-approved runtime bucket. Omission keeps
+	// configured routing; Engine rechecks the live bucket authority before use.
+	BucketId      string `protobuf:"bytes,11,opt,name=bucket_id,json=bucketId,proto3" json:"bucket_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -307,6 +310,13 @@ func (x *ExecuteRequest) GetPagination() *PaginationIntent {
 		return x.Pagination
 	}
 	return nil
+}
+
+func (x *ExecuteRequest) GetBucketId() string {
+	if x != nil {
+		return x.BucketId
+	}
+	return ""
 }
 
 type ExecuteResponse struct {
@@ -1550,7 +1560,7 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\x0fConnectResponse\"*\n" +
 	"\x11DisconnectRequest\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\"\x14\n" +
-	"\x12DisconnectResponse\"\xd2\x03\n" +
+	"\x12DisconnectResponse\"\xef\x03\n" +
 	"\x0eExecuteRequest\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12\x14\n" +
 	"\x05token\x18\x02 \x01(\tR\x05token\x12#\n" +
@@ -1563,7 +1573,8 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\n" +
 	"pagination\x18\n" +
 	" \x01(\v2\x1b.engine.v1.PaginationIntentR\n" +
-	"pagination\x1a>\n" +
+	"pagination\x12\x1b\n" +
+	"\tbucket_id\x18\v \x01(\tR\bbucketId\x1a>\n" +
 	"\x10CredentialsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\t\x10\n" +

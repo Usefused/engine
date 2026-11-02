@@ -201,6 +201,10 @@ func isRuntimeControlExclusion(request *http.Request) bool {
 	// generated SDK connect flow. App execution similarly authenticates only an
 	// exact family token at its dedicated runtime boundary.
 	path := request.URL.Path
+	// App deployment owns a family-scoped bearer authenticator; no neighboring path or other method is excluded.
+	if path == "/oauth/runtime/deploy" {
+		return request.Method == http.MethodPost
+	}
 	if path == "/workspace/connect/callback" || path == "/workspace/connect/input" {
 		return true
 	}
@@ -227,8 +231,12 @@ func isRuntimeControlExclusion(request *http.Request) bool {
 	return len(parts) == 2 && parts[0] != "" && parts[1] == "executions"
 }
 
+// isOAuthProviderProtocolRoute keeps issuer endpoints outside management bearer authorization.
 func isOAuthProviderProtocolRoute(path string) bool {
 	switch path {
+	// Each exact runtime path owns its browser or confidential-client authentication.
+	case "/oauth/runtime/register", "/oauth/runtime/authorize", "/oauth/runtime/authorize/consent", "/oauth/runtime/token", "/oauth/runtime/revoke":
+		return true
 	case "/oauth/authorize", "/oauth/authorize/consent", "/oauth/token", "/oauth/revoke", "/oauth/register":
 		return true
 	default:

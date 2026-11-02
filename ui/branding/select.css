@@ -1,0 +1,67 @@
+@layer components {
+  .fused-select {
+    min-width: 0;
+    border: 1px solid #cbd5e1;
+    border-radius: 0.5rem;
+    background-color: white;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    color: #334155;
+    cursor: pointer;
+  }
+
+  .fused-select[data-density="compact"] {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    line-height: 1rem;
+  }
+
+  .fused-select[data-tone="subtle"] { background-color: #f8fafc; }
+
+  /* Focus and disabled feedback remain available without page-specific styling. */
+  .fused-select:focus-visible {
+    outline: 2px solid var(--brand-violet, #7047eb);
+    outline-offset: 2px;
+  }
+  .fused-select:disabled { cursor: not-allowed; opacity: 0.6; }
+}
+
+/* Caret spacing is invariant across page utilities; native listboxes need no dropdown indicator. */
+.fused-select:not([multiple]):not([size]),
+.fused-select[size="0"]:not([multiple]),
+.fused-select[size="1"]:not([multiple]) {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 2.5rem;
+  /* CSS gradients keep the shared caret compatible with strict consent image policies. */
+  background-image: linear-gradient(45deg, transparent 45%, #64748b 45%, #64748b 62%, transparent 62%), linear-gradient(-45deg, transparent 45%, #64748b 45%, #64748b 62%, transparent 62%);
+  background-position: right 1rem center, right .6875rem center;
+  background-size: .3125rem .3125rem;
+  background-repeat: no-repeat;
+
+}
+
+/* Native indicators remain visible when the operating system replaces author colors and background images. */
+@media (forced-colors: active) {
+  .fused-select:not([multiple]):not([size]),
+  .fused-select[size="0"]:not([multiple]),
+  .fused-select[size="1"]:not([multiple]) {
+    appearance: auto;
+    -webkit-appearance: auto;
+    background-image: none;
+  }
+}
+
+
+/* One searchable presentation is shared by the dashboard and Go-rendered forms. */
+.fused-select[hidden],.fused-select-menu[hidden],.fused-select-empty[hidden]{display:none}
+.fused-select-host{display:contents}
+.fused-searchable-select{position:relative;display:block;min-width:0;width:100%}
+.fused-searchable-select>input{box-sizing:border-box;width:100%;cursor:text}
+.fused-select-menu{position:absolute;z-index:30;top:calc(100% + .375rem);left:0;right:0;background:#fff;border:1px solid #cbd5e1;border-radius:.5rem;padding:.25rem;box-shadow:0 6px 18px rgba(21,18,28,.1);max-height:15rem;overflow-y:auto}
+.fused-select-menu ul{list-style:none;padding:0;margin:0}
+.fused-select-menu [role=option]{padding:.625rem .75rem;border-radius:.25rem;font-size:.875rem;line-height:1.25rem;cursor:pointer;overflow-wrap:anywhere;color:#334155}
+.fused-select-menu [role=option][aria-selected=true]{background:#f2edff;color:#493289}
+.fused-select-menu [role=option][aria-disabled=true]{opacity:.5;cursor:not-allowed}
+.fused-select-empty{padding:.625rem .75rem;margin:0;color:#64748b;font-size:.875rem}

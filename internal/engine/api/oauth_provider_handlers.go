@@ -302,6 +302,7 @@ func oauthConsentFailureMessage(err error) string {
 // -- Consent page rendering (server-rendered, mirrors connect_input_handlers.go) --
 
 type oauthConsentPage struct {
+	Runtime             *runtimeConsentPage
 	MCP                 *mcpOAuthConsentPage
 	PickerScript        template.JS
 	Branding            hostedConnectBranding
@@ -323,13 +324,26 @@ var oauthConsentTemplate = parseHostedConnectTemplate("oauth-consent", `<!doctyp
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Authorize {{.ClientName}} · {{.Branding.DisplayName}}</title>
   {{template "hosted-connect-shell-style"}}
-  <style>`+branding.OAuthConsentStyles+`</style>
+  <style>`+branding.SelectStyles+branding.OAuthConsentStyles+`</style>
 </head>
-<body><main class="oauth-consent" style="--connect-accent:{{.Branding.PrimaryColor}};--connect-accent-foreground:{{.Branding.AccentForeground}}">
+<body><main class="oauth-consent{{if .Runtime}} oauth-runtime{{end}}" style="--connect-accent:{{.Branding.PrimaryColor}};--connect-accent-foreground:{{.Branding.AccentForeground}}">
   <header class="connect-brand">{{if .Branding.LogoURL}}<img class="connect-logo" src="{{.Branding.LogoURL}}" width="48" height="48" alt="" referrerpolicy="no-referrer">{{end}}<span>{{.Branding.DisplayName}}</span></header>
   {{/* Runtime consent names the server; management consent retains its permission summary. */}}
   {{if .MCP}}<p class="connect-eyebrow">Connect MCP server</p><h1>Allow {{.ClientName}} to use {{.MCP.Name}}?</h1>
   <p class="connect-copy">Choose the actions this connection can perform. New actions added later will need your approval.</p>
+  {{else if .Runtime}}
+  <p class="connect-eyebrow">Application permissions</p>
+  <h1>Connect {{.Runtime.Name}}?</h1>
+  <p class="oauth-release">Version {{.Runtime.Version}} <span aria-hidden="true">·</span> Requested by {{.ClientName}}</p>
+  <section class="oauth-access" aria-labelledby="runtime-access-title">
+    <h2 id="runtime-access-title">Integration access</h2>
+    <p class="oauth-section-copy">This app can use only the operations listed below.</p>
+    <ul class="oauth-integration-list">{{range $name, $service := .Runtime.Services}}
+      <li class="oauth-integration"><div class="oauth-integration-heading"><strong>{{$name}}</strong><span class="oauth-version">{{$service.Version}}</span></div>
+      <ul class="oauth-operation-chips" aria-label="Allowed operations">{{range $service.Operations}}<li><code>{{.}}</code></li>{{end}}</ul></li>
+    {{end}}</ul>
+  </section>
+  {{if .Runtime.Management}}<section class="oauth-deployment" aria-labelledby="runtime-deployment-title"><span class="oauth-permission-icon" aria-hidden="true">↗</span><div><h2 id="runtime-deployment-title">Manage this app’s releases</h2><p>The controller can publish versions and issue execution credentials for this application only.</p><p class="oauth-boundary">New integrations, provider versions, operations or buckets require your approval.</p></div></section>{{end}}
   {{else}}<p class="connect-eyebrow">Authorize application</p>
   <h1>{{.ClientName}} wants to access your account</h1>
   <p class="connect-copy">This application will be able to:</p>
@@ -341,6 +355,29 @@ var oauthConsentTemplate = parseHostedConnectTemplate("oauth-consent", `<!doctyp
     <input type="hidden" name="state" value="{{.State}}">
     <input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
     <input type="hidden" name="code_challenge_method" value="{{.CodeChallengeMethod}}">
+    {{if .Runtime}}
+    <input type="hidden" name="manifest_digest" value="{{.Runtime.Digest}}">
+    <section class="oauth-credentials" aria-labelledby="runtime-credentials-title">
+      <h2 id="runtime-credentials-title">Credentials</h2>
+      {{/* Caller-selected credentials are reviewed as fixed scope, not silently reselected. */}}
+      {{if .Runtime.FixedBucket}}
+      <p class="oauth-section-copy">This app will use the credentials selected in the requesting application.</p>
+      <p class="oauth-field-label">Credential bucket</p>
+      <div class="oauth-fixed-bucket"><strong>{{.Runtime.FixedBucket.Name}}</strong><span>Selected by the app</span></div>
+      <input type="hidden" name="bucket" value="{{.Runtime.FixedBucket.ID}}">
+      {{else}}
+      <p class="oauth-section-copy">Choose the saved credentials this app can use.</p>
+      <label class="oauth-field-label" for="runtime-default-bucket">Default credential bucket</label>
+      <select id="runtime-default-bucket" class="fused-select" name="bucket" required data-searchable data-search-placeholder="Search buckets…" aria-describedby="runtime-bucket-help"><option value="">Choose a bucket</option>{{range .Runtime.Buckets}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select>
+      {{/* A single available bucket needs no duplicate optional checkbox. */}}
+      {{if gt (len .Runtime.Buckets) 1}}
+      <p id="runtime-bucket-help" class="oauth-hint">The default bucket is included automatically.</p>
+      <details class="oauth-extra-buckets"><summary>Allow additional buckets <span>Optional</span></summary><fieldset><legend class="oauth-hint">Select any other buckets this app may use.</legend>{{range .Runtime.Buckets}}<label class="oauth-bucket-option"><input type="checkbox" name="runtime_bucket" value="{{.ID}}"><span>{{.Name}}</span></label>{{end}}</fieldset></details>
+      {{else}}<p id="runtime-bucket-help" class="oauth-hint">Only this bucket will be available to the app.</p>{{end}}
+      {{end}}
+    </section>
+    <p class="oauth-privacy"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><span>Credentials stay in Fused. You can revoke access anytime in Connected apps.</span></p>
+    {{end}}
     {{/* Only MCP grants carry exact server identity and selectable service/action authority. */}}
     {{if .MCP}}
     <input type="hidden" name="resource" value="{{.MCP.Resource}}"><input type="hidden" name="app_id" value="{{.MCP.AppID}}">
@@ -370,13 +407,13 @@ var oauthConsentTemplate = parseHostedConnectTemplate("oauth-consent", `<!doctyp
     <p class="oauth-hint">You can disconnect this application from Fused’s Connected apps page. Provider credentials stay in Fused.</p>
     {{end}}
     <div class="oauth-actions">
-      <button class="oauth-deny" type="submit" name="decision" value="deny">Deny</button>
+      <button class="oauth-deny" type="submit" name="decision" value="deny" formnovalidate>Deny</button>
       <button class="oauth-allow" type="submit" name="decision" value="allow">{{if .MCP}}Allow selected actions{{else}}Allow{{end}}</button>
     </div>
   </form>
 </main>
-{{/* Only the MCP picker needs the fixed, CSP-hashed progressive enhancement. */}}
-{{if .MCP}}<script>{{.PickerScript}}</script>{{end}}
+{{/* Runtime and MCP pickers share the fixed, CSP-hashed progressive enhancement. */}}
+{{if or .MCP .Runtime}}<script type="module">{{.PickerScript}}</script>{{end}}
 </body></html>`)
 
 // Pin the compiled asset bytes rather than allowing arbitrary inline consent-page scripts.
@@ -384,7 +421,7 @@ var oauthConsentScriptDigest = sha256.Sum256([]byte(branding.OAuthConsentScript)
 var oauthConsentScriptHash = base64.StdEncoding.EncodeToString(oauthConsentScriptDigest[:])
 
 // renderOAuthConsentPage shares branding, security headers, protocol fields, and the page shell across both consent policies.
-func renderOAuthConsentPage(w http.ResponseWriter, r *http.Request, s store.Store, result oauthprovider.AuthorizeResult, req oauthprovider.AuthorizeRequest, mcp *mcpOAuthConsentPage) {
+func renderOAuthConsentPage(w http.ResponseWriter, r *http.Request, s store.Store, result oauthprovider.AuthorizeResult, req oauthprovider.AuthorizeRequest, mcp *mcpOAuthConsentPage, runtime ...*runtimeConsentPage) {
 	pageBranding := loadHostedConnectBranding(r.Context(), s)
 	labels := make([]string, 0, len(result.Scope))
 	// Display only the protocol-validated scope labels.
@@ -397,15 +434,22 @@ func renderOAuthConsentPage(w http.ResponseWriter, r *http.Request, s store.Stor
 		Scope: strings.Join(result.Scope, " "), State: req.State,
 		CodeChallenge: req.CodeChallenge, CodeChallengeMethod: req.CodeChallengeMethod,
 	}
+	// Runtime consent uses the shared shell but its own manifest-bound issuer.
+	if len(runtime) > 0 && runtime[0] != nil {
+		page.Runtime = runtime[0]
+		page.FormAction = "/oauth/runtime/authorize/consent"
+	}
 	// MCP consent submits to its isolated issuer while sharing every browser-facing protocol field.
 	if mcp != nil {
 		page.FormAction = "/mcp/oauth/consent"
-		// Only the compiled asset is trusted as JavaScript, preserving its exact CSP hash after template escaping.
+	}
+	// Only the compiled asset can enhance runtime and MCP pickers, preserving the exact CSP hash.
+	if mcp != nil || page.Runtime != nil {
 		page.PickerScript = template.JS(branding.OAuthConsentScript)
 	}
 	writeConnectInputSecurityHeaders(w, "", pageBranding.LogoOrigin)
 	// Admit only the compiled picker script; all other scripts and external connections remain blocked.
-	if mcp != nil {
+	if mcp != nil || page.Runtime != nil {
 		w.Header().Set("Content-Security-Policy", w.Header().Get("Content-Security-Policy")+"; script-src 'sha256-"+oauthConsentScriptHash+"'")
 	}
 	// Native form POSTs need a real Origin for CSRF validation; cross-origin referrers still stay private.

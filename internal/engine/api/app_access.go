@@ -165,9 +165,17 @@ func plannedAppID(plan *store.ConfigPlan, current *store.ConfigState) *uuid.UUID
 		return id
 	}
 	var payload struct {
-		AppID uuid.UUID `json:"app_id"`
+		AppID              uuid.UUID `json:"app_id"`
+		AuthorizationAppID uuid.UUID `json:"authorization_app_id"`
 	}
-	if plan == nil || json.Unmarshal(plan.ResolvedPayload, &payload) != nil || payload.AppID == uuid.Nil {
+	if plan == nil || json.Unmarshal(plan.ResolvedPayload, &payload) != nil {
+		return nil
+	}
+	// A deployment's permission anchor is separate from the newly allocated immutable version.
+	if payload.AuthorizationAppID != uuid.Nil {
+		return &payload.AuthorizationAppID
+	}
+	if payload.AppID == uuid.Nil {
 		return nil
 	}
 	// Restored definitions have no config state yet, so the plan payload is the

@@ -157,7 +157,7 @@ func (v *CachedTokenValidator) Validate(ctx context.Context, appID uuid.UUID, to
 
 	key := tokenCacheKey{appID: appID, tokenDigest: digestToken(token)}
 	// OAuth disconnect, refresh expiry, and RBAC changes must apply on the next execution.
-	if strings.HasPrefix(token, "foat_") {
+	if strings.HasPrefix(token, "foat_") || strings.HasPrefix(token, "frt_") {
 		identity, _, err := v.load(ctx, key)
 		span.SetAttributes(attribute.String(tokenCacheResultAttribute, string(tokenCacheResultBypass)))
 		return identity, err
