@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,7 +13,9 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/oauthprovider"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/ui/branding"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
 )
 
 type mcpAudienceFixture struct {
@@ -98,23 +99,29 @@ func TestMCPConsentBindingRejectsForeignAccount(t *testing.T) {
 	}
 }
 
-// TestMCPConsentRendering checks escaped action labels, unselected defaults, and an account picker with no credential values.
+// TestMCPConsentRendering allows only the compiled picker script while checking escaped labels and explicit action/account consent.
 func TestMCPConsentRendering(t *testing.T) {
 	page := mcpOAuthConsentPage{Name: "Customer support", Resource: "https://engine.example/mcp/" + uuid.NewString(), AppID: uuid.NewString(), Services: []mcpOAuthServiceChoice{{Index: 0, Name: "Gmail", Connected: true, Operations: []string{"Read messages", "Send email <script>"}, Connections: []store.OAuthMCPConnectionChoice{{Value: "opaque", Label: "Support inbox"}}}, {Index: 1, Name: "Jira", Operations: []string{"Search issues", "Create issue"}}}}
-	var output bytes.Buffer
-	// Template failures must not be mistaken for a safe but empty consent view.
-	if err := oauthConsentTemplate.Execute(&output, oauthConsentPage{MCP: &page, Branding: hostedConnectBranding{ConnectBranding: store.DefaultConnectBranding()}, ClientName: "Claude", FormAction: "/mcp/oauth/consent", ClientID: "client", CodeChallengeMethod: "S256"}); err != nil {
-		t.Fatal(err)
-	}
-	html := output.String()
-	// Labels must remain escaped, and no action may be pre-approved.
-	if strings.Contains(html, "<script>") || strings.Contains(html, " checked") || !strings.Contains(html, `<select id="account_0"`) || !strings.Contains(html, "Support inbox") {
-		t.Fatal("unsafe or incomplete consent form")
-	}
+	response := httptest.NewRecorder()
+	// Use the production renderer so the test includes the actual script and response security policy.
+	renderOAuthConsentPage(response, httptest.NewRequest(http.MethodGet, "/mcp/oauth/authorize", nil), &mcpConsentHTTPStore{},
+		oauthprovider.AuthorizeResult{Client: store.OAuthClient{Name: "Claude"}},
+		oauthprovider.AuthorizeRequest{ClientID: "client", CodeChallengeMethod: "S256"}, &page)
+	html := response.Body.String()
+	require.Equal(t, http.StatusOK, response.Code)
+	// Search is trusted code, but an operation label must never introduce another executable script.
+	require.Equal(t, 1, strings.Count(html, "<script>"))
+	require.Contains(t, html, "<script>"+branding.OAuthConsentScript+"</script>")
+	require.Contains(t, html, "Send email &lt;script&gt;")
+	// Check native input attributes rather than matching JavaScript variables such as `const checked`.
+	require.NotRegexp(t, `<input\b[^>]*\schecked(?:\s|=|>)`, html)
+	require.Contains(t, html, `<form method="post" action="/mcp/oauth/consent">`)
+	require.Contains(t, html, `<select id="account_0"`)
+	require.Contains(t, html, "Support inbox")
 	// An opt-in temporary preview supports real browser layout checks without committing generated HTML.
 	if path := os.Getenv("FUSED_MCP_CONSENT_PREVIEW"); path != "" {
 		// An explicitly requested preview must contain the same bytes asserted above.
-		if err := os.WriteFile(path, output.Bytes(), 0600); err != nil {
+		if err := os.WriteFile(path, response.Body.Bytes(), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
