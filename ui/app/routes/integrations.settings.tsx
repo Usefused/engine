@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Link, useSearchParams, type MetaFunction } from "@remix-run/react";
+import { useSearchParams, type MetaFunction } from "@remix-run/react";
 
 export const meta: MetaFunction = ({ matches }) => {
   const parentMeta = matches
@@ -11,14 +11,11 @@ export const meta: MetaFunction = ({ matches }) => {
   ];
 };
 import { BillingSettings } from "~/components/settings/BillingSettings";
-import { Settings } from "lucide-react";
-import { CataloguePageHeader } from "~/components/layout/CataloguePageHeader";
 import { api, Account } from "~/lib/api";
 import { useToast } from "~/components/Toast";
 import { ConnectBrandingCard } from "~/components/settings/ConnectBrandingCard";
 import { ManagedAuthCard } from "~/components/settings/ManagedAuthCard";
-import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
-import { hasWorkspacePermission } from "~/lib/current-actor-access";
+import { SettingsLayout, settingsSection } from "~/components/settings/SettingsLayout";
 import { SettingsDisclosureCard } from "~/components/settings/SettingsDisclosureCard";
 
 // readEngineEndpoints resolves the operator's public Engine addresses from the browser runtime.
@@ -35,32 +32,11 @@ function displayEndpoint(value: string, emptyLabel: string) {
   return value || emptyLabel;
 }
 
-const SETTINGS_TABS = [
-  { id: "general", label: "General" },
-  { id: "billing", label: "Billing" },
-  { id: "branding", label: "Connection branding" },
-  { id: "managed-auth", label: "Managed auth" },
-  { id: "api-key", label: "API key" },
-];
-
-// Resolve section links independently so malformed URLs cannot hide every settings panel.
-function settingsSection(requested: string | null) {
-  // General retains the account and endpoints entry point for absent or unknown sections.
-  return SETTINGS_TABS.find((tab) => tab.id === requested)?.id ?? "general";
-}
-
 // SettingsPage preserves settings drafts across linkable sections while keeping generated credentials out of agent context.
 export default function SettingsPage() {
-  const { access } = useCurrentActorAccess();
   const toast = useToast();
   const [searchParams] = useSearchParams();
   const activeTab = settingsSection(searchParams.get("tab"));
-  // Keep unrelated URL state intact so tab navigation composes with workspace links.
-  const tabs = SETTINGS_TABS.map(({ id, label }) => {
-    const params = new URLSearchParams(searchParams);
-    params.set("tab", id);
-    return { label, to: `?${params.toString()}`, selected: activeTab === id };
-  });
   const [account, setAccount] = useState<Account | null>(null);
   const [email, setEmail] = useState("");
   const [savingEmail, setSavingEmail] = useState(false);
@@ -126,19 +102,11 @@ export default function SettingsPage() {
   }
 
   return (
-    <div className="min-w-0 space-y-6">
-      <CataloguePageHeader title="Settings" icon={Settings} description="Manage your account, connections, and API credentials." />
-      <nav aria-label="Settings sections" className="fused-tabs-scroll gap-2 border-b border-slate-200 pb-3">
-        {/* Match Apps' filled selected tab while keeping narrow screens horizontally scrollable while retaining linkable settings sections. */}
-        {tabs.map((tab) => <Link key={tab.to} to={tab.to} aria-current={tab.selected ? "page" : undefined} className={`rounded-lg px-4 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-950 ${tab.selected ? "bg-slate-950 text-white" : "text-slate-600 hover:bg-slate-100"}`}>{tab.label}</Link>)}
-        {/* OAuth registration is an administrative setting and retains its existing read permission. */}
-        {hasWorkspacePermission(access, "access.read") && <Link to="/integrations/settings/advanced" className="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-950">Advanced</Link>}
-      </nav>
-
+    <SettingsLayout activeSection={activeTab}>
       <section aria-label="Billing settings" hidden={activeTab !== "billing"}><BillingSettings active={activeTab === "billing"} /></section>
       {/* Keep inactive sections mounted so navigation cannot discard drafts or a newly generated key. */}
       <section aria-label="General settings" hidden={activeTab !== "general"}>
-      <div className="max-w-2xl space-y-6">
+      <div className="min-w-0 w-full space-y-6">
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="p-6">
           <h2 className="text-lg font-semibold text-slate-900">
@@ -273,10 +241,10 @@ export default function SettingsPage() {
         <ConnectBrandingCard defaultExpanded />
       </section>
       <section aria-label="Managed auth settings" hidden={activeTab !== "managed-auth"}>
-        <div className="max-w-2xl"><ManagedAuthCard /></div>
+        <div className="min-w-0 w-full"><ManagedAuthCard /></div>
       </section>
       <section aria-label="API key settings" hidden={activeTab !== "api-key"}>
-      <div className="max-w-2xl">
+      <div className="min-w-0 w-full">
       <SettingsDisclosureCard
         id="api-key-management-settings"
         defaultExpanded
@@ -359,6 +327,6 @@ export default function SettingsPage() {
       </SettingsDisclosureCard>
       </div>
       </section>
-    </div>
+    </SettingsLayout>
   );
 }

@@ -189,10 +189,10 @@ function planLimitLabel(value: number | boolean | string | undefined): string {
  return String(value ?? "Unavailable");
 }
 
-// BillingSettings integrates the account controls into Engine's existing settings layout without accepting credentials.
+// BillingSettings fills the shared settings content width while retaining its existing account controls.
 export function BillingSettings({ active }: { active: boolean }) {
  const controls = useBilling(active);
- return <div className="max-w-3xl space-y-6"><CurrentSubscription {...controls}/><PlanSettings {...controls}/></div>;
+ return <div className="min-w-0 w-full space-y-6"><CurrentSubscription {...controls}/><PlanSettings {...controls}/></div>;
 }
 
 // billingPlanName keeps an unloaded account distinct from an unknown or negotiated plan.

@@ -6,6 +6,7 @@ import { KeyRound, Plus, Ban, X } from "lucide-react";
 import { useToast } from "~/components/Toast";
 import { WorkspacePermissionGate, useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
+import { SettingsLayout } from "~/components/settings/SettingsLayout";
 import {
   createOAuthClient,
   listOAuthClients,
@@ -19,16 +20,16 @@ import {
 /** Identify the advanced registration page independently of personal authorizations. */
 export const meta: MetaFunction = () => [{ title: "OAuth Clients - Fused" }];
 
-/** Place client registration under advanced settings without changing its permission boundary. */
+/** Keep client registration inside the advanced settings shell and its existing permission boundary. */
 export default function OAuthClientsPage() {
   const { access } = useCurrentActorAccess();
   return (
-    <>
+    <SettingsLayout activeSection="advanced">
       <Link to="/integrations/settings/advanced" className="mb-5 inline-flex min-h-11 items-center text-sm font-medium text-slate-600 hover:text-slate-900">← Advanced settings</Link>
       <WorkspacePermissionGate permission="access.read" area="OAuth client registrations">
         <OAuthClientsManager canManage={hasWorkspacePermission(access, "access.manage")} />
       </WorkspacePermissionGate>
-    </>
+    </SettingsLayout>
   );
 }
 
