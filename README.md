@@ -2,9 +2,9 @@
 
 # Fused
 
-**The simplification of integration.**
+**Fused - Connect Your APIs Once, Use Everywhere**
 
-Build and deliver integrations faster, from a single service call to complex workflows for your applications and agents. Connect to internal and external services through typed SDKs, a direct API, or MCP servers, with credentials, access policies, retries, and execution records handled by Fused.
+Bring internal, partner, and third-party APIs into Fused. Reuse integrations across projects, teams, and AI agents while staying in control of who can access what. Developers can use a typed SDK, call a REST API, or expose selected operations through an MCP server.
 
 **[Documentation](https://usefused.com/docs)** ·
 [Quickstart](https://usefused.com/docs/quickstart) ·
@@ -13,7 +13,7 @@ Build and deliver integrations faster, from a single service call to complex wor
 ## How it works
 
 - **Registry** turns API descriptions into versioned service contracts.
-- **Fused** runs approved operations in your workspace and manages provider credentials.
+- **Fused Engine** runs approved operations in your workspace and manages provider credentials.
 - **CLI** configures workspaces, SDKs, and MCP servers through a reviewed `plan` → `apply` workflow.
 
 ## Install and start
