@@ -1,20 +1,20 @@
 <a id="fused-engine"></a>
 
-# Fused Engine
+# <img src=".github/readme/engine.svg" width="30" height="30" alt=""> Fused Engine
 
 **Fused - Connect Your APIs Once, Use Everywhere**
 
 Bring internal, partner, and third-party APIs into Fused. Your teams, apps, and AI agents can reuse those integrations while you stay in control of who can access what.
 
-[🚀 Run locally](#install-and-start) · [🔌 Connect an app or agent](#create-an-integration-interface) · [📖 Documentation](https://usefused.com/docs) · [☁️ Fused Cloud](https://usefused.com/docs/deploy-an-engine)
+[Run locally](#install-and-start) · [Connect an app or agent](#create-an-integration-interface) · [Documentation](https://usefused.com/docs) · [Fused Cloud](https://usefused.com/docs/deploy-an-engine)
 
 ## How it works
 
-| | Component | What it does |
-| --- | --- | --- |
-| 📚 | **Registry** | Describes the operations and authentication requirements for each API version. |
-| ⚙️ | **Engine** | Checks permissions, resolves credentials, runs the API call, and records the result. |
-| ⌨️ | **[CLI](https://github.com/Usefused/cli)** | Lets developers select operations, review changes, and publish apps from their terminal. |
+| Component | What it does |
+| --- | --- |
+| **Registry** | Describes the operations and authentication requirements for each API version. |
+| **Engine** | Checks permissions, resolves credentials, runs the API call, and records the result. |
+| **[CLI](https://github.com/Usefused/cli)** | Lets developers select operations, review changes, and publish apps from their terminal. |
 
 ## Install and start
 
@@ -66,11 +66,11 @@ fused-cli whoami
 
 Choose how your app or agent will use Linear. Each command lets you select operations and review the configuration before setup.
 
-| To use Linear from… | Run | Guide |
+| Client | Run | Guide |
 | --- | --- | --- |
-| 💻 **Application code** | `fused-cli init support-sdk --sdk --service linear` | [Typed SDK](https://usefused.com/docs/quickstart) |
-| 🤖 **An AI agent** | `fused-cli init support-mcp --mcp --service linear` | [MCP server](https://usefused.com/docs/mcp/deploy-a-server) |
-| 🌐 **An HTTP client** | `fused-cli init support-api --api --service linear` | [REST API](https://usefused.com/docs/app/testing/over-rest) |
+| **Application code** | `fused-cli init support-sdk --sdk --service linear` | [Typed SDK](https://usefused.com/docs/quickstart) |
+| **An AI agent** | `fused-cli init support-mcp --mcp --service linear` | [MCP server](https://usefused.com/docs/mcp/deploy-a-server) |
+| **An HTTP client** | `fused-cli init support-api --api --service linear` | [REST API](https://usefused.com/docs/app/testing/over-rest) |
 
 Omit the mode flag to choose interactively. To inspect the callable schema for an SDK version, see the [per-version OpenAPI export](docs/app-execution-rest.md#export-an-openapi-document).
 
