@@ -19,6 +19,9 @@ export const DEFAULT_EXECUTE_LIMITS: ExecuteLimits = {
   maxCalls: 10,
 };
 
+// Only the host serialization boundary can issue this marker.
+const SERIALIZATION_TIMEOUT = Symbol("serialization timeout");
+
 const PHYSICAL_PAGINATION_CORRECTION = "Use {pagination:{maxPages:N}} only when search_docs exact operationId detail reports pagination.caller_bound_supported=true for this operation; otherwise omit the third argument and use call(operationId, params). Never reuse another operation's bound.";
 
 /** Exposes only admitted text so no caller can accidentally serialize an untrusted result again. */
@@ -160,7 +163,9 @@ export async function runExecute(
     // Error formatting must not leave callbacks or provider requests running in the background.
     invocation.close();
     const authAction = executeAuthAction(err, callHistory);
-    return { ...serializeExecuteError(err, deadline, limits.timeoutMs, outputBudget, callHistory), delivery: "error", access, outputBudgetBytes: outputBudget, executionOutcome: invocation.outcome(true), ...(authAction ? { authAction } : {}) };
+    const formatted = serializeExecuteError(err, deadline, limits.timeoutMs, outputBudget, callHistory);
+    // Native VM interruption can precede the wall-clock check used for ordinary script failures.
+    return { ...formatted, delivery: "error", access, outputBudgetBytes: outputBudget, executionOutcome: formatted.executionOutcome ?? invocation.outcome(true), ...(authAction ? { authAction } : {}) };
   } finally {
     invocation.close();
   }
@@ -181,26 +186,43 @@ function withinSerializationDeadline<T extends SerializedJsonOutput>(serialize: 
   const remainingMs = deadline - Date.now();
   // An exhausted execution cannot acquire another timeout window while formatting its result.
   if (remainingMs <= 0) {
-    throw new Error("execute serialization deadline exceeded");
+    throw SERIALIZATION_TIMEOUT;
   }
   const context = vm.createContext({ serialize });
-  return new vm.Script("serialize()", { filename: "execute-output.js" }).runInContext(context, { timeout: remainingMs }) as T;
+  // Return hook exceptions as data so only the VM itself can throw into the host timeout check.
+  const script = new vm.Script("try { ({ value: serialize() }) } catch (error) { ({ error }) }", { filename: "execute-output.js" });
+  let result: { value: T } | { error: unknown };
+  try {
+    result = script.runInContext(context, { timeout: remainingMs, displayErrors: false });
+  } catch (vmError) {
+    // Node's watchdog runs independently of Date.now() and is authoritative when it interrupts execution.
+    if ((vmError as NodeJS.ErrnoException).code === "ERR_SCRIPT_EXECUTION_TIMEOUT") throw SERIALIZATION_TIMEOUT;
+    throw vmError;
+  }
+  // Preserve ordinary exceptions without inspecting the thrown value or invoking more user code.
+  if ("error" in result) throw result.error;
+  return result.value;
 }
 
 /** Renders hostile error hooks inside the deadline and honors smaller client output budgets. */
-function serializeExecuteError(error: unknown, deadline: number, timeoutMs: number, maxBytes: number, callHistory: CallExecutionHistory): SerializedJsonOutput {
+function serializeExecuteError(error: unknown, deadline: number, timeoutMs: number, maxBytes: number, callHistory: CallExecutionHistory): SerializedJsonOutput & { executionOutcome?: "timed_out" } {
   try {
+    // A result hook already used the available VM budget; skip formatting the host marker.
+    if (error === SERIALIZATION_TIMEOUT) throw error;
     return withinSerializationDeadline(() => boundedExecuteError(error, describeError(error), maxBytes, callHistory), deadline);
-  } catch {
-    // Failure to render an error must never recurse through its getters or toString outside the VM.
-    const timedOut = Date.now() >= deadline;
+  } catch (failure) {
+    // Compare by identity so even a proxy thrown from a formatting hook stays opaque here.
+    const timedOut = failure === SERIALIZATION_TIMEOUT || Date.now() >= deadline;
+    const code = timedOut ? "MCP_EXECUTE_TIMEOUT" : "MCP_EXECUTE_ERROR_SERIALIZATION_FAILED";
     return {
       text: JSON.stringify({
-        code: timedOut ? "MCP_EXECUTE_TIMEOUT" : "MCP_EXECUTE_ERROR_SERIALIZATION_FAILED",
+        code,
         message: timedOut ? `execute timed out after ${timeoutMs}ms` : "execute error could not be rendered safely",
-        ...recoveryForError(timedOut ? "MCP_EXECUTE_TIMEOUT:" : "MCP_EXECUTE_ERROR_SERIALIZATION_FAILED:"),
+        ...recoveryForError(`${code}:`),
       }),
       isError: true,
+      // Keep audit status consistent with a VM timeout even if the wall clock has not advanced.
+      executionOutcome: timedOut ? "timed_out" : undefined,
     };
   }
 }

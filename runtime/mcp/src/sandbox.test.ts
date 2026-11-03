@@ -443,18 +443,36 @@ describe("runExecute -- bounded output", () => {
     }
   }, 2000);
 
+  // Freeze only the host clock so a native VM interrupt cannot be inferred from elapsed wall time.
   it("keeps thrown message getters and toString hooks inside the execute deadline", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now());
     const limits: ExecuteLimits = { timeoutMs: 25, maxCalls: 10 };
-    const scripts = [
-      "throw { get message() { while (true) {} } };",
-      "throw { toString() { while (true) {} } };",
-    ];
-    for (const script of scripts) {
-      const outcome = await runExecute(script, testCallOptions, new SessionState(), limits);
-      expect(outcome.isError).toBe(true);
-      expect(JSON.parse(outcome.text).code).toBe("MCP_EXECUTE_TIMEOUT");
+    try {
+      // Both ways of describing a thrown value must honor the same VM timeout.
+      for (const script of [
+        "throw { get message() { while (true) {} } };",
+        "throw { toString() { while (true) {} } };",
+      ]) {
+        const outcome = await runExecute(script, testCallOptions, new SessionState(), limits);
+        expect(errorValue(outcome).code).toBe("MCP_EXECUTE_TIMEOUT");
+        expect(outcome.executionOutcome).toBe("timed_out");
+      }
+    } finally {
+      clock.mockRestore();
     }
   }, 2000);
+
+  // A hook can forge Node's timeout code or trap property reads on its error.
+  it("keeps a thrown formatting error separate from a VM interrupt", async () => {
+    const script = `throw { get message() {
+      throw new Proxy({ code: "ERR_SCRIPT_EXECUTION_TIMEOUT" }, {
+        get() { throw new Error("formatting error was inspected"); }
+      });
+    } };`;
+    const outcome = await runExecute(script, testCallOptions, new SessionState());
+    expect(errorValue(outcome).code).toBe("MCP_EXECUTE_ERROR_SERIALIZATION_FAILED");
+    expect(outcome.executionOutcome).toBe("failed");
+  });
 
   it("uses trusted JSON despite script-side serializer replacement", async () => {
     const outcome = await runExecute(
