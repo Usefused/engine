@@ -1,0 +1,35 @@
+name: Runtime SDK
+on:
+  pull_request:
+    paths: ['runtime/sdk/**', 'proto/engine/v1/engine.proto', '.github/workflows/runtime-sdk.yml']
+  push:
+    branches: [main]
+    paths: ['runtime/sdk/**', 'proto/engine/v1/engine.proto', '.github/workflows/runtime-sdk.yml']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+          cache: npm
+          cache-dependency-path: runtime/sdk/package-lock.json
+      - run: npm ci
+        working-directory: runtime/sdk
+      - run: npm test && npm run pack
+        working-directory: runtime/sdk
+      # A clean install catches missing protocol/types and accidental repository-relative dependencies.
+      - name: Verify standalone package
+        run: |
+          mkdir -p "$RUNNER_TEMP/runtime-consumer"
+          cd "$RUNNER_TEMP/runtime-consumer"
+          npm init -y
+          npm install "$GITHUB_WORKSPACE/runtime/sdk/dist/package/"*.tgz
+          node --input-type=module -e 'import { EngineTransport } from "@fused/runtime"; if (typeof EngineTransport !== "function") throw new Error("Missing runtime export");'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fused-runtime
+          path: runtime/sdk/dist/package/

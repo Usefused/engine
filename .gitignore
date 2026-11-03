@@ -20,6 +20,8 @@ data/
 .DS_Store
 runtime/mcp/dist/**
 runtime/execution/dist/**
+runtime/sdk/node_modules/
+runtime/sdk/dist/
 
 # Locally built agent archives are release artifacts, not source inputs.
 /agent-release/
