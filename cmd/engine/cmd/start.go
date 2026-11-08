@@ -184,6 +184,11 @@ func runEngine(cmd *cobra.Command) {
 	}
 
 	entitlement, authorizationRevision, managedAuthBrokerURL := bootstrapRegistryIdentity(ctx, engineStore, registryClient, envLicense)
+	// Private authoring is upgraded before HTTP or workers can expose an older split-source view.
+	if err := runUnifiedAppSourceMigration(ctx, postgresStore); err != nil {
+		slog.ErrorContext(ctx, "FATAL: Unified App source migration failed", slog.String("error_code", "unified_app_source_migration_failed"))
+		os.Exit(1)
+	}
 	// Load the persisted entitlement into the in-memory cache so runtime limit checks
 	// (sandbox concurrency, bucket creation, service limits) read from memory instead
 	// of the database on every request.
@@ -379,6 +384,22 @@ func runLegacyConnectConfigCutover(ctx context.Context, repository store.Store, 
 		attribute.Int("batch_count", result.BatchCount),
 		attribute.Bool("already_done", result.AlreadyDone),
 	)
+	return nil
+}
+
+// runUnifiedAppSourceMigration upgrades saved editor source while preserving compiled immutable versions.
+func runUnifiedAppSourceMigration(ctx context.Context, repository store.Store) error {
+	migrator, ok := repository.(store.UnifiedAppSourceMigrationStore)
+	// Every production store must support the migration before serving private app source.
+	if !ok {
+		return errors.New("Unified App source migration is unavailable")
+	}
+	result, err := migrator.MigrateUnifiedAppSources(ctx)
+	// Startup reports counts only; neither source, config values, nor app identities enter logs.
+	if err != nil {
+		return err
+	}
+	slog.InfoContext(ctx, "Unified App source migration complete", slog.Int("migrated", result.MigratedRows), slog.Int("already_owned", result.AlreadyOwned), slog.Int("skipped", result.SkippedRows))
 	return nil
 }
 

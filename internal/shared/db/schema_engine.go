@@ -1009,6 +1009,8 @@ func engineSchemaQueries() []string {
 				 (owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1)
 			)
 		);`,
+		// Startup source migration records progress per app without changing its immutable runtime or plan hash.
+		`ALTER TABLE fused_config_states ADD COLUMN IF NOT EXISTS unified_source_migrated_at timestamptz;`,
 		// Live config state must admit the same distinct hosted App kind as a fresh database.
 		`ALTER TABLE fused_config_states DROP CONSTRAINT IF EXISTS fused_config_states_config_type_check;
 		ALTER TABLE fused_config_states ADD CONSTRAINT fused_config_states_config_type_check CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'unified_app', 'webhook'));
