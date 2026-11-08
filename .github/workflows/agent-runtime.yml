@@ -11,7 +11,8 @@ jobs:
         include:
           - {os: ubuntu-latest, target: linux-amd64}
           - {os: ubuntu-24.04-arm, target: linux-arm64}
-          - {os: macos-14, target: darwin-arm64}
+          # GitHub schedules the standard macOS 15 label on arm64; macOS 14 is no longer available for this job.
+          - {os: macos-15, target: darwin-arm64}
           - {os: windows-latest, target: windows-amd64}
     env:
       FUSED_AGENT_GATEWAY_URL: https://registry.invalid/agent/v1
