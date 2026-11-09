@@ -422,8 +422,3 @@ func positionalItemClosers(items []any, depth int) []io.Closer {
 	}
 	return closers
 }
-
-func positionalMultipartMediaType(value string) bool {
-	mediaType, _, err := mime.ParseMediaType(value)
-	return err == nil && strings.HasPrefix(strings.ToLower(mediaType), "multipart/")
-}

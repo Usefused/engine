@@ -18,7 +18,7 @@ WORKDIR /app
 # Node remains part of the runtime because MCP sessions execute in isolated
 # processes. GoReleaser builds the bundled MCP runtime before compiling the Go
 # binary, so containers never install dependencies into tenant storage.
-RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates gosu nats-server tini && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates gosu tini && rm -rf /var/lib/apt/lists/*
 
 # GoReleaser copies the selected binary to the root context. Headless release
 # images pass ENGINE_BINARY=fused-engine-headless but keep /app/fused-engine as

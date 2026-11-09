@@ -3418,23 +3418,6 @@ func canonicalWorkspaceStaticAuthType(authType string) string {
 	}
 }
 
-// canonicalWorkspaceImportedAuthType keeps registry/OpenAPI spellings private;
-// workspace config should stay on the stable public auth vocabulary.
-func canonicalWorkspaceImportedAuthType(authType string) string {
-	normalized := strings.ToLower(strings.TrimSpace(authType))
-	normalized = strings.ReplaceAll(normalized, "-", "_")
-	switch normalized {
-	case "oauth2", "oauth2_authorization_code":
-		// Registry/OpenAPI names stay private; workspace config users select
-		// the public oauth family instead.
-		return "oauth"
-	case "mutualtls", "mutual_tls":
-		return "mtls"
-	default:
-		return canonicalWorkspaceStaticAuthType(authType)
-	}
-}
-
 type workspaceProfileReplacement = store.WorkspaceProfileReplacement
 
 type workspaceVersionProfile struct {
@@ -3964,12 +3947,6 @@ func validWorkspaceEnvName(name string) string {
 // and underscore may start, digits may follow, and nothing invokes a shell.
 func validWorkspaceEnvNameRune(index int, r rune) bool {
 	return r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || index > 0 && r >= '0' && r <= '9'
-}
-
-// workspaceBucketMaterialKey aligns CLI and Engine apply payloads without
-// exposing bucket credentials inside the plan's shareable desired state.
-func workspaceBucketMaterialKey(bucketName, serviceKey string) string {
-	return workspaceConnectBucketName(bucketName) + "\x00" + serviceKey
 }
 
 // workspaceBucketSecretMaterialKey is workspaceBucketMaterialKey's sibling for
@@ -4901,26 +4878,6 @@ func removeExplicitWorkspaceResources(ctx context.Context, s store.Store, desire
 	return nil
 }
 
-// managedWorkspaceServiceRemovalIDs returns the deterministic, non-deprecated
-// membership set that this apply is authorized to remove.
-func managedWorkspaceServiceRemovalIDs(desired workspaceDesiredState, previousManaged map[uuid.UUID]workspaceManagedService) []uuid.UUID {
-	serviceIDs := make([]uuid.UUID, 0, len(previousManaged))
-	for serviceID := range previousManaged {
-		// Desired membership always wins over historical managed state.
-		if _, keep := desired.Services[serviceID]; keep {
-			continue
-		}
-		// Deprecation keeps the service executable while announcing future removal.
-		if _, deprecated := serviceDeprecationDirective(desired, serviceID); deprecated {
-			continue
-		}
-		serviceIDs = append(serviceIDs, serviceID)
-	}
-	// Stable ordering keeps mutation audit events reproducible across map iteration.
-	sort.Slice(serviceIDs, func(i, j int) bool { return serviceIDs[i].String() < serviceIDs[j].String() })
-	return serviceIDs
-}
-
 // removeManagedWorkspaceServices preserves the single-service store contract
 // while requiring atomic persistence for a composite dependency graph.
 func removeManagedWorkspaceServices(ctx context.Context, s store.Store, serviceIDs []uuid.UUID) error {
@@ -4950,40 +4907,6 @@ func removeManagedWorkspaceServices(ctx context.Context, s store.Store, serviceI
 		span.End()
 	}
 	return nil
-}
-
-func removeManagedWorkspaceVersions(
-	ctx context.Context,
-	s store.Store,
-
-	desired workspaceDesiredState,
-	desiredSvc workspaceDesiredService,
-	managed workspaceManagedService,
-) error {
-	for _, version := range managed.Versions {
-		if shouldKeepManagedVersion(desired, desiredSvc, version) {
-			continue
-		}
-		if err := s.DisableWorkspaceServiceVersion(ctx, desiredSvc.ServiceID, version); err != nil && !errors.Is(err, store.ErrWorkspaceServiceVersionNotFound) {
-			return err
-		}
-
-		_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.version_removed")
-		span.SetAttributes(
-			attribute.String("service_id", desiredSvc.ServiceID.String()),
-			attribute.String("version", version),
-		)
-		span.End()
-	}
-	return nil
-}
-
-func shouldKeepManagedVersion(desired workspaceDesiredState, desiredSvc workspaceDesiredService, version string) bool {
-	if containsString(desiredSvc.Versions, version) {
-		return true
-	}
-	_, deprecated := versionDeprecationDirective(desired, desiredSvc.ServiceID, version)
-	return deprecated
 }
 
 // validateWorkspaceRemovalDecisions requires a force decision for every blocked removal action, including explicit targets.

@@ -125,8 +125,6 @@ func TestValidateEndpointTransportRejectsDuplicateOpenAPI32ServerNames(t *testin
 	}
 }
 
-func boolPointer(value bool) *bool { return &value }
-
 func TestValidateEndpointTransportRequiresExplicitProviderProtocol(t *testing.T) {
 	query := "query Viewer { viewer { id } }"
 	tests := []fusedobject.Endpoint{

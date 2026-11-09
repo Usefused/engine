@@ -334,39 +334,6 @@ func paginationScalarMatchesType(value *Scalar) bool {
 	}
 }
 
-func validateOptionalSource(value *ValueSource, allowed ...ValueType) error {
-	if value == nil {
-		return nil
-	}
-	return validateSource(*value, allowed...)
-}
-
-func validateSource(value ValueSource, allowed ...ValueType) error {
-	if !containsValueType(allowed, value.ValueType) {
-		return invalid("source value_type is invalid")
-	}
-	switch value.Location {
-	case SourceBody:
-		return validateBodySource(value)
-	case SourceHeader:
-		return validateHeaderSource(value)
-	case SourceLink:
-		return validateLinkSource(value)
-	default:
-		return invalid("unsupported source location")
-	}
-}
-
-func validateBodySource(value ValueSource) error {
-	if value.Name != "" || value.Relation != "" {
-		return invalid("body source only accepts path")
-	}
-	if err := ValidateBodyPath(value.Path); err != nil {
-		return invalid(err.Error())
-	}
-	return nil
-}
-
 func validateHeaderSource(value ValueSource) error {
 	if value.Path != "" || value.Relation != "" || !validHeaderName(value.Name) {
 		return invalid("header source only accepts a valid name")
@@ -382,26 +349,8 @@ func validateLinkSource(value ValueSource) error {
 	return nil
 }
 
-func anyTrue(values []bool) bool {
-	for _, value := range values {
-		if value {
-			return true
-		}
-	}
-	return false
-}
-
 func validHeaderName(name string) bool {
 	return name != "" && len(name) <= maxNameLength && headerPattern.MatchString(name)
-}
-
-func containsValueType(values []ValueType, wanted ValueType) bool {
-	for _, value := range values {
-		if value == wanted {
-			return true
-		}
-	}
-	return false
 }
 
 func defaultInt(value, fallback int) int {

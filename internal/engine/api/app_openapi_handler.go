@@ -826,59 +826,6 @@ func physicalSuccessSchemas(endpoint fusedobject.Endpoint, scope *appOpenAPISche
 	return schemas
 }
 
-// unifiedOpenAPIResponseSchema documents ordered target results and explicit
-// rollback results without exposing private dependency mappings.
-func unifiedOpenAPIResponseSchema(operation string, targets []string) map[string]any {
-	return map[string]any{
-		"type": "object", "additionalProperties": false,
-		"required": []string{"app_id", "operation", "kind", "results", "rollbacks"},
-		"properties": map[string]any{
-			"app_id":    map[string]any{"type": "string", "format": "uuid"},
-			"operation": map[string]any{"type": "string", "const": operation, "enum": []string{operation}},
-			"kind":      map[string]any{"type": "string", "const": "unified", "enum": []string{"unified"}},
-			"results":   map[string]any{"type": "array", "items": unifiedResultItemSchema(targets, true)},
-			"rollbacks": map[string]any{"type": "array", "items": unifiedResultItemSchema(targets, false)},
-		},
-	}
-}
-
-// unifiedResultItemSchema keeps result and rollback status vocabularies exact
-// while leaving provider data under the declared target result.
-func unifiedResultItemSchema(targets []string, forward bool) map[string]any {
-	statuses := []string{"success", "error"}
-	if forward {
-		statuses = append(statuses, "skipped")
-	}
-	properties := map[string]any{
-		"target":      map[string]any{"type": "string", "enum": targets},
-		"status":      map[string]any{"type": "string", "enum": statuses},
-		"error_code":  map[string]any{"type": "string"},
-		"auth_action": unifiedAuthActionOpenAPISchema(),
-	}
-	if forward {
-		properties["data"] = map[string]any{}
-	} else {
-		properties["triggered_by"] = map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
-	}
-	return map[string]any{"type": "object", "additionalProperties": false, "required": []string{"target", "status"}, "properties": properties}
-}
-
-// unifiedAuthActionOpenAPISchema documents only the non-secret repair routing
-// fields emitted by REST result projection.
-func unifiedAuthActionOpenAPISchema() map[string]any {
-	return map[string]any{
-		"type": "object", "additionalProperties": false,
-		"properties": map[string]any{
-			"action":        map[string]any{"type": "string", "enum": []string{"connect", "reconnect", "select_resource"}},
-			"bucket_id":     map[string]any{"type": "string", "format": "uuid"},
-			"service_id":    map[string]any{"type": "string", "format": "uuid"},
-			"end_user_ref":  map[string]any{"type": "string"},
-			"connection_id": map[string]any{"type": "string", "format": "uuid"},
-			"reason":        map[string]any{"type": "string"},
-		},
-	}
-}
-
 // composeAppOpenAPIDocument assembles one path with discriminator branches for
 // all exact app operations, setup guidance, and stable shared selector/error components.
 func composeAppOpenAPIDocument(app *store.App, family *store.AppFamily, export *appOpenAPIExport) map[string]any {

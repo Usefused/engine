@@ -113,12 +113,6 @@ func resolveConnectAdminCallForPhase(w http.ResponseWriter, r *http.Request, s s
 	}, true
 }
 
-// resolveBucketAdminCall authenticates the actor and verifies the exact route
-// bucket before any bucket-scoped connect operation proceeds.
-func resolveBucketAdminCall(w http.ResponseWriter, r *http.Request, s store.Store) (bucketAdminCall, bool) {
-	return resolveBucketAdminCallForPhase(w, r, s, "")
-}
-
 // resolveBucketAdminMutationCall authenticates and validates a bucket-scoped
 // mutation before storage writes, reporting every rejection as not committed.
 func resolveBucketAdminMutationCall(w http.ResponseWriter, r *http.Request, s store.Store, phase string) (bucketAdminCall, bool) {
@@ -184,12 +178,6 @@ func projectAuthConnection(conn store.AuthConnection) authConnectionResponse {
 	}
 }
 
-// parseUUIDParam validates an exact route UUID and emits a stable field-specific
-// diagnostic without reflecting the supplied value.
-func parseUUIDParam(w http.ResponseWriter, r *http.Request, name string) (uuid.UUID, bool) {
-	return parseUUIDParamForPhase(w, r, name, "")
-}
-
 // parseUUIDMutationParam validates an exact route UUID and records malformed
 // mutation identity as an authoritative pre-write rejection.
 func parseUUIDMutationParam(w http.ResponseWriter, r *http.Request, name, phase string) (uuid.UUID, bool) {
@@ -207,12 +195,6 @@ func parseUUIDParamForPhase(w http.ResponseWriter, r *http.Request, name, phase 
 		return uuid.Nil, false
 	}
 	return id, true
-}
-
-// writeBucketLookupError distinguishes authoritative absence from a retryable
-// store failure without exposing database details.
-func writeBucketLookupError(ctx context.Context, w http.ResponseWriter, err error) {
-	writeBucketLookupErrorForPhase(ctx, w, err, "")
 }
 
 // writeBucketMutationLookupError distinguishes authoritative bucket absence

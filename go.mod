@@ -5,7 +5,6 @@ go 1.27.3
 require (
 	github.com/ThreadifyDev/go-sdk v0.3.0
 	github.com/Usefused/fused-open-core v0.0.0-20260925151058-b91e769354ae
-	github.com/basgys/goxml2json v1.1.0
 	github.com/dop251/goja v0.0.0-20260915173639-b3fa02110dbd
 	github.com/getkin/kin-openapi v0.139.0
 	github.com/go-chi/chi/v5 v5.3.0
@@ -22,7 +21,6 @@ require (
 	github.com/sashabaranov/go-openai v1.28.1
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
-	github.com/tiaguinho/gosoap v1.4.4
 	github.com/tidwall/gjson v1.19.0
 	go.opentelemetry.io/contrib/bridges/otelslog v0.19.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.69.0
@@ -43,7 +41,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
-
 require (
 	github.com/dlclark/regexp2/v2 v2.5.2 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.3+incompatible // indirect
@@ -58,7 +55,6 @@ require (
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.7.0-default-no-op // indirect
-	github.com/bitly/go-simplejson v0.5.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect

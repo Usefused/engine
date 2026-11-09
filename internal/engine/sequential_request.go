@@ -64,16 +64,3 @@ func writeSequentialItem(destination io.Writer, mediaType string, item any) erro
 		return errors.New("sequential request media type is unsupported")
 	}
 }
-
-func supportedSequentialJSONMediaType(value string) bool {
-	mediaType, _, err := mime.ParseMediaType(value)
-	if err != nil {
-		return false
-	}
-	switch strings.ToLower(mediaType) {
-	case "application/jsonl", "application/json-seq", "application/x-ndjson":
-		return true
-	default:
-		return false
-	}
-}

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
-	"github.com/dop251/goja/parser"
 )
 
 const (
@@ -72,14 +71,10 @@ func runInProcessWithProgram(ctx context.Context, bundle []byte, program *goja.P
 	ctx, cancel := context.WithTimeout(ctx, WallTime)
 	defer cancel()
 	// Each invocation gets new globals; no provider credential or Node module enters the interpreter.
-	vm := goja.New()
-	// Inline-only maps apply to dynamically evaluated source as well as the immutable bundle.
-	vm.SetParserOptions(parser.WithSourceMapLoader(rejectExternalSourceMap))
+	vm, stopInterrupt := newBoundedRuntime(ctx, "capability timed out")
+	defer stopInterrupt()
 	vm.SetTimeSource(func() time.Time { return time.UnixMilli(control.StartedAtUnixMs).UTC() })
 	vm.SetRandSource(capabilityRandomSource(control.RandomSeed))
-	vm.SetMaxCallStackSize(512)
-	stopInterrupt := context.AfterFunc(ctx, func() { vm.Interrupt("capability timed out") })
-	defer stopInterrupt()
 	session := &capabilityScriptSession{
 		ctx: ctx, vm: vm, host: host,
 		results:   make(chan capabilityHostResult, MaxHostCalls),
