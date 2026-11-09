@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Usefused/engine/internal/shared/oauthmapping"
 	"log/slog"
 	"net"
 	"net/http"
@@ -17,6 +16,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Usefused/engine/internal/shared/oauthmapping"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/authevent"
@@ -1303,12 +1304,6 @@ func isConnectLoopbackHost(host string) bool {
 	}
 	parsed := net.ParseIP(host)
 	return parsed != nil && parsed.IsLoopback()
-}
-
-// exchangeOAuthCode builds the standards-shaped code exchange in one place so
-// refresh support can reuse the lower-level request/response handling later.
-func exchangeOAuthCode(ctx context.Context, client *http.Client, auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, creds connectClientCredentials, code, verifier string) (oauthTokenResponse, error) {
-	return connectauth.ExchangeAuthorizationCode(ctx, client, auth, flow, creds, code, verifier)
 }
 
 // encryptAuthConnectionFromToken converts a provider token response into the

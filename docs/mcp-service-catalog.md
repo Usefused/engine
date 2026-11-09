@@ -77,14 +77,6 @@ Automated coverage includes real SDK discovery against a local MCP fixture using
 JSON Schema keyword retention, safe errors, credential authorization and isolation,
 response limits, and real PostgreSQL persistence/expiry/concurrent promotion.
 
-The manual browser fixture mounts the production `McpCatalogTab` component with
-real Engine HTTP handlers and PostgreSQL persistence. Provider catalogs are
-synthetic, so the fixture never transmits workspace credentials. Enable
-`TestMCPCatalogBrowserPreview` with `FUSED_MCP_UI_DIR` pointing to the bundled
-`ui/mcp-catalog-preview.tsx` page and `DATABASE_URL` pointing to a disposable
-PostgreSQL instance on `127.0.0.1:55489`. It listens only on `127.0.0.1:4179`.
-The ordinary test suite skips this manual listener.
-
 Browser checks completed: empty state, discovery preview, endpoint-style catalog rows, type filtering, combined search and type filters,
 import, saved-state reload, URI search, tool schema expansion, unchanged refresh,
 discard, failed discovery retaining saved state, and unsupported capabilities.

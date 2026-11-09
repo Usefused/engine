@@ -1,12 +1,6 @@
 package models
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"encoding/base64"
-	"io"
-	"os"
 	"time"
 
 	"database/sql/driver"
@@ -17,7 +11,6 @@ import (
 
 	"github.com/Usefused/engine/internal/shared/authrouting"
 	"github.com/Usefused/engine/internal/shared/catalogcontract"
-	"github.com/Usefused/engine/internal/shared/config"
 	"github.com/Usefused/engine/internal/shared/connectionprofile"
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
@@ -447,8 +440,8 @@ type PublishConfigPayload struct {
 	IncomingWebhookConfig *IncomingWebhookConfig `json:"incoming_webhook_config,omitempty"`
 	DefaultHeaders        DefaultHeaders         `json:"default_headers,omitempty"`
 	// Servers is the full multi-environment base URL list (e.g. separately
-	// named "Production"/"Staging" entries) ServersForm.tsx lets an owner
-	// build. BaseURL remains the resolved primary URL used by SDK generation.
+	// named "Production"/"Staging" entries) an owner can configure.
+	// BaseURL remains the resolved primary URL used by SDK generation.
 	// Without this field, saves silently discard every server after the first.
 	Servers Servers `json:"servers,omitempty"`
 	// SourceSpecVersion mirrors the provider-declared version from the source.
@@ -1542,70 +1535,6 @@ func (s *AuthConfigs) Scan(value interface{}) error { return scanJSONB(value, s)
 
 func (p PaginationConfig) Value() (driver.Value, error)  { return json.Marshal(p) }
 func (p *PaginationConfig) Scan(value interface{}) error { return scanJSONB(value, p) }
-
-func getEncryptionKey() []byte {
-	if len(config.GlobalEncryptionKey) == 32 {
-		return config.GlobalEncryptionKey
-	}
-	key := os.Getenv("ENCRYPTION_KEY")
-	if len(key) >= 32 {
-		return []byte(key[:32])
-	}
-	b := make([]byte, 32)
-	copy(b, "fused-default-encrypt-key-32b")
-	if len(key) > 0 {
-		copy(b, key)
-	}
-	return b
-}
-
-func encrypt(plaintext string) (string, error) {
-	if plaintext == "" {
-		return "", nil
-	}
-	block, err := aes.NewCipher(getEncryptionKey())
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", err
-	}
-	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
-	return base64.StdEncoding.EncodeToString(ciphertext), nil
-}
-
-func decrypt(ciphertextStr string) (string, error) {
-	if ciphertextStr == "" {
-		return "", nil
-	}
-	ciphertext, err := base64.StdEncoding.DecodeString(ciphertextStr)
-	if err != nil {
-		return "", err
-	}
-	block, err := aes.NewCipher(getEncryptionKey())
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	nonceSize := gcm.NonceSize()
-	if len(ciphertext) < nonceSize {
-		return "", errors.New("ciphertext too short")
-	}
-	nonce, actualCiphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, actualCiphertext, nil)
-	if err != nil {
-		return "", err
-	}
-	return string(plaintext), nil
-}
 
 func (i IncomingWebhookConfig) Value() (driver.Value, error) {
 	// Canonical webhook contracts are credential-free; secret_ref is bound in

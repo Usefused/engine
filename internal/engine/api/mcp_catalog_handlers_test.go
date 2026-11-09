@@ -6,16 +6,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/mcpcatalog"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
-	"github.com/Usefused/engine/internal/shared/db"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -157,77 +154,13 @@ func TestMCPCatalogHTTPDiscovery(t *testing.T) {
 	}
 }
 
-// catalogBrowserFixture provides all four categories for deterministic handler and browser coverage.
+// catalogBrowserFixture provides all four categories for deterministic handler coverage.
 func catalogBrowserFixture() mcpcatalog.Catalog {
 	return mcpcatalog.Catalog{ProtocolVersion: "2026-07-28", Server: mcpcatalog.ServerInfo{Name: "Project knowledge", Version: "1.0.0"}, Supported: map[string]bool{"tools": true, "prompts": true, "resources": true, "resource_templates": true},
 		Tools:             []json.RawMessage{json.RawMessage(`{"name":"search_docs","title":"Search documentation","description":"Search the project knowledge base.","inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]},"outputSchema":{"type":"object","properties":{"matches":{"type":"array"}}}}`)},
 		Prompts:           []json.RawMessage{json.RawMessage(`{"name":"summarize_project","title":"Summarize a project","description":"Create a concise project summary.","arguments":[{"name":"project","required":true}]}`)},
 		Resources:         []json.RawMessage{json.RawMessage(`{"name":"Project guide","description":"Getting started with the project.","uri":"docs://guide","mimeType":"text/markdown"}`)},
 		ResourceTemplates: []json.RawMessage{json.RawMessage(`{"name":"Issue details","description":"Read the metadata for a project issue.","uriTemplate":"issues://{id}","mimeType":"application/json"}`)}}
-}
-
-// TestMCPCatalogBrowserPreview serves the actual UI component and Engine handlers against an explicitly disposable PostgreSQL fixture.
-func TestMCPCatalogBrowserPreview(t *testing.T) {
-	directory := os.Getenv("FUSED_MCP_UI_DIR")
-	// The manual browser fixture is opt-in and never starts during the ordinary test suite.
-	if directory == "" {
-		t.Skip("FUSED_MCP_UI_DIR not set")
-	}
-	dsn := os.Getenv("DATABASE_URL")
-	// Guard the dedicated fixture port so this helper cannot seed an ordinary development database.
-	if !strings.Contains(dsn, "127.0.0.1:55489/") {
-		t.Fatal("browser fixture requires the dedicated local test database")
-	}
-	pool, err := db.InitEnginePostgres(context.Background(), dsn)
-	// Fixture setup must succeed before the behavior assertions can be trusted.
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	s := store.NewPostgresStore(pool)
-	serviceID := uuid.MustParse("10000000-0000-4000-8000-000000000001")
-	versionID := uuid.MustParse("20000000-0000-4000-8000-000000000001")
-	actor := catalogTestActor(t, serviceID, true)
-	actor.SubjectID = uuid.MustParse("30000000-0000-4000-8000-000000000001")
-	// Fixture setup must succeed before the behavior assertions can be trusted.
-	if err = s.AddWorkspaceServiceVersion(context.Background(), serviceID, "fixture", "1", versionID, "Fixture service", uuid.Nil); err != nil {
-		t.Fatal(err)
-	}
-	router := chi.NewRouter()
-	// Authentication is a synthetic test actor; this listener never exposes real credentials or workspace data.
-	router.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			next.ServeHTTP(w, r.WithContext(accesscontrol.ContextWithActor(r.Context(), actor)))
-		})
-	})
-	base := "/workspace/services/{id}/versions/{version_id}/mcp-catalog"
-	router.Get(base, GetMCPCatalogHandler(s))
-	router.Post(base+"/apply", ApplyMCPCatalogHandler(s, catalogOwnerVerifier{owner: true}))
-	// Endpoint names choose deterministic provider conditions while all persistence and API behavior remain real.
-	discover := func(ctx context.Context, endpoint, token string) (mcpcatalog.Catalog, error) {
-		if strings.Contains(endpoint, "unavailable") {
-			return mcpcatalog.Catalog{}, mcpcatalog.ErrDiscovery
-		}
-		result := catalogBrowserFixture()
-		// The requested fixture endpoint selects an intentional provider failure or capability subset.
-		if strings.Contains(endpoint, "tools-only") {
-			result.Supported["prompts"] = false
-			result.Prompts = []json.RawMessage{}
-			result.Supported["resources"] = false
-			result.Supported["resource_templates"] = false
-			result.Resources = []json.RawMessage{}
-			result.ResourceTemplates = []json.RawMessage{}
-		}
-		return result, nil
-	}
-	router.Post(base+"/discover", discoverMCPCatalogHandler(s, nil, discover, catalogOwnerVerifier{owner: true}))
-	router.Handle("/*", http.FileServer(http.Dir(directory)))
-	server := &http.Server{Addr: "127.0.0.1:4179", Handler: router, ReadHeaderTimeout: 5 * time.Second}
-	t.Log("Browser fixture available at http://127.0.0.1:4179")
-	// The test process owns this listener and is stopped by the browser-test runner.
-	if err = server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		t.Fatal(err)
-	}
 }
 
 // catalogOwnerVerifier makes service ownership independent of the test actor's workspace grants.

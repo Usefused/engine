@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { isVisibleOperationMethod } from "~/lib/operation-filter";
 import { stripLinks } from "~/lib/format";
 
 const ENDPOINT_DESCRIPTION_COLLAPSE_THRESHOLD = 240;
@@ -75,7 +76,10 @@ function SelectButton({ selected, onSelect }: RowSelectionControlsProps) {
   );
 }
 
+// MethodBadge omits retired methods on rows opened from cached selections.
 function MethodBadge({ method }: { method?: string }) {
+  // Other row types, including Unified operations, keep their own label.
+  if (!isVisibleOperationMethod(method)) return null;
   return (
     <span className={`shrink-0 text-xs font-bold px-1.5 py-0.5 rounded ${(method && METHOD_COLORS[method]) ?? "bg-slate-100 text-slate-700 border-slate-200"}`}>
       {method || "EP"}

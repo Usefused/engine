@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
-	"github.com/dop251/goja/parser"
 )
 
 // InspectInProcess evaluates declarations only inside the already-confined worker.
@@ -24,11 +23,7 @@ func InspectInProcess(ctx context.Context, bundle []byte) (json.RawMessage, erro
 func inspectCapabilityProgram(ctx context.Context, program *goja.Program) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	vm := goja.New()
-	// Inline-only maps apply to dynamically evaluated source as well as the immutable bundle.
-	vm.SetParserOptions(parser.WithSourceMapLoader(rejectExternalSourceMap))
-	vm.SetMaxCallStackSize(512)
-	stopInterrupt := context.AfterFunc(ctx, func() { vm.Interrupt("capability declaration timed out") })
+	vm, stopInterrupt := newBoundedRuntime(ctx, "capability declaration timed out")
 	defer stopInterrupt()
 	// No __fusedHost or Node objects exist here, so top-level code cannot reach provider or DB effects.
 	if _, err := vm.RunProgram(program); err != nil {

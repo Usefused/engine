@@ -100,7 +100,7 @@ WORKDIR /app
 # Node remains part of the slim runtime because MCP sessions execute in
 # isolated processes. Their JavaScript dependencies are already bundled into
 # the Go binary, so containers never run npm against tenant storage.
-RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates gosu nats-server tini && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates gosu tini && rm -rf /var/lib/apt/lists/*
 
 # Docker applies seccomp before startup; ship the matching profile and license for host-side extraction.
 COPY deploy/unified-app-workers/ /app/deploy/unified-app-workers/

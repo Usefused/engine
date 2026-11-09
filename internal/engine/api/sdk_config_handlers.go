@@ -3270,16 +3270,6 @@ func enforceConfiguredFamilyLimit(ctx context.Context, s store.Store, accountID 
 	return checkSDKFamilyCapacity(ctx, s, trace.SpanFromContext(ctx), accountID, canonicalName, sdkConfigGeneratesPackage(doc))
 }
 
-// enforceSDKFamilyLimit canonicalizes authored SDK/API identity before applying its delivery-specific family entitlement.
-func enforceSDKFamilyLimit(ctx context.Context, s store.Store, accountID uuid.UUID, name string, generatesPackage bool) error {
-	canonicalName, _, err := canonical.AppName(name)
-	// Invalid authored identity must fail before any family or entitlement lookup.
-	if err != nil {
-		return workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}
-	}
-	return checkSDKFamilyCapacity(ctx, s, trace.SpanFromContext(ctx), accountID, canonicalName, generatesPackage)
-}
-
 // preflightSDKFamilyLifecycle rejects immutable local family conflicts before a plan is created.
 func preflightSDKFamilyLifecycle(ctx context.Context, s store.Store, accountID uuid.UUID, doc sdkConfigDocument) error {
 	canonicalName, _, err := canonical.AppName(doc.Name)
@@ -3818,10 +3808,6 @@ func loadSDKPlanForApply(ctx context.Context, configStore store.ConfigRepository
 	return plan, state, nil
 }
 
-func validateSDKPlanForApply(plan *store.ConfigPlan, sourceHash string) error {
-	return validateAppPlanForApply(plan, sourceHash, store.ConfigTypeSDK)
-}
-
 // validateAppPlanForApply binds a plan to its exact route kind before any apply lease is reserved.
 func validateAppPlanForApply(plan *store.ConfigPlan, sourceHash string, kind store.ConfigType) error {
 	if plan.Status == store.ConfigPlanStatusSuperseded {
@@ -3903,18 +3889,6 @@ func ensurePinnedSDKSelectionAllowed(selection models.SDKSelection, binding sdkC
 		return workspaceConfigHTTPError{status: http.StatusConflict, message: fmt.Sprintf("version %s for service %s is no longer allowed in this workspace", binding.Version, selection.ServiceID)}
 	}
 	return nil
-}
-
-func sdkSelectionServiceIDs(selections []models.SDKSelection) []uuid.UUID {
-	ids := make([]uuid.UUID, 0, len(selections))
-	seen := map[uuid.UUID]bool{}
-	for _, selection := range selections {
-		if !seen[selection.ServiceID] {
-			ids = append(ids, selection.ServiceID)
-			seen[selection.ServiceID] = true
-		}
-	}
-	return ids
 }
 
 func sdkBindingMap(bindings []sdkContractBinding) map[uuid.UUID]sdkContractBinding {

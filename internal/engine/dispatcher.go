@@ -119,6 +119,10 @@ func (d *Dispatcher) ExecuteStream(
 	bucketValues []store.BucketValue,
 	stream ResponseStream,
 ) (int, error) {
+	// SOAP execution was removed to keep Engine lean; fail explicitly rather than sending an HTTP call.
+	if strings.EqualFold(obj.Method, "SOAP") {
+		return http.StatusNotImplemented, ErrSOAPUnsupported
+	}
 	intent, hasIntent := PaginationIntentFromContext(ctx)
 	// Request pagination controls fail before content selection or provider I/O and may only tighten reviewed pagination.
 	if hasIntent {
@@ -133,9 +137,6 @@ func (d *Dispatcher) ExecuteStream(
 	}
 	if selectedContent != nil && selectedContent.UploadWorkflow != nil {
 		return d.executeUploadWorkflow(ctx, srv, obj, params, credentials, bucketValues, stream)
-	}
-	if obj.Method == "SOAP" {
-		return d.executeSOAP(ctx, srv, obj, params, credentials, bucketValues, stream)
 	}
 	if obj.Pagination != nil {
 		return d.executePaginated(ctx, srv, obj, params, credentials, bucketValues, stream)
@@ -937,18 +938,6 @@ func appendQueryParams(reqURL string, queryParams queryParameters) string {
 		return reqURL + "?" + queryParams.Encode()
 	}
 	return reqURL
-}
-
-func buildRequestBody(obj *models.IntegrationObject, headerParams map[string]string, bodyParams map[string]any) (io.Reader, error) {
-	return buildRequestBodyWithContext(context.Background(), obj, headerParams, bodyParams)
-}
-
-func buildRequestBodyWithContext(ctx context.Context, obj *models.IntegrationObject, headerParams map[string]string, bodyParams map[string]any) (io.Reader, error) {
-	selected, _, err := SelectRequestContent(obj.RequestContent)
-	if err != nil {
-		return nil, err
-	}
-	return buildSelectedRequestBodyWithContext(ctx, obj, selected, headerParams, bodyParams)
 }
 
 func buildSelectedRequestBodyWithContext(ctx context.Context, obj *models.IntegrationObject, content *SelectedRequestRepresentation, headerParams map[string]string, bodyParams map[string]any) (io.Reader, error) {

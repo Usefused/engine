@@ -10,20 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
-	"github.com/Usefused/engine/internal/engine/store"
 )
-
-type actorFastPathStore struct {
-	store.Store
-}
-
-func (actorFastPathStore) GetAccountByAPIKey(context.Context, string) (uuid.UUID, error) {
-	panic("cached Actor must avoid credential lookup")
-}
-
-func (actorFastPathStore) VerifyWorkspaceOwner(context.Context, uuid.UUID) error {
-	panic("RBAC actor must avoid legacy ownership lookup")
-}
 
 func TestResolveWorkspaceActorUsesCachedRBACActorWithoutStoreQueries(t *testing.T) {
 	actor := accesscontrol.Actor{

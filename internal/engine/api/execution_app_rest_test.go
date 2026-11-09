@@ -32,12 +32,6 @@ type capabilityRouteStore struct {
 	startRelease chan struct{}
 }
 
-type blockingCapabilityRuntime struct {
-	*restRuntimeTestDouble
-	entered chan struct{}
-	release chan struct{}
-}
-
 // TestUnifiedAppRejectsUnboundOperation prevents provider names from granting access without immutable bindings.
 func TestUnifiedAppRejectsUnboundOperation(t *testing.T) {
 	_, err := parseUnifiedAppManifest(json.RawMessage(`{"schemaVersion":1,"inputSchema":{"type":"object"},"outputSchema":{"type":"object"},"searchable":[],"selectedOperations":[{"service":"issues","operation":"createIssue"}]}`))
@@ -70,18 +64,6 @@ func TestUnifiedAppOldVersionRejectsNewTraffic(t *testing.T) {
 	// The refusal happens before accepting a durable execution or touching the provider.
 	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "app_family_id_required") || len(fixture.records) != 0 {
 		t.Fatalf("old version status=%d body=%s records=%d", response.Code, response.Body.String(), len(fixture.records))
-	}
-}
-
-// ConnectAppRuntime holds provider setup so an asynchronous response can be inspected while queued.
-func (runtime *blockingCapabilityRuntime) ConnectAppRuntime(ctx context.Context, appID uuid.UUID) error {
-	close(runtime.entered)
-	// The worker remains cancellation aware while the test observes its durable reservation.
-	select {
-	case <-runtime.release:
-		return runtime.restRuntimeTestDouble.ConnectAppRuntime(ctx, appID)
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }
 

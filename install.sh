@@ -70,6 +70,14 @@ echo "=> Installing to ${INSTALL_DIR}/${BINARY}..."
 mv "${BINARY}" "${INSTALL_DIR}/${BINARY}"
 chmod +x "${INSTALL_DIR}/${BINARY}"
 
+# Linux archives bundle the sandbox worker; Engine only runs Unified Apps when it sits beside the Engine binary.
+WORKER_BINARY="fused-execution-worker"
+if [ -f "${WORKER_BINARY}" ]; then
+    echo "=> Installing to ${INSTALL_DIR}/${WORKER_BINARY}..."
+    mv "${WORKER_BINARY}" "${INSTALL_DIR}/${WORKER_BINARY}"
+    chmod +x "${INSTALL_DIR}/${WORKER_BINARY}"
+fi
+
 echo "=> Note: Installed to ${INSTALL_DIR} to avoid requiring sudo."
 echo "=> If you prefer a system-wide installation, you can move it to /usr/local/bin using sudo."
 
