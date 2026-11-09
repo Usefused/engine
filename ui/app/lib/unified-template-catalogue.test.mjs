@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { act, createElement, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -14,7 +15,11 @@ function loadUI(file, dependencies) {
   const source = readFileSync(new URL(file, import.meta.url), "utf8");
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const exports = {};
-  new Function("require", "exports", code)(name => dependencies[name] ?? require(name), exports);
+  new Function("require", "exports", code)(name => {
+    // Transpiled component imports need the same branding module location as the application build.
+    if (name === "../../../branding/searchable_select.js") return require(fileURLToPath(new URL("../../branding/searchable_select.js", import.meta.url)));
+    return dependencies[name] ?? require(name);
+  }, exports);
   return exports;
 }
 

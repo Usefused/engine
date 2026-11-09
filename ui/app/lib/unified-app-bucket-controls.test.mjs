@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { act, createElement, useState } from "react";
 import { JSDOM } from "jsdom";
@@ -27,6 +28,8 @@ function loadComponent(path) {
     // Schema extraction and validation use their real ESM implementations.
     if (name === "~/lib/unified-app-input-fields") return fields;
     if (name === "~/lib/schedule-input-validation") return validation;
+    // Transpiled component imports resolve from this test file, so restore the production branding path explicitly.
+    if (name === "../../../branding/searchable_select.js") return require(fileURLToPath(new URL("../../branding/searchable_select.js", import.meta.url)));
     // The Node test runner cannot resolve the browser application's tilde aliases.
     if (aliases[name]) return loadComponent(aliases[name]);
     return require(name);
@@ -62,9 +65,9 @@ test("runtime bucket controls preserve explicit scope and send a single scoped e
     const input = document.querySelector(selector);
     await act(async () => { input.value = value; input.dispatchEvent(new window.Event("change", { bubbles: true })); });
   }
-  /** Uses native input events so the tag editor sees the same query changes as browser typing. */
+  /** Targets the runtime tag editor rather than the searchable fixed-bucket select. */
   async function typeBucketQuery(value) {
-    const input = document.querySelector('input[role="combobox"]');
+    const input = document.querySelector('input[placeholder="Add a bucket…"]');
     await act(async () => {
       Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(input, value);
       input.dispatchEvent(new window.Event("input", { bubbles: true }));
@@ -79,7 +82,8 @@ test("runtime bucket controls preserve explicit scope and send a single scoped e
   try {
     await act(async () => { root.render(createElement(ScopeEditor)); });
     assert.deepEqual(scope, []);
-    assert.equal(document.querySelector('input[role="combobox"]'), null);
+    // Fixed routing hides only the runtime tag editor; the bucket select remains searchable.
+    assert.equal(document.querySelector('input[placeholder="Add a bucket…"]'), null);
     await chooseBucket("__fused_runtime_bucket__");
     assert.deepEqual(scope, ["tenant-b"], "runtime selection starts from the configured default");
     assert.equal(defaultBucket, "bucket-b");
@@ -103,7 +107,8 @@ test("runtime bucket controls preserve explicit scope and send a single scoped e
     await chooseBucket("bucket-b");
     assert.deepEqual(scope, [], "a fixed dropdown choice disables runtime selection");
     assert.equal(defaultBucket, "bucket-b");
-    assert.equal(document.querySelector('input[role="combobox"]'), null);
+    // Returning to a fixed bucket removes the runtime tag editor again.
+    assert.equal(document.querySelector('input[placeholder="Add a bucket…"]'), null);
 
     await act(async () => { root.render(createElement(UnifiedAppInvocation, { appID: "app-family", versionID, buckets: [{ id: bucketID, name: "tenant-a" }], example: '{"customer":"fabricated example"}', schema: { type: "object", required: ["customer"], properties: { customer: { type: "string", minLength: 1 } }, additionalProperties: false } })); });
     assert.equal(requests.length, 0);
