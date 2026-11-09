@@ -1,3 +1,4 @@
+import { isVisibleOperationMethod } from "~/lib/operation-filter";
 import { OperationDetailsHeader, OperationParameterTable, OperationCodeExample, OperationDetailsPanel, OperationDetailsBody, OperationSummary, OperationTechnicalDetails, OperationSection, OperationSchemaDisclosure } from "~/components/OperationDetailsParts";
 import { AlertTriangle, Loader2, Info } from "lucide-react";
 import { SchemaViewer } from "~/components/SchemaViewer";
@@ -139,6 +140,8 @@ export default function EndpointDetailsSidebar({
   componentScope,
   allowRemoteRefs,
 }: EndpointDetailsSidebarProps) {
+  // A stale selection from another view cannot reopen a retired endpoint.
+  if (!selectedEndpoint.isWebhook && !isVisibleOperationMethod(selectedEndpoint.method)) return null;
   const isLoading = !selectedEndpoint._detailsLoaded && !selectedEndpoint.isWebhook;
   const endpointType = operationDisplayType(selectedEndpoint);
   const requestSchema = selectedEndpoint.isWebhook
@@ -155,7 +158,8 @@ export default function EndpointDetailsSidebar({
 
 // methodBadgeClass maps operation verbs to stable header colors.
 function methodBadgeClass(endpoint: IntegrationObject): string {
-  if (endpoint.isWebhook || endpoint.method === "SOAP") return "bg-purple-100 text-purple-700";
+  // Webhooks have a distinct badge even when their transport method is POST.
+  if (endpoint.isWebhook) return "bg-purple-100 text-purple-700";
   if (endpoint.method === "GET") return "bg-green-100 text-green-700";
   if (endpoint.method === "POST") return "bg-blue-100 text-blue-700";
   if (endpoint.method === "DELETE") return "bg-red-100 text-red-700";

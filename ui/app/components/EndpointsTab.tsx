@@ -1,4 +1,4 @@
-import { filterOperationMethods, operationMethods } from "~/lib/operation-filter";
+import { filterOperationMethods, isVisibleOperationMethod, operationMethods } from "~/lib/operation-filter";
 import { ServiceCatalogHeader, ServiceCatalogOptions } from "~/components/integration-details/ServiceCatalogHeader";
 import { Select } from "./forms/Select.ts";
 import { ChevronDown, ChevronRight, Loader2, Search } from "lucide-react";
@@ -75,8 +75,8 @@ export default function EndpointsTab({
   // A method selected for one service version must not silently constrain another contract.
   useEffect(() => setMethod("all"), [res.service.id, res.service.current_service_version]);
   const loadedMethods = Object.values(integrationsByResource).flat().map((endpoint) => endpoint.method);
-  // Preserve uncommon protocol labels already present in the catalog alongside standard HTTP methods.
-  const methodOptions = Array.from(new Set([...operationMethods, ...loadedMethods, ...(searchResults ?? []).map((endpoint) => endpoint.method)].filter(Boolean).map((value) => value!.toUpperCase())));
+  // Preserve custom HTTP methods while excluding retired methods from cached search and resource pages.
+  const methodOptions = Array.from(new Set([...operationMethods, ...loadedMethods, ...(searchResults ?? []).map((endpoint) => endpoint.method)].filter(Boolean).filter(isVisibleOperationMethod).map((value) => value!.toUpperCase())));
 
   return (
     <div className="min-w-0 rounded-xl border border-slate-200 bg-white">
