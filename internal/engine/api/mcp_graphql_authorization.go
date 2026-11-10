@@ -111,7 +111,9 @@ var engineGraphQLPolicy = graphQLAuthorizationPolicy{
 		"workspaceServices":           collectionPermissions(accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),
 		"workspaceServiceIds":         collectionPermissions(accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),
 		"workspaceServicePage":        collectionPermissions(accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),
-		"workspaceWebhooks":           argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead),
+		// Exact registration reads retain the service resource boundary before any storage lookup.
+		"workspaceWebhook":  argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead),
+		"workspaceWebhooks": argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead),
 		// The collection resolver passes the complete service scope into SQL before paging.
 		"workspaceWebhookPage":        collectionPermissions(accesscontrol.ResourceService, accesscontrol.PermissionServiceRead),
 		"webhookEvents":               argumentPermissions(accesscontrol.ResourceService, "service_id", accesscontrol.PermissionServiceRead, accesscontrol.PermissionAuditRead),

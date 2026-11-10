@@ -29,7 +29,7 @@ func initEngineSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
-// engineSchemaQueries returns the canonical schema plus unversioned live-table convergence.
+// engineSchemaQueries declares canonical live tables and durable version markers for supported authoring migrations.
 func engineSchemaQueries() []string {
 	queries := []string{
 		// Workspaces
@@ -1009,8 +1009,11 @@ func engineSchemaQueries() []string {
 				 (owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1)
 			)
 		);`,
-		// Startup source migration records progress per app without changing its immutable runtime or plan hash.
+		// Source-format versions rerun additive authoring upgrades without changing immutable runtime or plan hashes.
 		`ALTER TABLE fused_config_states ADD COLUMN IF NOT EXISTS unified_source_migrated_at timestamptz;`,
+		`ALTER TABLE fused_config_states ADD COLUMN IF NOT EXISTS unified_source_format_version integer NOT NULL DEFAULT 0;`,
+		// The pending-work index bounds startup batches even after earlier format migrations marked every row.
+		`CREATE INDEX IF NOT EXISTS idx_fused_config_states_unified_source_v2 ON fused_config_states(id) WHERE config_type='unified_app' AND unified_source_format_version < 2;`,
 		// Live config state must admit the same distinct hosted App kind as a fresh database.
 		`ALTER TABLE fused_config_states DROP CONSTRAINT IF EXISTS fused_config_states_config_type_check;
 		ALTER TABLE fused_config_states ADD CONSTRAINT fused_config_states_config_type_check CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'unified_app', 'webhook'));
@@ -1718,7 +1721,20 @@ func engineSchemaQueries() []string {
 			ON fused_unified_app_results(account_id, app_id, created_at DESC, id DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_results_status
 			ON fused_unified_app_results(account_id, app_id, status, created_at DESC);`,
-		// Private diagnostics share the result retention and never enter execution-event payloads.
+		// Private message bodies never enter execution-event payloads.
+		// Webhook evidence can arrive before its asynchronous canonical receipt, so reads enforce the receipt join instead of a foreign key.
+		`CREATE TABLE IF NOT EXISTS fused_webhook_diagnostics (
+			event_id uuid PRIMARY KEY,
+			account_id uuid NOT NULL,
+			service_id uuid NOT NULL,
+			registration_id uuid NOT NULL,
+			diagnostic_dek text NOT NULL,
+			diagnostic_payload text NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT NOW(),
+			expires_at timestamptz NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_webhook_diagnostics_expiry ON fused_webhook_diagnostics(expires_at);`,
+		// Unified App diagnostics share the parent result retention.
 		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS diagnostic_dek text, ADD COLUMN IF NOT EXISTS diagnostic_payload text;`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_results_expiry
 			ON fused_unified_app_results(expires_at) WHERE expires_at IS NOT NULL;`,

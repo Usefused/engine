@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"os"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/store"
@@ -32,7 +31,7 @@ func webhookSigningSecretTarget(ctx context.Context, registration store.Workspac
 }
 
 // webhookDiscoveryDestination exposes only the receiving address, never relay authority or secret references.
-func webhookDiscoveryDestination(registration store.WorkspaceWebhook) (string, string) {
+func webhookDiscoveryDestination(ctx context.Context, registration store.WorkspaceWebhook) (string, string) {
 	var relay struct {
 		Source json.RawMessage `json:"source"`
 	}
@@ -51,7 +50,7 @@ func webhookDiscoveryDestination(registration store.WorkspaceWebhook) (string, s
 	if registration.CallbackURL != "" {
 		return registration.CallbackURL, "direct"
 	}
-	url, err := registeredCallbackURL(os.Getenv("FUSED_ENGINE_PUBLIC_URL"), registration.Slug)
+	url, err := registeredCallbackURL(enginePublicURL(ctx), registration.Slug)
 	// Without a valid public base, callers may show the route but must not invent a provider URL.
 	if err != nil {
 		return "", "direct"

@@ -6,7 +6,7 @@ import type { AppPlanResponse } from "./app-builder-contract";
 export const WEBHOOK_REGISTRATIONS_QUERY = `query WorkspaceWebhookPage($limit: Int, $offset: Int, $serviceId: String, $search: String) {
   workspaceWebhookPage(limit: $limit, offset: $offset, service_id: $serviceId, search: $search) {
     total
-    items { service_id service_name service_ref label slug callback_url delivery_mode signature signing_secret { bucket_id key_name } created_at }
+    items { id service_id service_name service_ref label slug callback_url delivery_mode signature signing_secret { bucket_id key_name } created_at }
   }
 }`;
 

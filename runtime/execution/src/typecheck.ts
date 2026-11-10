@@ -2,14 +2,16 @@ import path from "node:path";
 import ts from "typescript";
 import type { BundleSpec } from "./bundle";
 import { generateExecutionBindingsDeclaration } from "./bindings";
+import { validateAppMetadata } from "./source-config";
 import { verifyOperationCalls } from "./verify-operations";
 
-// Reject reference directives before TypeScript can read files or ambient capabilities outside the pinned import graph.
+// Reject retired metadata and reference directives before evaluating source or resolving the pinned import graph.
 function validateAuthorReferences(entry: string): void {
   const source = ts.sys.readFile(entry);
   // A missing authored entry cannot be substituted with a declaration-only program.
   if (source === undefined) throw new Error("Unified App source is unavailable");
   const parsed = ts.createSourceFile(entry, source, ts.ScriptTarget.ES2022, true);
+  validateAppMetadata(parsed);
   // Triple-slash references bypass module resolution, so import allowlisting alone is insufficient.
   if (parsed.referencedFiles.length || parsed.typeReferenceDirectives.length || parsed.libReferenceDirectives.length || parsed.hasNoDefaultLib) {
     throw new Error("Unified App source cannot use TypeScript reference directives");

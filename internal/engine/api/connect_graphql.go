@@ -217,6 +217,7 @@ var workspaceWebhookGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "WorkspaceWebhook",
 	Fields: graphql.Fields{
 		// Batch discovery uses persisted service identity rather than Registry enrichment.
+		"id":           &graphql.Field{Type: graphql.String},
 		"service_id":   &graphql.Field{Type: graphql.String},
 		"service_name": &graphql.Field{Type: graphql.String},
 		"service_ref":  &graphql.Field{Type: graphql.String},
@@ -261,6 +262,16 @@ var appTokenGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 var webhookEventGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "WebhookEvent",
 	Fields: graphql.Fields{
+		"registration_id":     &graphql.Field{Type: graphql.String},
+		"service_version_id":  &graphql.Field{Type: graphql.String},
+		"trace_id":            &graphql.Field{Type: graphql.String},
+		"span_id":             &graphql.Field{Type: graphql.String},
+		"execution_status":    &graphql.Field{Type: graphql.String},
+		"failure_category":    &graphql.Field{Type: graphql.String},
+		"failure_code":        &graphql.Field{Type: graphql.String},
+		"attempt_count":       &graphql.Field{Type: graphql.Int},
+		"ended_at":            &graphql.Field{Type: graphql.String},
+		"recorded_at":         &graphql.Field{Type: graphql.String},
 		"id":                  &graphql.Field{Type: graphql.String},
 		"account_id":          &graphql.Field{Type: graphql.String},
 		"service_id":          &graphql.Field{Type: graphql.String},
@@ -291,10 +302,12 @@ var webhookEventPageGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 var webhookAnalyticsGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "WebhookAnalytics",
 	Fields: graphql.Fields{
-		"total_ingested":  &graphql.Field{Type: graphql.Int},
-		"total_delivered": &graphql.Field{Type: graphql.Int},
-		"total_rejected":  &graphql.Field{Type: graphql.Int},
-		"total_failed":    &graphql.Field{Type: graphql.Int},
+		"average_latency_ms": &graphql.Field{Type: graphql.Float},
+		"p95_latency_ms":     &graphql.Field{Type: graphql.Float},
+		"total_ingested":     &graphql.Field{Type: graphql.Int},
+		"total_delivered":    &graphql.Field{Type: graphql.Int},
+		"total_rejected":     &graphql.Field{Type: graphql.Int},
+		"total_failed":       &graphql.Field{Type: graphql.Int},
 	},
 })
 
@@ -863,21 +876,26 @@ func workspaceWebhooksGraphQLField(s store.Store) *graphql.Field {
 	}
 }
 
+// webhookEventsGraphQLField serves canonical receipts under account, service, and optional exact-registration scope.
 func webhookEventsGraphQLField(s store.Store) *graphql.Field {
 	return &graphql.Field{
 		Type: webhookEventPageGraphQLType,
 		Args: webhookAnalyticsArgs(true),
+		// Preserve the existing bounded execution-reporting trace without emitting provider data.
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.webhook_events.list")
 			defer span.End()
 			actor, err := actorFromContext(p.Context)
+			// Reporting must bind every query to the authenticated account.
 			if err != nil {
 				return nil, err
 			}
 			filter, err := webhookAnalyticsFilterFromArgs(p)
+			// Invalid filters must not broaden event visibility.
 			if err != nil {
 				return nil, err
 			}
+			// Disabled services cannot expose activity through a direct GraphQL request.
 			if err := requireActiveWorkspaceService(ctx, s, filter.serviceID); err != nil {
 				return nil, err
 			}
@@ -886,7 +904,8 @@ func webhookEventsGraphQLField(s store.Store) *graphql.Field {
 				attribute.Int("limit", filter.limit),
 				attribute.Int("offset", filter.offset),
 			)
-			events, total, err := s.ListWebhookEventsByService(ctx, actor.accountID, filter.serviceID, filter.eventName, filter.limit, filter.offset, filter.startDate, filter.endDate)
+			events, total, err := readWebhookEvents(ctx, s, filter.storeFilter(actor.accountID))
+			// Storage failures remain unavailable instead of becoming an empty successful page.
 			if err != nil {
 				return nil, fmt.Errorf("list webhook events: %w", err)
 			}
@@ -895,26 +914,32 @@ func webhookEventsGraphQLField(s store.Store) *graphql.Field {
 	}
 }
 
+// webhookAnalyticsGraphQLField uses the same registration predicates as event history.
 func webhookAnalyticsGraphQLField(s store.Store) *graphql.Field {
 	return &graphql.Field{
 		Type: webhookAnalyticsGraphQLType,
 		Args: webhookAnalyticsArgs(false),
+		// Preserve the existing bounded execution-reporting trace without emitting provider data.
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.webhook_analytics.get")
 			defer span.End()
 			actor, err := actorFromContext(p.Context)
+			// Summaries must retain the same authenticated account boundary as history.
 			if err != nil {
 				return nil, err
 			}
 			filter, err := webhookAnalyticsFilterFromArgs(p)
+			// Invalid scope must not become a service-wide aggregate.
 			if err != nil {
 				return nil, err
 			}
+			// Disabled services cannot expose activity through a direct GraphQL request.
 			if err := requireActiveWorkspaceService(ctx, s, filter.serviceID); err != nil {
 				return nil, err
 			}
 			span.SetAttributes(attribute.String("service_id", filter.serviceID.String()))
-			analytics, err := s.GetWebhookAnalytics(ctx, actor.accountID, filter.serviceID, filter.eventName, filter.startDate, filter.endDate)
+			analytics, err := readWebhookAnalytics(ctx, s, filter.storeFilter(actor.accountID))
+			// An unavailable aggregate must never be presented as zero received events.
 			if err != nil {
 				return nil, fmt.Errorf("get webhook analytics: %w", err)
 			}
@@ -1968,12 +1993,14 @@ func connectScopedArgs() graphql.FieldConfigArgument {
 }
 
 type webhookAnalyticsFilter struct {
-	serviceID uuid.UUID
-	eventName string
-	limit     int
-	offset    int
-	startDate *time.Time
-	endDate   *time.Time
+	registrationID *uuid.UUID
+	status         string
+	serviceID      uuid.UUID
+	eventName      string
+	limit          int
+	offset         int
+	startDate      *time.Time
+	endDate        *time.Time
 }
 
 type engineExecutionActivityFilter struct {
@@ -2141,13 +2168,17 @@ func (f appExecutionActivityFilter) storeFilter(accountID uuid.UUID) store.Engin
 	}
 }
 
+// webhookAnalyticsArgs shares exact-registration and outcome filters across summaries and paged receipts.
 func webhookAnalyticsArgs(includePage bool) graphql.FieldConfigArgument {
 	args := graphql.FieldConfigArgument{
-		"service_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
-		"event_name": &graphql.ArgumentConfig{Type: graphql.String},
-		"start_date": &graphql.ArgumentConfig{Type: graphql.String},
-		"end_date":   &graphql.ArgumentConfig{Type: graphql.String},
+		"service_id":      &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
+		"registration_id": &graphql.ArgumentConfig{Type: graphql.String},
+		"status":          &graphql.ArgumentConfig{Type: graphql.String},
+		"event_name":      &graphql.ArgumentConfig{Type: graphql.String},
+		"start_date":      &graphql.ArgumentConfig{Type: graphql.String},
+		"end_date":        &graphql.ArgumentConfig{Type: graphql.String},
 	}
+	// Aggregates share receipt predicates without accepting irrelevant page offsets.
 	if includePage {
 		args["limit"] = &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 10}
 		args["offset"] = &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 0}
@@ -2155,28 +2186,35 @@ func webhookAnalyticsArgs(includePage bool) graphql.FieldConfigArgument {
 	return args
 }
 
+// webhookAnalyticsFilterFromArgs validates exact identity and bounded outcome filters before any data read.
 func webhookAnalyticsFilterFromArgs(p graphql.ResolveParams) (webhookAnalyticsFilter, error) {
 	serviceID, err := requiredGraphQLUUIDArg(p, "service_id")
+	// Reject malformed service identities before evaluating optional scope.
 	if err != nil {
 		return webhookAnalyticsFilter{}, err
 	}
+	registrationID, err := optionalGraphQLUUIDArg(p, "registration_id")
+	// An invalid registration must never silently widen to service-wide history.
+	if err != nil {
+		return webhookAnalyticsFilter{}, err
+	}
+	status := graphQLStringArg(p, "status")
+	// Only the fixed UI outcome choices are admitted into the query builder.
+	if err := validateOptionalExecutionDimension(status, "webhook status", "success", "failed", "rejected"); err != nil {
+		return webhookAnalyticsFilter{}, fmt.Errorf("invalid webhook status")
+	}
 	limit, offset := bucketPageArgs(p)
-	startDate, err := parseOptionalRFC3339(graphQLStringArg(p, "start_date"))
+	startDate, endDate, err := engineExecutionDatesFromArgs(p)
+	// Invalid date syntax must never become an unbounded report.
 	if err != nil {
-		return webhookAnalyticsFilter{}, fmt.Errorf("invalid start_date")
+		return webhookAnalyticsFilter{}, err
 	}
-	endDate, err := parseOptionalRFC3339(graphQLStringArg(p, "end_date"))
-	if err != nil {
-		return webhookAnalyticsFilter{}, fmt.Errorf("invalid end_date")
+	// Reversed bounds are input errors, rather than misleading empty activity.
+	if startDate != nil && endDate != nil && startDate.After(*endDate) {
+		return webhookAnalyticsFilter{}, fmt.Errorf("start_date must precede end_date")
 	}
-	return webhookAnalyticsFilter{
-		serviceID: serviceID,
-		eventName: strings.TrimSpace(graphQLStringArg(p, "event_name")),
-		limit:     limit,
-		offset:    offset,
-		startDate: startDate,
-		endDate:   endDate,
-	}, nil
+	return webhookAnalyticsFilter{serviceID: serviceID, registrationID: registrationID, status: status,
+		eventName: strings.TrimSpace(graphQLStringArg(p, "event_name")), limit: limit, offset: offset, startDate: startDate, endDate: endDate}, nil
 }
 
 func bucketIDPageArgs() graphql.FieldConfigArgument {
@@ -2785,9 +2823,14 @@ func authRequiredFields(authType string) []string {
 // projectGraphQLWorkspaceWebhooks makes receiving URLs discoverable without exposing verification credentials.
 func projectGraphQLWorkspaceWebhooks(webhooks []store.WorkspaceWebhook, contexts ...context.Context) []map[string]interface{} {
 	items := make([]map[string]interface{}, 0, len(webhooks))
+	ctx := context.Background()
+	// Pure projections remain usable in tests; HTTP requests carry loaded deployment configuration.
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
 	// Every registration uses the same routing and metadata permission boundary.
 	for _, webhook := range webhooks {
-		callbackURL, deliveryMode := webhookDiscoveryDestination(webhook)
+		callbackURL, deliveryMode := webhookDiscoveryDestination(ctx, webhook)
 		var signingSecret interface{}
 		// Existing projections without an actor remain metadata-free.
 		if len(contexts) > 0 {
@@ -2798,7 +2841,7 @@ func projectGraphQLWorkspaceWebhooks(webhooks []store.WorkspaceWebhook, contexts
 		}
 		items = append(items, map[string]interface{}{
 			"callback_url": callbackURL, "delivery_mode": deliveryMode,
-			"label": webhook.Label, "slug": webhook.Slug, "created_at": formatGraphQLTime(webhook.CreatedAt),
+			"id": webhook.ID.String(), "label": webhook.Label, "slug": webhook.Slug, "created_at": formatGraphQLTime(webhook.CreatedAt),
 			"signature":      webhookSignatureStatus(webhook.SecretBucketID),
 			"signing_secret": signingSecret,
 		})
@@ -2844,12 +2887,18 @@ func projectGraphQLWebhookEvents(events []models.WebhookEvent) []map[string]inte
 	return items
 }
 
+// projectGraphQLWebhookEvent exposes canonical metadata without private message bytes or credential material.
 func projectGraphQLWebhookEvent(event models.WebhookEvent) map[string]interface{} {
 	sdkRecordID := ""
+	// Legacy app correlation is optional for standalone ingress registrations.
 	if event.SDKRecordID != nil {
 		sdkRecordID = event.SDKRecordID.String()
 	}
 	return map[string]interface{}{
+		"registration_id": formatOptionalGraphQLUUID(event.RegistrationID), "service_version_id": event.ServiceVersionID,
+		"trace_id": event.TraceID, "span_id": event.SpanID, "execution_status": event.ExecutionStatus,
+		"failure_category": event.FailureCategory, "failure_code": event.FailureCode, "attempt_count": event.AttemptCount,
+		"ended_at": formatGraphQLTime(event.EndedAt), "recorded_at": formatGraphQLTime(event.RecordedAt),
 		"id": event.ID.String(), "account_id": event.AccountID.String(), "service_id": event.ServiceID.String(),
 		"msg_id": event.MsgID, "event_name": event.EventType,
 		"status": event.DeliveryStatus, "delivery_status": event.DeliveryStatus,
@@ -2861,8 +2910,10 @@ func projectGraphQLWebhookEvent(event models.WebhookEvent) map[string]interface{
 	}
 }
 
+// projectGraphQLWebhookAnalytics exposes only aggregate receipt metadata, matching app analytics.
 func projectGraphQLWebhookAnalytics(analytics models.WebhookAnalytics) map[string]interface{} {
 	return map[string]interface{}{
+		"average_latency_ms": analytics.AverageLatencyMs, "p95_latency_ms": analytics.P95LatencyMs,
 		"total_ingested":  int(analytics.TotalIngested),
 		"total_delivered": int(analytics.TotalDelivered),
 		"total_rejected":  int(analytics.TotalRejected),

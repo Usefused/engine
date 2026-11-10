@@ -169,6 +169,12 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodGet, "/audit/export", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionAuditRead),
 	}},
+	// Private webhook messages require independent diagnostics and receipt grants before any handler or decryption.
+	{http.MethodGet, "/workspace/services/{service_id}/webhooks/{registration_id}/receipts/{event_id}/diagnostics", false, []routeRequirement{
+		pathRequirement(accesscontrol.PermissionServiceRead, accesscontrol.ResourceService, "service_id"),
+		pathRequirement(accesscontrol.PermissionWebhookDiagnosticsRead, accesscontrol.ResourceService, "service_id"),
+		workspaceRequirement(accesscontrol.PermissionAuditRead),
+	}},
 	// Imported catalog reads and writes share service RBAC; handlers additionally enforce actor and bucket scope.
 	{http.MethodGet, "/workspace/services/{service_id}/versions/{version_id}/mcp-catalog", false, []routeRequirement{
 		pathRequirement(accesscontrol.PermissionServiceRead, accesscontrol.ResourceService, "service_id"),

@@ -220,26 +220,30 @@ func webhookConfigVerifiesSignature(config *webhookConfig) bool {
 }
 
 // ingestResolvedWebhook runs the shared post-resolution tail: attach identity
-// attributes, verify the signature, extract the event, and publish.
+// attributes, privately snapshot the original body, verify the signature, extract the event, and publish.
 func ingestResolvedWebhook(w http.ResponseWriter, r *http.Request, span trace.Span, ctx context.Context, config *webhookConfig, urlSlug string, rawBody, body []byte) {
- // Delegated input is accepted only by the authenticated outbound pull adapter.
- if config.AuthType == "fused_remote" {
-  writeError(w,http.StatusForbidden,"remote webhook registration has no public ingress")
-  return
- }
+	// Delegated input is accepted only by the authenticated outbound pull adapter.
+	if config.AuthType == "fused_remote" {
+		writeError(w, http.StatusForbidden, "remote webhook registration has no public ingress")
+		return
+	}
 
 	// Attach account/service identifiers once the config is resolved.
 	span.SetAttributes(
 		attribute.String("account_id", config.AccountID),
 		attribute.String("service_id", config.ServiceID),
 	)
+	ctx = withWebhookDiagnosticCapture(ctx, r, rawBody)
+	r = r.WithContext(ctx)
 
 	authOutcome := validateWebhookAuth(ctx, w, r, rawBody, config)
+	// Rejections already publish their receipt; challenges must not create message evidence.
 	if webhookAuthStopsIngress(span, authOutcome) {
 		return
 	}
 
 	eventName := extractEventName(r, body, config)
+	// A verified but unclassifiable message remains an inspectable rejection.
 	if eventName == "" {
 		publishRejection(ctx, config, "UNKNOWN", "failed to extract event name", len(body))
 		span.SetStatus(codes.Error, "failed to extract event name")
@@ -602,9 +606,10 @@ func buildDownstreamPayload(r *http.Request, body []byte, urlSlug, eventName str
 	}
 }
 
-// publishAnalyticsIngestion records a successful webhook ingestion in analytics.
+// publishAnalyticsIngestion records a successful ingress receipt and retains its separate private capture.
 func publishAnalyticsIngestion(ctx context.Context, msgID, eventName string, payloadSize int, config *webhookConfig) {
 	accountID, serviceID := webhookExecutionIDs(config)
+	// Invalid tenant identities cannot create either a receipt or loosely scoped private evidence.
 	if accountID == uuid.Nil || serviceID == uuid.Nil {
 		return
 	}
@@ -613,20 +618,25 @@ func publishAnalyticsIngestion(ctx context.Context, msgID, eventName string, pay
 		ServiceVersionID: config.ServiceVersionID, RegistrationID: config.RegistrationID, EventName: eventName,
 		DeliveryStatus: "ingested", VerificationStatus: "verified", PayloadSize: int64(payloadSize), OccurredAt: time.Now(),
 	})
+	saveWebhookDiagnosticCapture(ctx, event)
+	// Receipt publication failure cannot expose body bytes or undo an accepted provider message.
 	if err := executionevent.Publish(ctx, event); err != nil {
 		slog.ErrorContext(ctx, "Failed to publish webhook execution event", slog.Any("error", err), slog.String("event_id", event.ID.String()))
 	}
 }
 
-// publishRejection records an aborted/rejected webhook in analytics.
+// publishRejection records a rejected receipt with private evidence correlated to that exact attempt.
 func publishRejection(ctx context.Context, config *webhookConfig, eventName, errorReason string, payloadSize int) {
+	// Unknown registrations cannot acquire private retained evidence.
 	if config == nil || config.AccountID == "" || config.ServiceID == "" {
 		return
 	}
 	accountID, serviceID := webhookExecutionIDs(config)
+	// Invalid tenant/service scope must fail closed before either storage path.
 	if accountID == uuid.Nil || serviceID == uuid.Nil {
 		return
 	}
+	// Unverified input must not be trusted to classify the provider's event name.
 	if eventName == "" {
 		eventName = "UNKNOWN"
 	}
@@ -637,6 +647,8 @@ func publishRejection(ctx context.Context, config *webhookConfig, eventName, err
 		DeliveryStatus: "rejected", VerificationStatus: "rejected", FailureReason: errorReason,
 		PayloadSize: int64(payloadSize), OccurredAt: time.Now(),
 	})
+	saveWebhookDiagnosticCapture(ctx, event)
+	// Receipt transport errors never include private evidence.
 	if err := executionevent.Publish(ctx, event); err != nil {
 		slog.ErrorContext(ctx, "Failed to publish rejected webhook execution event", slog.Any("error", err), slog.String("event_id", event.ID.String()))
 	}

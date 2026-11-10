@@ -1078,6 +1078,8 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 
 	// This middleware must run before proxy routes: paths such as /integrations
 	// are both SPA routes and Registry API routes, so the request shape decides.
+	// API discovery and browser settings share the same loaded public URL, including YAML-only deployments.
+	r.Use(api.EnginePublicURLMiddleware(deps.cfg.Engine.PublicURL))
 	uiFS := backend.GetUIFS()
 	r.Use(api.EmbeddedUIMiddleware(uiFS, api.EmbeddedUIRuntimeConfig{
 		EnginePublicURL:     deps.cfg.Engine.PublicURL,
@@ -1144,6 +1146,8 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 	})
 
 	secretResolver := sandbox.NewSecretResolver(deps.engineStore, deps.masterKey)
+	// Ingress retains bounded encrypted evidence separately from ordinary execution receipts.
+	sandbox.SetWebhookDiagnosticsStore(deps.engineStore, deps.masterKey)
 
 	// One server instance owns REST and MCP Unified adapters so both call the
 	// same preflight, scheduler, physical runtime, and token validator.

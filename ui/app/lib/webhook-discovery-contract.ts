@@ -1,4 +1,5 @@
 export interface WebhookRegistration {
+  id: string;
   label: string;
   slug: string;
   callback_url: string;
@@ -54,4 +55,9 @@ export function matchesWebhook(registration: WebhookListing, search: string): bo
   const value = search.trim().toLowerCase();
   // Older callers can omit the canonical reference without breaking display-name search.
   return [registration.label, registration.service_name, registration.service_ref || "", registration.callback_url, registration.slug].some((field) => field.toLowerCase().includes(value));
+}
+
+/** Exact receiving-route links remain distinct from the public provider callback URL. */
+export function webhookDetailPath(registration: Pick<WebhookListing, "service_id" | "slug">): string {
+  return `/integrations/webhooks/${encodeURIComponent(registration.service_id)}/${encodeURIComponent(registration.slug)}`;
 }

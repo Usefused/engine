@@ -49,7 +49,7 @@ test("execution details drawer is viewport safe on mobile", () => {
   assert.match(sharedDrawer, /xl:max-w-\[1080px\]/);
 });
 
-// Confirms incoming webhook cards and rows expose only the bounded reduced receipt.
+// Confirms canonical failure reasons remain inspectable while provider bodies and credentials stay excluded.
 test("webhook receipt rows open bounded webhook details", () => {
   assert.match(webhookLogs, /<WebhookEventCard[^>]+onSelect=\{setSelectedEventID\}/);
   assert.match(webhookLogs, /<WebhookEventRow[^>]+onSelect=\{setSelectedEventID\}/);
@@ -57,5 +57,7 @@ test("webhook receipt rows open bounded webhook details", () => {
   for (const label of ["Event", "Verification", "Delivery", "Environment", "Delivery time", "Payload size", "Retries", "Received", "Message ID", "Receipt ID"]) {
     assert.match(webhookDrawer, new RegExp(`label="${label}"`));
   }
-  assert.doesNotMatch(webhookDrawer, /event\.(?:error_reason|payload(?!_size)|credentials?|secrets?)/i);
+  assert.match(webhookDrawer, /Failure reason/);
+  assert.match(webhookDrawer, /event\.error_reason/);
+  assert.doesNotMatch(webhookDrawer, /event\.(?:payload(?!_size)|credentials?|secrets?)/i);
 });

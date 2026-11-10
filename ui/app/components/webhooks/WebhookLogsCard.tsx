@@ -119,11 +119,11 @@ export interface WebhookLogsCardProps {
   setWebhookEndDate: (date: string) => void;
   webhookAnalytics: WebhookAnalyticsSummary | null;
   loadWebhookData: () => void;
+  showSummary?: boolean;
+  emptyMessage?: string;
 }
 
-// Shared between the per-service Webhook activity tab (components/AnalyticsTab.tsx)
-// and the Observability page's Webhooks tab -- both feed it results from the
-// same api.workspace.listWebhookEvents / getWebhookAnalytics calls.
+// WebhookLogsCard shares responsive receipt inspection across service and exact-registration Activity.
 export function WebhookLogsCard({
   webhookNameOptions,
   webhookEvents,
@@ -139,6 +139,8 @@ export function WebhookLogsCard({
   setWebhookEndDate,
   webhookAnalytics,
   loadWebhookData,
+  showSummary = true,
+  emptyMessage = "No incoming webhooks yet.",
 }: WebhookLogsCardProps) {
   const [selectedEventID, setSelectedEventID] = useState("");
   const selectedEvent = webhookEvents.find((event) => event.id === selectedEventID) ?? null;
@@ -150,6 +152,7 @@ export function WebhookLogsCard({
         </h2>
         <div className="flex flex-wrap items-center gap-3">
           <Select
+            aria-label="Filter webhook event type"
             value={webhookFilterEvent}
             onChange={(e) => setWebhookFilterEvent(e.target.value)}
             className="text-sm border border-slate-200 rounded px-2 py-1 bg-white text-slate-700 outline-none flex-1 sm:flex-initial"
@@ -163,6 +166,7 @@ export function WebhookLogsCard({
           <div className="flex items-center gap-2 flex-wrap flex-1 sm:flex-initial">
             <input
               type="date"
+              aria-label="Webhook start date"
               value={webhookStartDate}
               onChange={(e) => setWebhookStartDate(e.target.value)}
               className="text-sm border border-slate-200 rounded px-2 py-1 bg-white text-slate-700 outline-none flex-1 sm:flex-initial min-w-[110px]"
@@ -171,6 +175,7 @@ export function WebhookLogsCard({
             <span className="text-slate-400 text-sm">to</span>
             <input
               type="date"
+              aria-label="Webhook end date"
               value={webhookEndDate}
               onChange={(e) => setWebhookEndDate(e.target.value)}
               className="text-sm border border-slate-200 rounded px-2 py-1 bg-white text-slate-700 outline-none flex-1 sm:flex-initial min-w-[110px]"
@@ -188,7 +193,8 @@ export function WebhookLogsCard({
         </div>
       </div>
 
-      {webhookAnalytics && (
+      {/* Dedicated analytics tabs own their metrics; service Activity retains its inline summary. */}
+      {showSummary && webhookAnalytics && (
         <div className="grid grid-cols-2 gap-px border-b border-slate-200 bg-slate-100 sm:grid-cols-4">
           <div className="bg-white p-4">
             <div className="mb-1 text-xs font-medium text-slate-500">Received</div>
@@ -209,16 +215,16 @@ export function WebhookLogsCard({
         </div>
       )}
 
-      <div className="divide-y divide-slate-100 md:hidden">
+      <div aria-label="Incoming webhook receipts on mobile" className="divide-y divide-slate-100 md:hidden">
         {webhookEvents.length > 0 ? webhookEvents.map((event, index) => (
           <WebhookEventCard key={event.id || event.msg_id || index} event={event} onSelect={setSelectedEventID} />
         )) : (
-          <div className="px-5 py-10 text-center text-sm text-slate-500">No incoming webhooks yet.</div>
+          <div className="px-5 py-10 text-center text-sm text-slate-500">{emptyMessage}</div>
         )}
       </div>
 
       <div className="hidden overflow-x-auto md:block">
-        <table className="w-full min-w-[900px] table-fixed text-left text-sm text-slate-600">
+        <table aria-label="Incoming webhook receipts" className="w-full min-w-[900px] table-fixed text-left text-sm text-slate-600">
           <thead className="border-b border-slate-200 bg-slate-50 text-xs font-medium text-slate-500">
             <tr>
               <th className="w-[17%] px-4 py-3">Event</th>
@@ -240,7 +246,7 @@ export function WebhookLogsCard({
             ) : (
               <tr>
                 <td colSpan={9} className="px-5 py-10 text-center text-slate-500">
-                  No incoming webhooks yet.
+                  {emptyMessage}
                 </td>
               </tr>
             )}

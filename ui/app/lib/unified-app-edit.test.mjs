@@ -40,6 +40,18 @@ test("editing preserves family identity, provider overrides and exact pins", () 
   assert.deepEqual(saved, before);
 });
 
+// Registration selection must not alter saved source, capability pins, or the deployed ingress binding.
+test("choosing an existing webhook seeds only the successor draft", () => {
+  const saved = savedApp();
+  const before = structuredClone(saved);
+  const draft = unifiedEditDraft(saved, "billing & events");
+  assert.equal(draft.webhookAttachment, "billing & events");
+  assert.equal(draft.source, saved.config.source);
+  assert.deepEqual(draft.services, unifiedEditDraft(saved).services);
+  assert.equal(unifiedEditConfig(saved, draft, "1.0.1").webhook_attachment, "billing & events");
+  assert.deepEqual(saved, before);
+});
+
 // Canonical picker names cannot rename a provider referenced by the saved source or drop credential overrides.
 test("picker hydration retains saved service aliases", () => {
   const saved = savedApp();

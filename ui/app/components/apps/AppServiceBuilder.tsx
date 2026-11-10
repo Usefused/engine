@@ -1,3 +1,4 @@
+import { CompactServiceCapabilities } from "./CompactServiceCapabilities";
 import { isSDKLanguage, sdkLanguageOrDefault, type SDKLanguage } from "~/lib/sdk-languages";
 import { ImportedMcpPicker, importedMcpCount, type ImportedMcpSelection } from "./ImportedMcpPicker";
 import { AppServiceAuthFields, type AppAuthService } from "~/components/apps/AppServiceAuthFields";
@@ -1312,6 +1313,31 @@ function BuilderSelectionPane(props: BuilderSelectionPaneProps) {
   );
 }
 
+/** Embeds flat capabilities while preserving the shared catalogue, exact version pins and selection callbacks. */
+function BuilderCompactSelectionPane(props: BuilderSelectionPaneProps & { onLoadService: (id: string) => void }) {
+  const selected = props.data.filter(/** Review includes only services with an explicit selected capability. */ (row) => hasServiceSelection(row.service.id, props));
+  // Clearing the last capability must keep discovery reachable.
+  const browsing = props.browsingServices || selected.length === 0;
+  const rows = browsing ? props.data : selected;
+  return <div className="min-w-0 space-y-3">
+    {/* Catalogue browsing is explicit, without nesting a second selected-services header inside the form section. */}
+    {selected.length > 0 && <div className="flex justify-end"><button type="button" onClick={/** Switching catalogue visibility leaves all reviewed selections intact. */ () => props.setBrowsingServices(!browsing)} className="text-xs font-medium text-[var(--brand-violet)]">{browsing ? "Done selecting" : "Add services"}</button></div>}
+    {browsing && <BuilderSearchForm {...props} />}
+    {/* Empty catalogue results retain the existing permission-aware recovery guidance. */}
+    {rows.length === 0 && <BuilderEmptyServices {...props} />}
+    {rows.map(/** Every service remains a flat block with direct capability rows and an inline version selector. */ (item) => <CompactServiceCapabilities key={item.service.id} item={item}
+      selectedOperations={props.selections[item.service.id] ?? new Set<string>()} selectedEvents={props.webhookSelections[item.service.id] ?? new Set<string>()}
+      version={props.versionSelections[item.service.id] ?? item.serviceVersions[0]?.id ?? ""} loaded={Boolean(props.loadedServices[item.service.id])} loading={Boolean(props.loadingService[item.service.id])} allowEvents={props.allowWebhooks}
+      onLoad={/** Existing bootstrap owns authorization and remains directly retryable after a failed contract read. */ () => props.onLoadService(item.service.id)}
+      onVersion={/** Changing the version invalidates stale operation/resource identities through the shared builder. */ (version) => props.handleVersionSelection(item.service.id, version)}
+      onOperation={/** Toggle only the exact operation represented by this row. */ (id) => props.toggleEndpoint(item.service.id, id)}
+      onEvent={/** Provider events remain a separate, explicit ingress scope. */ (id) => props.toggleWebhook(item.service.id, id)}
+      onResource={/** Resource loading is presentation-only and never activates a provider service. */ (id, name) => props.loadResourceEndpoints(item.service.id, id, name)}
+      onMore={/** Paging retains the selected service and version rather than resolving a newer contract. */ (name) => props.loadMoreResource(item.service.id, name)} resourceLoading={props.loadingResourceByName} resourceMore={props.hasMoreResources} />)}
+    {browsing && <BuilderPagination {...props} />}
+  </div>;
+}
+
 // BuilderPageHeader names the artifact being configured.
 function BuilderPageHeader({ generationMode }: { generationMode: GenerationMode }) {
   // A combined build advertises the single App identity before listing its delivery methods.
@@ -1464,7 +1490,7 @@ export function AppOperationPicker({ seed, onChange, onPendingChange, allowWebho
   return <AppServiceBuilder loaderData={pickerLoader} picker={{ seed, onChange, onPendingChange, allowWebhooks }} />;
 }
 
-/** Owns one manual selection for both described proposals and direct SDK/MCP authoring. */
+/** Shares exact selection state while giving embedded Unified App authoring a flat capability presentation. */
 export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderData; picker?: PickerOptions }) {
   const { access } = useCurrentActorAccess();
   const credentialReview = useAppCredentialReview();
@@ -2465,7 +2491,7 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   if (picker) return <fieldset disabled={selectionPending} className="min-w-0 space-y-4">
     {seedBusy && <p role="status" className="text-sm text-slate-500">Loading selected operations…</p>}
     {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
-    <BuilderSelectionPane {...selection} />
+    <BuilderCompactSelectionPane {...selection} onLoadService={loadServiceIntegrations} />
   </fieldset>;
 
   const pageContent = <BuilderPage

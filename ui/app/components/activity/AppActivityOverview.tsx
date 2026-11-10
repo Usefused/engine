@@ -190,3 +190,6 @@ function hostedLatency(analytics: AppExecutionAnalytics | null): string { return
 
 /** Hosted apps expose successful executions instead of package-specific drift counts. */
 function hostedSuccesses(analytics: AppExecutionAnalytics | null): string { return analytics ? analytics.successful_calls.toLocaleString() : "—"; }
+
+// Registration analytics reuse the same responsive metric treatment as app analytics.
+export { Metric as ActivityMetric };

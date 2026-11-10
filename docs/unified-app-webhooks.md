@@ -2,7 +2,7 @@
 
 Unified Apps consume provider events from the existing Fused `WEBHOOKS` NATS stream. Register provider ingress with `kind: webhook` first, then attach that registration to the app and select event names alongside its operations:
 
-In the Unified App editor, select exact webhook events in the service picker and enter an applied webhook registration that covers those services. The editor links to registration creation when one is needed. `fused-cli describe '<goal>' --kind unified` can also resolve event intent, reuse a compatible registration, or create one before deploying the app. Review the generated TypeScript and webhook scope before confirming the describe proposal.
+In an app's Webhooks tab, **Add webhook trigger** lists existing webhook registrations. Choose one to open an unsaved successor version with that registration selected, then choose exact webhook events in the service picker. The editor also lets you search and select an existing registration, or create one when needed. The registration must cover every selected event service; validation checks coverage before deployment. Existing registrations alone do not trigger an app until a version selecting their events is deployed. `fused-cli describe '<goal>' --kind unified` can also resolve event intent, reuse a compatible registration, or create one before deploying the app. Review the generated TypeScript and webhook scope before confirming the describe proposal.
 
 ```yaml
 apiVersion: fused/v1

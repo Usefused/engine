@@ -8,7 +8,7 @@ import { WebhookSigningSecret } from "~/components/webhooks/WebhookSigningSecret
 import { CopyValue } from "~/components/CopyValue";
 import { Select } from "~/components/forms/Select";
 import { webhookListings } from "~/lib/webhook-discovery-api";
-import { copyableWebhookURL, type WebhookListing } from "~/lib/webhook-discovery-contract";
+import { copyableWebhookURL, webhookDetailPath, type WebhookListing } from "~/lib/webhook-discovery-contract";
 
 /** Gives webhook pages a clear browser identity distinct from service detail routes. */
 export const meta = () => [{ title: "Webhooks - Fused" }];
@@ -111,7 +111,7 @@ export default function WebhooksPage() {
   </div>;
 }
 
-/** Keeps provider URLs visible and copyable while distinguishing managed subscriptions from direct ingress. */
+/** Links each registration to its exact detail page while keeping the provider destination separately copyable. */
 function RegistrationCard({ item, canManage, onSaved }: { item: WebhookListing; canManage: boolean; onSaved: () => void }) {
   const url = copyableWebhookURL(item);
   // Older listings preserve their known name when a canonical provider reference is unavailable.
@@ -119,7 +119,7 @@ function RegistrationCard({ item, canManage, onSaved }: { item: WebhookListing; 
   return <article className="min-w-0 space-y-4 px-4 py-5 sm:px-5 sm:py-6">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0 space-y-2">
-        <h2 className="text-sm font-semibold text-slate-900">{item.label}</h2>
+        <h2 className="text-sm font-semibold text-slate-900"><Link to={webhookDetailPath(item)} className="break-words hover:text-[var(--brand-violet)] hover:underline">{item.label}</Link></h2>
         <Link to={`/integrations/${item.service_id}?tab=webhooks`} className="inline-flex max-w-full rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600 hover:bg-slate-200 hover:text-slate-900"><span className="break-all">{serviceTag}</span></Link>
       </div>
       {/* Managed subscriptions and direct verification have distinct setup requirements. */}

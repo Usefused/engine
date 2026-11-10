@@ -60,6 +60,8 @@ export interface UnifiedApp<Input extends $ZodType, Output extends $ZodType> {
 }
 
 export interface UnifiedAppConfig<Input extends $ZodType, Output extends $ZodType> {
+  /** Static deployment metadata read by the CLI and builder; never grants runtime authority. */
+  config?: JsonObject;
   /** Automatically checkpoint finite provider calls in Engine; defaults to false. */
   snapshot?: boolean;
   recovery?: Partial<RecoveryPolicy>;

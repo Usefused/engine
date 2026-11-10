@@ -877,6 +877,16 @@ export interface ActivatedService {
 }
 
 export interface WebhookEventEntry {
+  registration_id?: string;
+  service_version_id?: string;
+  trace_id?: string;
+  span_id?: string;
+  execution_status?: string;
+  failure_category?: string;
+  failure_code?: string;
+  attempt_count?: number;
+  ended_at?: string;
+  recorded_at?: string;
   id: string;
   account_id: string;
   service_id: string;
@@ -893,6 +903,17 @@ export interface WebhookEventEntry {
   error_reason: string;
   payload_size: number;
   created_at: string;
+}
+
+// Private bodies are retrieved only after an explicit, independently authorized reveal.
+export interface PrivateWebhookDiagnostics {
+  body: string;
+  encoding: "utf-8" | "base64";
+  content_type: string;
+  method: string;
+  original_bytes: number;
+  captured_bytes: number;
+  truncated: boolean;
 }
 
 export interface WebhookAnalyticsSummary {
@@ -1725,8 +1746,11 @@ export const api = {
         )
         .then(({ workspaceServicePage }) => workspaceServicePage),
 
-    // Webhook delivery events/analytics are Engine-owned data
-    // (fused_webhook_events) that never touches the Registry.
+    // Every explicit reveal revalidates the exact scope; private bytes bypass browser and shared caches.
+    webhookDiagnostics: (serviceID: string, registrationID: string, eventID: string, signal: AbortSignal) =>
+      req<PrivateWebhookDiagnostics>(`/workspace/services/${encodeURIComponent(serviceID)}/webhooks/${encodeURIComponent(registrationID)}/receipts/${encodeURIComponent(eventID)}/diagnostics`, { cache: "no-store", signal }),
+
+    // Webhook receipts and analytics share canonical Engine execution history.
     listWebhookEvents: (params: {
       serviceId: string;
       eventName?: string;
@@ -1746,6 +1770,8 @@ export const api = {
                 id
                 account_id
                 service_id
+                registration_id service_version_id trace_id span_id execution_status
+                failure_category failure_code attempt_count ended_at recorded_at
                 msg_id
                 event_name
                 status

@@ -4,16 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 const unifiedSourceMigrationBatchSize = 100
 const unifiedSourceMigrationMaxBytes = 256 * 1024
 
-var unifiedSourceConfigDeclaration = regexp.MustCompile(`(?m)^[ \t]*export[ \t]+const[ \t]+fusedConfig[ \t]*=`)
+const unifiedSourceFormatVersion = 2
 
 // UnifiedAppSourceMigrationResult exposes only aggregate startup progress, never private app source.
 type UnifiedAppSourceMigrationResult struct {
@@ -32,7 +32,7 @@ type unifiedSourceMigrationRow struct {
 	desired []byte
 }
 
-// MigrateUnifiedAppSources embeds legacy config beside code without changing an applied version or bundle.
+// MigrateUnifiedAppSources upgrades every older authoring format without changing compiled versions or receipt identities.
 func (s *postgresStore) MigrateUnifiedAppSources(ctx context.Context) (UnifiedAppSourceMigrationResult, error) {
 	result := UnifiedAppSourceMigrationResult{}
 	cursor := uuid.Nil
@@ -51,77 +51,83 @@ func (s *postgresStore) MigrateUnifiedAppSources(ctx context.Context) (UnifiedAp
 	}
 }
 
-// migrateUnifiedAppSourceBatch locks only one bounded page while replicas may start concurrently.
+// migrateUnifiedAppSourceBatch commits one bounded page and reports only source changes whose version markers committed with it.
 func (s *postgresStore) migrateUnifiedAppSourceBatch(ctx context.Context, after uuid.UUID, result *UnifiedAppSourceMigrationResult) ([]unifiedSourceMigrationRow, error) {
 	tx, err := s.db.Begin(ctx)
-	// A transaction makes source replacement and its marker atomic.
+	// Source bytes and their format marker must share one atomic transaction.
 	if err != nil {
 		return nil, fmt.Errorf("begin Unified App source migration: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `
-		SELECT id, desired_state FROM fused_config_states
-		WHERE config_type = 'unified_app' AND unified_source_migrated_at IS NULL AND id > $1
-		ORDER BY id LIMIT $2 FOR UPDATE
-	`, after, unifiedSourceMigrationBatchSize)
-	// Read errors must leave this page unmarked for a future startup attempt.
+	batch, err := readUnifiedSourceMigrationRows(ctx, tx, after)
+	// A partial or failed read must not mark any app as migrated.
 	if err != nil {
-		return nil, fmt.Errorf("read Unified App migration batch: %w", err)
-	}
-	batch := make([]unifiedSourceMigrationRow, 0, unifiedSourceMigrationBatchSize)
-	// Materialize the locked page before updating any of its rows.
-	for rows.Next() {
-		var row unifiedSourceMigrationRow
-		// A partial page cannot safely commit a subset of editor conversions.
-		if err := rows.Scan(&row.id, &row.desired); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scan Unified App migration batch: %w", err)
-		}
-		batch = append(batch, row)
-	}
-	readErr := rows.Err()
-	rows.Close()
-	// Iterator failure is equivalent to an incomplete locked page.
-	if readErr != nil {
-		return nil, fmt.Errorf("read Unified App migration batch: %w", readErr)
+		return nil, err
 	}
 	page := UnifiedAppSourceMigrationResult{}
-	// Each saved version owns one independent migration decision.
+	// Each row changes only its authoring representation; immutable runtime and receipt fields remain outside the update.
 	for _, row := range batch {
-		source, status := migratedUnifiedAppSource(row.desired)
-		// An unavailable or oversized source remains untouched so the existing runtime stays usable.
-		if status == unifiedSourceSkip {
-			page.SkippedRows++
-			continue
+		if err := migrateUnifiedSourceRow(ctx, tx, row, &page); err != nil {
+			return nil, err
 		}
-		// An already source-owned app only needs its per-row progress marker.
-		if status == unifiedSourceAlreadyOwned {
-			// Persist ownership once so later starts do not rescan a valid one-file source.
-			if _, err := tx.Exec(ctx, `UPDATE fused_config_states SET unified_source_migrated_at=NOW() WHERE id=$1`, row.id); err != nil {
-				return nil, fmt.Errorf("mark Unified App source migration: %w", err)
-			}
-			page.AlreadyOwned++
-			continue
-		}
-		// The editor source is the only field that changes for a legacy app.
-		if _, err := tx.Exec(ctx, `
-			UPDATE fused_config_states
-			SET desired_state=jsonb_set(desired_state, '{source}', to_jsonb($2::text)), unified_source_migrated_at=NOW()
-			WHERE id=$1
-		`, row.id, source); err != nil {
-			return nil, fmt.Errorf("write Unified App source migration: %w", err)
-		}
-		page.MigratedRows++
 	}
-	// A commit failure must not report unpersisted conversions as successful.
+	// Failed commit must never contribute unpersisted conversions to startup progress.
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit Unified App source migration: %w", err)
 	}
-	// Only a committed batch contributes to the startup summary.
 	result.MigratedRows += page.MigratedRows
 	result.AlreadyOwned += page.AlreadyOwned
 	result.SkippedRows += page.SkippedRows
 	return batch, nil
+}
+
+// readUnifiedSourceMigrationRows locks one indexed page, including exports marked by the original timestamp-only migration.
+func readUnifiedSourceMigrationRows(ctx context.Context, tx pgx.Tx, after uuid.UUID) ([]unifiedSourceMigrationRow, error) {
+	rows, err := tx.Query(ctx, `SELECT id,desired_state FROM fused_config_states WHERE config_type='unified_app' AND unified_source_format_version < 2 AND id > $1 ORDER BY id LIMIT $2 FOR UPDATE`, after, unifiedSourceMigrationBatchSize)
+	// A read error leaves the page available for a later startup retry.
+	if err != nil {
+		return nil, fmt.Errorf("read Unified App migration batch: %w", err)
+	}
+	defer rows.Close()
+	batch := make([]unifiedSourceMigrationRow, 0, unifiedSourceMigrationBatchSize)
+	// Materialize and lock the complete page before changing any source.
+	for rows.Next() {
+		var row unifiedSourceMigrationRow
+		// An incomplete row cannot be safely converted or marked.
+		if err := rows.Scan(&row.id, &row.desired); err != nil {
+			return nil, fmt.Errorf("scan Unified App migration batch: %w", err)
+		}
+		batch = append(batch, row)
+	}
+	// Iterator failure must roll back the entire page rather than a successfully read prefix.
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read Unified App migration batch: %w", err)
+	}
+	return batch, nil
+}
+
+// migrateUnifiedSourceRow records only completed conversions; unsupported source remains pending without a compatibility interpretation.
+func migrateUnifiedSourceRow(ctx context.Context, tx pgx.Tx, row unifiedSourceMigrationRow, page *UnifiedAppSourceMigrationResult) error {
+	source, status := migratedUnifiedAppSource(row.desired)
+	// Precompiled-only or unconvertible source must not receive a misleading completion marker.
+	if status == unifiedSourceSkip {
+		page.SkippedRows++
+		return nil
+	}
+	// Canonical source is marked without rewriting any bytes or historical timestamps.
+	if status == unifiedSourceAlreadyOwned {
+		if _, err := tx.Exec(ctx, `UPDATE fused_config_states SET unified_source_migrated_at=COALESCE(unified_source_migrated_at,NOW()),unified_source_format_version=2 WHERE id=$1`, row.id); err != nil {
+			return fmt.Errorf("mark Unified App source migration: %w", err)
+		}
+		page.AlreadyOwned++
+		return nil
+	}
+	// This update deliberately excludes hashes, generations, app versions, compiled bundles, tokens and traffic pointers.
+	if _, err := tx.Exec(ctx, `UPDATE fused_config_states SET desired_state=jsonb_set(desired_state,'{source}',to_jsonb($2::text)),unified_source_migrated_at=COALESCE(unified_source_migrated_at,NOW()),unified_source_format_version=2 WHERE id=$1`, row.id, source); err != nil {
+		return fmt.Errorf("write Unified App source migration: %w", err)
+	}
+	page.MigratedRows++
+	return nil
 }
 
 type unifiedSourceMigrationStatus uint8
@@ -132,107 +138,49 @@ const (
 	unifiedSourceMigrated
 )
 
-// migratedUnifiedAppSource builds a portable declaration from the exact saved config and code.
+// migratedUnifiedAppSource upgrades YAML-derived metadata and retired exports into one current inline config property.
 func migratedUnifiedAppSource(desired []byte) (string, unifiedSourceMigrationStatus) {
-	var config map[string]json.RawMessage
-	// Malformed saved state cannot be guessed into executable authoring.
-	if err := json.Unmarshal(desired, &config); err != nil || config == nil {
+	config, source, ok := unifiedSourceMigrationInput(desired)
+	// Missing source and unrelated app kinds have no editable TypeScript to convert.
+	if !ok {
 		return "", unifiedSourceSkip
 	}
-	var kind string
-	// A mismatched saved discriminator cannot become a valid Unified App declaration.
-	if err := json.Unmarshal(config["kind"], &kind); err != nil || kind != "unified_app" {
-		return "", unifiedSourceSkip
-	}
-	var source string
-	// Bundle-only versions lack editable TypeScript and retain their old private record.
-	if err := json.Unmarshal(config["source"], &source); err != nil || strings.TrimSpace(source) == "" {
-		return "", unifiedSourceSkip
-	}
-	// A valid exported literal means this app already uses the one-file authoring form.
-	if hasUnifiedSourceConfig(source) {
+	// Already current source stays byte-for-byte intact while receiving the new format marker.
+	if !hasRetiredUnifiedMetadata(source) && hasInlineUnifiedConfig(source) {
 		return "", unifiedSourceAlreadyOwned
+	}
+	metadata, err := json.MarshalIndent(config, "", "  ")
+	// Saved metadata remains authoritative; serialization must finish before any source is changed.
+	if err != nil {
+		return "", unifiedSourceSkip
+	}
+	converted, err := inlineUnifiedSourceMetadata(source, metadata)
+	// Unavailable or unsafe source remains unmarked and cannot be admitted by the new authoring readers.
+	if err != nil || len(converted) > unifiedSourceMigrationMaxBytes {
+		return "", unifiedSourceSkip
+	}
+	return converted, unifiedSourceMigrated
+}
+
+// unifiedSourceMigrationInput isolates portable persisted settings from transport fields before source rewriting.
+func unifiedSourceMigrationInput(desired []byte) (map[string]json.RawMessage, string, bool) {
+	var config map[string]json.RawMessage
+	// Malformed state must never be guessed into deployable metadata.
+	if err := json.Unmarshal(desired, &config); err != nil || config == nil {
+		return nil, "", false
+	}
+	var kind, source string
+	// Only stored Unified Apps participate in this source-format migration.
+	if err := json.Unmarshal(config["kind"], &kind); err != nil || kind != "unified_app" {
+		return nil, "", false
+	}
+	// Precompiled-only versions have no recoverable source and keep their existing runtime unchanged.
+	if err := json.Unmarshal(config["source"], &source); err != nil || strings.TrimSpace(source) == "" {
+		return nil, "", false
 	}
 	delete(config, "source")
 	delete(config, "source_path")
 	delete(config, "bundle_digest")
-	// Type was a local YAML file discriminator and is invalid in source-owned metadata.
 	delete(config, "type")
-	metadata, err := json.MarshalIndent(config, "", "  ")
-	// Unknown malformed saved metadata cannot be guessed into portable TypeScript.
-	if err != nil {
-		return "", unifiedSourceSkip
-	}
-	combined := "export const fusedConfig = " + string(metadata) + ";\n\n" + source
-	// The same source ceiling used by CLI plans prevents exporting an unusable replacement.
-	if len(combined) > unifiedSourceMigrationMaxBytes {
-		return "", unifiedSourceSkip
-	}
-	return combined, unifiedSourceMigrated
-}
-
-// hasUnifiedSourceConfig recognizes a literal exported declaration before startup adds another one.
-func hasUnifiedSourceConfig(source string) bool {
-	candidates := unifiedSourceConfigDeclaration.FindAllStringIndex(source, -1)
-	const (
-		code = iota
-		lineComment
-		blockComment
-		singleQuote
-		doubleQuote
-		templateQuote
-	)
-	state := code
-	nextCandidate := 0
-	// Scan lexical context so a comment example never suppresses a real migration.
-	for index := 0; index < len(source); index++ {
-		// Examples inside comments or strings do not establish source ownership.
-		if nextCandidate < len(candidates) && index == candidates[nextCandidate][0] {
-			// Only a candidate in live code can establish source ownership.
-			if state == code {
-				decoder := json.NewDecoder(strings.NewReader(source[candidates[nextCandidate][1]:]))
-				var config map[string]json.RawMessage
-				// Only a literal object can satisfy the CLI's declaration contract.
-				if err := decoder.Decode(&config); err == nil && config != nil {
-					return true
-				}
-			}
-			nextCandidate++
-		}
-		character := source[index]
-		// Keep the lexical states aligned with the CLI's declaration discovery.
-		switch state {
-		case code:
-			// Comment openers hide declaration-shaped examples until their terminator.
-			if character == '/' && index+1 < len(source) && source[index+1] == '/' {
-				state, index = lineComment, index+1
-			} else if character == '/' && index+1 < len(source) && source[index+1] == '*' {
-				state, index = blockComment, index+1
-			} else if character == '\'' {
-				state = singleQuote
-			} else if character == '"' {
-				state = doubleQuote
-			} else if character == '`' {
-				state = templateQuote
-			}
-		case lineComment:
-			// A newline restores normal code scanning for the next candidate.
-			if character == '\n' {
-				state = code
-			}
-		case blockComment:
-			// A block close restores code even when the example spans many lines.
-			if character == '*' && index+1 < len(source) && source[index+1] == '/' {
-				state, index = code, index+1
-			}
-		case singleQuote, doubleQuote, templateQuote:
-			// Escaped delimiters cannot end a quoted example early.
-			if character == '\\' {
-				index++
-			} else if (state == singleQuote && character == '\'') || (state == doubleQuote && character == '"') || (state == templateQuote && character == '`') {
-				state = code
-			}
-		}
-	}
-	return false
+	return config, source, true
 }

@@ -3,13 +3,14 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { URL } from "node:url";
 
-// Service operations and Unified Apps use this same responsive table.
+// Check only parameter-table source; code examples have their own intentional horizontal scrolling.
 const sidebarSource = readFileSync(
   new URL("../components/OperationDetailsParts.tsx", import.meta.url),
   "utf8"
 );
 const parameterSection = sidebarSource.slice(
-  sidebarSource.indexOf("export interface OperationParameter")
+  sidebarSource.indexOf("export interface OperationParameter"),
+  sidebarSource.indexOf("export function OperationCodeExample")
 );
 
 // This contract keeps the parameter table responsive and prevents ordinary

@@ -20,6 +20,7 @@ type WorkspaceWebhookListing struct {
 type WorkspaceWebhookFilter struct {
 	ServiceID *uuid.UUID
 	Search    string
+	Slug      string
 }
 
 const authorizedWebhookFromSQL = ` FROM fused_workspace_webhooks w
@@ -28,6 +29,7 @@ const authorizedWebhookFromSQL = ` FROM fused_workspace_webhooks w
  AND ($3::uuid IS NULL OR w.service_id = $3)
  AND ($4::text = '' OR strpos(lower(w.label || ' ' || w.slug || ' ' || w.callback_url || ' ' ||
      COALESCE(s.service_name, '') || ' ' || COALESCE(s.service_slug, '')), lower($4)) > 0)
+ AND ($5::text = '' OR w.slug = $5)
  AND EXISTS (SELECT 1 FROM fused_workspace_service_versions v
              WHERE v.service_id = s.service_id AND v.status <> 'deprecated')`
 
@@ -39,16 +41,16 @@ func (s *postgresStore) ListAuthorizedWorkspaceWebhookPage(ctx context.Context, 
 	}
 	var total int
 	// Keep totals accurate even when the requested page is beyond the last registration.
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*)`+authorizedWebhookFromSQL, scope.All, scope.IDs, filter.ServiceID, filter.Search).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*)`+authorizedWebhookFromSQL, scope.All, scope.IDs, filter.ServiceID, filter.Search, filter.Slug).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count authorized webhooks: %w", err)
 	}
 	// Empty workspaces need no second read and no Registry availability.
 	if total == 0 {
 		return nil, 0, nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT w.service_id, COALESCE(s.service_name, ''), COALESCE(s.service_slug, ''),
+	rows, err := s.db.Query(ctx, `SELECT w.id, w.service_id, COALESCE(s.service_name, ''), COALESCE(s.service_slug, ''),
 	 w.label, w.slug, w.callback_url, w.relay_config, w.secret_bucket_id, w.secret_ref, w.created_at`+authorizedWebhookFromSQL+`
-	 ORDER BY s.service_name, w.service_id, w.label, w.id LIMIT $5 OFFSET $6`, scope.All, scope.IDs, filter.ServiceID, filter.Search, limit, offset)
+	 ORDER BY s.service_name, w.service_id, w.label, w.id LIMIT $6 OFFSET $7`, scope.All, scope.IDs, filter.ServiceID, filter.Search, filter.Slug, limit, offset)
 	// Storage failures are surfaced instead of presenting a misleading empty catalogue.
 	if err != nil {
 		return nil, 0, fmt.Errorf("list authorized webhooks: %w", err)
@@ -59,7 +61,7 @@ func (s *postgresStore) ListAuthorizedWorkspaceWebhookPage(ctx context.Context, 
 	for rows.Next() {
 		var item WorkspaceWebhookListing
 		// An invalid row must fail the page rather than silently omit a registration.
-		if err := rows.Scan(&item.ServiceID, &item.ServiceName, &item.ServiceRef, &item.Label, &item.Slug,
+		if err := rows.Scan(&item.ID, &item.ServiceID, &item.ServiceName, &item.ServiceRef, &item.Label, &item.Slug,
 			&item.CallbackURL, &item.RelayConfig, &item.SecretBucketID, &item.SecretRef, &item.CreatedAt); err != nil {
 			return nil, 0, fmt.Errorf("scan authorized webhook: %w", err)
 		}

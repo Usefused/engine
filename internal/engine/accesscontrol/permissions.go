@@ -12,13 +12,15 @@ type Permission string
 
 const (
 	// Bridge grants scope local-provider registration separately from app execution.
-	PermissionBridgeRead              Permission = "bridge.read"
-	PermissionBridgeManage            Permission = "bridge.manage"
-	PermissionWorkspaceRead           Permission = "workspace.read"
-	PermissionWorkspaceUpdate         Permission = "workspace.update"
-	PermissionServiceRead             Permission = "service.read"
-	PermissionServiceConsume          Permission = "service.consume"
-	PermissionServiceManage           Permission = "service.manage"
+	PermissionBridgeRead      Permission = "bridge.read"
+	PermissionBridgeManage    Permission = "bridge.manage"
+	PermissionWorkspaceRead   Permission = "workspace.read"
+	PermissionWorkspaceUpdate Permission = "workspace.update"
+	PermissionServiceRead     Permission = "service.read"
+	PermissionServiceConsume  Permission = "service.consume"
+	PermissionServiceManage   Permission = "service.manage"
+	// Raw webhook messages require an explicit service-scoped grant, independently of receipt access.
+	PermissionWebhookDiagnosticsRead  Permission = "service.webhook.diagnostics.read"
 	PermissionBucketRead              Permission = "bucket.read"
 	PermissionBucketValuesRead        Permission = "bucket.values.read"
 	PermissionBucketUse               Permission = "bucket.use"
@@ -81,6 +83,7 @@ var (
 		PermissionServiceRead,
 		PermissionServiceConsume,
 		PermissionServiceManage,
+		PermissionWebhookDiagnosticsRead,
 		PermissionBucketRead,
 		PermissionBucketValuesRead,
 		PermissionBucketUse,

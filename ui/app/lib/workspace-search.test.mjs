@@ -25,7 +25,7 @@ function loadImportDiagnostics() {
   return exports;
 }
 
-// Exercise route effects and URL changes with only presentation and remote transport replaced.
+// Exercise search orchestration while isolating unrelated navigation presentation and remote transport.
 test('workspace search handles partial text, clearing, pagination, history and stale responses', async () => {
   const dom = new JSDOM('<div id="root"></div>');
   const previous = { window: globalThis.window, document: globalThis.document, act: globalThis.IS_REACT_ACT_ENVIRONMENT };
@@ -49,6 +49,7 @@ test('workspace search handles partial text, clearing, pagination, history and s
   const dependencies = {
     '~/components/ImportDiagnostics': loadImportDiagnostics(),
     '~/components/layout/CataloguePageHeader': { CataloguePageHeader: Hidden },
+    '~/components/layout/IntegrationSourceTabs': { IntegrationSourceTabs: Hidden },
     '@remix-run/react': { useSearchParams, useNavigate: () => () => {}, useRouteLoaderData: () => ({ isAuth: true }) },
     '~/lib/api': { api: {
       // Registry matches include an enabled service and one available to add; the UI retains membership markers.

@@ -68,11 +68,47 @@ func (w *ExecutionRetentionWorker) run(ctx context.Context, store executionReten
 	}
 }
 
+// cleanupExecutionRetentionPass always expires private bodies, even when ordinary receipt retention is disabled.
 func cleanupExecutionRetentionPass(ctx context.Context, store executionRetentionStore, now time.Time, retentionDays, batchSize int) {
+	cutoff := time.Time{}
+	// Private bodies honor a shorter configured receipt history without extending their own seven-day maximum.
+	if retentionDays > 0 {
+		cutoff = now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	}
+	cleanupWebhookDiagnostics(ctx, store, cutoff, batchSize)
+	// Disabled receipt retention does not disable the private-evidence expiry above.
 	if retentionDays <= 0 {
 		return
 	}
 	cleanupExpiredExecutionEvents(ctx, store, now.Add(-time.Duration(retentionDays)*24*time.Hour), batchSize)
+}
+
+// cleanupWebhookDiagnostics drains bounded encrypted-body batches without recording payloads or raw storage errors.
+func cleanupWebhookDiagnostics(ctx context.Context, repository executionRetentionStore, cutoff time.Time, batchSize int) {
+	cleaner, ok := repository.(interface {
+		DeleteExpiredWebhookDiagnostics(context.Context, time.Time, int) (int64, error)
+	})
+	// Older stores have no private body table and need no alternate retention path.
+	if !ok {
+		return
+	}
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.webhook.diagnostics.retention")
+	defer span.End()
+	var total int64
+	for ctx.Err() == nil {
+		deleted, err := cleaner.DeleteExpiredWebhookDiagnostics(ctx, cutoff, batchSize)
+		// A failure must never echo encrypted or decrypted storage values into telemetry.
+		if err != nil {
+			span.SetAttributes(attribute.Bool("cleanup.failed", true))
+			return
+		}
+		total += deleted
+		// A partial batch proves this pass drained every eligible private record.
+		if deleted < int64(batchSize) {
+			span.SetAttributes(attribute.Int64("diagnostics.deleted_count", total))
+			return
+		}
+	}
 }
 
 func cleanupExpiredExecutionEvents(ctx context.Context, store executionRetentionStore, before time.Time, batchSize int) {

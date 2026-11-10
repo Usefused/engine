@@ -76,20 +76,26 @@ export function decodeUnifiedSourceRevision(raw: string): UnifiedSourceRevision 
   return { source: "", explanation: explanation.trim() };
 }
 
+/** Shares current form metadata between the visible TypeScript declaration and the deployment configuration. */
+export function unifiedMetadata(draft: UnifiedDraft, name: string, version: string, bucket: string): Record<string, unknown> {
+  // Explicit empty event lists clear earlier settings when the picker removes a trigger.
+  const services = Object.fromEntries(Object.entries(draft.services).map(([key, pin]) => [key, { ...unifiedServiceSettings(draft, key), version: pin.version, operations: pin.operations, webhooks: pin.webhooks ?? [] }]));
+  const hasEvents = unifiedDraftHasEvents(draft);
+  const config: Record<string, unknown> = { ...draft.configSettings, apiVersion: "fused/v1", kind: "unified_app", name: name.trim(), description: draft.description, version: version.trim(), bucket: bucket.trim(), services };
+  // The declaration owns metadata only; embedding source would recursively duplicate the file inside itself.
+  delete config.source; delete config.source_path; delete config.bundle_digest; delete config.webhook_attachment;
+  // Form previews remain available while the author is still choosing a required registration.
+  if (hasEvents && draft.webhookAttachment?.trim()) config.webhook_attachment = draft.webhookAttachment.trim();
+  return config;
+}
+
 /** Includes reviewed source and event scope in the desired state consumed by Unified App planning. */
 export function unifiedConfig(draft: UnifiedDraft, name: string, version: string, bucket: string): Record<string, unknown> {
   // User-reviewed identity is required before compilation or service activation.
   if (!name.trim() || !version.trim() || !bucket.trim()) throw new Error("Name, version, and a bucket are required.");
-  // Explicit empty event lists clear earlier settings when the picker removes a trigger.
-  const services = Object.fromEntries(Object.entries(draft.services).map(([key, pin]) => [key, { ...unifiedServiceSettings(draft, key), version: pin.version, operations: pin.operations, webhooks: pin.webhooks ?? [] }]));
-  const hasEvents = unifiedDraftHasEvents(draft);
   // A selected event without an applied registration would never reach the hosted worker.
-  if (hasEvents && !draft.webhookAttachment?.trim()) throw new Error("Choose a webhook registration for the selected events.");
-  const config: Record<string, unknown> = { ...draft.configSettings, apiVersion: "fused/v1", kind: "unified_app", name: name.trim(), description: draft.description, version: version.trim(), bucket: bucket.trim(), services, source: draft.source };
-  // Inline browser source and the reviewed event scope supersede portable file and attachment fields.
-  delete config.source_path; delete config.bundle_digest; delete config.webhook_attachment;
-  if (hasEvents) config.webhook_attachment = draft.webhookAttachment!.trim();
-  return config;
+  if (unifiedDraftHasEvents(draft) && !draft.webhookAttachment?.trim()) throw new Error("Choose a webhook registration for the selected events.");
+  return { ...unifiedMetadata(draft, name, version, bucket), source: draft.source };
 }
 
 /** Decodes published source templates for review before installation. */

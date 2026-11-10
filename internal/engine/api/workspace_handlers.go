@@ -61,6 +61,8 @@ func WorkspaceHandler(s store.Store, verifier ServiceVerifier, masterKey []byte,
 	r := chi.NewRouter()
 	redirectURI := firstRedirectURI(redirectURIs)
 	r.Post("/services", addServiceHandler(s, verifier))
+	// Private webhook bodies stay under the authenticated workspace control namespace and exact receipt scope.
+	r.Get("/services/{service_id}/webhooks/{registration_id}/receipts/{event_id}/diagnostics", WebhookDiagnosticsHandler(s, masterKey))
 	// Imported catalogs remain private; mutations additionally require authoritative service ownership.
 	ownership, _ := verifier.(ServiceVisibilityResolver)
 	r.Get("/services/{id}/versions/{version_id}/mcp-catalog", GetMCPCatalogHandler(s))

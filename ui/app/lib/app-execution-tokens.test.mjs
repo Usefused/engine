@@ -13,12 +13,20 @@ const require = createRequire(import.meta.url);
 let access = null;
 let calls = 0;
 let listCalls = 0;
-/** Loads production components with only the access snapshot and issuance transport replaced. */
+/** Loads production components with their source-relative imports and only access/issuance transport replaced. */
 function load(path, dependencies = {}) {
   const source = readFileSync(new URL(path, import.meta.url), 'utf8');
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const exports = {};
-  new Function('require', 'exports', compiled)(name => dependencies[name] ?? require(name), exports);
+  /** Resolve local helpers beside their production component rather than beside this test harness. */
+  function resolve(name) {
+    // Explicit access and transport boundaries remain owned by each fixture.
+    if (Object.hasOwn(dependencies, name)) return dependencies[name];
+    // Relative JavaScript helpers keep their production import base after TypeScript transpilation.
+    if (name.startsWith(".")) return require(new URL(name, new URL(path, import.meta.url)).pathname);
+    return require(name);
+  }
+  new Function('require', 'exports', compiled)(resolve, exports);
   return exports;
 }
 const { AppExecutionTokens, customTokenExpirySeconds } = load('../components/apps/AppExecutionTokens.tsx', {

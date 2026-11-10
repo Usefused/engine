@@ -10,17 +10,33 @@ func TestPermissionCatalogueContainsUniqueValidNames(t *testing.T) {
 	permissions := AllPermissions()
 	seen := make(map[Permission]struct{}, len(permissions))
 	for _, permission := range permissions {
+		// Persisted grants must always belong to the explicit permission catalogue.
 		if err := ValidatePermission(permission); err != nil {
 			t.Fatalf("ValidatePermission(%q): %v", permission, err)
 		}
+		// A repeated grant would corrupt Owner's all-permissions projection.
 		if _, duplicate := seen[permission]; duplicate {
 			t.Fatalf("permission catalogue repeats %q", permission)
 		}
 		seen[permission] = struct{}{}
 	}
-	// Bridge read/manage add distinct grants without widening existing app execution scopes.
-	if len(permissions) != 51 {
-		t.Fatalf("permission catalogue contains %d entries, want 51", len(permissions))
+	// Private webhook messages add a distinct grant without widening ordinary receipt permissions.
+	if len(permissions) != 52 {
+		t.Fatalf("permission catalogue contains %d entries, want 52", len(permissions))
+	}
+}
+
+// TestWebhookDiagnosticsGrantIsExplicitAndServiceScoped prevents ordinary built-in roles inheriting body access.
+func TestWebhookDiagnosticsGrantIsExplicitAndServiceScoped(t *testing.T) {
+	for _, role := range BuiltInRoles() {
+		// Owner retains its existing contract; all other roles require a separately authored diagnostic grant.
+		if role.Slug != RoleOwner && roleHasPermission(role, PermissionWebhookDiagnosticsRead) {
+			t.Fatalf("%s implicitly reveals webhook bodies", role.Slug)
+		}
+	}
+	if !permissionSupportsRoleScope(PermissionWebhookDiagnosticsRead, ResourceService) || permissionSupportsRoleScope(PermissionWebhookDiagnosticsRead, ResourceApp) {
+		// Webhook registrations are service resources, not Unified App families.
+		t.Fatal("webhook diagnostics must bind to service scope")
 	}
 }
 

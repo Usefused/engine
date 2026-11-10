@@ -110,14 +110,14 @@ func acceptanceRoleAllowsAll(role string, requirements []accesscontrol.Requireme
 	return true
 }
 
-// acceptanceRoleAllowsPermission preserves explicit disclosure grants outside ordinary administrator authority.
+// acceptanceRoleAllowsPermission keeps private message and credential disclosure outside ordinary administrator authority.
 func acceptanceRoleAllowsPermission(role string, permission accesscontrol.Permission) bool {
 	switch role {
 	case accesscontrol.RoleOwner:
 		return true
 	case accesscontrol.RoleAdmin:
-		// Administrators manage credentials but do not implicitly obtain their plaintext.
-		return permission != accesscontrol.PermissionAccountManage && permission != accesscontrol.PermissionBillingManage && permission != accesscontrol.PermissionCredentialsReveal
+		// Administrative management does not implicitly grant plaintext credentials or private webhook message access.
+		return permission != accesscontrol.PermissionAccountManage && permission != accesscontrol.PermissionBillingManage && permission != accesscontrol.PermissionCredentialsReveal && permission != accesscontrol.PermissionWebhookDiagnosticsRead
 	case accesscontrol.RoleBuilder:
 		return acceptanceBuilderPermission(permission)
 	case accesscontrol.RoleViewer:

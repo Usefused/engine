@@ -400,6 +400,17 @@ type WebhookObject struct {
 }
 
 type WebhookEvent struct {
+	// Canonical correlation and outcomes remain metadata; message bodies use a separate privileged store.
+	RegistrationID     *uuid.UUID `json:"registration_id,omitempty"`
+	ServiceVersionID   string     `json:"service_version_id"`
+	TraceID            string     `json:"trace_id"`
+	SpanID             string     `json:"span_id"`
+	ExecutionStatus    string     `json:"execution_status"`
+	FailureCategory    string     `json:"failure_category"`
+	FailureCode        string     `json:"failure_code"`
+	AttemptCount       int        `json:"attempt_count"`
+	EndedAt            time.Time  `json:"ended_at"`
+	RecordedAt         time.Time  `json:"recorded_at"`
 	ID                 uuid.UUID  `json:"event_id"`
 	AccountID          uuid.UUID  `json:"account_id"`
 	ServiceID          uuid.UUID  `json:"service_id"`
@@ -418,10 +429,12 @@ type WebhookEvent struct {
 }
 
 type WebhookAnalytics struct {
-	TotalIngested  int64 `json:"total_ingested"`
-	TotalDelivered int64 `json:"total_delivered"`
-	TotalRejected  int64 `json:"total_rejected"`
-	TotalFailed    int64 `json:"total_failed"`
+	AverageLatencyMs float64 `json:"average_latency_ms"`
+	P95LatencyMs     float64 `json:"p95_latency_ms"`
+	TotalIngested    int64   `json:"total_ingested"`
+	TotalDelivered   int64   `json:"total_delivered"`
+	TotalRejected    int64   `json:"total_rejected"`
+	TotalFailed      int64   `json:"total_failed"`
 }
 
 // ─── Service Version ──────────────────────────────────────────────────────────

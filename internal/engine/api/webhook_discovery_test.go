@@ -42,7 +42,7 @@ func TestWebhookDiscoveryURLs(t *testing.T) {
 		})
 	}
 	t.Setenv("FUSED_ENGINE_PUBLIC_URL", "")
-	url, mode := webhookDiscoveryDestination(store.WorkspaceWebhook{Slug: "route"})
+	url, mode := webhookDiscoveryDestination(context.Background(), store.WorkspaceWebhook{Slug: "route"})
 	// Missing public configuration must not be replaced with a guessed browser or request origin.
 	if url != "" || mode != "direct" {
 		t.Fatal("invented a public webhook URL")

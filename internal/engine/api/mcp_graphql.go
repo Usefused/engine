@@ -474,6 +474,7 @@ func newMCPGraphQLSchema(configStore store.ConfigRepository, s store.Store, veri
 			"workspaceWebhooks":           workspaceWebhooksGraphQLField(s),
 			// The catalogue lists only persisted registrations, avoiding one resolver call per service.
 			"workspaceWebhookPage":        workspaceWebhookPageGraphQLField(s),
+			"workspaceWebhook":            workspaceWebhookGraphQLField(s),
 			"webhookEvents":               webhookEventsGraphQLField(s),
 			"webhookAnalytics":            webhookAnalyticsGraphQLField(s),
 			"engineExecutionEvents":       engineExecutionEventsGraphQLField(s),

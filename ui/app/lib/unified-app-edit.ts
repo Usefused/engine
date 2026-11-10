@@ -11,8 +11,8 @@ export interface UnifiedAppSource {
   service_pins: Array<{ key: string; authored_key?: string; service_id: string; service_version_id: string }>;
 }
 
-/** Hydrates editable source from exact saved pins without rediscovering or upgrading provider versions. */
-export function unifiedEditDraft(saved: UnifiedAppSource): UnifiedDraft {
+/** Hydrates exact saved pins and an optional explicitly chosen registration without changing the saved version. */
+export function unifiedEditDraft(saved: UnifiedAppSource, webhookAttachment?: string): UnifiedDraft {
   const config = saved.config;
   // Precompiled-only deployments have no recoverable TypeScript; never pretend an empty source is their implementation.
   if (config.kind !== "unified_app" || typeof config.source !== "string" || !config.source.trim()) throw new Error("This version has no saved TypeScript source to edit. Create a new app from your original source.");
@@ -26,7 +26,8 @@ export function unifiedEditDraft(saved: UnifiedAppSource): UnifiedDraft {
   }));
   // Preserve the complete per-service config, including an explicit auth preference, for form and YAML editing.
   const serviceSettings = Object.fromEntries(Object.entries(services).map(([key, pin]) => [key, { service_id: pin.service_id, config: { ...config.services[key] } }]));
-  return { serviceSettings, configSettings: { ...config }, name: config.name, description: config.description ?? "", source: config.source, services, webhookAttachment: config.webhook_attachment ?? "" };
+  // A chosen registration changes only the draft; ordinary edits retain their saved ingress binding.
+  return { serviceSettings, configSettings: { ...config }, name: config.name, description: config.description ?? "", source: config.source, services, webhookAttachment: webhookAttachment ?? config.webhook_attachment ?? "" };
 }
 
 /** Suggests a new patch version for ordinary semantic versions while leaving custom labels to the author. */
