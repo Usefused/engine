@@ -23,6 +23,7 @@ func registerProxyRoutesWithRuntimeContracts(r chi.Router, proxy api.Forwarder, 
 
 	// Permission introspection is local; no browser credential is forwarded to Registry.
 	r.Get("/account/billing/access", api.BillingAccessHandler)
+	r.Get("/account/engine/access", api.HostedEngineAccessHandler(Version))
 	restHandler := api.RESTProxyHandlerWithRuntimeContracts(proxy, s, contractFetcher)
 	for _, path := range api.RESTProxyMountPaths {
 		if path == "/leads" {

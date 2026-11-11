@@ -10,6 +10,7 @@ export const meta: MetaFunction = ({ matches }) => {
     { title: "Settings - Fused" },
   ];
 };
+import { HostedEngineSettings } from "~/components/settings/HostedEngineSettings";
 import { BillingSettings } from "~/components/settings/BillingSettings";
 import { api, Account } from "~/lib/api";
 import { useToast } from "~/components/Toast";
@@ -55,6 +56,7 @@ export default function SettingsPage() {
       .getAccount()
       .then((acc) => {
         setAccount(acc);
+        // Empty account email leaves the editable draft available for first-time setup.
         if (acc.email) setEmail(acc.email);
       })
       .catch(console.error);
@@ -65,13 +67,16 @@ export default function SettingsPage() {
     setEngineEndpoints(readEngineEndpoints());
   }, []);
 
+  // copyEndpoint lets clients reuse the operator-configured endpoint without retyping it.
   function copyEndpoint(value: string, label: string) {
     navigator.clipboard.writeText(value);
     toast.success(`${label} copied to clipboard!`);
   }
 
+  // handleSaveEmail persists the current account draft and keeps failures visible.
   async function handleSaveEmail(e: React.FormEvent) {
     e.preventDefault();
+    // Account identity must finish loading before a mutation can be submitted.
     if (!account) return;
     setSavingEmail(true);
     setEmailSuccess(false);
@@ -87,6 +92,7 @@ export default function SettingsPage() {
     }
   }
 
+  // handleRegenerateKey reveals a replacement credential only after the server confirms rotation.
   async function handleRegenerateKey() {
     setRegenerating(true);
     try {
@@ -169,6 +175,8 @@ export default function SettingsPage() {
           </div>
         </div>
       </div>
+
+      <HostedEngineSettings active={activeTab === "general"} />
 
       <SettingsDisclosureCard
         id="account-details-settings"

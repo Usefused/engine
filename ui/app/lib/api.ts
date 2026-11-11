@@ -1,3 +1,4 @@
+import type { HostedEngineState, EngineUpgradeIntent } from "./hosted-engine-upgrade";
 import { mcpCatalogPath, type McpCatalogSnapshot, type McpCatalogPreview, type McpDiscoveryInput } from "./mcp-catalog.ts";
 import { getCSRFToken, purgeLegacyBrowserCredential } from "./session";
 import { credentialedRequestInit, credentialedResponseLoginPath } from "./browser-request";
@@ -1369,6 +1370,18 @@ export const api = {
         body: JSON.stringify({ transaction_id: transactionId, token: browserToken }),
       }),
     logout: () => req<{ logout_url?: string }>("/auth/logout", { method: "POST", body: "{}" }),
+  },
+
+  hostedEngine: {
+    // state reads account-scoped deployment progress with a bounded reconnect deadline.
+    state: () => reqWithTimeout<HostedEngineState>("/account/engine", {}, 10000, "Engine is reconnecting."),
+    // access returns the serving binary version and local account-management permission.
+    access: () => reqWithTimeout<{ can_manage: boolean; running_version: string }>("/account/engine/access", {}, 10000, "Engine is reconnecting."),
+    // upgrade retains request identity across an uncertain network response without sending credentials or deployment IDs.
+    upgrade: (intent: EngineUpgradeIntent) => reqWithTimeout<HostedEngineState>("/account/engine/upgrade", {
+      method: "POST", headers: { "Idempotency-Key": intent.id },
+      body: JSON.stringify({ expected_generation: intent.expected_generation, target_image: intent.target_image }),
+    }, 20000, "The update response was interrupted. Retry the same update after reconnecting."),
   },
 
   billing: {

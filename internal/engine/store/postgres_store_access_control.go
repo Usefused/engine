@@ -578,12 +578,20 @@ func upsertBootstrapSubject(ctx context.Context, tx pgx.Tx) (uuid.UUID, bool, er
 	return subjectID, changed, nil
 }
 
+// rotateBootstrapCredential preserves derived sessions on restart but revokes them when the root license actually changes.
 func rotateBootstrapCredential(ctx context.Context, tx pgx.Tx, subjectID uuid.UUID, input accesscontrol.BootstrapInput) (uuid.UUID, bool, error) {
+	// An unchanged active license must not sign browsers out during a hosted upgrade; real rotation still invalidates every derived credential.
 	revoked, err := tx.Exec(ctx, `
 		UPDATE fused_control_credentials
 		SET revoked_at = NOW()
 		WHERE subject_id = $1 AND revoked_at IS NULL AND key_hash <> $2
+			AND (source = 'api_key' OR NOT EXISTS (
+				SELECT 1 FROM fused_control_credentials current_root
+				WHERE current_root.subject_id = $1 AND current_root.key_hash = $2
+					AND current_root.source = 'api_key' AND current_root.revoked_at IS NULL
+			))
 	`, subjectID, input.CredentialHash)
+	// A failed revocation cannot be followed by activation of a replacement root credential.
 	if err != nil {
 		return uuid.Nil, false, fmt.Errorf("revoke prior bootstrap credential: %w", err)
 	}
@@ -614,6 +622,7 @@ func rotateBootstrapCredential(ctx context.Context, tx pgx.Tx, subjectID uuid.UU
 	`
 	var credentialID uuid.UUID
 	var upsertChanged bool
+	// The transaction must return a complete root identity before bootstrap can publish its authorization revision.
 	if err := tx.QueryRow(ctx, query, subjectID, input.CredentialHash, input.CredentialPrefix).Scan(&credentialID, &upsertChanged); err != nil {
 		return uuid.Nil, false, fmt.Errorf("upsert bootstrap credential: %w", err)
 	}

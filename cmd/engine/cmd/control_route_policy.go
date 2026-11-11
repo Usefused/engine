@@ -371,6 +371,10 @@ var controlRESTPolicies = []controlRoutePolicy{
 	{http.MethodGet, "/account", false, []routeRequirement{
 		workspaceRequirement(accesscontrol.PermissionAccountRead),
 	}},
+	// Hosted updates use the account-management boundary, including server-side authorization on every mutation.
+	{http.MethodGet, "/account/engine", false, []routeRequirement{workspaceRequirement(accesscontrol.PermissionAccountRead)}},
+	{http.MethodGet, "/account/engine/access", false, []routeRequirement{workspaceRequirement(accesscontrol.PermissionAccountRead)}},
+	{http.MethodPost, "/account/engine/upgrade", false, []routeRequirement{workspaceRequirement(accesscontrol.PermissionAccountManage)}},
 	// Billing recovery retains the same read/manage split as other account operations.
 	{http.MethodGet, "/account/billing", false, []routeRequirement{workspaceRequirement(accesscontrol.PermissionBillingRead)}},
 	{http.MethodGet, "/account/billing/access", false, []routeRequirement{workspaceRequirement(accesscontrol.PermissionBillingRead)}},
