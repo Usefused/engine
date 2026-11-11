@@ -51,10 +51,11 @@ test("execution details drawer is viewport safe on mobile", () => {
 
 // Confirms canonical failure reasons remain inspectable while provider bodies and credentials stay excluded.
 test("webhook receipt rows open bounded webhook details", () => {
-  assert.match(webhookLogs, /<WebhookEventCard[^>]+onSelect=\{setSelectedEventID\}/);
-  assert.match(webhookLogs, /<WebhookEventRow[^>]+onSelect=\{setSelectedEventID\}/);
+  assert.match(webhookLogs, /<WebhookReceiptRow[^>]+onSelect=\{setSelectedEventID\}/);
+  assert.match(webhookLogs, /<button type="button" aria-haspopup="dialog"/);
+  assert.doesNotMatch(webhookLogs, /<table|event\.environment/);
   assert.match(webhookLogs, /<WebhookEventDetailsDrawer event=\{selectedEvent\}/);
-  for (const label of ["Event", "Verification", "Delivery", "Environment", "Delivery time", "Payload size", "Retries", "Received", "Message ID", "Receipt ID"]) {
+  for (const label of ["Event", "Verification", "Delivery", "Service", "Delivery time", "Payload size", "Retries", "Received", "Message ID", "Receipt ID"]) {
     assert.match(webhookDrawer, new RegExp(`label="${label}"`));
   }
   assert.match(webhookDrawer, /Failure reason/);

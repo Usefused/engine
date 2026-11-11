@@ -906,7 +906,7 @@
       "file": "app/lib/api.ts",
       "call": 3,
       "variant": 1,
-      "document": "query WebhookEvents($serviceId: String!, $eventName: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {\n            webhookEvents(service_id: $serviceId, event_name: $eventName, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {\n              total\n              items {\n                id\n                account_id\n                service_id\n                registration_id service_version_id trace_id span_id execution_status\n                failure_category failure_code attempt_count ended_at recorded_at\n                msg_id\n                event_name\n                status\n                delivery_status\n                verification_status\n                environment\n                latency_ms\n                retry_count\n                credits_consumed\n                sdk_record_id\n                error_reason\n                payload_size\n                created_at\n              }\n            }\n          }"
+      "document": "query WebhookEvents($serviceId: String!, $eventName: String, $limit: Int, $offset: Int, $startDate: String, $endDate: String) {\n            webhookEvents(service_id: $serviceId, event_name: $eventName, limit: $limit, offset: $offset, start_date: $startDate, end_date: $endDate) {\n              total\n              items {\n                id\n                account_id\n                service_id\n                registration_id service_version_id trace_id span_id execution_status\n                failure_category failure_code attempt_count ended_at recorded_at\n                msg_id\n                event_name\n                status\n                delivery_status\n                verification_status\n                latency_ms\n                retry_count\n                credits_consumed\n                sdk_record_id\n                error_reason\n                payload_size\n                created_at\n              }\n            }\n          }"
     },
     {
       "endpoint": "engine",
@@ -1613,14 +1613,14 @@
       "file": "app/lib/webhook-detail-api.ts",
       "call": 3,
       "variant": 1,
-      "document": "query WebhookRegistrationEvents($serviceId: String!, $registrationId: String!, $eventName: String, $status: String, $startDate: String, $endDate: String, $limit: Int, $offset: Int) {\n  webhookEvents(service_id: $serviceId, registration_id: $registrationId, event_name: $eventName, status: $status, start_date: $startDate, end_date: $endDate, limit: $limit, offset: $offset) {\n    total\n    items { registration_id service_version_id trace_id span_id execution_status failure_category failure_code attempt_count ended_at recorded_at id account_id service_id msg_id event_name status delivery_status verification_status environment latency_ms retry_count credits_consumed sdk_record_id error_reason payload_size created_at }\n  }\n}"
+      "document": "query WebhookRegistrationEvents($serviceId: String!, $registrationId: String!, $eventName: String, $status: String, $startDate: String, $endDate: String, $limit: Int, $offset: Int) {\n  webhookEvents(service_id: $serviceId, registration_id: $registrationId, event_name: $eventName, status: $status, start_date: $startDate, end_date: $endDate, limit: $limit, offset: $offset) {\n    total\n    items { registration_id service_version_id trace_id span_id execution_status failure_category failure_code attempt_count ended_at recorded_at id account_id service_id msg_id event_name status delivery_status verification_status latency_ms retry_count credits_consumed sdk_record_id error_reason payload_size created_at }\n  }\n}"
     },
     {
       "endpoint": "engine",
       "file": "app/lib/webhook-discovery-api.ts",
       "call": 1,
       "variant": 1,
-      "document": "query WorkspaceWebhookPage($limit: Int, $offset: Int, $serviceId: String, $search: String) {\n  workspaceWebhookPage(limit: $limit, offset: $offset, service_id: $serviceId, search: $search) {\n    total\n    items { id service_id service_name service_ref label slug callback_url delivery_mode signature signing_secret { bucket_id key_name } created_at }\n  }\n}"
+      "document": "query WorkspaceWebhookPage($limit: Int, $offset: Int, $serviceId: String, $search: String) {\n  workspaceWebhookPage(limit: $limit, offset: $offset, service_id: $serviceId, search: $search) {\n    total\n    items { id service_id service_name service_ref label slug delivery_mode signature created_at }\n  }\n}"
     },
     {
       "endpoint": "registry",

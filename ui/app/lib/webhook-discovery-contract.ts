@@ -9,6 +9,7 @@ export interface WebhookRegistration {
   created_at: string;
 }
 export interface WebhookListing extends WebhookRegistration { service_id: string; service_name: string; service_ref?: string }
+export type WebhookCatalogueItem = Omit<WebhookListing, "callback_url" | "signing_secret">;
 export interface WebhookDraft { name: string; service: string; secret: string; baseURL: string }
 
 /** Uses the service's canonical identity without inventing a provider when Registry metadata is absent. */

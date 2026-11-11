@@ -58,14 +58,13 @@ function WebhookDetailLoader({ serviceId, slug }: { serviceId: string; slug: str
   </div>;
 }
 
-/** Uses the shared app detail navigation with exact-registration overview, analytics, and received-event views. */
+/** Uses the shared app detail navigation and points newly created registrations to provider setup. */
 function WebhookDetailView({ item, onReload }: { item: WebhookListing; onReload: () => void }) {
   const { access } = useCurrentActorAccess();
   const [params, setParams] = useSearchParams();
   const [start, setStart] = useState(""), [end, setEnd] = useState("");
   const canReadActivity = canReadWebhookActivity(access, item.service_id);
   const active = selectedWebhookTab(params.get("tab"), canReadActivity);
-  const url = copyableWebhookURL(item);
   // Only bounded outcome selections may be restored from an analytics drill-down link.
   const status: WebhookEventStatus = ["failed", "rejected", "success"].includes(params.get("status") || "") ? params.get("status") as WebhookEventStatus : "";
   /** Keeps the chosen period mounted while moving from an aggregate into matching receipts. */
@@ -81,17 +80,51 @@ function WebhookDetailView({ item, onReload }: { item: WebhookListing; onReload:
     <AppDetailTabs label="Webhook details" active={active} tabs={webhookDetailTabs(canReadActivity)} onChange={(tab) => setParams({ tab })} />
     <AppDetailBody>
       {/* Only an authorized Activity tab mounts a reporting loader; direct URL selection cannot bypass this boundary. */}
-      {active === "overview" && <div className="space-y-7">
-        <AppDetailSection title="Receiving URL">
-          {/* Managed subscriptions never advertise a provider callback, even if old metadata retained one. */}
-          {url ? <><CopyValue value={url} label="webhook URL" /><p className="mt-2 text-xs text-slate-500">Paste this URL into your provider’s webhook settings.</p></> : item.delivery_mode === "managed" ? <p className="text-sm text-slate-500">Events arrive through your managed connection. No provider URL is needed.</p> : <div className="space-y-2 text-sm text-slate-500"><p>Configure the Engine public URL to display a provider-ready address.</p><CopyValue value={`/webhook/${item.slug}`} label="webhook receiving path" /></div>}
-        </AppDetailSection>
-        <AppDetailSection title="Verification"><p className="mb-3 text-sm text-slate-600">{item.signature === "set" ? "Signing secret configured" : "No signing secret configured"}</p>
-          <div className="flex flex-wrap items-center gap-4">{/* Credential locations remain separately permission-gated by Engine. */}{item.signing_secret && <Link to={`/integrations/buckets?${new URLSearchParams({ bucket: item.signing_secret.bucket_id, tab: "secrets", secret: item.signing_secret.key_name })}`} className="text-sm font-medium text-[var(--brand-violet)] hover:underline">Manage secret</Link>}{hasWorkspacePermission(access, "app.webhook.manage") && item.delivery_mode === "direct" && <WebhookSigningSecret slug={item.slug} onSaved={onReload} />}</div>
-        </AppDetailSection>
-      </div>}
+      {active === "overview" && <WebhookOverview item={item} created={params.get("created") === "1"} canManage={hasWorkspacePermission(access, "app.webhook.manage")} onReload={onReload} />}
       {active === "analytics" && <WebhookRegistrationAnalytics serviceId={item.service_id} registrationId={item.id} start={start} end={end} onStart={setStart} onEnd={setEnd} onEvents={openEvents} />}
-      {active === "events" && <WebhookRegistrationEvents key={status} serviceId={item.service_id} registrationId={item.id} initialStatus={status} start={start} end={end} onStart={setStart} onEnd={setEnd} />}
+      {active === "events" && <WebhookRegistrationEvents key={status} serviceId={item.service_id} serviceName={item.service_ref || item.service_name} registrationId={item.id} initialStatus={status} start={start} end={end} onStart={setStart} onEnd={setEnd} />}
     </AppDetailBody>
   </>;
+}
+
+/** Displays the exact provider destination while retaining useful guidance for managed and legacy registrations. */
+function WebhookReceivingURL({ item }: { item: WebhookListing }) {
+  const url = copyableWebhookURL(item);
+  // Managed receivers use their connection for delivery and have no provider URL to copy.
+  if (item.delivery_mode === "managed") return <p className="text-sm text-slate-600">Events arrive through your managed connection. No provider URL is needed.</p>;
+  // A legacy direct registration can expose its path before the Engine public URL is configured.
+  if (!url) return <div className="space-y-2">
+    <p className="text-sm text-slate-600">Configure the Engine public URL to display a provider-ready address.</p>
+    <CopyValue value={`/webhook/${item.slug}`} label="webhook receiving path" className="[&_code]:whitespace-normal [&_code]:[overflow-wrap:anywhere]" />
+  </div>;
+  return <div className="space-y-2">
+    <CopyValue value={url} label="webhook URL" className="[&_code]:whitespace-normal [&_code]:[overflow-wrap:anywhere]" />
+    <p className="text-sm text-slate-600">Paste this URL into your provider’s webhook settings.</p>
+  </div>;
+}
+
+// Both setup cards use the same frame and allow controls to wrap at narrow widths.
+const setupCard = "min-w-0 rounded-xl border border-slate-200 bg-white p-4 sm:p-5";
+
+/** Gives the receiving address and verification their own cards at any panel width. */
+function WebhookOverview({ item, created, canManage, onReload }: { item: WebhookListing; created: boolean; canManage: boolean; onReload: () => void }) {
+  return <div className="@container min-w-0 space-y-4">
+    {/* The creation flow lands here so the confirmed provider destination is immediately available. */}
+    {created && <p role="status" className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">Webhook created.</p>}
+    <div className="grid min-w-0 gap-4 @3xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+      <AppDetailSection title="Receiving URL" className={setupCard}>
+        <WebhookReceivingURL item={item} />
+      </AppDetailSection>
+      <AppDetailSection title="Verification" className={setupCard}>
+        {/* Display presence only; credential management has its own permission boundary. */}
+        <p className="mb-3 text-sm text-slate-600">{item.signature === "set" ? "Signing secret configured" : "No signing secret configured"}</p>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          {/* Engine only returns a reference when the viewer can read the credential metadata. */}
+          {item.signing_secret && <Link to={`/integrations/buckets?${new URLSearchParams({ bucket: item.signing_secret.bucket_id, tab: "secrets", secret: item.signing_secret.key_name })}`} className="text-sm font-medium text-[var(--brand-violet)] hover:underline">Manage secret</Link>}
+          {/* Editing verification requires management access and applies to direct delivery. */}
+          {canManage && item.delivery_mode === "direct" && <WebhookSigningSecret slug={item.slug} onSaved={onReload} />}
+        </div>
+      </AppDetailSection>
+    </div>
+  </div>;
 }

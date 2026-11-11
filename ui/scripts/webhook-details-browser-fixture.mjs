@@ -7,6 +7,12 @@ const ui = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const service = "11111111-1111-4111-8111-111111111111";
 const registration = "22222222-2222-4222-8222-222222222222";
 const item = { id: registration, service_id: service, service_name: "Synthetic payments", service_ref: "@fixture/payments", label: "Billing events", slug: "billing-route", callback_url: "https://engine.example/webhook/billing-route", delivery_mode: "direct", signature: "set", created_at: "2026-11-01T12:00:00Z" };
+// Use realistic name lengths and delivery modes to check both catalogue breakpoints.
+const catalogue = [
+  item,
+  { ...item, id: "managed-fixture", label: "Customer updates", service_ref: "@fixture/customers", slug: "customer-updates", callback_url: "", delivery_mode: "managed", signature: "none" },
+  { ...item, id: "unsigned-fixture", label: "International fulfillment and warehouse reconciliation", service_ref: "@fixture/logistics-warehouse-integration", slug: "fulfillment-events", signature: "none" },
+];
 const state = { mode: "success", role: "both", calls: [] };
 
 /** Returns only synthetic JSON; no fixture route proxies to a Registry or Engine. */
@@ -39,10 +45,24 @@ function graphql(input, response) {
   state.calls.push({ query, variables });
   // Access loading/failure is independent of registration metadata and receipt loading.
   if (query.includes("CurrentActorAccess")) return reply(response, state.mode === "access-error" ? { errors: [{ message: "Synthetic access outage" }] } : { data: { currentActorAccess: access() } });
-  // The catalogue remains available for testing the name's actual navigation link.
-  if (query.includes("WorkspaceWebhookPage")) return reply(response, { data: { workspaceWebhookPage: { items: [item], total: 1 } } });
-  // Removed and managed registrations have separate observable states.
-  if (query.includes("WebhookRegistration(")) return reply(response, { data: { workspaceWebhook: state.mode === "missing" ? null : { ...item, delivery_mode: state.mode === "managed" ? "managed" : "direct", callback_url: state.mode === "managed" ? "" : item.callback_url } } });
+  // Keep a single registration for detail scenarios and a varied list for layout checks.
+  if (query.includes("WorkspaceWebhookPage")) {
+    // Match the visible names and service references so catalogue search can be verified locally.
+    const search = (variables.search || "").trim().toLowerCase();
+    const items = (state.mode === "catalogue" ? catalogue : [item]).filter((row) =>
+      [row.label, row.service_name, row.service_ref, row.callback_url].some((field) => field.toLowerCase().includes(search))
+    );
+    return reply(response, { data: { workspaceWebhookPage: { items, total: items.length } } });
+  }
+  // Detail navigation always resolves the clicked registration, including managed catalogue rows.
+  if (query.includes("WebhookRegistration(")) {
+    const registration = catalogue.find((row) => row.slug === variables.slug && row.service_id === variables.serviceId);
+    // Removed registrations and unknown route identities remain distinguishable from API failures.
+    if (!registration || state.mode === "missing") return reply(response, { data: { workspaceWebhook: null } });
+    // The explicit managed mode also supports the original single-registration scenario.
+    const detail = state.mode === "managed" ? { ...registration, delivery_mode: "managed", callback_url: "" } : registration;
+    return reply(response, { data: { workspaceWebhook: detail } });
+  }
   // Reporting must always carry the exact registration, never only a label or service name.
   if (variables.registrationId !== registration || variables.serviceId !== service) return reply(response, { errors: [{ message: "Missing exact registration scope" }] });
   // Outages and confirmed empty activity must remain distinguishable in the page.

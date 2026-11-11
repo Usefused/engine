@@ -178,6 +178,7 @@ type LocalActivityProps = Omit<ActivityTabProps, "dependentSDKs" | "dependentMCP
   setSelectedExecutionID: (id: string) => void;
 };
 
+/** Supplies the current service identity to its incoming webhook receipts. */
 function LocalActivity(props: LocalActivityProps) {
   return (
     <>
@@ -195,6 +196,7 @@ function LocalActivity(props: LocalActivityProps) {
         <OutboundActivity {...props} />
       ) : (
         <WebhookLogsCard
+          service={{ id: props.res.service.id, name: props.res.service.canonical_ref || props.res.service.name }}
           webhookNameOptions={Array.from(new Set((props.res.service.webhooks || []).map((webhook) => webhook.name)))}
           webhookEvents={props.webhookEvents} webhookTotal={props.webhookTotal} webhookPage={props.webhookPage}
           setWebhookPage={props.setWebhookPage} webhookLimit={props.webhookLimit} webhookFilterEvent={props.webhookFilterEvent}

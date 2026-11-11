@@ -1,12 +1,12 @@
 import { api, type ActivatedService } from "./api";
 import { readAllBoundedPages } from "./bounded-pages";
-import { webhookConfiguration, type WebhookDraft, type WebhookListing } from "./webhook-discovery-contract";
+import { webhookConfiguration, type WebhookCatalogueItem, type WebhookDraft } from "./webhook-discovery-contract";
 import type { AppPlanResponse } from "./app-builder-contract";
 
 export const WEBHOOK_REGISTRATIONS_QUERY = `query WorkspaceWebhookPage($limit: Int, $offset: Int, $serviceId: String, $search: String) {
   workspaceWebhookPage(limit: $limit, offset: $offset, service_id: $serviceId, search: $search) {
     total
-    items { id service_id service_name service_ref label slug callback_url delivery_mode signature signing_secret { bucket_id key_name } created_at }
+    items { id service_id service_name service_ref label slug delivery_mode signature created_at }
   }
 }`;
 
@@ -18,7 +18,7 @@ export async function webhookServices(): Promise<ActivatedService[]> {
   }, 100, 100);
 }
 
-export interface WebhookPage { items: WebhookListing[]; total: number }
+export interface WebhookPage { items: WebhookCatalogueItem[]; total: number }
 
 /** Fetches exactly one filtered registration page; neither catalogue discovery nor per-service requests are needed. */
 export async function webhookListings(filters: { limit: number; offset: number; serviceId?: string; search?: string }, signal?: AbortSignal): Promise<WebhookPage> {
@@ -49,7 +49,7 @@ export async function planWebhook(draft: WebhookDraft, ownerTeam: string): Promi
   return plan;
 }
 
-/** Applies exactly the reviewed hash, without silently retrying a possibly committed provisioning request. */
-export async function createWebhook(plan: AppPlanResponse): Promise<void> {
-  await api.appConfig.apply("webhook", { plan_id: plan.plan_id, source_hash: plan.source_hash });
+/** Applies the reviewed hash once and returns the receiving identities confirmed by Engine. */
+export async function createWebhook(plan: AppPlanResponse): Promise<{ registrations?: { slug: string }[] }> {
+  return api.appConfig.apply("webhook", { plan_id: plan.plan_id, source_hash: plan.source_hash });
 }

@@ -28,7 +28,7 @@ export function WebhookSigningSecret({ slug, onSaved }: { slug: string; onSaved:
     finally{setBusy(false);}
   }
   // Keep credential controls out of the URL row until a manager explicitly opens them.
-  if(!open) return <button type="button" onClick={()=>setOpen(true)} className="text-[11px] font-medium text-slate-500 hover:text-slate-950">Change secret reference</button>;
+  if(!open) return <button type="button" onClick={()=>setOpen(true)} className="text-left text-sm font-medium text-slate-600 hover:text-slate-950 hover:underline">Change secret reference</button>;
   return <form onSubmit={review} className="w-full space-y-3 border-t border-slate-100 pt-4"><fieldset disabled={busy || uncertain} className="space-y-3">
     <SecretReferenceField required label="New secret reference" disabled={busy || uncertain} value={secret} onChange={(reference) => { setSecret(reference); setPlan(null); setError(""); }} />
     <p className="text-xs text-slate-500">Choose an existing reference or create a secret here. Your receiving URL stays the same.</p>

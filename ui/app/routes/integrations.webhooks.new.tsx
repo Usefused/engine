@@ -8,6 +8,7 @@ import { SecretReferenceField } from "~/components/buckets/SecretReferenceField"
 import { FieldLabel } from "~/components/forms/FieldLabel";
 import { Select } from "~/components/forms/Select";
 import { createWebhook, planWebhook, webhookServices } from "~/lib/webhook-discovery-api";
+import { webhookDetailPath } from "~/lib/webhook-discovery-contract";
 import { listAppOwningTeams } from "~/lib/app-builder";
 import { readAllBoundedPages } from "~/lib/bounded-pages";
 import type { ActivatedService } from "~/lib/api";
@@ -65,14 +66,18 @@ export default function CreateWebhookPage() {
     catch (cause) { setError(String(cause)); }
     finally { setBusy(false); }
   }
-  /** An ambiguous apply outcome directs the user to inspect registrations before another attempt. */
+  /** Opens the confirmed receiver for setup and leaves ambiguous outcomes for manual inspection. */
   async function provision() {
     // The saved plan and hash are the only authority for the creation action.
     if (!plan || busy || uncertain) return;
     setBusy(true); setError("");
     try {
-      await createWebhook(plan);
-      navigate(`/integrations/webhooks?service=${encodeURIComponent(serviceID)}&created=${encodeURIComponent(name.trim())}`);
+      const result = await createWebhook(plan);
+      // This form creates one receiver; use its server-issued slug rather than guessing from its label.
+      const slug = result?.registrations?.length === 1 ? result.registrations[0].slug : "";
+      // Older receipts without an exact identity fall back to a filtered list so setup remains reachable.
+      const fallback = new URLSearchParams({ service: serviceID, search: name.trim(), created: "1" });
+      navigate(slug ? `${webhookDetailPath({ service_id: serviceID, slug })}?created=1` : `/integrations/webhooks?${fallback}`);
     } catch (cause) { setError(`${String(cause)} Check the webhook list before trying again.`); setUncertain(true); }
     finally { setBusy(false); }
   }

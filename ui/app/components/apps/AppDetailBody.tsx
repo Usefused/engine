@@ -11,6 +11,7 @@ interface AppDetailBodyProps {
 interface AppDetailSectionProps {
   title: string;
   children: ReactNode;
+  className?: string;
 }
 
 interface AppOverviewBodyProps {
@@ -42,10 +43,10 @@ export function AppDetailBody({ children }: AppDetailBodyProps) {
   return <div className="min-w-0 max-w-full p-1">{children}</div>;
 }
 
-/** Renders a shared detail subsection while leaving its contents adapter-owned. */
-export function AppDetailSection({ title, children }: AppDetailSectionProps) {
+/** Renders a shared detail heading with optional framing supplied by its page. */
+export function AppDetailSection({ title, children, className }: AppDetailSectionProps) {
   return (
-    <section>
+    <section className={className}>
       <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-slate-700">{title}</h2>
       {children}
     </section>

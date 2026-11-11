@@ -4,11 +4,12 @@ import { Link, useSearchParams } from "@remix-run/react";
 import { ChevronLeft, ChevronRight, Plus, RefreshCw, Search, Webhook } from "lucide-react";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasAnyPermission, hasWorkspacePermission } from "~/lib/current-actor-access";
-import { WebhookSigningSecret } from "~/components/webhooks/WebhookSigningSecret";
-import { CopyValue } from "~/components/CopyValue";
 import { Select } from "~/components/forms/Select";
 import { webhookListings } from "~/lib/webhook-discovery-api";
-import { copyableWebhookURL, webhookDetailPath, type WebhookListing } from "~/lib/webhook-discovery-contract";
+import { webhookDetailPath, type WebhookCatalogueItem } from "~/lib/webhook-discovery-contract";
+
+// Keep catalogue headers and rows aligned, including at intermediate desktop widths.
+const catalogueColumns = "md:grid-cols-[minmax(0,1fr)_10rem_7rem_1rem] md:gap-x-4 md:px-6";
 
 /** Gives webhook pages a clear browser identity distinct from service detail routes. */
 export const meta = () => [{ title: "Webhooks - Fused" }];
@@ -17,7 +18,7 @@ export const meta = () => [{ title: "Webhooks - Fused" }];
 export default function WebhooksPage() {
   const { access, loading: accessLoading } = useCurrentActorAccess();
   const [params, setParams] = useSearchParams();
-  const [items, setItems] = useState<WebhookListing[]>([]);
+  const [items, setItems] = useState<WebhookCatalogueItem[]>([]);
   // App registration links prefill the existing server-side search instead of loading every webhook.
   const [search, setSearch] = useState(params.get("search") || ""), [error, setError] = useState("");
   const [loading, setLoading] = useState(true), [refresh, setRefresh] = useState(0);
@@ -70,8 +71,9 @@ export default function WebhooksPage() {
       // The title action preserves the existing webhook creation permission.
       canCreate && <Link to={createURL} className={catalogueActionClassName}><Plus className="h-3.5 w-3.5" aria-hidden="true" />Create webhook</Link>
     } />
-    {params.get("created") && <p role="status" className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">Webhook created. Copy its receiving URL into your provider’s webhook settings.</p>}
-    <section aria-label="Registered webhooks" className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+    {/* Older apply responses may send the user back to search for the new registration. */}
+    {params.get("created") && <p role="status" className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">Webhook created. Open its details to copy the receiving URL.</p>}
+    <section aria-label="Registered webhooks" className="overflow-hidden rounded-xl border border-slate-200 bg-white">
     {/* Search queries persisted webhooks directly without a catalogue-backed service selector. */}
     <div className="grid grid-cols-[minmax(0,1fr)_2.25rem] items-center gap-2 border-b border-slate-100 px-4 py-3 sm:px-5">
       <div className="relative min-w-0">
@@ -89,7 +91,7 @@ export default function WebhooksPage() {
     }}>Show all services</button></div>}
     {error && <p role="alert" className="rounded-lg bg-red-50 p-4 text-sm text-red-700">{error}</p>}
     {/* Loading, denial, failure, and a verified empty catalogue remain distinct states. */}
-    {accessLoading || loading ? <p role="status" className="p-8 text-center text-sm text-slate-500">Loading webhook URLs…</p> : !canRead ? <p className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-600">Service read access is needed to view registered URLs.</p> : items.length ? <div className="divide-y divide-slate-100">{items.map((item) => <RegistrationCard key={`${item.service_id}:${item.slug}`} item={item} canManage={hasWorkspacePermission(access, "app.webhook.manage")} onSaved={() => setRefresh((value) => value + 1)} />)}</div> : !error && <section className="px-6 py-12 text-center"><Webhook className="mx-auto mb-3 h-8 w-8 text-slate-400" /><h2 className="text-sm font-semibold text-slate-900">{search || selected ? "No matching webhooks" : "No webhooks yet"}</h2><p className="mx-auto mt-2 max-w-md text-sm text-slate-500">{search ? "Try another name or service." : "Create a receiving URL, then add it to your provider’s webhook settings."}</p>{canCreate && !search && <Link to={createURL} className="mt-5 inline-flex items-center gap-2 text-sm font-semibold text-[var(--brand-violet)]"><Plus className="h-4 w-4" />Create your first webhook</Link>}</section>}
+    {accessLoading || loading ? <p role="status" className="p-8 text-center text-sm text-slate-500">Loading webhooks…</p> : !canRead ? <p className="p-6 text-sm text-slate-600">Service read access is needed to view registered webhooks.</p> : items.length ? <RegistrationList items={items} /> : !error && <section className="px-6 py-12 text-center"><Webhook className="mx-auto mb-3 h-8 w-8 text-slate-400" /><h2 className="text-sm font-semibold text-slate-900">{search || selected ? "No matching webhooks" : "No webhooks yet"}</h2><p className="mx-auto mt-2 max-w-md text-sm text-slate-500">{search ? "Try another name or service." : "Create a receiving URL, then add it to your provider’s webhook settings."}</p>{canCreate && !search && <Link to={createURL} className="mt-5 inline-flex items-center gap-2 text-sm font-semibold text-[var(--brand-violet)]"><Plus className="h-4 w-4" />Create your first webhook</Link>}</section>}
     {/* Completed server totals drive the services-style range, page selector, and bounded arrow controls. */}
     {!loading && !error && total > pageSize && <nav aria-label="Webhook pages" className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3 sm:px-5">
       <p className="text-xs text-slate-500">{offset + 1}-{Math.min(offset + pageSize, total)} of {total}</p>
@@ -111,23 +113,41 @@ export default function WebhooksPage() {
   </div>;
 }
 
-/** Links each registration to its exact detail page while keeping the provider destination separately copyable. */
-function RegistrationCard({ item, canManage, onSaved }: { item: WebhookListing; canManage: boolean; onSaved: () => void }) {
-  const url = copyableWebhookURL(item);
-  // Older listings preserve their known name when a canonical provider reference is unavailable.
-  const serviceTag = item.service_ref || item.service_name;
-  return <article className="min-w-0 space-y-4 px-4 py-5 sm:px-5 sm:py-6">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div className="min-w-0 space-y-2">
-        <h2 className="text-sm font-semibold text-slate-900"><Link to={webhookDetailPath(item)} className="break-words hover:text-[var(--brand-violet)] hover:underline">{item.label}</Link></h2>
-        <Link to={`/integrations/${item.service_id}?tab=webhooks`} className="inline-flex max-w-full rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600 hover:bg-slate-200 hover:text-slate-900"><span className="break-all">{serviceTag}</span></Link>
-      </div>
-      {/* Managed subscriptions and direct verification have distinct setup requirements. */}
-      <span className="rounded-md bg-slate-100 px-2 py-1 text-[10px] font-medium text-slate-600">{item.delivery_mode === "managed" ? "Managed delivery" : item.signature === "set" ? "Signing secret configured" : "No signing secret"}</span>
+/** Mirrors the app catalogue's column headings while keeping each registration a single native link. */
+function RegistrationList({ items }: { items: WebhookCatalogueItem[] }) {
+  return <>
+    <div aria-hidden="true" className={`hidden border-b border-slate-200 bg-slate-50 py-3 text-sm font-medium text-slate-500 md:grid ${catalogueColumns}`}>
+      <span className="pl-11">Webhook</span><span>Status</span><span>Created</span>
     </div>
-    {/* Only Engine-projected URLs are copied; local browser origins are never substituted. */}
-    {url ? <CopyValue value={url} label="webhook URL" /> : <p className="text-sm text-slate-500">{item.delivery_mode === "managed" ? "Events arrive through your managed connection. No provider URL is needed." : <>Public URL not configured. Receiving path: <code className="select-all break-all">/webhook/{item.slug}</code></>}</p>}
-    {/* Receiving URLs remain readable without granting authority to change verification. */}
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-1">{item.signing_secret && <Link to={`/integrations/buckets?${new URLSearchParams({bucket:item.signing_secret.bucket_id,tab:"secrets",secret:item.signing_secret.key_name})}`} className="text-[11px] font-medium text-slate-500 hover:text-[var(--brand-violet)]">Manage secret</Link>}{canManage && item.delivery_mode === "direct" && <WebhookSigningSecret slug={item.slug} onSaved={onSaved} />}</div>
-  </article>;
+    <ul aria-label="Webhook registrations" className="divide-y divide-slate-100">
+      {items.map((item) => <RegistrationRow key={`${item.service_id}:${item.slug}`} item={item} />)}
+    </ul>
+  </>;
+}
+
+/** Summarizes the registration so URL setup, verification controls, and activity stay in details. */
+function RegistrationRow({ item }: { item: WebhookCatalogueItem }) {
+  // Older registrations can still identify their service by display name.
+  const service = item.service_ref || item.service_name;
+  // Managed receivers use their connection for delivery; only direct verification uses a signing secret.
+  const status = item.delivery_mode === "managed" ? "Managed delivery" : item.signature === "set" ? "Signing secret set" : "No signing secret";
+  // Legacy registrations can lack a timestamp; avoid implying a creation date in that case.
+  const created = item.created_at ? new Date(item.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
+  return <li className="min-w-0">
+    <Link to={webhookDetailPath(item)} className={`group grid min-w-0 cursor-pointer grid-cols-[minmax(0,1fr)_1rem] items-center gap-x-3 gap-y-1 px-4 py-3 text-sm transition-colors hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-blue-500 ${catalogueColumns}`}>
+      <div className="col-start-1 row-start-1 flex min-w-0 items-center gap-3">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded bg-blue-100 text-blue-600"><Webhook aria-hidden="true" className="h-4 w-4" /></span>
+        <div className="min-w-0">
+          <span title={item.label} className="block font-semibold leading-5 text-slate-900 [overflow-wrap:anywhere] md:truncate">{item.label}</span>
+          <span title={service} className="block truncate text-xs leading-5 text-slate-500">{service}</span>
+        </div>
+      </div>
+      <div className="col-start-1 row-start-2 pl-11 md:col-start-2 md:row-start-1 md:pl-0">
+        <span className="inline-flex rounded-md bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">{status}</span>
+      </div>
+      {/* Creation is secondary on narrow screens; the detail page retains the timestamp. */}
+      {created && <time dateTime={item.created_at} className="hidden text-slate-500 md:col-start-3 md:row-start-1 md:block"><span className="sr-only">Created </span>{created}</time>}
+      <ChevronRight aria-hidden="true" className="col-start-2 row-span-2 row-start-1 h-4 w-4 text-slate-400 group-hover:text-slate-700 md:col-start-4 md:row-span-1" />
+    </Link>
+  </li>;
 }

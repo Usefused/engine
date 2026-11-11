@@ -1,110 +1,63 @@
 import { Select } from "../forms/Select.ts";
 import { useState } from "react";
 import { RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
-import { activateReceiptRow } from "~/components/activity/receiptRow";
 import { WebhookEventDetailsDrawer } from "~/components/webhooks/WebhookEventDetailsDrawer";
 import { type WebhookEventEntry, type WebhookAnalyticsSummary } from "~/lib/api";
 
-function Badge({ label, color }: { label: string; color: string }) {
-  return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${color}`}>
-      {label}
-    </span>
-  );
+// Switch columns based on the available panel width, including when the workspace sidebar is open.
+const receiptColumns = "@2xl:grid-cols-[minmax(0,2fr)_minmax(0,1.25fr)_minmax(0,1fr)_minmax(0,1fr)_1rem] @2xl:gap-x-4";
+
+interface ReceiptService {
+  id: string;
+  name: string;
 }
 
-function deliveryStatus(event: WebhookEventEntry): string {
-  return event.delivery_status || event.status;
+/** Matches the displayed service to the receipt's recorded identity. */
+function receiptServiceName(event: WebhookEventEntry, service: ReceiptService) {
+  // Older or unmatched receipts can still show their recorded ID without borrowing another service's name.
+  return event.service_id === service.id && service.name ? service.name : event.service_id;
 }
 
-function mobileDeliveryColor(status: string): string {
-  if (status === "failed" || status === "rejected") return "bg-red-100 text-red-700";
-  return "bg-slate-100 text-slate-700";
-}
-
-function desktopDeliveryColor(status: string): string {
-  if (status === "acked") return "bg-green-100 text-green-700";
+/** Colors delivery outcomes consistently across the receipt list. */
+function deliveryColor(status: string): string {
+  // Acknowledgement, successful delivery, and failure have different operator meanings.
+  if (status === "acked") return "bg-emerald-100 text-emerald-700";
   if (status === "delivered") return "bg-blue-100 text-blue-700";
-  if (status === "failed" || status === "nacked" || status === "rejected") return "bg-red-100 text-red-700";
+  if (["failed", "nacked", "rejected"].includes(status)) return "bg-red-100 text-red-700";
   return "bg-slate-100 text-slate-700";
 }
 
-// WebhookEventCard makes the complete mobile receipt a native inspection control.
-function WebhookEventCard({ event, onSelect }: { event: WebhookEventEntry; onSelect: (id: string) => void }) {
-  const status = deliveryStatus(event);
+/** Keeps the full receipt row keyboard accessible with a single inspection button. */
+function WebhookReceiptRow({ event, service, onSelect }: { event: WebhookEventEntry; service: ReceiptService; onSelect: (id: string) => void }) {
+  // Older receipts can carry delivery outcome only in the legacy status field.
+  const status = event.delivery_status || event.status;
+  const received = new Date(event.created_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
   return (
-    <button type="button" aria-haspopup="dialog" onClick={() => onSelect(event.id)} className="block w-full space-y-3 p-4 text-left transition-colors hover:bg-slate-50">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="break-words text-sm font-medium text-slate-950">{event.event_name}</div>
-          <div className="mt-1 truncate font-mono text-[11px] text-slate-400" title={event.msg_id}>{event.msg_id}</div>
-        </div>
-        <Badge label={status} color={mobileDeliveryColor(status)} />
-      </div>
-      <dl className="grid grid-cols-2 gap-3 text-xs">
-        <div><dt className="text-slate-400">Verification</dt><dd className="mt-0.5 text-slate-700">{event.verification_status || "Not recorded"}</dd></div>
-        <div><dt className="text-slate-400">Environment</dt><dd className="mt-0.5 text-slate-700">{event.environment || "Not recorded"}</dd></div>
-        <div><dt className="text-slate-400">Delivery time</dt><dd className="mt-0.5 text-slate-700">{event.latency_ms > 0 ? `${event.latency_ms} ms` : "Not recorded"}</dd></div>
-        <div><dt className="text-slate-400">Payload</dt><dd className="mt-0.5 text-slate-700">{(event.payload_size / 1024).toFixed(1)} KB</dd></div>
-        <div><dt className="text-slate-400">Retries</dt><dd className="mt-0.5 text-slate-700">{event.retry_count}</dd></div>
-        <div><dt className="text-slate-400">Received</dt><dd className="mt-0.5 text-slate-700">{new Date(event.created_at).toLocaleString()}</dd></div>
-      </dl>
-      {event.error_reason ? <div className="text-xs text-red-700">{event.error_reason}</div> : null}
-    </button>
-  );
-}
-
-function SdkRecordCode({ sdkRecordId }: { sdkRecordId?: string }) {
-  if (!sdkRecordId) return null;
-  return (
-    <code className="text-[9px] text-blue-400 mt-0.5 truncate max-w-[80px] block" title={`SDK Record: ${sdkRecordId}`}>SDK: {sdkRecordId.substring(0, 8)}...</code>
-  );
-}
-
-function VerificationCell({ status }: { status?: string }) {
-  if (!status) return <span className="text-slate-300">-</span>;
-  return <Badge label={status} color={status === "passed" ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-700"} />;
-}
-
-// WebhookEventRow provides equivalent mouse and keyboard inspection on desktop.
-function WebhookEventRow({ ev, onSelect }: { ev: WebhookEventEntry; onSelect: (id: string) => void }) {
-  const status = deliveryStatus(ev);
-  return (
-    <tr role="button" tabIndex={0} aria-haspopup="dialog" aria-label={`Inspect ${ev.event_name || "webhook"}`} onClick={() => onSelect(ev.id)} onKeyDown={(keyboardEvent) => activateReceiptRow(keyboardEvent, () => onSelect(ev.id))} className="cursor-pointer transition-colors hover:bg-slate-50 focus:bg-slate-50 focus:outline-none">
-      <td className="break-words px-4 py-3 font-medium text-slate-900">{ev.event_name}</td>
-      <td className="px-4 py-3">
-        <code className="text-[10px] text-slate-400 truncate max-w-[80px] block" title={ev.msg_id}>{ev.msg_id}</code>
-        <SdkRecordCode sdkRecordId={ev.sdk_record_id} />
-      </td>
-      <td className="px-4 py-3">
-        <VerificationCell status={ev.verification_status} />
-      </td>
-      <td className="px-4 py-3">
-        <Badge label={status} color={desktopDeliveryColor(status)} />
-        {ev.error_reason && (
-          <div className="text-[10px] text-red-500 mt-1 max-w-[150px] truncate" title={ev.error_reason}>
-            {ev.error_reason}
-          </div>
-        )}
-      </td>
-      <td className="px-4 py-3 text-slate-500">{ev.environment || "Not recorded"}</td>
-      <td className="px-4 py-3 text-slate-500">
-        {ev.latency_ms > 0 ? `${ev.latency_ms} ms` : <span className="text-slate-300">-</span>}
-      </td>
-      <td className="px-4 py-3 text-slate-500">
-        {typeof ev.payload_size === "number" ? `${(ev.payload_size / 1024).toFixed(1)} KB` : <span className="text-slate-300">-</span>}
-      </td>
-      <td className="px-4 py-3 text-slate-500">
-        {ev.retry_count}
-      </td>
-      <td className="whitespace-nowrap px-4 py-3 text-right text-xs text-slate-400">
-        {new Date(ev.created_at).toLocaleString()}
-      </td>
-    </tr>
+    <li className="min-w-0">
+      <button type="button" aria-haspopup="dialog" onClick={() => onSelect(event.id)} className={`grid w-full min-w-0 cursor-pointer grid-cols-[minmax(0,1fr)_1rem] items-center gap-x-3 gap-y-1 px-4 py-3.5 text-left transition-colors hover:bg-slate-50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-blue-500 ${receiptColumns}`}>
+        <span className="col-start-1 row-start-1 min-w-0 text-sm font-semibold text-slate-900 [overflow-wrap:anywhere]">
+          {/* Failed verification can leave an event without a recognized name. */}
+          {event.event_name || "Unnamed event"}
+        </span>
+        <span className="col-start-1 row-start-2 min-w-0 text-sm text-slate-600 [overflow-wrap:anywhere] @2xl:col-start-2 @2xl:row-start-1">
+          <span className="sr-only">Service </span>{receiptServiceName(event, service) || "Unknown service"}
+        </span>
+        <span className="col-start-1 row-start-3 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 @2xl:col-start-3 @2xl:row-start-1">
+          <span className={`rounded-md px-2 py-0.5 text-xs font-medium [overflow-wrap:anywhere] ${deliveryColor(status)}`}><span className="sr-only">Delivery </span>{status || "Not recorded"}</span>
+          {/* Verification can be absent on historical receipts and remains available in the inspector. */}
+          {event.verification_status && <span className="text-xs text-slate-500 [overflow-wrap:anywhere]"><span className="sr-only">Verification </span>{event.verification_status}</span>}
+        </span>
+        <time dateTime={event.created_at} className="col-start-1 row-start-4 text-xs leading-5 text-slate-500 @2xl:col-start-4 @2xl:row-start-1">
+          <span className="sr-only">Received </span>{received}
+        </time>
+        <ChevronRight aria-hidden="true" className="col-start-2 row-span-4 row-start-1 h-4 w-4 text-slate-400 @2xl:col-start-5 @2xl:row-span-1" />
+      </button>
+    </li>
   );
 }
 
 export interface WebhookLogsCardProps {
+  service: ReceiptService;
   webhookNameOptions: string[];
   webhookEvents: WebhookEventEntry[];
   webhookTotal: number;
@@ -123,8 +76,9 @@ export interface WebhookLogsCardProps {
   emptyMessage?: string;
 }
 
-// WebhookLogsCard shares responsive receipt inspection across service and exact-registration Activity.
+/** Shares width-aware receipt browsing and inspection across both webhook activity views. */
 export function WebhookLogsCard({
+  service,
   webhookNameOptions,
   webhookEvents,
   webhookTotal,
@@ -145,17 +99,17 @@ export function WebhookLogsCard({
   const [selectedEventID, setSelectedEventID] = useState("");
   const selectedEvent = webhookEvents.find((event) => event.id === selectedEventID) ?? null;
   return (
-    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-      <div className="flex flex-col gap-3 border-b border-slate-100 bg-slate-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+    <div className="@container min-w-0 max-w-full rounded-lg border border-slate-200 bg-white">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-t-lg border-b border-slate-100 bg-slate-50 px-4 py-3">
         <h2 className="text-sm font-semibold text-slate-800">
           Incoming webhook receipts
         </h2>
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
           <Select
             aria-label="Filter webhook event type"
             value={webhookFilterEvent}
             onChange={(e) => setWebhookFilterEvent(e.target.value)}
-            className="text-sm border border-slate-200 rounded px-2 py-1 bg-white text-slate-700 outline-none flex-1 sm:flex-initial"
+            className="max-w-full min-w-0 rounded border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700"
           >
             <option value="">All Events</option>
             {webhookNameOptions.map(name => (
@@ -163,7 +117,7 @@ export function WebhookLogsCard({
             ))}
             <option value="UNKNOWN">UNKNOWN</option>
           </Select>
-          <div className="flex items-center gap-2 flex-wrap flex-1 sm:flex-initial">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <input
               type="date"
               aria-label="Webhook start date"
@@ -215,49 +169,25 @@ export function WebhookLogsCard({
         </div>
       )}
 
-      <div aria-label="Incoming webhook receipts on mobile" className="divide-y divide-slate-100 md:hidden">
-        {webhookEvents.length > 0 ? webhookEvents.map((event, index) => (
-          <WebhookEventCard key={event.id || event.msg_id || index} event={event} onSelect={setSelectedEventID} />
-        )) : (
-          <div className="px-5 py-10 text-center text-sm text-slate-500">{emptyMessage}</div>
-        )}
-      </div>
+      {/* A single list switches from stacked metadata to columns within the available width. */}
+      {webhookEvents.length > 0 ? (
+        <>
+          <div aria-hidden="true" className={`hidden border-b border-slate-200 bg-slate-50 px-4 py-2.5 text-xs font-medium text-slate-500 @2xl:grid ${receiptColumns}`}>
+            <span>Event</span><span>Service</span><span>Delivery</span><span>Received</span>
+          </div>
+          <ul aria-label="Incoming webhook receipts" className="divide-y divide-slate-100">
+            {webhookEvents.map((event) => <WebhookReceiptRow key={event.id} event={event} service={service} onSelect={setSelectedEventID} />)}
+          </ul>
+        </>
+      ) : (
+        <p className="px-5 py-10 text-center text-sm text-slate-500">{emptyMessage}</p>
+      )}
 
-      <div className="hidden overflow-x-auto md:block">
-        <table aria-label="Incoming webhook receipts" className="w-full min-w-[900px] table-fixed text-left text-sm text-slate-600">
-          <thead className="border-b border-slate-200 bg-slate-50 text-xs font-medium text-slate-500">
-            <tr>
-              <th className="w-[17%] px-4 py-3">Event</th>
-              <th className="w-[15%] px-4 py-3">Message ID</th>
-              <th className="w-[12%] px-4 py-3">Verification</th>
-              <th className="w-[11%] px-4 py-3">Delivery</th>
-              <th className="w-[11%] px-4 py-3">Environment</th>
-              <th className="w-[11%] px-4 py-3">Delivery time</th>
-              <th className="w-[8%] px-4 py-3">Payload</th>
-              <th className="w-[6%] px-4 py-3">Retries</th>
-              <th className="w-[9%] px-4 py-3 text-right">Received</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {webhookEvents.length > 0 ? (
-              webhookEvents.map((ev, index) => (
-                <WebhookEventRow key={ev.id || ev.msg_id || index} ev={ev} onSelect={setSelectedEventID} />
-              ))
-            ) : (
-              <tr>
-                <td colSpan={9} className="px-5 py-10 text-center text-slate-500">
-                  {emptyMessage}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-
+      {/* Server totals preserve page controls even when an offset has become empty. */}
       {webhookTotal > 0 && (
-        <div className="flex items-center justify-between gap-3 border-t border-slate-100 px-4 py-3 bg-white">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-b-lg border-t border-slate-100 bg-white px-4 py-3">
           <p className="text-xs text-slate-500">
-            {webhookTotal === 0 ? 0 : (webhookPage - 1) * webhookLimit + 1}-{Math.min(webhookTotal, webhookPage * webhookLimit)} of {webhookTotal}
+            {Math.min((webhookPage - 1) * webhookLimit + 1, webhookTotal)}-{Math.min(webhookTotal, webhookPage * webhookLimit)} of {webhookTotal}
           </p>
           <div className="flex items-center gap-1">
             <button
@@ -298,7 +228,8 @@ export function WebhookLogsCard({
           </div>
         </div>
       )}
-      {selectedEvent ? <WebhookEventDetailsDrawer event={selectedEvent} onClose={() => setSelectedEventID("")} /> : null}
+      {/* The selected receipt retains its recorded service in the inspector. */}
+      {selectedEvent && <WebhookEventDetailsDrawer event={selectedEvent} serviceName={receiptServiceName(selectedEvent, service)} onClose={() => setSelectedEventID("")} />}
     </div>
   );
 }

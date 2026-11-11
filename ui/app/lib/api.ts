@@ -895,7 +895,6 @@ export interface WebhookEventEntry {
   status: string;
   delivery_status: string;
   verification_status: string;
-  environment: string;
   latency_ms: number;
   retry_count: number;
   credits_consumed: number;
@@ -1777,7 +1776,6 @@ export const api = {
                 status
                 delivery_status
                 verification_status
-                environment
                 latency_ms
                 retry_count
                 credits_consumed

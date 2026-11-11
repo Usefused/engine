@@ -32,7 +32,7 @@ export const WEBHOOK_ANALYTICS_QUERY = `query WebhookRegistrationAnalytics($serv
 export const WEBHOOK_EVENTS_QUERY = `query WebhookRegistrationEvents($serviceId: String!, $registrationId: String!, $eventName: String, $status: String, $startDate: String, $endDate: String, $limit: Int, $offset: Int) {
   webhookEvents(service_id: $serviceId, registration_id: $registrationId, event_name: $eventName, status: $status, start_date: $startDate, end_date: $endDate, limit: $limit, offset: $offset) {
     total
-    items { registration_id service_version_id trace_id span_id execution_status failure_category failure_code attempt_count ended_at recorded_at id account_id service_id msg_id event_name status delivery_status verification_status environment latency_ms retry_count credits_consumed sdk_record_id error_reason payload_size created_at }
+    items { registration_id service_version_id trace_id span_id execution_status failure_category failure_code attempt_count ended_at recorded_at id account_id service_id msg_id event_name status delivery_status verification_status latency_ms retry_count credits_consumed sdk_record_id error_reason payload_size created_at }
   }
 }`;
 

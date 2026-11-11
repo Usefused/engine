@@ -34,14 +34,15 @@ test("service tags preserve provider identity and are searchable", () => {
   assert.equal(contract.matchesWebhook({label:"Orders",service_name:"Payments",service_ref:"@stripe/payments",callback_url:"",slug:"orders"},"@stripe/"),true);
 });
 
-// The browser must share named config identity and the exact reviewed hash with CLI APIs.
+// The browser shares the reviewed hash with CLI APIs and uses the committed identity for navigation.
 test("webhook creation plans first and applies only the reviewed receipt", async () => {
   const calls = [];
+  const applied = { registrations: [{ slug: "server-issued-slug" }] };
   const api = { appConfig: {
     /** Record planning without implicitly applying it. */
     plan: async (kind, input) => { calls.push({kind,input}); return {plan_id:"plan",source_hash:input.source_hash,summary:{create_webhook:true}}; },
-    /** Observe the exact immutable receipt sent to apply. */
-    apply: async (kind, input) => { calls.push({kind,input}); },
+    /** Confirm the request used the reviewed receipt and return an independent receiving identity. */
+    apply: async (kind, input) => { calls.push({kind,input}); return applied; },
   }};
   const client = adapter(api), plan = await client.planWebhook(draft,"ops");
   assert.equal(calls.length,1);
@@ -49,7 +50,7 @@ test("webhook creation plans first and applies only the reviewed receipt", async
   assert.equal(calls[0].input.config_key,"webhook:stripe-events");
   assert.equal(calls[0].input.owner_team,"ops");
   assert.equal(calls[0].input.config.services.stripe.secret,draft.secret);
-  await client.createWebhook(plan);
+  assert.deepEqual(await client.createWebhook(plan), applied);
   assert.deepEqual(calls[1],{kind:"webhook",input:{plan_id:"plan",source_hash:plan.source_hash}});
 });
 
@@ -77,7 +78,7 @@ test("configuration rejects raw signing secrets and unsafe destinations", () => 
   assert.equal(contract.webhookConfiguration({...draft,secret:""}).services.stripe.secret,undefined);
 });
 
-// One page must issue one direct query with server filters, even when the total spans many pages.
+// One page must issue one direct summary query even when the total spans many pages.
 test("discovery sends filters once and returns only the requested server page", async () => {
   const calls = [];
   const page = {items:[{service_id:"stripe",service_name:"Stripe",slug:"route",label:"events"}],total:1000};
@@ -92,7 +93,7 @@ test("discovery sends filters once and returns only the requested server page", 
   assert.equal(calls.length,1);
   assert.deepEqual(calls[0].variables,filters);
   assert.match(calls[0].query,/workspaceWebhookPage/);
-  assert.doesNotMatch(calls[0].query,/workspaceServices|auth_options/);
+  assert.doesNotMatch(calls[0].query,/workspaceServices|auth_options|callback_url|signing_secret/);
   assert.ok(calls[0].options.signal instanceof AbortSignal);
 });
 

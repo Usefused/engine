@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Activity, CheckCircle2, Clock3, RefreshCw, ServerCrash, ShieldAlert } from "lucide-react";
 import { ActivityMetric } from "~/components/activity/AppActivityOverview";
 import { WebhookLogsCard } from "./WebhookLogsCard";
-import { webhookRegistrationAnalytics, webhookRegistrationEvents, type RegistrationAnalytics, type RegistrationEventPage, type WebhookActivityInput } from "~/lib/webhook-detail-api";
+import { webhookRegistrationAnalytics, webhookRegistrationEvents, type RegistrationAnalytics, type WebhookActivityInput } from "~/lib/webhook-detail-api";
 import { webhookEventNameOptions, type WebhookEventStatus } from "~/lib/webhook-detail";
 
 /** Cancels obsolete reports and clears stale values so failed refreshes never look like verified zero activity. */
@@ -86,8 +86,8 @@ export function WebhookRegistrationAnalytics({ serviceId, registrationId, start,
   </div>;
 }
 
-/** Retains server-side outcome filtering and pagination while reusing the shared mobile/table receipt inspector. */
-export function WebhookRegistrationEvents({ serviceId, registrationId, initialStatus = "", start, end, onStart, onEnd }: { serviceId: string; registrationId: string; initialStatus?: WebhookEventStatus; start: string; end: string; onStart: (value: string) => void; onEnd: (value: string) => void }) {
+/** Retains exact service and registration scope while showing the service on each receipt. */
+export function WebhookRegistrationEvents({ serviceId, serviceName, registrationId, initialStatus = "", start, end, onStart, onEnd }: { serviceId: string; serviceName: string; registrationId: string; initialStatus?: WebhookEventStatus; start: string; end: string; onStart: (value: string) => void; onEnd: (value: string) => void }) {
   const [status, setStatus] = useState<WebhookEventStatus>(initialStatus);
   const [eventName, setEventName] = useState("");
   const [page, setPage] = useState(1);
@@ -100,14 +100,14 @@ export function WebhookRegistrationEvents({ serviceId, registrationId, initialSt
   function changeStart(value: string) { onStart(value); setPage(1); }
   /** End bounds use the same pagination reset as start bounds and outcome filters. */
   function changeEnd(value: string) { onEnd(value); setPage(1); }
-  return <div className="min-w-0 max-w-full space-y-5 overflow-x-hidden">
-    <div className="flex flex-wrap items-center justify-between gap-3">
-      <div><h2 className="text-sm font-semibold text-slate-900">Received events</h2><p className="mt-1 text-xs text-slate-500">Only deliveries received by this webhook registration.</p></div>
+  return <div className="min-w-0 max-w-full space-y-4">
+    <div className="flex flex-wrap items-center gap-3">
       <div aria-label="Filter webhook outcomes" className="flex max-w-full flex-wrap gap-1 rounded-lg bg-slate-100 p-1">{([{ value: "", label: "All" }, { value: "success", label: "Successful" }, { value: "failed", label: "Failures" }, { value: "rejected", label: "Rejected" }] as const).map((option) => <button type="button" key={option.value} aria-pressed={status === option.value} onClick={() => { setStatus(option.value); setPage(1); }} className={`rounded-md px-3 py-2 text-xs font-medium sm:py-1.5 ${status === option.value ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{option.label}</button>)}</div>
     </div>
     {/* The shared receipt card owns period controls once data is loaded; these preserve retry access during loading and failure. */}
     {(report.loading || report.error) && <ReportControls start={start} end={end} onStart={changeStart} onEnd={changeEnd} onRefresh={() => setRefresh((value) => value + 1)} />}
     {report.error ? <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{report.error}</p> : report.loading ? <p role="status" className="py-12 text-center text-sm text-slate-500">Loading received events…</p> : report.data && <WebhookLogsCard
+      service={{ id: serviceId, name: serviceName }}
       webhookNameOptions={names} webhookEvents={report.data.items} webhookTotal={report.data.total} webhookPage={page} setWebhookPage={setPage} webhookLimit={pageSize}
       webhookFilterEvent={eventName} setWebhookFilterEvent={(value) => { setEventName(value); setPage(1); }}
       webhookStartDate={start} setWebhookStartDate={changeStart} webhookEndDate={end} setWebhookEndDate={changeEnd}

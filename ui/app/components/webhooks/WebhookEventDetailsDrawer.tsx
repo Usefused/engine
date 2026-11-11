@@ -5,8 +5,8 @@ import type { WebhookEventEntry } from "~/lib/api";
 import { WebhookMessageDiagnostics } from "./WebhookMessageDiagnostics";
 import { OperationDisclosure } from "~/components/OperationDetailsParts";
 
-// WebhookEventDetailsDrawer keeps diagnostic identifiers collapsed while showing receipt outcomes and the private message inspector.
-export function WebhookEventDetailsDrawer({ event, onClose }: { event: WebhookEventEntry; onClose: () => void }) {
+/** Shows the recorded service and receipt outcomes while keeping correlation and private messages behind disclosures. */
+export function WebhookEventDetailsDrawer({ event, serviceName, onClose }: { event: WebhookEventEntry; serviceName?: string; onClose: () => void }) {
   const agent = useFusedAgent();
   useEffect(() => {
     // Escape mirrors the overlay and header close actions for keyboard users.
@@ -33,7 +33,7 @@ export function WebhookEventDetailsDrawer({ event, onClose }: { event: WebhookEv
             <WebhookDetail label="Execution status" value={event.execution_status} />
             <WebhookDetail label="Verification" value={event.verification_status} />
             <WebhookDetail label="Delivery" value={event.delivery_status || event.status} />
-            <WebhookDetail label="Environment" value={event.environment} />
+            <WebhookDetail label="Service" value={serviceName} />
             <WebhookDetail label="Delivery time" value={event.latency_ms > 0 ? `${event.latency_ms} ms` : ""} />
             <WebhookDetail label="Payload size" value={formatBytes(event.payload_size)} />
             <WebhookDetail label="Retries" value={event.retry_count.toLocaleString()} />
