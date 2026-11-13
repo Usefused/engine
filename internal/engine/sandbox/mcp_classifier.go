@@ -137,7 +137,7 @@ func classifierDescription(value string) string {
 
 // mcpClassifierFailure is stable model-facing guidance without raw query or upstream diagnostics.
 func mcpClassifierFailure() map[string]any {
-	return map[string]any{"isError": true, "content": []any{map[string]any{"type": "text", "text": "Jev intelligent search is unavailable or the catalogue exceeds 2048 operations. Retry later, narrow the MCP selection, or use an exact operationId. No operation was selected."}}}
+	return map[string]any{"isError": true, "content": []any{map[string]any{"type": "text", "text": "Intelligent search is unavailable or the catalogue exceeds 2048 operations. Retry later, narrow the MCP selection, or use an exact operationId. No operation was selected."}}}
 }
 
 // mcpSearchHandler gives compatibility transports the same licensed search path without exposing it to scripts.

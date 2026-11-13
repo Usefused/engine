@@ -22,7 +22,7 @@ func TestMCPClassifierIsImmutableAndDisclosed(t *testing.T) {
 		t.Fatal(err)
 	} // The canonical provider must be admitted on MCP.
 	summary := mcpSearchPlanSummary(true, nil, doc.FusedIntelligentClassifier)
-	if !strings.Contains(summary["disclaimer"].(string), "Jev") {
+	if disclosure := summary["disclaimer"].(string); !strings.Contains(disclosure, "search intent and authorized operation names and descriptions") || !strings.Contains(disclosure, "AI providers through Fused") {
 		t.Fatal("missing disclosure")
 	} // Both UI and CLI receive the same plan disclosure.
 	doc.FusedIntelligentClassifier = true

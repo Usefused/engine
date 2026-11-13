@@ -277,7 +277,7 @@ function McpLoadedContent({ id, server, versions, activeTab, canReadActivity, ca
 
       <AppDetailBody>
         {/* Disclosure follows this exact immutable version, including versions created through CLI. */}
-        {server.fused_intelligent_classifier === true && <p className="mb-4 text-sm text-slate-600">Intelligent search uses Jev through Fused Registry. Search intent and authorized operation names and descriptions are sent to Jev. Fused manages the Jev API key; no additional key is required.</p>}
+        {server.fused_intelligent_classifier === true && <p className="mb-4 text-sm text-slate-600">Intelligent search sends search intent and authorized operation names and descriptions to AI providers through Fused. No additional API key is required.</p>}
         {/* MCP contributes only its transport controls; service selection remains shared. */}
         {activeTab === "overview" ? (
           <AppOverviewBody

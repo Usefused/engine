@@ -2,21 +2,24 @@ import { FieldLabel } from "~/components/forms/FieldLabel";
 import { Select } from "../forms/Select.ts";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@remix-run/react";
-import { ChevronDown, Code2, Loader2, Search, TerminalSquare, X } from "lucide-react";
+import { ChevronDown, Code2, Loader2, Play, Search, TerminalSquare, X } from "lucide-react";
 import { api } from "~/lib/api";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasResourcePermission, hasWorkspacePermission } from "~/lib/current-actor-access";
+
+import { AppTrySidebar, type AppTryTarget } from "./AppTrySidebar";
 
 type Destination = { app_family_id: string; name: string; latest_version: string; latest_version_id: string | null };
 type App = { app_id: string; app_family_id: string; name: string; version: string };
 
 /** Carries one hosted capability into the ordinary SDK/MCP create-or-update builder. */
-export function UnifiedAppUsage({ app }: { app: App }) {
-  const { access } = useCurrentActorAccess();
+export function UnifiedAppUsage({ app, executionFamilyID }: { app: App; executionFamilyID?: string }) {
+  const { access, canUse, canOpen } = useUsageAccess(app.app_family_id, Boolean(executionFamilyID));
   const navigate = useNavigate();
   const dialog = useRef<HTMLDialogElement>(null);
   const [kind, setKind] = useState<"sdk" | "mcp">("sdk");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [tryTarget, setTryTarget] = useState<AppTryTarget | null>(null);
   const menu = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<Destination[]>([]);
@@ -25,7 +28,6 @@ export function UnifiedAppUsage({ app }: { app: App }) {
   const searchEpoch = useRef(0);
   const [searched, setSearched] = useState(false);
   const [error, setError] = useState("");
-  const canUse = hasResourcePermission(access, "app.unified_app.use", "APP", app.app_family_id);
   const label = kind === "sdk" ? "SDK" : "MCP server";
 
   // Changing adapters invalidates every destination chosen under the previous namespace.
@@ -41,6 +43,14 @@ export function UnifiedAppUsage({ app }: { app: App }) {
     document.addEventListener("pointerdown", outside); document.addEventListener("keydown", escape);
     return () => { document.removeEventListener("pointerdown", outside); document.removeEventListener("keydown", escape); };
   }, [menuOpen]);
+
+  /** Return focus to the stable menu trigger before unmounting its Try item. */
+  function openTry() {
+    if (!executionFamilyID) return;
+    menu.current?.querySelector("button")?.focus();
+    setMenuOpen(false);
+    setTryTarget({ versionID: app.app_id, executionID: executionFamilyID, familyID: app.app_family_id, name: app.name, unified: true });
+  }
 
   /** Existing destinations need a modal; new consumers can go directly to configuration. */
   function choose(next: "sdk" | "mcp", existing: boolean) {
@@ -87,21 +97,20 @@ export function UnifiedAppUsage({ app }: { app: App }) {
     close(); navigate(`/integrations/builder?${params}`);
   }
 
-  return <section className="rounded-xl border border-slate-200 bg-white p-5">
-    <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center"><div><h2 className="font-semibold text-slate-900">Use in your application</h2><p className="mt-1 text-sm text-slate-500">Create an SDK or MCP server, or add this app to an existing one.</p></div>
+  return <>
       <div ref={menu} className="relative shrink-0">
-        {/* Keep this secondary action visually quieter than the page's primary Edit app action. */}
-        <button type="button" disabled={!canUse} aria-expanded={menuOpen} aria-controls="unified-app-usage-actions" onClick={() => setMenuOpen(!menuOpen)} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950 focus-visible:ring-offset-2 disabled:opacity-50 sm:w-auto">Use this app<ChevronDown className="h-4 w-4" /></button>
+        {/* The primary action opens all supported ways to use this app. */}
+        <button type="button" disabled={!canOpen} aria-expanded={menuOpen} aria-controls="unified-app-usage-actions" onClick={() => setMenuOpen(!menuOpen)} className="inline-flex h-11 items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-slate-950 px-4 text-sm font-medium text-white shadow-sm hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-950 focus-visible:ring-offset-2 disabled:opacity-50 sm:h-9">Use this app<ChevronDown className="h-4 w-4" /></button>
         {/* One disclosure keeps the overview compact; only existing-app actions open the modal. */}
-        {menuOpen && <div id="unified-app-usage-actions" className="absolute right-0 top-full z-20 mt-2 w-full min-w-64 rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">
+        {menuOpen && <div id="unified-app-usage-actions" className="absolute left-0 top-full z-50 mt-2 w-64 md:left-auto md:right-0 rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">
+          <TryUsageAction available={Boolean(executionFamilyID)} onClick={openTry} />
           {[{ kind: "sdk" as const, label: "SDK", Icon: Code2 }, { kind: "mcp" as const, label: "MCP", Icon: TerminalSquare }].map((option) => <div key={option.kind} className="border-b border-slate-100 last:border-0"><span className="flex items-center gap-2 px-3 pb-1 pt-2 text-xs font-medium text-slate-400"><option.Icon className="h-3.5 w-3.5" />{option.label}</span>
-            <button type="button" disabled={!hasWorkspacePermission(access, `app.${option.kind}.create`)} onClick={() => choose(option.kind, false)} className="block min-h-10 w-full rounded-lg px-3 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40">Create {option.label}</button>
-            <button type="button" onClick={() => choose(option.kind, true)} className="mb-1 block min-h-10 w-full rounded-lg px-3 text-left text-sm text-slate-700 hover:bg-slate-50">Add to existing {option.label}</button>
+            <button type="button" disabled={!canUse || !hasWorkspacePermission(access, `app.${option.kind}.create`)} onClick={() => choose(option.kind, false)} className="block min-h-10 w-full rounded-lg px-3 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40">Create {option.label}</button>
+            <button type="button" disabled={!canUse} onClick={() => choose(option.kind, true)} className="mb-1 block min-h-10 w-full rounded-lg px-3 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40">Add to existing {option.label}</button>
           </div>)}
         </div>}
       </div>
-    </div>
-    {!canUse && <p className="mt-3 text-xs text-slate-500">You need permission to use this Unified App.</p>}
+    {tryTarget && <AppTrySidebar target={tryTarget} onClose={() => setTryTarget(null)} />}
     <dialog onCancel={close} ref={dialog} aria-labelledby="unified-usage-title" className="m-auto max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-lg rounded-xl border border-slate-200 bg-white p-0 text-slate-900 shadow-xl backdrop:bg-slate-950/40">
       <div className="flex items-start justify-between gap-4 px-5 pt-5"><div><h2 id="unified-usage-title" className="text-lg font-semibold">Add to existing {label}</h2><p className="mt-1 text-sm text-slate-500">Choose where to add this Unified App.</p></div><button aria-label="Close" onClick={close} className="rounded p-2 text-slate-500 hover:bg-slate-50"><X className="h-4 w-4" /></button></div>
       <div className="space-y-4 p-5">
@@ -114,5 +123,18 @@ export function UnifiedAppUsage({ app }: { app: App }) {
       </div>
       <div className="flex justify-end gap-2 border-t border-slate-100 p-4"><button type="button" onClick={close} className="min-h-11 rounded-lg border border-slate-200 px-4 text-sm">Cancel</button><button type="button" disabled={busy || !selected} onClick={continueSetup} className="min-h-11 rounded-lg bg-slate-950 px-4 text-sm font-medium text-white disabled:opacity-50">Continue</button></div>
     </dialog>
-  </section>;
+  </>;
+}
+
+/** Only the traffic-receiving version can launch a test using its displayed contract. */
+function TryUsageAction({ available, onClick }: { available: boolean; onClick: () => void }) {
+  if (!available) return null;
+  return <div className="mb-1 border-b border-slate-100 pb-1"><button type="button" onClick={onClick} className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-sm text-slate-700 hover:bg-slate-50"><Play className="h-4 w-4 text-slate-400" aria-hidden="true" />Try it</button></div>;
+}
+
+/** Keep dependency-use permission separate from testing an app with an execution token. */
+function useUsageAccess(familyID: string, canTry: boolean) {
+  const { access } = useCurrentActorAccess();
+  const canUse = hasResourcePermission(access, "app.unified_app.use", "APP", familyID);
+  return { access, canUse, canOpen: canUse || canTry };
 }

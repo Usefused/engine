@@ -1,6 +1,6 @@
 # Shared Try sidebar
 
-Unified Apps and REST API app details launch the same sidebar. It reuses Fused’s operation inspector shell, searchable selectors, input chips, JSON editor, and button styles. The inspector supports keyboard dismissal, focus restoration, independent scrolling, and narrow viewports.
+Unified Apps and REST API app details launch the same sidebar. Unified Apps offer **Use this app → Try it** and SDK/MCP actions from the primary header menu. The API endpoint and token controls stay together in the overview. It reuses Fused’s operation inspector shell, searchable selectors, input chips, JSON editor, and button styles. The inspector supports keyboard dismissal, focus restoration, independent scrolling, and narrow viewports.
 
 The public OpenAPI document for the exact immutable app version supplies the operation picker, input schema, and permitted runtime buckets. Unified Apps show their authored `execute` input; REST APIs show the selected operation’s input. Required fields and schema constraints validate before execution, with JSON available for complex shapes. Selecting another operation clears input, credentials, routing, and output. Closing the sidebar clears the session.
 

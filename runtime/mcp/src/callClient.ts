@@ -224,6 +224,6 @@ export async function remoteSearch(options: CallClientOptions, args: unknown, si
     if (!response.ok) throw new Error("discovery unavailable");
     return await response.json();
   } catch {
-    return { content: [{ type: "text", text: "Jev intelligent search is unavailable. Retry later or use an exact operationId." }], isError: true };
+    return { content: [{ type: "text", text: "Intelligent search is unavailable. Retry later or use an exact operationId." }], isError: true };
   }
 }

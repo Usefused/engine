@@ -542,18 +542,18 @@ function McpDescriptionField(props: ConsumerGenerationPanelProps) {
   </div>;
 }
 
-/** Shows optional Jev processing consent beside the final creation action. */
+/** Shows optional intelligent search processing consent beside the final creation action. */
 function IntelligentSearchField(props: ConsumerGenerationPanelProps) {
   return <div className="space-y-2 pb-3">
     <label className="flex items-center gap-2 text-sm text-slate-700">
       {/* Only an owner-selected checkbox adds the remote search provider to the config. */}
-      <input type="checkbox" checked={props.intelligentSearch} onChange={event => props.setIntelligentSearch(event.target.checked)} aria-describedby="jev-disclosure"
+      <input type="checkbox" checked={props.intelligentSearch} onChange={event => props.setIntelligentSearch(event.target.checked)} aria-describedby="intelligent-search-disclosure"
         className="h-4 w-4 shrink-0 accent-[var(--brand-violet)]" />
-      <span>Intelligent search with Jev</span>
+      <span>Intelligent search</span>
     </label>
-    <div id="jev-disclosure" className="flex items-start gap-2 rounded-lg border border-violet-100 bg-violet-50/60 p-2 text-xs leading-4 text-slate-600">
+    <div id="intelligent-search-disclosure" className="flex items-start gap-2 rounded-lg border border-violet-100 bg-violet-50/60 p-2 text-xs leading-4 text-slate-600">
       <Info aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-violet-500" />
-      <p>Search intent, operation names, and descriptions are sent to Jev via Fused Registry. No extra API key needed.</p>
+      <p>Search intent, operation names, and descriptions are sent to AI providers through Fused. No additional API key is required.</p>
     </div>
   </div>;
 }

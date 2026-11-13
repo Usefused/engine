@@ -43,12 +43,12 @@ func (c *HTTPRegistryClient) ClassifyServiceOperation(ctx context.Context, servi
 	}
 	// Never classify a truncated subset of a large service.
 	if len(operations) > 2048 {
-		return "", errors.New("Jev operation discovery supports at most 2048 operations; use an exact operation ID")
+		return "", errors.New("Operation discovery supports at most 2048 operations; use an exact operation ID")
 	}
 	selected, err := c.ClassifyOperations(ctx, intent, operations)
 	// Provider failures remain explicit; text search is not a substitute for the selected classifier.
 	if err != nil {
-		return "", errors.New("Jev operation discovery is unavailable; retry or use an exact operation ID")
+		return "", errors.New("Operation discovery is unavailable; retry or use an exact operation ID")
 	}
 	// No-match is valid, but provider output may never introduce a name outside this immutable catalogue.
 	if selected != "" && !names[selected] {

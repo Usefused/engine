@@ -1,6 +1,6 @@
 package api
 
-const mcpClassifierDisclosure = "Intelligent search uses Jev through Fused Registry. Search intent and authorized operation names and descriptions are sent to Jev. Fused manages the Jev API key; no additional key is required."
+const mcpClassifierDisclosure = "Intelligent search sends search intent and authorized operation names and descriptions to AI providers through Fused. No additional API key is required."
 
 // mcpSearchPlanSummary makes remote processing visible wherever UI or CLI reviews the immutable plan.
 func mcpSearchPlanSummary(create bool, services any, enabled bool) map[string]any {

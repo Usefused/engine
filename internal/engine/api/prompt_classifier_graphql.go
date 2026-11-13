@@ -32,7 +32,7 @@ func classifyPromptOperationGraphQLField(registry sandbox.RegistryClient) *graph
 			classifier, ok := registry.(promptOperationClassifier)
 			// Older or unconfigured clients fail explicitly instead of silently using lexical selection.
 			if !ok {
-				return nil, errors.New("Jev operation discovery is unavailable")
+				return nil, errors.New("Operation discovery is unavailable")
 			}
 			return classifier.ClassifyServiceOperation(p.Context, serviceID, p.Args["version"].(string), p.Args["query"].(string))
 		},
