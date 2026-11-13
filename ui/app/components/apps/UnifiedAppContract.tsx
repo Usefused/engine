@@ -1,4 +1,3 @@
-import { UnifiedAppInvocation } from "./UnifiedAppInvocation";
 import { useEffect, useMemo, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { api } from "~/lib/api";
@@ -8,7 +7,7 @@ import { SchemaViewer } from "~/components/SchemaViewer";
 import { CopyButton } from "~/components/CopyValue";
 
 /** Shows the saved public contract and supplies that exact version's schema to the value editor. */
-export function UnifiedAppContract({ appID, familyID, version }: { appID: string; familyID?: string; version: string }) {
+export function UnifiedAppContract({ appID, version }: { appID: string; version: string }) {
   const [contract, setContract] = useState<Contract | null>(null);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
@@ -45,8 +44,7 @@ export function UnifiedAppContract({ appID, familyID, version }: { appID: string
       {/* Each schema owns its local references, including nested $defs from the authored app. */}
       {(["input", "output"] as const).map((direction) => <ContractSchema key={direction} direction={direction} schema={contract[direction]} view={view} appID={appID} />)}
     </div>}
-    {/* Only versions that opt in expose runtime bucket invocation controls. */}
-    {familyID && contract?.runtimeBuckets?.length ? <UnifiedAppInvocation key={appID} appID={familyID} versionID={appID} buckets={contract.runtimeBuckets} schema={contract.input} example={schemaExample(contract.input).json ?? "{}"} /> : null}
+
   </section>;
 }
 

@@ -1,0 +1,6 @@
+@import "../../app/tailwind.css";
+@source "../../app/components/OperationDetailsParts.tsx";
+@source "../../app/components/apps";
+@source "../../app/components/CopyValue.tsx";
+@source "./preview.tsx";
+body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }

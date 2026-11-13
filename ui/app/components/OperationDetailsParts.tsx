@@ -191,7 +191,8 @@ function operationDetailsKeyboard(event: KeyboardEvent<HTMLElement>, panel: HTML
   if (event.key === "Escape") { event.stopPropagation(); close(); return; }
   // An open assistant and ordinary keys retain normal browser navigation.
   if (!modal || event.key !== "Tab" || !panel) return;
-  const controls = Array.from(panel.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], summary, [tabindex="0"]')).filter(/** Collapsed contract controls cannot receive focus. */ element => element.getClientRects().length > 0);
+  // Editable Try forms share this inspector, so native fields participate in the same focus boundary.
+  const controls = Array.from(panel.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), a[href], summary, [tabindex="0"]')).filter(/** Collapsed contract controls cannot receive focus. */ element => element.getClientRects().length > 0);
   const first = controls[0], last = controls[controls.length - 1];
   // Wrap only at the visible edges of the modal inspector.
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }

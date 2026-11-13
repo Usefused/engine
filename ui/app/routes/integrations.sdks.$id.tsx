@@ -1,3 +1,4 @@
+import { AppTryButton } from "~/components/apps/AppTrySidebar";
 import { AppExecutionEndpoint } from "~/components/apps/AppExecutionEndpoint";
 import { AppExecutionTokens } from "~/components/apps/AppExecutionTokens";
 import { CopyValue } from "~/components/CopyValue";
@@ -562,7 +563,7 @@ function SdkLoadedContent({
             </Link>
           </span>
         ))}
-        action={optionalNode(Boolean(sdk.is_downloadable), <AppDetailPrimaryAction icon={<Download className="h-4 w-4" />} label="Download package" onClick={handleDownload} />)}
+        action={<div className="flex items-center gap-3">{/* REST versions use the shared Try session; SDK package delivery retains its existing action. */}{sdk.delivery_mode === "api" && (sdk.status === "active" || sdk.status === "deprecated") && <AppTryButton key={sdk.app_id} target={{ versionID: sdk.app_id, executionID: sdk.app_id, familyID: sdk.app_family_id, name: sdk.name, unified: false }} />}{optionalNode(Boolean(sdk.is_downloadable), <AppDetailPrimaryAction icon={<Download className="h-4 w-4" />} label="Download package" onClick={handleDownload} />)}</div>}
       />
 
       {/* The immutable app key resets disclosure state when switching versions or families. */}

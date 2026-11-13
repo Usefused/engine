@@ -118,11 +118,9 @@ func (s *EngineGRPCServer) handleRESTExecution(writer http.ResponseWriter, reque
 	// Resolve once so dispatch and receipts use the same immutable version.
 	appID = identity.AppID
 	// Only the family-selected ready Unified App version accepts new invocations, including raw operations.
-	if scope.Kind == store.AppKindUnifiedApp {
-		if requestErr := s.admitUnifiedAppTraffic(request.Context(), appID); requestErr != nil {
-			writeRESTExecutionError(writer, requestErr)
-			return
-		}
+	if requestErr := s.admitRESTTraffic(request.Context(), scope, appID); requestErr != nil {
+		writeRESTExecutionError(writer, requestErr)
+		return
 	}
 	decoded, canonical, requestErr := decodeRESTExecutionRequest(writer, request)
 	if requestErr != nil {
@@ -136,9 +134,9 @@ func (s *EngineGRPCServer) handleRESTExecution(writer http.ResponseWriter, reque
 		}
 		return
 	}
-	// Bucket selection is a direct authored-execution capability, never a raw-operation override.
-	if hasUnifiedAppRoutingControls(decoded) {
-		writeRESTExecutionError(writer, newRESTExecutionError(http.StatusBadRequest, "bucket_selection_unsupported", "bucket_id and expected_app_id require a direct Unified App execute request"))
+	// REST API bucket overrides use the same live deployed-scope authorization as authored runs.
+	if routingError := s.admitRESTBucket(request.Context(), scope, identity, decoded); routingError != nil {
+		writeRESTExecutionError(writer, routingError)
 		return
 	}
 	// Attached hosted capabilities use the same consumer authentication and durable executor.
@@ -379,6 +377,8 @@ func (s *EngineGRPCServer) executeRESTPlan(ctx context.Context, scope *store.App
 // executeRESTPhysical validates its singular selector, binds full public
 // intent to idempotency, and collects one successful bounded JSON response.
 func (s *EngineGRPCServer) executeRESTPhysical(ctx context.Context, identity auth.RuntimeIdentity, request restExecutionRequest, canonical []byte, plan restExecutionPlan, idempotencyKey string) (restExecutionSuccess, *restExecutionError) {
+	// Invocation-local routing never mutates the shared app scope or its configured buckets.
+	ctx = sandbox.WithUnifiedAppBucket(ctx, identity.AppID, request.BucketID)
 	selectors := physicalRESTSelectors(request.Selector)
 	// Typed auth corrections must reach the shared public projector instead of being collapsed into the legacy selector mask.
 	if err := s.restRuntime.ValidateResolvedPhysicalSelectors(plan.physical, selectors); err != nil {

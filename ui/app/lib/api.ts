@@ -1469,7 +1469,7 @@ export const api = {
   appTokens: {
     // Revocation uses the same exact family/name identity as the CLI and leaves token history intact.
     revoke: (familyID: string, name: string) =>
-      req<void>(`/workspace/app-tokens?app_family_id=${encodeURIComponent(familyID)}&name=${encodeURIComponent(name)}`, { method: "DELETE" }),
+      req<void>(`/workspace/app-tokens?app_family_id=${encodeURIComponent(familyID)}&name=${encodeURIComponent(name)}`, { method: "DELETE", keepalive: true }),
     // Runtime credentials belong to the stable app family and are returned only by this explicit issuance request.
     generate: (familyID: string, input: { name: string; allow: string[]; expires_in?: number }) =>
       req<{ token: string; name: string; expires_at: string | null }>(`/workspace/app-tokens?app_family_id=${encodeURIComponent(familyID)}`, { method: "POST", body: JSON.stringify(input) }),
@@ -1485,6 +1485,8 @@ export const api = {
   },
 
   appConfig: {
+    /** Checks exact deployed connection metadata without dispatching provider operations. */
+    tryReadiness: (appID: string, operation: string, bucketID: string, userRef: string, signal?: AbortSignal) => req<import("./app-try-contract").TryReadiness>(`/apps/${encodeURIComponent(appID)}/try-readiness?${new URLSearchParams({ operation, ...(bucketID ? { bucket_id: bucketID } : {}), ...(userRef ? { end_user_ref: userRef } : {}) })}`, { signal, cache: "no-store" }),
     // Read-only schema export respects app read access and never retrieves private source.
     openAPI: (appID: string, operation: string, signal?: AbortSignal) => req<unknown>(`/apps/${encodeURIComponent(appID)}/openapi?operation=${encodeURIComponent(operation)}`, { signal }),
     // Engine preserves the complete webhook bundle while reviewing one signing-secret replacement.

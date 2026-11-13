@@ -118,6 +118,10 @@ func buildAppOpenAPIDocumentWithBundle(ctx context.Context, contracts appOpenAPI
 	if len(export.operations) == 0 {
 		return nil, missingAppOpenAPIOperationError(filter)
 	}
+	// REST API overrides are advertised only when this exact version opted into permitted buckets.
+	if err := addAPIRuntimeBucketSchema(ctx, bundles, app, family, export); err != nil {
+		return nil, err
+	}
 	document := composeAppOpenAPIDocument(app, family, export)
 	encoded, err := json.Marshal(document)
 	if err != nil {
