@@ -50,8 +50,9 @@ func backgroundDatabaseValue[T any](ctx context.Context, gate *backgroundDatabas
 }
 
 // serializedBackgroundStore gates only short scheduled probes. Once a worker
-// finds real work, its mutations and Registry calls remain unconstrained so a
-// slow maintenance pass cannot delay authorization refresh or foreground I/O.
+// finds real work, its mutations and Registry calls bypass the gate. Historical
+// insight discovery also bypasses it: finding distinct unprojected services can
+// scan the full receipt history even when the resulting service page is small.
 type serializedBackgroundStore struct {
 	store.Store
 	gate           *backgroundDatabaseGate
@@ -173,10 +174,11 @@ func (s *serializedBackgroundStore) ClaimAuthConnectionsForRefresh(ctx context.C
 	})
 }
 
+// ListUnprojectedPublicInsightServiceIDs keeps the potentially long history scan
+// outside the short-probe gate so it cannot exhaust usage reporting's deadline
+// or delay authorization polling. The shared database pool still bounds connections.
 func (s *serializedBackgroundStore) ListUnprojectedPublicInsightServiceIDs(ctx context.Context, before time.Time, limit int) ([]uuid.UUID, error) {
-	return backgroundDatabaseValue(ctx, s.gate, func() ([]uuid.UUID, error) {
-		return s.Store.ListUnprojectedPublicInsightServiceIDs(ctx, before, limit)
-	})
+	return s.Store.ListUnprojectedPublicInsightServiceIDs(ctx, before, limit)
 }
 
 func (s *serializedBackgroundStore) ListPendingPublicServiceInsightReports(ctx context.Context, limit int, now time.Time) ([]models.PublicServiceInsightReport, error) {
