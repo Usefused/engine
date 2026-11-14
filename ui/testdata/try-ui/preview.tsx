@@ -9,13 +9,15 @@ api.appTokens.generate = async (_family, input) => ({ token: 'synthetic-preview-
 api.appTokens.revoke = async () => undefined;
 const bucket = '11111111-1111-4111-8111-111111111111';
 const unified = new URLSearchParams(window.location.search).has('unified');
-/** Exercises the production sidebar using synthetic contracts without any connected account. */
+/** Exercises typed object input for authored apps and scalar input for physical operations without a connected account. */
+// Each mode retains its own contract rather than coercing a provider form into an authored payload.
 api.appConfig.openAPI = async () => ({ 'x-fused-app-id': 'preview', paths: { '/v1/apps/{app_id}/executions': { post: { requestBody: { content: { 'application/json': { schema: { oneOf: [
-  { properties: { operation: { const: unified ? 'execute' : 'createCustomer' }, ...(unified ? {} : { selector: {} }), bucket_id: { enum: [bucket], 'x-fused-bucket-names': { [bucket]: 'Sandbox' } }, input: { type: 'object', required: ['email'], properties: { email: { type: 'string', minLength: 3, description: 'Email address for the customer.' }, name: { type: 'string' }, notify: { type: 'boolean' }, metadata: { type: 'object' } } } } },
+  { properties: { operation: { const: unified ? 'execute' : 'createCustomer' }, ...(unified ? {} : { selector: {} }), bucket_id: { enum: [bucket], 'x-fused-bucket-names': { [bucket]: 'Sandbox' } }, input: unified ? { type: 'object', required: ['payload'], properties: { payload: { type: 'object', description: 'Request body passed to the app.' } } } : { type: 'object', required: ['email'], properties: { email: { type: 'string', minLength: 3, description: 'Email address for the customer.' }, name: { type: 'string' }, notify: { type: 'boolean' }, metadata: { type: 'object' } } } } },
   ...(!unified ? [{ properties: { operation: { const: 'listCustomers' }, selector: {}, input: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 } } } } }] : []),
  ] } } } } } } } });
-/** Switches exact readiness metadata when the user changes buckets or their connected-user reference. */
-api.appConfig.tryReadiness = async (_id, _operation, selected, user) => ({ requirements: [{ service_id: 'stripe', service: 'Stripe', bucket_id: selected || bucket, bucket_name: selected ? 'Sandbox' : 'Default', auth_name: 'apiKey', auth_type: 'api_key', credentials: selected ? 'ready' : 'missing', connection: user ? 'ready' : 'not_required' }], runtime_buckets: [{ id: bucket, name: 'Sandbox' }] });
+/** Previews configured authored connections and editable provider routing without contacting either service. */
+// Authored and physical modes need distinct readiness states to exercise the compact status row.
+api.appConfig.tryReadiness = async (_id, _operation, selected, user) => ({ requirements: [{ service_id: unified ? 'openai' : 'stripe', service: unified ? 'OpenAI' : 'Stripe', bucket_id: selected || bucket, bucket_name: selected ? 'Sandbox' : 'Default', auth_name: unified ? 'ApiKeyAuth' : 'apiKey', auth_type: 'api_key', credentials: unified || selected ? 'ready' : 'missing', connection: user ? 'ready' : 'not_required' }], runtime_buckets: [{ id: bucket, name: 'Sandbox' }], note: unified ? 'Connections shown cover declared provider services. The app chooses connected users from its code and input; child apps keep their own buckets.' : undefined });
 /** The preview's execution boundary returns synthetic output and never contacts a provider. */
 window.fetch = async () => new Response(JSON.stringify({ status_code: 200, results: [{ id: 'cus_preview', email: 'test@example.com' }] }), { status: 200 });
 /** Retains the real launch button and modal lifecycle within a representative app page. */

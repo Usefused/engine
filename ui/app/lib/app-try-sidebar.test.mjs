@@ -89,9 +89,19 @@ test('sidebar loads exact forms, sends once, clears tokens, and resets on operat
     assert.equal(readinessCalls[1].args[3], 'alice');
     await act(async () => readinessCalls[0].resolve({ requirements: [], runtime_buckets: [], note: 'Stale readiness' }));
     assert.doesNotMatch(document.body.textContent, /Stale readiness/);
-    assert.match(document.body.textContent, /Checking this operation/);
-    await act(async () => readinessCalls[1].resolve({ requirements: [], runtime_buckets: [], note: 'Current readiness' }));
+    assert.match(document.body.textContent, /Checking connections/);
+    await act(async () => readinessCalls[1].resolve({ requirements: [
+      { service_id: 'openai', service: 'OpenAI', bucket_id: 'sandbox', bucket_name: 'Sandbox', auth_name: 'ApiKeyAuth', credentials: 'ready', connection: 'not_required' },
+      { service_id: 'slack', service: 'Slack', bucket_id: 'sandbox', bucket_name: 'Sandbox', auth_name: 'OAuth', credentials: 'ready', connection: 'reconnect_required' },
+    ], runtime_buckets: [], note: 'Current readiness' }));
     assert.match(document.body.textContent, /Current readiness/);
+    // Keep detailed inspection limits collapsed while showing actionable status and correctly routed setup links.
+    const readiness=document.querySelector('[aria-label="Connection readiness"]');
+    assert.equal(readiness.querySelector('details').open,false);
+    assert.match(readiness.textContent,/Credentials configured/);assert.match(readiness.textContent,/Reconnect required/);
+    assert.match(readiness.querySelector('[aria-label="Open Sandbox bucket setup for OpenAI"]').href,/tab=secrets/);
+    const reconnect=readiness.querySelector('[aria-label="Open Sandbox bucket setup for Slack"]');
+    assert.match(reconnect.href,/tab=connections/);assert.doesNotMatch(reconnect.parentElement.textContent,/Credentials configured/);
     await act(async () => { Simulate.click(runButton()); Simulate.click(runButton()); });
     assert.equal(calls.length, 1);
     assert.equal(issued.length, 1);

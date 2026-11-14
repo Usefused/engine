@@ -48,7 +48,7 @@ test('schema chips edit inline, preserve types, and track independent invalid dr
  const previous={window:globalThis.window,document:globalThis.document,act:globalThis.IS_REACT_ACT_ENVIRONMENT};
  globalThis.window=dom.window;globalThis.document=dom.window.document;globalThis.IS_REACT_ACT_ENVIRONMENT=true;
  const {createRoot}=await import('react-dom/client');const {Simulate}=await import('react-dom/test-utils');
- const schema={type:'object',required:['count'],properties:{count:{type:'integer'},status:{type:'string',enum:['','open','closed']},enabled:{type:'boolean'},note:{type:'string'},items:{type:'array'}}};
+ const schema={type:'object',required:['count','payload'],properties:{count:{type:'integer'},status:{type:'string',enum:['','open','closed']},enabled:{type:'boolean'},note:{type:'string'},items:{type:'array'},payload:{type:'object',description:'Request body'}}};
  let text='{}';let blocked=false;
  /** Retains the emitted JSON separately from the incomplete-text execution lock. */
  function Harness(){const [value,setValue]=useState(text);return createElement(UnifiedAppInput,{schema,value,disabled:false,onEditingChange:next=>{blocked=next;},onChange:next=>{text=next;setValue(next);}});}
@@ -59,7 +59,18 @@ test('schema chips edit inline, preserve types, and track independent invalid dr
  async function change(name,value){await act(async()=>Simulate.change(document.querySelector(`[aria-label="${name}"]`),{target:{value}}));}
  try{
   await act(async()=>root.render(createElement(Harness)));
-  assert.equal(document.querySelectorAll('textarea').length,3);assert.equal(text,'{}');assert.doesNotMatch(document.body.textContent,/Add field|Save field/);
+  assert.equal(document.querySelectorAll('textarea').length,4);assert.equal(text,'{}');assert.doesNotMatch(document.body.textContent,/Add field|Save field/);
+  // The declared object type must be visible before any value is supplied, and Enter must support multiline JSON.
+  const payload=document.querySelector('[aria-label="payload"]');
+  assert.match(payload.parentElement.textContent,/payloadobjectRequired/);assert.equal(payload.rows,4);
+  assert.equal(payload.getAttribute('aria-required'),'true');assert.equal(payload.placeholder,'Enter a JSON object…');
+  let enterPrevented=false;
+  await act(async()=>Simulate.keyDown(payload,{key:'Enter',preventDefault(){enterPrevented=true;}}));
+  assert.equal(enterPrevented,false);
+  await change('payload','{');assert.equal(blocked,true);assert.equal(Object.hasOwn(JSON.parse(text),'payload'),false);
+  await change('payload','[]');assert.equal(blocked,true,'an array cannot satisfy an object field');
+  await change('payload','{\n  "message": "hello"\n}');assert.equal(blocked,false);assert.deepEqual(JSON.parse(text).payload,{message:'hello'});
+  await click('Clear payload');assert.equal(Object.hasOwn(JSON.parse(text),'payload'),false);
   await change('count','7');assert.deepEqual(JSON.parse(text),{count:7});assert.equal(blocked,false);
   await change('note','false');assert.equal(JSON.parse(text).note,'false');
   await change('status','0');assert.equal(JSON.parse(text).status,'');

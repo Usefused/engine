@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import { Link } from "@remix-run/react";
+import { Code2, Database, Globe2, Layers3, TerminalSquare, Webhook } from "lucide-react";
 import { PageBackLink } from "~/components/layout/PageBackLink";
 import { AppRuntimeStatus } from "~/components/apps/AppRuntimeStatus";
 
@@ -12,14 +14,24 @@ export interface AppDetailTab<T extends string> {
   label: string;
 }
 
+const detailKinds = {
+  sdk: { label: "SDK", Icon: Code2, summary: "A reusable interface for the services and operations this app can use." },
+  api: { label: "REST API", Icon: Globe2, summary: "A reusable interface for the services and operations this app can use." },
+  mcp: { label: "MCP", Icon: TerminalSquare, summary: "A reusable interface for the services and operations this MCP server exposes." },
+  unified_app: { label: "Unified App", Icon: Layers3, summary: "Combine approved services into one typed action for onboarding, fulfillment, or reporting." },
+  webhook: { label: "Webhook", Icon: Webhook, summary: "Receive service events and inspect deliveries for this webhook registration." },
+};
+
 interface AppDetailHeaderProps {
+  kind: keyof typeof detailKinds;
   name: string;
-  summary: string;
-  status: string;
-  version: string;
+  summary?: string;
+  status?: string;
+  version?: string;
+  language?: string;
+  bucket?: { id: string; name: string } | null;
+  service?: { name: string; to: string };
   createdAt?: string;
-  leadingMetadata?: ReactNode;
-  trailingMetadata?: ReactNode;
   action?: ReactNode;
 }
 
@@ -54,24 +66,34 @@ function appCreatedDate(value?: string): string {
   return value ? new Date(value).toLocaleDateString() : "";
 }
 
-/** Renders the common identity hierarchy for SDK, REST, and MCP immutable-version pages. */
-export function AppDetailHeader({ name, summary, status, version, createdAt, leadingMetadata, trailingMetadata, action }: AppDetailHeaderProps) {
+/** Owns the identity layout and metadata design for every app and webhook detail page. */
+export function AppDetailHeader({ name, summary, status, action, ...metadata }: AppDetailHeaderProps) {
   return (
     <header className="flex min-w-0 flex-col justify-between gap-4 md:flex-row md:items-start">
       <div className="min-w-0">
         <h1 className="break-words text-2xl font-bold text-slate-900">{name}</h1>
-        <p className="mt-1 text-slate-500">{summary}</p>
+        <p className="mt-1 text-slate-500">{summary || detailKinds[metadata.kind].summary}</p>
         <AppRuntimeStatus className="mt-1.5" status={status} />
-        <div className="mt-3 flex flex-wrap items-center gap-3 text-sm">
-          <span className="rounded bg-slate-100 px-2.5 py-1 font-medium text-slate-700">{version}</span>
-          {leadingMetadata}
-          {/* Creation metadata is absent only for older rows that predate the shared projection. */}
-          {createdAt ? <span className="text-slate-600">Created {appCreatedDate(createdAt)}</span> : null}
-          {trailingMetadata}
-        </div>
+        <AppDetailMetadata {...metadata} />
       </div>
       {action}
     </header>
+  );
+}
+
+/** Routes supply metadata values; ordering, icons, links, and badges have one owner. */
+function AppDetailMetadata({ kind, version, language, bucket, service, createdAt }: Omit<AppDetailHeaderProps, "name">) {
+  const { label, Icon } = detailKinds[kind];
+  const languageNames: Record<string, string> = { typescript: "TypeScript", python: "Python", go: "Go" };
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-3 text-sm">
+      {version && <span className="rounded bg-slate-100 px-2.5 py-1 font-medium text-slate-700">{version}</span>}
+      <span className="inline-flex items-center gap-1.5 text-[var(--brand-violet)]"><Icon className="h-4 w-4 shrink-0" aria-hidden="true" />{label}</span>
+      {language && <span className="text-slate-600">{languageNames[language] || language}</span>}
+      {bucket && <Link to={`/integrations/buckets?bucket=${encodeURIComponent(bucket.id)}`} className="inline-flex min-w-0 items-center gap-1.5 rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-slate-600 transition-colors hover:text-[var(--brand-violet)]"><Database className="h-3.5 w-3.5 shrink-0 text-slate-400" aria-hidden="true" /><span className="break-all">{bucket.name}</span></Link>}
+      {service && <Link to={service.to} className="break-all text-slate-600 hover:text-[var(--brand-violet)] hover:underline">{service.name}</Link>}
+      {createdAt && <time dateTime={createdAt} className="text-slate-600">Created {appCreatedDate(createdAt)}</time>}
+    </div>
   );
 }
 

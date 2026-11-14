@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "@remix-run/react";
-import { Webhook } from "lucide-react";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
-import { AppDetailTabs } from "~/components/apps/AppDetailChrome";
+import { AppDetailHeader, AppDetailTabs } from "~/components/apps/AppDetailChrome";
 import { AppDetailBody, AppDetailSection } from "~/components/apps/AppDetailBody";
 import { PageBackLink } from "~/components/layout/PageBackLink";
 import { CopyValue } from "~/components/CopyValue";
@@ -72,11 +71,12 @@ function WebhookDetailView({ item, onReload }: { item: WebhookListing; onReload:
     setParams({ tab: "events", status: nextStatus });
   }
   return <>
-    <header className="flex min-w-0 flex-col justify-between gap-4 md:flex-row md:items-start">
-      <div className="min-w-0"><h1 className="break-words text-2xl font-bold text-slate-900">{item.label}</h1><p className="mt-1 text-slate-500">Receive service events and inspect deliveries for this webhook registration.</p>
-        <div className="mt-3 flex flex-wrap items-center gap-3 text-sm"><span className="inline-flex items-center gap-1.5 text-[var(--brand-violet)]"><Webhook className="h-4 w-4" />Webhook</span><Link to={`/integrations/${item.service_id}?tab=webhooks`} className="break-all text-slate-600 hover:underline">{item.service_ref || item.service_name}</Link>{/* Older registrations may lack a creation timestamp. */}{item.created_at && <span className="text-slate-500">Created {new Date(item.created_at).toLocaleDateString()}</span>}</div>
-      </div>
-    </header>
+    <AppDetailHeader
+      kind="webhook"
+      name={item.label}
+      service={{ name: item.service_ref || item.service_name, to: `/integrations/${item.service_id}?tab=webhooks` }}
+      createdAt={item.created_at}
+    />
     <AppDetailTabs label="Webhook details" active={active} tabs={webhookDetailTabs(canReadActivity)} onChange={(tab) => setParams({ tab })} />
     <AppDetailBody>
       {/* Only an authorized Activity tab mounts a reporting loader; direct URL selection cannot bypass this boundary. */}

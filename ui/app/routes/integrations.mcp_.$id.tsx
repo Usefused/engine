@@ -264,7 +264,7 @@ function McpLoadedContent({ id, server, versions, activeTab, canReadActivity, ca
       {/* The header action copies the stable family URL; immutable routes belong to Changes. */}
       <AppDetailHeader
         name={server.name}
-        summary="A reusable interface for the services and operations this MCP server exposes."
+        kind="mcp"
         status={server.status}
         version={server.version}
         createdAt={server.created_at}

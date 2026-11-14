@@ -42,7 +42,7 @@ test("MCP details show Engine-projected transports and immutable selected operat
   assert.match(detail, /<McpTransportEndpoints endpoints=\{server\}/);
   assert.match(detail, /<AppOverviewBody[\s\S]*selections=\{server\.detailed_selections\}/);
   assert.match(detailBody, /<AppConnectedServices selections=\{selections\}/);
-  assert.match(detail, /A reusable interface for the services and operations this MCP server exposes\./);
+  assert.match(detailChrome, /A reusable interface for the services and operations this MCP server exposes\./);
   assert.match(detail, /primaryURL \? <CopyButton value=\{primaryURL\} label="server URL"/);
   assert.match(detail, /versioned_streamable_http/);
   assert.match(detail, /transport_urls \{ versioned_streamable_http versioned_sse \}/);

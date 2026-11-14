@@ -4,7 +4,7 @@ import { AppExecutionTokens } from "~/components/apps/AppExecutionTokens";
 import { CopyValue } from "~/components/CopyValue";
 import { useState, useEffect, isValidElement, type ReactNode } from "react";
 import { useParams, Link, useNavigate, useSearchParams, type MetaFunction } from "@remix-run/react";
-import { Download, Copy, Check, Database } from "lucide-react";
+import { Download, Copy, Check } from "lucide-react";
 import { api, type NotificationServiceRef, type WorkspaceNotification } from "~/lib/api";
 import { useToast } from "~/components/Toast";
 import { readBucketsForSDK } from "~/lib/buckets";
@@ -211,33 +211,7 @@ export const meta: MetaFunction = ({ matches }) => {
   ];
 };
 
-/** Displays the actual immutable package emitter, including unknown future targets. */
-function LanguageBadge({ targetLanguage }: { targetLanguage?: string }) {
-  // Go packages must not inherit the historical TypeScript fallback badge.
-  if (targetLanguage === "go") return <span className="inline-flex items-center justify-center w-5 h-5 text-cyan-600 text-xs font-bold" title="Go" aria-label="Go">Go</span>;
-  // Unknown emitters remain visible instead of being mislabeled as TypeScript.
-  if (targetLanguage && targetLanguage !== "typescript" && targetLanguage !== "python") return <span title={targetLanguage}>{targetLanguage}</span>;
-  // Python retains its recognizable language mark.
-  if (targetLanguage === "python") {
-    return (
-      <span className="inline-flex items-center justify-center w-5 h-5" title="Python" aria-label="Python">
-        <svg viewBox="0 0 32 32" className="w-4 h-4 shrink-0" aria-hidden="true">
-          <path fill="#3776AB" d="M15.9 3c-6.3 0-5.9 2.7-5.9 2.7v2.8h6v.9H7.6S3 8.9 3 15.9 7 22.6 7 22.6h2.4v-3.4s-.1-4 4-4h6.7s3.7.1 3.7-3.5V5.9S24.4 3 18 3h-2.1Zm-3.3 2a1.2 1.2 0 1 1 0 2.3 1.2 1.2 0 0 1 0-2.3Z"/>
-          <path fill="#FFD43B" d="M16.1 29c6.3 0 5.9-2.7 5.9-2.7v-2.8h-6v-.9h8.4s4.6.5 4.6-6.5-4-6.7-4-6.7h-2.4v3.4s.1 4-4 4H12s-3.7-.1-3.7 3.5v5.8S7.6 29 14 29h2.1Zm3.3-2a1.2 1.2 0 1 1 0-2.3 1.2 1.2 0 0 1 0 2.3Z"/>
-        </svg>
-      </span>
-    );
-  }
 
-  return (
-    <span className="inline-flex items-center justify-center w-5 h-5" title="TypeScript" aria-label="TypeScript">
-      <svg viewBox="0 0 32 32" className="w-4 h-4 shrink-0" aria-hidden="true">
-        <rect x="3" y="3" width="26" height="26" rx="3" fill="#3178C6" />
-        <path fill="#fff" d="M11.3 13.1h9.8v2.2h-3.7V26h-2.4V15.3h-3.7v-2.2Zm10.6 0h-2.4v8.5c0 2.5 1.3 4.4 4.7 4.4 1.2 0 2.5-.3 3.5-.8v-2.1c-.9.5-1.8.8-2.7.8-1.7 0-3.1-.8-3.1-2.6v-8.2Z"/>
-      </svg>
-    </span>
-  );
-}
 
 function isTableCellEmpty(cell: ReactNode): boolean {
   const c = (cell as { props?: { children?: ReactNode } } | null)?.props?.children;
@@ -550,19 +524,12 @@ function SdkLoadedContent({
       {/* Adapter-owned metadata and actions slot into one shared app identity hierarchy. */}
       <AppDetailHeader
         name={sdk.name}
-        summary="A reusable interface for the services and operations this app can use."
+        kind={sdk.target_type === "api" ? "api" : sdk.target_type === "mcp" ? "mcp" : "sdk"}
         status={sdk.status}
         version={sdk.version}
         createdAt={sdk.created_at}
-        leadingMetadata={optionalNode(sdk.target_type === "sdk", <LanguageBadge targetLanguage={sdk.target_language} />)}
-        trailingMetadata={optionalNode(Boolean(bucket), (
-          <span className="flex items-center gap-1.5 rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-slate-600">
-            <Database className="h-3.5 w-3.5 text-slate-400" />
-            <Link to={`/integrations/buckets?bucket=${encodeURIComponent(bucket?.id ?? "")}`} className="transition-colors hover:text-blue-600">
-              {bucket?.name}
-            </Link>
-          </span>
-        ))}
+        language={sdk.target_type === "sdk" ? sdk.target_language : undefined}
+        bucket={bucket}
         action={<div className="flex items-center gap-3">{/* REST versions use the shared Try session; SDK package delivery retains its existing action. */}{sdk.delivery_mode === "api" && (sdk.status === "active" || sdk.status === "deprecated") && <AppTryButton key={sdk.app_id} target={{ versionID: sdk.app_id, executionID: sdk.app_id, familyID: sdk.app_family_id, name: sdk.name, unified: false }} />}{optionalNode(Boolean(sdk.is_downloadable), <AppDetailPrimaryAction icon={<Download className="h-4 w-4" />} label="Download package" onClick={handleDownload} />)}</div>}
       />
 
