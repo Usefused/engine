@@ -14,6 +14,7 @@ import * as describing from "./app-describe-contract.ts";
 import * as builder from "./app-builder-contract.ts";
 import * as sourceDraft from "./unified-app-source-draft.ts";
 import * as sourceConfig from "./unified-app-source-config.ts";
+import * as webhookCoverage from "./unified-app-webhook-coverage.ts";
 
 /** Runs the real authoring route and tab layout while isolating network, credential, and catalogue dependencies. */
 test("compact builder retains edits, review state, and compilation behavior across keyboard and pointer tabs", async () => {
@@ -66,6 +67,11 @@ test("compact builder retains edits, review state, and compilation behavior acro
     "~/lib/app-builder-contract": builder,
     "~/lib/unified-app-source-config": sourceConfig,
     "~/lib/unified-app-source-draft": sourceDraft,
+    "~/lib/unified-app-webhook-coverage": webhookCoverage,
+    "~/lib/webhook-discovery-api": {
+      // No webhook attachment is selected in this baseline edit test.
+      webhookAttachmentRegistrations: async () => [],
+    },
     "~/lib/unified-app-source-services": {
       // Hold new version lookups to prove older source edits cannot overwrite newer ones.
       resolveUnifiedSourceService: (key, version, retainedID) => new Promise(/** Expose only completion of the bounded read-only lookup. */ (resolve) => resolutions.push({key,version,retainedID,resolve})),
@@ -83,8 +89,10 @@ test("compact builder retains edits, review state, and compilation behavior acro
       useCurrentActorAccess: () => ({ access: {} }),
     },
     "~/lib/current-actor-access": {
-      // Creation gates do not block editing this already-authorized family.
+      // Creation and read gates do not block editing this already-authorized family.
       hasWorkspacePermission: () => true,
+      hasAnyPermission: () => true,
+      hasResourcePermission: () => true,
     },
     "~/components/agent/FusedAgentContext": {
       // Keep bridge identity stable so unrelated rerenders do not masquerade as navigation.
@@ -238,6 +246,119 @@ test("compact builder retains edits, review state, and compilation behavior acro
     assert.equal(saved.config.version, "1.0.1", 'reviewing never changes the deployed baseline');
   } finally {
     await act(/** Unmount production effects before releasing the test document. */ async () => root.unmount()); dom.window.close();
+    globalThis.window = previous.window; globalThis.document = previous.document; globalThis.IS_REACT_ACT_ENVIRONMENT = previous.act;
+  }
+});
+
+/** Choosing a webhook registered for another service surfaces that service's events and warns if unrelated events are selected. */
+test("deep-linked webhook registration focuses its covered service and explains coverage mismatches", async () => {
+  const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
+  const previous = { window: globalThis.window, document: globalThis.document, act: globalThis.IS_REACT_ACT_ENVIRONMENT };
+  globalThis.window = dom.window; globalThis.document = dom.window.document; globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const saved = {
+    app_id: "margin-ai", owner_team: "margin",
+    config: {
+      kind: "unified_app", name: "margin-ai-generation", version: "1.2.1", bucket: "default", description: "",
+      source: 'export default buildUnifiedApp({ config: {"bucket":"default","version":"1.2.1"} });',
+      services: { OpenAI: { version: "2.3.0", operations: ["createResponse"] } },
+    },
+    service_pins: [{ key: "OpenAI", service_id: "openai-id", service_version_id: "openai-v230" }],
+  };
+  const params = new URLSearchParams("edit=margin-ai&webhook=margin-billing&webhookService=stripe-id&webhookServiceName=Stripe");
+  const plans = [];
+  let pickerProps = null;
+  const require = createRequire(import.meta.url);
+  const dependencies = {
+    "~/components/layout/PageBackLink": { PageBackLink: ({ to, children }) => createElement("a", { href: to }, children) },
+    "~/components/apps/AppDetailChrome": { AppDetailBackLink: ({ to }) => createElement("a", { href: to }, "Back to app") },
+    "~/components/apps/AppCredentialWarning": { AppCredentialWarning: () => null },
+    "@remix-run/react": {
+      useSearchParams: () => [params], useLocation: () => ({ hash: "#app-service-selection" }),
+      Link: ({ to, ...props }) => createElement("a", { ...props, href: to }),
+    },
+    "~/lib/api": { api: { appConfig: { source: async () => structuredClone(saved) } } },
+    "~/lib/unified-app-edit": editing,
+    "~/lib/unified-app-contract": contract,
+    "~/lib/unified-app-runtime-buckets": buckets,
+    "~/lib/app-describe-contract": describing,
+    "~/lib/app-builder-contract": builder,
+    "~/lib/unified-app-source-config": sourceConfig,
+    "~/lib/unified-app-source-draft": sourceDraft,
+    "~/lib/unified-app-webhook-coverage": webhookCoverage,
+    "~/lib/webhook-discovery-api": {
+      // Return only Stripe for margin-billing so OpenAI event selections are verifiably uncovered.
+      webhookAttachmentRegistrations: async (label) => label === "margin-billing"
+        ? [{ label: "margin-billing", service_id: "stripe-id", service_name: "Stripe", service_ref: "@martins-joseph/stripe", slug: "margin-billing-stripe" }]
+        : [],
+    },
+    "~/lib/app-builder": { listAppBuildSelectors: async () => ({ items: [{ resource_id: "default", display_name: "default" }] }) },
+    "~/lib/unified-app-api": { planUnifiedApp: async (config) => { plans.push(config); return { plan_id: "ok", source_hash: "sha256:ok", summary: { version: config.version } }; } },
+    "~/components/access/CurrentActorAccess": { useCurrentActorAccess: () => ({ access: {} }) },
+    "~/lib/current-actor-access": { hasWorkspacePermission: () => true, hasAnyPermission: () => true, hasResourcePermission: () => true },
+    "~/components/agent/FusedAgentContext": { useFusedAgent: () => null },
+    "~/components/apps/useAppCredentialReview": { useAppCredentialReview: () => ({}) },
+    "~/components/buckets/useCredentialSetCreation": { useCredentialSetCreation: () => ({}) },
+    "~/components/apps/WebhookRegistrationPicker": { WebhookRegistrationPicker: ({ selected }) => createElement("div", { "data-selected-webhook": selected }, "Webhook picker") },
+    "~/components/apps/AppServiceBuilder": {
+      // Capture exact focus and notice props passed from the route to the embedded picker.
+      AppOperationPicker: (props) => { pickerProps = props; return createElement("div", null, "Picker"); },
+    },
+    "~/components/apps/AppServiceAuthFields": { AppServiceAuthFields: () => null },
+    "~/components/code/TypeScriptEditor": {
+      TypeScriptEditor: ({ id, value, onChange, disabled }) => createElement("textarea", { id, value, disabled, onChange: (event) => onChange(event.target.value) }),
+    },
+  };
+  const aliases = {
+    "~/components/apps/UnifiedAppBuilderLayout": "../components/apps/UnifiedAppBuilderLayout.tsx",
+    "~/components/apps/UnifiedAppCodeEditor": "../components/apps/UnifiedAppCodeEditor.tsx",
+    "~/components/apps/UnifiedAppCompileAction": "../components/apps/UnifiedAppCompileAction.tsx",
+    "~/components/apps/UnifiedAppBucketScope": "../components/apps/UnifiedAppBucketScope.tsx",
+    "~/components/forms/Select": "../components/forms/Select.ts",
+  };
+  /** Loads production route components while isolating transport and picker dependencies. */
+  function load(file) {
+    const code = ts.transpileModule(readFileSync(new URL(file, import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+    const exports = {};
+    /** Resolves test overrides first, then real authoring subcomponents, then Node modules. */
+    function resolve(name) {
+      if (dependencies[name]) return dependencies[name];
+      if (aliases[name]) return load(aliases[name]);
+      if (name === "../../../branding/searchable_select.js") return require(new URL("../../branding/searchable_select.js", import.meta.url).pathname);
+      if (name.startsWith("~/")) return {};
+      return require(name);
+    }
+    new Function("require", "exports", code)(resolve, exports);
+    return exports;
+  }
+  const CreateUnifiedApp = load("../routes/integrations.unified-apps.new.tsx").default;
+  const root = createRoot(document.getElementById("root"));
+  try {
+    await act(/** Hydrate the deep-linked edit route and its webhook attachment coverage lookup. */ async () => root.render(createElement(CreateUnifiedApp)));
+    assert.deepEqual(pickerProps.webhookFocusServices, [{ serviceId: "stripe-id", serviceName: "Stripe" }]);
+    assert.equal(pickerProps.webhookFocusVersion, 1);
+    assert.match(pickerProps.eventCoverageNotice("openai-id", "OpenAI"), /registers Stripe, not OpenAI/);
+    assert.equal(pickerProps.eventCoverageNotice("stripe-id", "Stripe"), "");
+    assert.match(document.body.textContent, /margin-billing · Stripe/);
+    // Selecting OpenAI events while margin-billing only covers Stripe must immediately warn and expand Webhook.
+    await act(async () => pickerProps.onChange({
+      OpenAI: { service_id: "openai-id", service_version_id: "openai-v230", version: "2.3.0", operations: ["createResponse"], webhooks: ["agent.session.created"] },
+    }));
+    const alerts = [...document.querySelectorAll('[role="alert"]')].map((node) => node.textContent);
+    assert.equal(alerts.some((text) => /Webhook "margin-billing" registers Stripe, not OpenAI/.test(text)), true);
+    assert.equal(document.querySelector("details").open, true);
+    // Selecting Stripe events while keeping OpenAI operation-only satisfies margin-billing coverage cleanly.
+    await act(async () => pickerProps.onChange({
+      OpenAI: { service_id: "openai-id", service_version_id: "openai-v230", version: "2.3.0", operations: ["createResponse"], webhooks: [] },
+      "@martins-joseph/stripe": { service_id: "stripe-id", service_version_id: "stripe-v1", version: "1.0.0", operations: [], webhooks: ["invoice.paid"] },
+    }));
+    assert.equal(document.querySelector('[role="alert"]'), null);
+    await act(async () => Simulate.click([...document.querySelectorAll("button")].find((button) => button.textContent.includes("Validate and compile"))));
+    assert.equal(plans.length, 1);
+    assert.equal(plans[0].webhook_attachment, "margin-billing");
+    assert.deepEqual(plans[0].services.OpenAI.webhooks, []);
+    assert.deepEqual(plans[0].services["@martins-joseph/stripe"].webhooks, ["invoice.paid"]);
+  } finally {
+    await act(/** Dispose effects before releasing the test document. */ async () => root.unmount()); dom.window.close();
     globalThis.window = previous.window; globalThis.document = previous.document; globalThis.IS_REACT_ACT_ENVIRONMENT = previous.act;
   }
 });

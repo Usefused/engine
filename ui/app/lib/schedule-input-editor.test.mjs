@@ -11,6 +11,7 @@ import * as helpers from './schedule-input-validation.ts';
 import * as examples from './schema-example.ts';
 import * as indentation from './code-indentation.ts';
 import * as differences from './code-diff.ts';
+import * as codeHistory from './code-history.ts';
 const require=createRequire(import.meta.url);
 
 // Exercise the JSON editor and native form validity together so schema failures cannot silently submit.
@@ -25,7 +26,7 @@ test('JSON editor follows active traffic, preserves drafts and blocks invalid da
  Highlighter.registerLanguage=()=>{};
  const dependencies={
   '~/lib/schedule-input-validation':helpers, '~/lib/schema-example':examples,
-  '~/lib/code-indentation':indentation, '~/lib/code-diff':differences,
+  '~/lib/code-indentation':indentation, '~/lib/code-diff':differences, '~/lib/code-history':codeHistory,
   '~/lib/unified-app-io':{unifiedAppContract:document=>({input:document})},
   // An older retained version must still validate against current traffic.
   '~/lib/api':{api:{appConfig:{traffic:async()=>({active_app_id:'active-version'}),openAPI:async(id)=>{targets.push(id);return schema;}}}},

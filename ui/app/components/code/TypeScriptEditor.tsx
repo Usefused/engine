@@ -1,5 +1,7 @@
-import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type UIEvent, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type UIEvent, type KeyboardEvent, type RefObject } from "react";
+import { Redo2, Undo2 } from "lucide-react";
 import { diffCode, codeDiffContext } from "~/lib/code-diff";
+import { classifyCodeEditKind, codeHistoryShortcut, createCodeHistory, recordCodeEdit, redoCodeHistory, syncExternalCodeValue, undoCodeHistory, type CodeEditKind, type CodeSelection } from "~/lib/code-history";
 import { indentCode } from "~/lib/code-indentation";
 import SyntaxHighlighter from "react-syntax-highlighter/dist/esm/prism-light.js";
 import yaml from "react-syntax-highlighter/dist/esm/languages/prism/yaml.js";
@@ -47,6 +49,93 @@ interface TypeScriptEditorProps {
   describedBy?: string;
 }
 
+/** Detects an unmodified Tab/Shift+Tab press intended to adjust code indentation rather than move focus. */
+function isTabIndentKey(event: KeyboardEvent<HTMLTextAreaElement>, releaseTab: boolean): boolean {
+  // Preserve platform shortcuts and focus navigation immediately after Escape.
+  return event.key === "Tab" && !releaseTab && !event.ctrlKey && !event.metaKey && !event.altKey;
+}
+
+/** Captures the active caret or selection range when the target exposes DOM selection indices. */
+function readTextareaSelection(element: HTMLTextAreaElement): CodeSelection | null {
+  // Synthetic change targets in tests may omit selection fields; fall back gracefully without dropping the edit.
+  if (typeof element.selectionStart !== "number" || typeof element.selectionEnd !== "number") return null;
+  return { start: element.selectionStart, end: element.selectionEnd, direction: element.selectionDirection ?? "none" };
+}
+
+/** Manages controlled undo/redo history so Tab indentation, typing, and external sync edits remain reversible. */
+function useCodeHistory(
+  value: string,
+  disabled: boolean | undefined,
+  onChange: (value: string) => void,
+  textarea: RefObject<HTMLTextAreaElement | null>,
+  pendingSelection: { current: CodeSelection | null },
+) {
+  const [history, setHistory] = useState(() => createCodeHistory(value));
+  const historyRef = useRef(history);
+  const lastSelection = useRef<CodeSelection | null>(null);
+
+  // Capture external updates (such as Config tab sync or assistant revisions) as discrete undoable snapshots.
+  useEffect(() => {
+    if (value === historyRef.current.present.value) return;
+    const next = syncExternalCodeValue(historyRef.current, value);
+    historyRef.current = next;
+    setHistory(next);
+  }, [value]);
+
+  /** Records a direct editor mutation onto the undo stack while tracking its before/after selection. */
+  function record(nextValue: string, kind: CodeEditKind, beforeSelection: CodeSelection | null, afterSelection: CodeSelection | null) {
+    const next = recordCodeEdit(historyRef.current, nextValue, { kind, now: Date.now(), beforeSelection, afterSelection });
+    historyRef.current = next;
+    lastSelection.current = afterSelection;
+    setHistory(next);
+  }
+
+  /** Applies one undo or redo transition, restoring caret selection and optionally returning focus to the editor. */
+  function apply(direction: "undo" | "redo", restoreFocus = false) {
+    // Locked editors cannot mutate code through toolbar clicks or keyboard shortcuts.
+    if (disabled) return;
+    const result = direction === "undo" ? undoCodeHistory(historyRef.current) : redoCodeHistory(historyRef.current);
+    // Avoid emitting redundant onChange calls when already at the end of the stack.
+    if (!result.changed) return;
+    historyRef.current = result.history;
+    setHistory(result.history);
+    // Restore the saved caret/selection range once React commits the controlled text.
+    if (result.history.present.selection) {
+      pendingSelection.current = result.history.present.selection;
+      lastSelection.current = result.history.present.selection;
+    }
+    onChange(result.history.present.value);
+    // Return focus to the textarea after toolbar clicks so typing can continue immediately.
+    if (restoreFocus) textarea.current?.focus();
+  }
+
+  /** Tracks the latest textarea selection so typing edits capture the pre-edit caret for accurate undo. */
+  function trackSelection(element: HTMLTextAreaElement) {
+    lastSelection.current = readTextareaSelection(element);
+  }
+
+  return {
+    canUndo: history.past.length > 0,
+    canRedo: history.future.length > 0,
+    currentValue: () => historyRef.current.present.value,
+    lastSelection: () => lastSelection.current,
+    record,
+    apply,
+    trackSelection,
+  };
+}
+
+/** Renders compact Undo/Redo controls beside the change-review action in the editor header. */
+function HistoryButtons({ canUndo, canRedo, disabled, onUndo, onRedo }: {
+  canUndo: boolean; canRedo: boolean; disabled?: boolean; onUndo: () => void; onRedo: () => void;
+}) {
+  const buttonStyle = "inline-flex items-center justify-center rounded-md p-1 text-slate-600 hover:bg-slate-200 focus-visible:outline-slate-950 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent";
+  return <div className="flex items-center gap-0.5" role="group" aria-label="Edit history">
+    <button type="button" aria-label="Undo" title="Undo (⌘Z / Ctrl+Z)" disabled={Boolean(disabled) || !canUndo} onClick={onUndo} className={buttonStyle}><Undo2 className="h-3.5 w-3.5" aria-hidden="true" /></button>
+    <button type="button" aria-label="Redo" title="Redo (⇧⌘Z / Ctrl+Y)" disabled={Boolean(disabled) || !canRedo} onClick={onRedo} className={buttonStyle}><Redo2 className="h-3.5 w-3.5" aria-hidden="true" /></button>
+  </div>;
+}
+
 /** Shares native editing and line-level change review without mixing removed text into the authored value. */
 export function TypeScriptEditor({ id, value, baseline, onChange, disabled, required, language = "typescript", validationMessage = "", describedBy }: TypeScriptEditorProps) {
   // Language changes presentation only; the parent owns the corresponding source or configuration text.
@@ -55,11 +144,12 @@ export function TypeScriptEditor({ id, value, baseline, onChange, disabled, requ
   const jsonMode = language === "json";
   const label = jsonMode ? "Input JSON" : yamlMode ? "YAML configuration" : "TypeScript source";
   const textarea = useRef<HTMLTextAreaElement>(null);
-  const pendingSelection = useRef<{ start: number; end: number; direction: "forward" | "backward" | "none" } | null>(null);
+  const pendingSelection = useRef<CodeSelection | null>(null);
   const escapeTab = useRef(false);
   const highlight = useRef<HTMLDivElement>(null);
   const gutter = useRef<HTMLDivElement>(null);
   const [review, setReview] = useState(false);
+  const history = useCodeHistory(value, disabled, onChange, textarea, pendingSelection);
   // Editors without a baseline retain their existing presentation and avoid comparison work.
   const changes = useMemo(() => baseline === undefined ? [] : diffCode(baseline, value), [baseline, value]);
   const addedLines = useMemo(() => new Set(changes.filter(line => line.kind === "added").map(line => line.newLine)), [changes]);
@@ -84,8 +174,15 @@ export function TypeScriptEditor({ id, value, baseline, onChange, disabled, requ
     if (gutter.current) gutter.current.scrollTop = scrollTop;
   }
 
-  /** Passes every edit through the existing source state so previous compilation plans are invalidated. */
-  function updateSource(event: React.ChangeEvent<HTMLTextAreaElement>) { onChange(event.target.value); }
+  /** Passes every edit through undo history and the parent source state so previous compilation plans are invalidated. */
+  function updateSource(event: React.ChangeEvent<HTMLTextAreaElement>) {
+    const element = event.target;
+    const nextValue = element.value;
+    const afterSelection = readTextareaSelection(element);
+    const kind = classifyCodeEditKind(history.currentValue(), nextValue);
+    history.record(nextValue, kind, history.lastSelection(), afterSelection);
+    onChange(nextValue);
+  }
 
   // Restore selection after React commits the controlled value, including backward block selections.
   useLayoutEffect(() => {
@@ -97,7 +194,7 @@ export function TypeScriptEditor({ id, value, baseline, onChange, disabled, requ
     }
   }, [value]);
 
-  /** Tab edits indentation; Escape then Tab provides a keyboard route out of the editor. */
+  /** Handles undo/redo and Tab indentation while Escape then Tab provides a keyboard route out of the editor. */
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     // Release the next Tab so keyboard-only users are never trapped in source editing.
     if (event.key === "Escape") {
@@ -106,22 +203,37 @@ export function TypeScriptEditor({ id, value, baseline, onChange, disabled, requ
     }
     const releaseTab = escapeTab.current;
     escapeTab.current = false;
-    // Preserve platform shortcuts, composition, disabled state, and focus navigation after Escape.
-    if (event.key !== "Tab" || releaseTab || event.ctrlKey || event.metaKey || event.altKey || event.nativeEvent.isComposing || disabled) return;
+    // IME composition and disabled editors must never run custom keyboard mutations.
+    if (event.nativeEvent.isComposing || disabled) return;
+    const shortcut = codeHistoryShortcut(event);
+    // Always intercept undo/redo shortcuts so stale browser-native textarea history cannot conflict with our stack.
+    if (shortcut) {
+      event.preventDefault();
+      history.apply(shortcut);
+      return;
+    }
+    // Preserve platform shortcuts and focus navigation after Escape.
+    if (!isTabIndentKey(event, releaseTab)) return;
     event.preventDefault();
     const element = event.currentTarget;
+    const beforeSelection = readTextareaSelection(element);
     const edit = indentCode(value, element.selectionStart, element.selectionEnd, event.shiftKey);
     // Outdenting an already flush-left line should not invalidate a compilation plan.
     if (edit.value === value) return;
-    pendingSelection.current = { start: edit.start, end: edit.end, direction: element.selectionDirection };
+    const afterSelection: CodeSelection = { start: edit.start, end: edit.end, direction: element.selectionDirection };
+    pendingSelection.current = afterSelection;
+    history.record(edit.value, "discrete", beforeSelection, afterSelection);
     onChange(edit.value);
   }
 
   return <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm focus-within:border-violet-300 focus-within:ring-2 focus-within:ring-violet-100">
     <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-2.5">
       <div className="flex items-center gap-2.5"><span aria-hidden="true" className="rounded bg-blue-600 px-1 py-0.5 text-[10px] font-bold leading-none text-white">{jsonMode ? "{}" : yamlMode ? "YML" : "TS"}</span><span className="font-mono text-xs font-medium text-slate-700">{jsonMode ? "input.json" : yamlMode ? "app.yaml" : "app.ts"}</span></div>
-      {/* Counts and signs communicate changes without relying on red/green alone. */}
-      {hasChanges ? <button type="button" aria-pressed={reviewing} onClick={() => setReview(!reviewing)} className="flex items-center gap-2 rounded-md px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-200 focus-visible:outline-slate-950"><span>{reviewing ? "Back to editing" : "Review changes"}</span><span className="text-green-700">+{addedLines.size}</span><span className="text-red-700">−{removedCount}</span></button> : <span className="text-xs font-normal text-slate-400">{jsonMode ? "JSON" : yamlMode ? "YAML" : "TypeScript"}</span>}
+      <div className="flex items-center gap-2">
+        <HistoryButtons canUndo={history.canUndo} canRedo={history.canRedo} disabled={disabled} onUndo={/** Reverts the last source edit and returns focus when editing. */ () => history.apply("undo", !reviewing)} onRedo={/** Reapplies the next undone source edit and returns focus when editing. */ () => history.apply("redo", !reviewing)} />
+        {/* Counts and signs communicate changes without relying on red/green alone. */}
+        {hasChanges ? <button type="button" aria-pressed={reviewing} onClick={() => setReview(!reviewing)} className="flex items-center gap-2 rounded-md px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-200 focus-visible:outline-slate-950"><span>{reviewing ? "Back to editing" : "Review changes"}</span><span className="text-green-700">+{addedLines.size}</span><span className="text-red-700">−{removedCount}</span></button> : <span className="text-xs font-normal text-slate-400">{jsonMode ? "JSON" : yamlMode ? "YAML" : "TypeScript"}</span>}
+      </div>
     </div>
     {/* Removed lines are read-only review evidence, never textarea content. */}
     {reviewing && <div role="region" aria-label={`${label} changes`} tabIndex={0} className="h-96 overflow-auto text-slate-800" style={textMetrics}>
@@ -135,8 +247,8 @@ export function TypeScriptEditor({ id, value, baseline, onChange, disabled, requ
     <div hidden={reviewing} className={`fused-typescript-editor relative ${jsonMode ? "h-64" : "h-96"} text-slate-800`} style={textMetrics}>
       <div ref={highlight} aria-hidden="true" className="fused-code-highlight pointer-events-none absolute inset-0 overflow-hidden">{highlighted}</div>
       <div ref={gutter} aria-hidden="true" className="fused-code-highlight pointer-events-none absolute inset-y-0 left-0 z-10 w-10 overflow-hidden border-r border-slate-100 bg-slate-50 text-right text-slate-400"><pre className="m-0 py-4 pr-2" style={textMetrics}>{Array.from({ length: lineCount }, (_, index) => index + 1).join("\n")}</pre></div>
-      <textarea ref={textarea} id={id} aria-label={label} aria-describedby={`${id}-help ${describedBy ?? ""}`} aria-invalid={Boolean(validationMessage)} onKeyDown={handleKeyDown} value={value} onChange={updateSource} onScroll={syncScroll} required={required} disabled={disabled} spellCheck={false} autoCapitalize="off" autoComplete="off" autoCorrect="off" wrap="off" placeholder={jsonMode ? "Enter the app input as JSON…" : yamlMode ? "App configuration…" : "Generated TypeScript will appear here…"} className="absolute inset-0 m-0 h-full w-full resize-none overflow-auto border-0 bg-transparent text-transparent caret-slate-900 outline-none placeholder:text-slate-400 selection:bg-violet-200/60 disabled:cursor-wait" style={{ ...textMetrics, padding: "16px 16px 16px 56px" }} />
+      <textarea ref={textarea} id={id} aria-label={label} aria-describedby={`${id}-help ${describedBy ?? ""}`} aria-invalid={Boolean(validationMessage)} onKeyDown={handleKeyDown} onSelect={/** Tracks caret movement so subsequent edits save accurate pre-edit undo selection. */ (event) => history.trackSelection(event.currentTarget)} value={value} onChange={updateSource} onScroll={syncScroll} required={required} disabled={disabled} spellCheck={false} autoCapitalize="off" autoComplete="off" autoCorrect="off" wrap="off" placeholder={jsonMode ? "Enter the app input as JSON…" : yamlMode ? "App configuration…" : "Generated TypeScript will appear here…"} className="absolute inset-0 m-0 h-full w-full resize-none overflow-auto border-0 bg-transparent text-transparent caret-slate-900 outline-none placeholder:text-slate-400 selection:bg-violet-200/60 disabled:cursor-wait" style={{ ...textMetrics, padding: "16px 16px 16px 56px" }} />
     </div>
-    <div className="flex justify-between gap-4 border-t border-slate-100 px-4 py-1.5 text-[10px] font-normal text-slate-400"><span id={`${id}-help`}>{reviewing ? "Changes since this editor was opened · removed lines are not included in your app" : "Tab to indent · Shift+Tab to outdent · Esc then Tab to leave"}</span><span aria-hidden="true">{lineCount} lines</span></div>
+    <div className="flex justify-between gap-4 border-t border-slate-100 px-4 py-1.5 text-[10px] font-normal text-slate-400"><span id={`${id}-help`}>{reviewing ? "Changes since this editor was opened · removed lines are not included in your app" : "Tab to indent · Shift+Tab to outdent · ⌘Z / Ctrl+Z to undo · Esc then Tab to leave"}</span><span aria-hidden="true">{lineCount} lines</span></div>
   </div>;
 }

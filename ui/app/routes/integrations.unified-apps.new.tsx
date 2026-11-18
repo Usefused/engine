@@ -20,7 +20,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "@remix-run/react";
 import { ArrowRight, Check, ChevronDown, Loader2, Sparkles } from "lucide-react";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
-import { hasWorkspacePermission } from "~/lib/current-actor-access";
+import { hasAnyPermission, hasResourcePermission, hasWorkspacePermission } from "~/lib/current-actor-access";
 import { ExecutionTokenField } from "~/components/apps/ExecutionTokenField";
 import { ExecutionTokenOption } from "~/components/apps/ExecutionTokenOption";
 import { AppDetailBackLink } from "~/components/apps/AppDetailChrome";
@@ -29,6 +29,9 @@ import { UnifiedSourceClarificationError, unifiedConfig, unifiedMetadata, unifie
 import { readUnifiedAppSourceConfig, unifiedAppSourceView } from "~/lib/unified-app-source-config";
 import { unifiedAppDraftFromSource } from "~/lib/unified-app-source-draft";
 import { resolveUnifiedSourceService } from "~/lib/unified-app-source-services";
+import { buildWebhookAttachmentCoverage, mergeWebhookFocusServices, serviceWebhookCoverageNotice, uncoveredWebhookEventServices, webhookCoverageMismatchMessage, type WebhookAttachmentCoverage, type WebhookFocusService } from "~/lib/unified-app-webhook-coverage";
+import { webhookAttachmentRegistrations } from "~/lib/webhook-discovery-api";
+import type { WebhookCatalogueItem } from "~/lib/webhook-discovery-contract";
 import { draftAppSource } from "~/lib/app-describe-api";
 import { api } from "~/lib/api";
 import { unifiedEditDraft, unifiedEditConfig, unifiedEditSelections, nextUnifiedVersion, type UnifiedAppSource } from "~/lib/unified-app-edit";
@@ -68,6 +71,9 @@ export default function CreateUnifiedApp() {
   const editID = params.get("edit");
   // Registration choices seed only an existing app draft and never mutate its deployed configuration.
   const requestedAttachment = editID ? params.get("webhook") ?? undefined : undefined;
+  // Carry the registration's service identity so its Events tab surfaces immediately without mutating saved services.
+  const requestedWebhookServiceId = editID && requestedAttachment ? params.get("webhookService") ?? undefined : undefined;
+  const requestedWebhookServiceName = editID && requestedAttachment ? params.get("webhookServiceName") ?? undefined : undefined;
   // Only the fixed publication return intent is supported; arbitrary redirect URLs are ignored.
   const returnToPublisher = !editID && params.get("returnTo") === "publish-template";
   // Private source takes precedence over a template supplied in the same URL.
@@ -75,7 +81,12 @@ export default function CreateUnifiedApp() {
   const [editSource, setEditSource] = useState<UnifiedAppSource | null>(null);
   const [loadingSource, setLoadingSource] = useState(Boolean(editID));
   const canCreate = hasWorkspacePermission(access, "app.unified_app.create");
+  const canReadServices = hasAnyPermission(access, "service.read");
   const [pickerSeed, setPickerSeed] = useState<Record<string, AppServicePin>>({});
+  const [selectedWebhookService, setSelectedWebhookService] = useState<WebhookFocusService | null>(() => requestedWebhookServiceId ? { serviceId: requestedWebhookServiceId, serviceName: requestedWebhookServiceName } : null);
+  const [webhookFocusVersion, setWebhookFocusVersion] = useState(() => (requestedAttachment ? 1 : 0));
+  const [attachmentCoverage, setAttachmentCoverage] = useState<WebhookAttachmentCoverage | null>(null);
+  const [coverageRefresh, setCoverageRefresh] = useState(0);
   const [selecting, setSelecting] = useState(false);
   const [describing, setDescribing] = useState(false);
   const draftRequest = useRef<AbortController | null>(null);
@@ -115,6 +126,46 @@ export default function CreateUnifiedApp() {
   const sourceBucket = editSource?.config.bucket ?? buckets.find((item) => item.resource_id === bucket)?.display_name ?? "";
   // Raw code owns its editing buffer; form changes project only after the author has finished valid metadata.
   const sourceView = sourceEdit ?? (draft ? unifiedAppSourceView(draft.source, unifiedMetadata(draft, name, version, sourceBucket)) : { source: "", error: "" });
+  const currentAttachment = draftAttachment(draft).trim();
+  // Only apply coverage metadata that matches the currently selected attachment label.
+  const activeCoverage = attachmentCoverage?.attachment === currentAttachment ? attachmentCoverage : null;
+  // Surface registered services for the chosen webhook in the picker without adding unselected services to config.
+  const webhookFocusServices = currentAttachment ? mergeWebhookFocusServices(selectedWebhookService, activeCoverage) : [];
+  /** Evaluates per-service read access so coverage hints never overclaim for unreadable services. */
+  const canReadService = (serviceId: string) => hasResourcePermission(access, "service.read", "SERVICE", serviceId);
+  const uncoveredServices = draft ? uncoveredWebhookEventServices(draft, activeCoverage, canReadService) : [];
+  const coverageWarning = webhookCoverageMismatchMessage(currentAttachment, uncoveredServices, activeCoverage?.serviceNames ?? []);
+  /** Supplies an inline warning on a service's Events tab when the attached webhook covers a different provider. */
+  const eventCoverageNotice = (serviceId: string, serviceName: string) => serviceWebhookCoverageNotice(serviceId, serviceName, activeCoverage, canReadService(serviceId));
+
+  // Keep deep-linked webhook service focus aligned with route changes and navigation.
+  useEffect(() => {
+    setSelectedWebhookService(requestedWebhookServiceId ? { serviceId: requestedWebhookServiceId, serviceName: requestedWebhookServiceName } : null);
+    setWebhookFocusVersion(requestedAttachment ? 1 : 0);
+  }, [editID, requestedAttachment, requestedWebhookServiceId, requestedWebhookServiceName]);
+
+  // Read authorized registrations for the attached webhook label to surface its service events and detect mismatches early.
+  useEffect(() => {
+    // Skip advisory lookup when no attachment is chosen or the actor lacks service.read access.
+    if (!currentAttachment || !canReadServices) {
+      setAttachmentCoverage(null);
+      return;
+    }
+    const controller = new AbortController();
+    /** Fetches exact-label registrations without blocking compilation if the advisory lookup fails. */
+    async function loadCoverage() {
+      try {
+        const items = await webhookAttachmentRegistrations(currentAttachment, controller.signal);
+        // Discard stale responses after attachment edits or navigation.
+        if (!controller.signal.aborted) setAttachmentCoverage(buildWebhookAttachmentCoverage(currentAttachment, items));
+      } catch {
+        // Leave authoritative coverage enforcement to Engine plan/apply when the advisory lookup cannot complete.
+        if (!controller.signal.aborted) setAttachmentCoverage(null);
+      }
+    }
+    void loadCoverage();
+    return () => controller.abort();
+  }, [currentAttachment, canReadServices, coverageRefresh]);
 
   // Source authorization comes from the same private endpoint used by the other app editors.
   useEffect(() => {
@@ -291,10 +342,13 @@ export default function CreateUnifiedApp() {
     setDraft({ ...draft, description }); invalidatePlan();
   }
 
-  /** Keeps the selected registration in the same reviewed draft as its event allowlist. */
-  function updateWebhookAttachment(webhookAttachment: string) {
+  /** Keeps the selected registration in the same reviewed draft and focuses its service events for selection. */
+  function updateWebhookAttachment(webhookAttachment: string, item?: WebhookCatalogueItem) {
     // The attachment is meaningful only after service and event selection created a draft.
     if (!draft) return;
+    // Focusing the picked registration's service surfaces its Events tab even when the app uses other services.
+    setSelectedWebhookService(item?.service_id ? { serviceId: item.service_id, serviceName: item.service_name } : null);
+    setWebhookFocusVersion((value) => value + 1);
     setDraft({ ...draft, webhookAttachment }); invalidatePlan();
   }
 
@@ -452,12 +506,16 @@ export default function CreateUnifiedApp() {
         {/* New apps start in discovery; saved scopes and webhook deep links remain accessible in the Config tab. */}
         <section aria-label="Services & events" className="space-y-3 border-t border-slate-200 pt-4">
           <h3 className="text-sm font-medium text-slate-800">Services & events<span className="ml-2 text-xs font-normal text-slate-400">{Object.keys(draft?.services ?? pickerSeed).length} selected</span></h3>
-          <fieldset id="app-service-selection" disabled={busy || describing} className="min-w-0 scroll-mt-6"><AppOperationPicker seed={pickerSeed} onChange={selectOperations} onPendingChange={setSelecting} allowWebhooks /></fieldset>
+          <fieldset id="app-service-selection" disabled={busy || describing} className="min-w-0 scroll-mt-6"><AppOperationPicker seed={pickerSeed} onChange={selectOperations} onPendingChange={setSelecting} allowWebhooks webhookFocusServices={webhookFocusServices} webhookFocusVersion={webhookFocusVersion} eventCoverageNotice={eventCoverageNotice} /></fieldset>
         </section>
         {/* Registration selection can precede event selection, while compilation still requires an explicit event scope. */}
-        {draft && (draftHasWebhookEvents(draft) || draftAttachment(draft)) && <details className="group rounded-lg border border-slate-200" open={!draftAttachment(draft)}>
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-sm font-medium text-slate-800"><span>Webhook<span className="ml-2 break-all text-xs font-normal text-slate-500">{draftAttachment(draft)}</span></span><ChevronDown className="h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" /></summary>
-          <fieldset disabled={busy || describing || selecting} className="max-h-80 overflow-y-auto border-t border-slate-100 p-3"><WebhookRegistrationPicker selected={draftAttachment(draft)} onSelect={updateWebhookAttachment} /></fieldset>
+        {draft && (draftHasWebhookEvents(draft) || draftAttachment(draft)) && <details className="group rounded-lg border border-slate-200" open={!draftAttachment(draft) || uncoveredServices.length > 0}>
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-sm font-medium text-slate-800"><span>Webhook<span className="ml-2 break-all text-xs font-normal text-slate-500">{draftAttachment(draft)}{activeCoverage?.serviceNames.length ? ` · ${activeCoverage.serviceNames.join(", ")}` : ""}</span></span><ChevronDown className="h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" /></summary>
+          <fieldset disabled={busy || describing || selecting} className="max-h-80 space-y-3 overflow-y-auto border-t border-slate-100 p-3">
+            {/* Explain mismatched service coverage next to the picker and let authors refresh after registering in another tab. */}
+            {coverageWarning && <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">{coverageWarning}<button type="button" onClick={/** Re-reads workspace registrations after creating or updating a webhook in another tab. */ () => setCoverageRefresh((value) => value + 1)} className="ml-2 font-semibold underline">Refresh webhooks</button></p>}
+            <WebhookRegistrationPicker selected={draftAttachment(draft)} onSelect={updateWebhookAttachment} />
+          </fieldset>
         </details>}
         {/* Credential overrides and initial token issuance remain available without expanding the everyday form. */}
         {draft && <details className="group rounded-lg border border-slate-200">
@@ -478,6 +536,8 @@ export default function CreateUnifiedApp() {
       footer={<fieldset disabled={busy || describing || selecting} className="space-y-3">
         {/* Read failures and compilation errors remain visible regardless of the selected authoring tab. */}
         {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
+        {/* Surface attachment/service mismatches in the footer so Code-tab authors also see why validation will reject it. */}
+        {coverageWarning && <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">{coverageWarning}</p>}
         {/* Incomplete inline JSON remains editable, but cannot silently diverge from the configuration being deployed. */}
         {sourceView.error && <p role="alert" className="text-sm text-red-700">{sourceView.error}</p>}
         {/* Compilation owns its own live status; other loading states stay in the shared footer. */}

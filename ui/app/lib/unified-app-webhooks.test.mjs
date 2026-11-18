@@ -113,7 +113,7 @@ test('webhook panel renders saved events and registration management without cha
     await search('billing');
     assert.equal(listingCalls.at(-1).offset, 0, 'search starts from the first registration page');
     await click('Use webhook');
-    assert.deepEqual(navigations, ['/integrations/unified-apps/new?edit=empty&webhook=billing%20%26%20events#app-service-selection']);
+    assert.deepEqual(navigations, ['/integrations/unified-apps/new?edit=empty&webhook=billing%20%26%20events&webhookService=stripe&webhookServiceName=Stripe#app-service-selection']);
     listingFailure = true; await search('denied');
     assert.match(document.querySelector('[role="alert"]').textContent, /Registration read denied/);
     assert.doesNotMatch(document.body.textContent, /No matching webhooks/);

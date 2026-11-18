@@ -39,6 +39,12 @@ test("flat capabilities expose direct operations, events and immutable versions"
     assert.equal(document.querySelector('input[aria-label="getCustomer"]'), null);
     await act(/** Provider event scope is independent of the operation selected above. */ async () => Simulate.change(document.querySelector('input[aria-label="customer.created"]')));
     assert.deepEqual(calls, [['operation','get-id'],['version','v2-id'],['event','event-id']]);
+    // Focusing a service from a webhook choice opens Events directly and shows coverage mismatch notes only on Events.
+    await act(/** Re-render with an explicit webhook focus version and an inline attachment coverage notice. */ async () => root.render(createElement(exports.CompactServiceCapabilities, { ...props, preferEventsVersion: 1, eventNotice: 'Attached webhook "margin-billing" registers Stripe, not CRM.' })));
+    assert.equal(document.querySelector('input[aria-label="customer.created"]') !== null, true);
+    assert.match(document.querySelector('[role="note"]').textContent, /registers Stripe, not CRM/);
+    await act(/** Switching back to Operations hides the Events-only coverage notice. */ async () => Simulate.click(document.querySelector('[role="tab"]')));
+    assert.equal(document.querySelector('[role="note"]'), null);
   } finally {
     await act(/** Dispose mounted effects before restoring the caller's document. */ async () => root.unmount()); dom.window.close();
     globalThis.window = before.window; globalThis.document = before.document; globalThis.IS_REACT_ACT_ENVIRONMENT = before.act;

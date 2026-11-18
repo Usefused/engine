@@ -38,6 +38,19 @@ export async function webhookListings(filters: { limit: number; offset: number; 
   }
 }
 
+/** Loads all authorized service registrations belonging to one exact webhook attachment label. */
+export async function webhookAttachmentRegistrations(label: string, signal?: AbortSignal): Promise<WebhookCatalogueItem[]> {
+  const trimmed = label.trim();
+  // Blank attachments have no persisted registration bundle to inspect.
+  if (!trimmed) return [];
+  const items = await readAllBoundedPages(async (limit, offset) => {
+    const page = await webhookListings({ limit, offset, search: trimmed }, signal);
+    return { items: page.items, total: page.total };
+  }, 100, 10);
+  // Server search is substring-based; exact label matching isolates the attached bundle's registered services.
+  return items.filter((item) => item.label === trimmed);
+}
+
 /** Creates only a review receipt; provider ingress changes solely after the user presses Create webhook. */
 export async function planWebhook(draft: WebhookDraft, ownerTeam: string): Promise<AppPlanResponse> {
   const config = webhookConfiguration(draft);

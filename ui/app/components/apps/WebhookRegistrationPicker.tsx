@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { Link } from "@remix-run/react";
 import { webhookListings, type WebhookPage } from "~/lib/webhook-discovery-api";
+import type { WebhookCatalogueItem } from "~/lib/webhook-discovery-contract";
 
 const pageSize = 20;
 
 /** Offers persisted, authorized registrations without creating ingress or changing a deployed app. */
-export function WebhookRegistrationPicker({ selected, onSelect }: { selected?: string; onSelect: (name: string) => void }) {
+export function WebhookRegistrationPicker({ selected, onSelect }: { selected?: string; onSelect: (name: string, item: WebhookCatalogueItem) => void }) {
   const [search, setSearch] = useState("");
   const [offset, setOffset] = useState(0);
   const [refresh, setRefresh] = useState(0);
@@ -42,8 +43,8 @@ export function WebhookRegistrationPicker({ selected, onSelect }: { selected?: s
     {page && page.items.length === 0 && <p className="text-sm text-slate-500">No matching webhooks. Create a registration or try another search.</p>}
     <div className="divide-y divide-slate-100">{page?.items.map((item) => <div key={`${item.service_id}:${item.slug}`} className="flex flex-wrap items-center justify-between gap-3 py-3">
       <div className="min-w-0"><p className="break-all text-sm font-semibold text-slate-900">{item.label}</p><p className="break-all text-xs text-slate-500">{item.service_name} · {item.service_ref}</p></div>
-      {/* Bundle labels, rather than receiving URL slugs, identify app attachments across services. */}
-      <button type="button" onClick={() => onSelect(item.label)} className="min-h-10 rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-900">{selected === item.label ? "Use selected webhook" : "Use webhook"}</button>
+      {/* Bundle labels identify app attachments, while the row item carries the service whose events belong to it. */}
+      <button type="button" onClick={() => onSelect(item.label, item)} className="min-h-10 rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-900">{selected === item.label ? "Use selected webhook" : "Use webhook"}</button>
     </div>)}</div>
     {/* Server totals keep registrations beyond the first page reachable without an unbounded read. */}
     {page && page.total > pageSize && <nav aria-label="Existing webhook pages" className="flex items-center justify-between gap-3 text-sm">

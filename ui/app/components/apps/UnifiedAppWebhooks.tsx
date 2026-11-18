@@ -3,6 +3,7 @@ import { Link, useNavigate } from "@remix-run/react";
 import { ArrowUpRight, Loader2, Plus, Webhook } from "lucide-react";
 import { api } from "~/lib/api";
 import type { UnifiedAppSource } from "~/lib/unified-app-edit";
+import type { WebhookCatalogueItem } from "~/lib/webhook-discovery-contract";
 import { WebhookRegistrationPicker } from "./WebhookRegistrationPicker";
 
 const action = "inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800";
@@ -40,9 +41,12 @@ export function UnifiedAppWebhooks({ appID, active }: { appID: string; active: b
   const services = Object.entries(source.config.services).filter(([, service]) => Boolean(service.webhooks?.length) || service.webhooks_select_all === true);
   const attachment = source.config.webhook_attachment;
   const editURL = `/integrations/unified-apps/new?edit=${encodeURIComponent(appID)}#app-service-selection`;
-  /** Carries only the chosen registration into an unsaved editor; the existing deployment flow validates coverage. */
-  function chooseRegistration(name: string) {
-    navigate(`/integrations/unified-apps/new?edit=${encodeURIComponent(appID)}&webhook=${encodeURIComponent(name)}#app-service-selection`);
+  /** Carries the chosen registration and its service into an unsaved editor so its events open directly. */
+  function chooseRegistration(name: string, item?: WebhookCatalogueItem) {
+    // Carrying the registration's service avoids landing only on unrelated app services when adding a trigger.
+    const serviceParam = item?.service_id ? `&webhookService=${encodeURIComponent(item.service_id)}` : "";
+    const serviceNameParam = item?.service_name ? `&webhookServiceName=${encodeURIComponent(item.service_name)}` : "";
+    navigate(`/integrations/unified-apps/new?edit=${encodeURIComponent(appID)}&webhook=${encodeURIComponent(name)}${serviceParam}${serviceNameParam}#app-service-selection`);
   }
   return <section className="space-y-5">
     <header className="flex flex-wrap items-start justify-between gap-4">

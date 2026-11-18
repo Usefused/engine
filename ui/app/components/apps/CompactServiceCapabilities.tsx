@@ -1,4 +1,4 @@
-import { useId, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useState, type KeyboardEvent } from "react";
 import { Select } from "~/components/forms/Select";
 import type { IntegrationObject, Service, WebhookObject } from "~/lib/api";
 
@@ -8,6 +8,7 @@ interface CompactServiceData { service: Service; integrations: IntegrationObject
 interface Props {
   item: CompactServiceData; selectedOperations: Set<string>; selectedEvents: Set<string>;
   version: string; loaded: boolean; loading: boolean; allowEvents?: boolean;
+  preferEventsVersion?: number; eventNotice?: string;
   onLoad: () => void; onVersion: (version: string) => void;
   onOperation: (id: string) => void; onEvent: (id: string) => void;
   onResource: (id: string, name: string) => void; onMore: (name: string) => void;
@@ -17,9 +18,17 @@ interface Props {
 /** Presents exact-version capabilities as a flat list with one pair of tabs and no nested disclosures. */
 export function CompactServiceCapabilities(props: Props) {
   const { item } = props;
-  const [tab, setTab] = useState<CapabilityTab>("operations");
+  // Open directly on Events when this service was focused from a webhook registration choice.
+  const [tab, setTab] = useState<CapabilityTab>(props.allowEvents && props.preferEventsVersion ? "events" : "operations");
   const [query, setQuery] = useState("");
   const id = useId();
+  // Re-choosing a webhook for an already-mounted service switches it directly to Events without altering selections.
+  useEffect(() => {
+    if (props.allowEvents && props.preferEventsVersion) {
+      setTab("events");
+      setQuery("");
+    }
+  }, [props.allowEvents, props.preferEventsVersion]);
   /** Keeps keyboard and pointer tab selection on the same visible list without carrying an unrelated search across categories. */
   function selectTab(next: CapabilityTab) { setTab(next); setQuery(""); }
   /** Provides native tab-list navigation while keeping one category in the page's tab order. */
@@ -64,6 +73,8 @@ function CapabilityOptions({ settings: props, id, tab, query, onQuery }: { setti
   const toggle = tab === "operations" ? props.onOperation : props.onEvent;
   const filtered = rows.filter(/** Search only the currently visible exact-version capabilities. */ (row) => [row.name, row.path, row.description, row.method].join(" ").toLowerCase().includes(query.trim().toLowerCase()));
   return <div role="tabpanel" id={`${id}-${tab}-panel`} aria-labelledby={`${id}-${tab}-tab`} className="space-y-2">
+        {/* Surface attachment coverage mismatches inside Events before the author attempts to compile. */}
+        {tab === "events" && props.eventNotice && <p role="note" className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs text-amber-900">{props.eventNotice}</p>}
         {/* A single plain search field replaces the nested resource/search card hierarchy. */}
         {rows.length > 6 && <input aria-label={`Search ${tab} for ${item.service.name}`} value={query} onChange={/** Search affects presentation only; selected IDs and exact-version pins remain unchanged. */ (event) => onQuery(event.target.value)} placeholder={`Search ${tab}…`} className="h-8 w-full rounded-md border border-slate-200 px-2 text-xs" />}
         <div className="max-h-64 overflow-y-auto divide-y divide-slate-100">

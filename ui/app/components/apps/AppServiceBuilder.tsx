@@ -13,6 +13,7 @@ import { loadDescribedSelection } from "~/lib/app-describe-selection";
 import { describeSelectionKey, type AppServicePin } from "~/lib/app-describe-contract";
 import { composeUnifiedAppConsumer, unifiedAppAlias, type HostedAppReference } from "~/lib/unified-app-consumer";
 import { findServiceAppSource } from "~/lib/service-app-launch";
+import type { WebhookFocusService } from "~/lib/unified-app-webhook-coverage";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
 import { hasAnyAppPermission } from "~/lib/current-actor-access";
 import { useState, useEffect, useRef, type FormEvent, type ReactNode } from "react";
@@ -1313,21 +1314,56 @@ function BuilderSelectionPane(props: BuilderSelectionPaneProps) {
   );
 }
 
+/** Places newly focused webhook services first so their Events tab appears immediately after choosing a webhook. */
+function orderCompactSelectedRows(selected: ServiceData[], focused?: Set<string>, preferredEventTabVersion?: number): ServiceData[] {
+  // Preserve normal service order during ordinary edits when no webhook was just focused.
+  if (!preferredEventTabVersion || !focused?.size) return selected;
+  return [...selected.filter((row) => focused.has(row.service.id)), ...selected.filter((row) => !focused.has(row.service.id))];
+}
+
+/** Resolves a focused webhook service through Engine selectors, falling back to an unfiltered scan if names differ. */
+async function resolveAuthorizedWebhookService(ownerTeamId: string, item: WebhookFocusService) {
+  /** Scans the owner-scoped service selector list with an optional display-name filter. */
+  const findBySearch = (search: string) => findServiceAppSource(item.serviceId, (pageLimit, offset) => listAppBuildSelectors(ownerTeamId, "SERVICE", search, pageLimit, offset));
+  // Narrow pagination with the workspace service name first, then fall back to an unfiltered scan if names differ.
+  if (item.serviceName) return findBySearch(item.serviceName).catch(() => findBySearch(""));
+  return findBySearch("");
+}
+
+/** Appends newly loaded webhook service rows without overwriting already-hydrated service entries. */
+function mergeNewServiceRows(previous: ServiceData[], additions: ServiceData[]): ServiceData[] {
+  const existingIDs = new Set(previous.map((row) => row.service.id));
+  const fresh = additions.filter((row) => !existingIDs.has(row.service.id));
+  return fresh.length ? [...previous, ...fresh] : previous;
+}
+
 /** Embeds flat capabilities while preserving the shared catalogue, exact version pins and selection callbacks. */
-function BuilderCompactSelectionPane(props: BuilderSelectionPaneProps & { onLoadService: (id: string) => void }) {
-  const selected = props.data.filter(/** Review includes only services with an explicit selected capability. */ (row) => hasServiceSelection(row.service.id, props));
+function BuilderCompactSelectionPane(props: BuilderSelectionPaneProps & {
+  onLoadService: (id: string) => void;
+  focusedWebhookServiceIds?: Set<string>;
+  preferredEventTabVersion?: number;
+  eventCoverageNotice?: (serviceId: string, serviceName: string) => string;
+}) {
+  const focused = props.focusedWebhookServiceIds;
+  const selected = props.data.filter(
+    /** Review includes services with selected capabilities plus services covered by the chosen webhook registration. */
+    (row) => hasServiceSelection(row.service.id, props) || Boolean(focused?.has(row.service.id))
+  );
+  const orderedSelected = orderCompactSelectedRows(selected, focused, props.preferredEventTabVersion);
   // Clearing the last capability must keep discovery reachable.
-  const browsing = props.browsingServices || selected.length === 0;
-  const rows = browsing ? props.data : selected;
+  const browsing = props.browsingServices || orderedSelected.length === 0;
+  const rows = browsing ? props.data : orderedSelected;
   return <div className="min-w-0 space-y-3">
     {/* Catalogue browsing is explicit, without nesting a second selected-services header inside the form section. */}
-    {selected.length > 0 && <div className="flex justify-end"><button type="button" onClick={/** Switching catalogue visibility leaves all reviewed selections intact. */ () => props.setBrowsingServices(!browsing)} className="text-xs font-medium text-[var(--brand-violet)]">{browsing ? "Done selecting" : "Add services"}</button></div>}
+    {orderedSelected.length > 0 && <div className="flex justify-end"><button type="button" onClick={/** Switching catalogue visibility leaves all reviewed selections intact. */ () => props.setBrowsingServices(!browsing)} className="text-xs font-medium text-[var(--brand-violet)]">{browsing ? "Done selecting" : "Add services"}</button></div>}
     {browsing && <BuilderSearchForm {...props} />}
     {/* Empty catalogue results retain the existing permission-aware recovery guidance. */}
     {rows.length === 0 && <BuilderEmptyServices {...props} />}
     {rows.map(/** Every service remains a flat block with direct capability rows and an inline version selector. */ (item) => <CompactServiceCapabilities key={item.service.id} item={item}
       selectedOperations={props.selections[item.service.id] ?? new Set<string>()} selectedEvents={props.webhookSelections[item.service.id] ?? new Set<string>()}
       version={props.versionSelections[item.service.id] ?? item.serviceVersions[0]?.id ?? ""} loaded={Boolean(props.loadedServices[item.service.id])} loading={Boolean(props.loadingService[item.service.id])} allowEvents={props.allowWebhooks}
+      preferEventsVersion={focused?.has(item.service.id) ? props.preferredEventTabVersion : 0}
+      eventNotice={props.eventCoverageNotice?.(item.service.id, item.service.name)}
       onLoad={/** Existing bootstrap owns authorization and remains directly retryable after a failed contract read. */ () => props.onLoadService(item.service.id)}
       onVersion={/** Changing the version invalidates stale operation/resource identities through the shared builder. */ (version) => props.handleVersionSelection(item.service.id, version)}
       onOperation={/** Toggle only the exact operation represented by this row. */ (id) => props.toggleEndpoint(item.service.id, id)}
@@ -1476,6 +1512,9 @@ interface PickerOptions {
   onChange: (services: Record<string, AppServicePin>) => void;
   onPendingChange: (pending: boolean) => void;
   allowWebhooks?: boolean;
+  webhookFocusServices?: WebhookFocusService[];
+  webhookFocusVersion?: number;
+  eventCoverageNotice?: (serviceId: string, serviceName: string) => string;
 }
 const pickerLoader: BuilderData = { services: [], total: 0, isAuth: true, workflows: [], source: null, attachment: null };
 
@@ -1486,8 +1525,8 @@ function pickerAllowsWebhooks(picker?: PickerOptions): boolean {
 }
 
 /** Embeds exact operation and event selection in Unified App authoring without SDK mutation controls. */
-export function AppOperationPicker({ seed, onChange, onPendingChange, allowWebhooks }: PickerOptions) {
-  return <AppServiceBuilder loaderData={pickerLoader} picker={{ seed, onChange, onPendingChange, allowWebhooks }} />;
+export function AppOperationPicker({ seed, onChange, onPendingChange, allowWebhooks, webhookFocusServices, webhookFocusVersion, eventCoverageNotice }: PickerOptions) {
+  return <AppServiceBuilder loaderData={pickerLoader} picker={{ seed, onChange, onPendingChange, allowWebhooks, webhookFocusServices, webhookFocusVersion, eventCoverageNotice }} />;
 }
 
 /** Shares exact selection state while giving embedded Unified App authoring a flat capability presentation. */
@@ -1604,8 +1643,17 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   const [language, setLanguage] = useState<SDKLanguage>("typescript");
   const [describing, setDescribing] = useState(false);
   const [seedBusy, setSeedBusy] = useState(false);
+  const [webhookFocusLoading, setWebhookFocusLoading] = useState(false);
+  const dataRef = useRef(data);
+  dataRef.current = data;
   const selectionRef = useRef(new Set<string>());
   selectionRef.current = new Set([...Object.keys(selections).filter((id) => selections[id].size), ...selectAllServices, ...Object.keys(webhookSelections).filter((id) => webhookSelections[id].size), ...Object.keys(mcpSelections).filter((id) => importedMcpCount(mcpSelections[id]) > 0)]);
+  const focusedWebhookServiceIds = new Set((picker?.webhookFocusServices ?? []).map((item) => item.serviceId).filter(Boolean));
+  const focusedWebhookServiceRef = useRef(focusedWebhookServiceIds);
+  focusedWebhookServiceRef.current = focusedWebhookServiceIds;
+  const webhookFocusKey = (picker?.webhookFocusServices ?? []).map((item) => `${item.serviceId}:${item.serviceName ?? ""}`).join("|");
+  const webhookFocusAttempted = useRef(new Set<string>());
+  const webhookBootstrapAttempted = useRef(new Set<string>());
   const pickerChange = useRef(picker?.onChange);
   pickerChange.current = picker?.onChange;
   const emittedSelection = useRef("");
@@ -1636,8 +1684,10 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   useEffect(() => {
     if (!picker) return;
     let current = true;
-    // A new seed replaces loaded row state, so its service shortcut must be eligible to reopen afterwards.
+    // A new seed replaces loaded row state, so its service shortcuts must be eligible to reopen afterwards.
     focusedServiceAttempt.current = "";
+    webhookFocusAttempted.current.clear();
+    webhookBootstrapAttempted.current.clear();
     setSeedBusy(true);
     loadDescribedSelection(picker.seed).then((proposal) => {
       // Navigation or a newer description supersedes pending hydration.
@@ -1648,6 +1698,82 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
     }).catch((cause) => { if (current) setError(String(cause)); }).finally(() => { if (current) setSeedBusy(false); });
     return () => { current = false; };
   }, [picker?.seed]);
+
+  // Surface services registered by the chosen webhook through authorized selectors so their Events tab opens directly.
+  useEffect(() => {
+    // Wait until seed hydration finishes so focused webhook services append cleanly onto the saved app's rows.
+    if (!picker || seedBusy || hydratedSeed.current !== picker.seed) return;
+    const requested = picker.webhookFocusServices ?? [];
+    const missing = requested.filter((item) => {
+      const attemptKey = `${ownerTeamId}:${item.serviceId}`;
+      // Skip services already present in the picker or previously attempted for this owner scope.
+      return Boolean(item.serviceId) && !dataRef.current.some((row) => row.service.id === item.serviceId) && !webhookFocusAttempted.current.has(attemptKey);
+    });
+    if (missing.length === 0) return;
+    let current = true;
+    let finished = false;
+    const attemptKeys = missing.map((item) => `${ownerTeamId}:${item.serviceId}`);
+    for (const key of attemptKeys) webhookFocusAttempted.current.add(key);
+    setWebhookFocusLoading(true);
+    /** Resolves each webhook service through Engine selectors before reading Registry metadata. */
+    async function loadWebhookServices() {
+      const resolvedIds: string[] = [];
+      for (const item of missing) {
+        try {
+          const selector = await resolveAuthorizedWebhookService(ownerTeamId, item);
+          resolvedIds.push(selector.resource_id);
+        } catch (cause) {
+          // Surface missing selector access without discarding the app's already-loaded services.
+          if (current) setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      }
+      if (!current || resolvedIds.length === 0) return;
+      const servicesData = await loadRegistryServicesByIDs(resolvedIds);
+      // Navigation or a newer seed supersedes this focused webhook lookup.
+      if (!current) return;
+      const additions: ServiceData[] = servicesData.map((service) => ({
+        service,
+        integrations: [],
+        webhooks: service.webhooks || [],
+        serviceVersions: [],
+      }));
+      setData((previous) => mergeNewServiceRows(previous, additions));
+      setSelections((previous) => {
+        const next = { ...previous };
+        for (const row of additions) if (!next[row.service.id]) next[row.service.id] = new Set();
+        return next;
+      });
+      setWebhookSelections((previous) => {
+        const next = { ...previous };
+        for (const row of additions) if (!next[row.service.id]) next[row.service.id] = new Set();
+        return next;
+      });
+    }
+    void loadWebhookServices()
+      .catch((cause) => { if (current) setError(cause instanceof Error ? cause.message : String(cause)); })
+      .finally(() => {
+        finished = true;
+        if (current) setWebhookFocusLoading(false);
+      });
+    return () => {
+      current = false;
+      // Allow a superseded or unmounted attempt to retry if the same webhook service is requested again.
+      if (!finished) {
+        for (const key of attemptKeys) webhookFocusAttempted.current.delete(key);
+      }
+    };
+  }, [picker?.seed, seedBusy, webhookFocusKey, ownerTeamId]);
+
+  // Bootstrap exact versions and webhook events for focused webhook services once their rows enter the picker.
+  useEffect(() => {
+    if (!picker || seedBusy || hydratedSeed.current !== picker.seed) return;
+    for (const item of picker.webhookFocusServices ?? []) {
+      // Only bootstrap unloaded services that are present in data and have not already started loading.
+      if (!data.some((row) => row.service.id === item.serviceId) || loadedServices[item.serviceId] || loadingService[item.serviceId] || webhookBootstrapAttempted.current.has(item.serviceId)) continue;
+      webhookBootstrapAttempted.current.add(item.serviceId);
+      void loadServiceIntegrations(item.serviceId);
+    }
+  }, [picker?.seed, seedBusy, webhookFocusKey, data, loadedServices, loadingService]);
 
   // Publish only complete manual selections; loading a template must never briefly clear its dependencies.
   useEffect(() => {
@@ -1757,9 +1883,9 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
       return { service: s, integrations, webhooks: s.webhooks || [], serviceVersions: s.serviceVersions || [] };
     });
 
-    // Browsing cannot discard rows backing selected operations or overwrite their exact-version metadata.
+    // Browsing cannot discard rows backing selected operations or focused webhook services.
     setData((previous) => {
-      const retained = previous.filter((row) => selectionRef.current.has(row.service.id));
+      const retained = previous.filter((row) => selectionRef.current.has(row.service.id) || focusedWebhookServiceRef.current.has(row.service.id));
       const retainedIDs = new Set(retained.map((row) => row.service.id));
       return [...retained, ...validResults.filter((row) => !retainedIDs.has(row.service.id))];
     });
@@ -2490,8 +2616,15 @@ export function AppServiceBuilder({ loaderData, picker }: { loaderData: BuilderD
   // Embedded selection reuses all paging and version controls without entering a delivery-specific permission gate.
   if (picker) return <fieldset disabled={selectionPending} className="min-w-0 space-y-4">
     {seedBusy && <p role="status" className="text-sm text-slate-500">Loading selected operations…</p>}
+    {webhookFocusLoading && !seedBusy && <p role="status" className="text-sm text-slate-500">Loading webhook service…</p>}
     {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
-    <BuilderCompactSelectionPane {...selection} onLoadService={loadServiceIntegrations} />
+    <BuilderCompactSelectionPane
+      {...selection}
+      onLoadService={loadServiceIntegrations}
+      focusedWebhookServiceIds={focusedWebhookServiceIds}
+      preferredEventTabVersion={picker.webhookFocusVersion}
+      eventCoverageNotice={picker.eventCoverageNotice}
+    />
   </fieldset>;
 
   const pageContent = <BuilderPage
