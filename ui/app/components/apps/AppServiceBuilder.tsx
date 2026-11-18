@@ -1337,6 +1337,20 @@ function mergeNewServiceRows(previous: ServiceData[], additions: ServiceData[]):
   return fresh.length ? [...previous, ...fresh] : previous;
 }
 
+/** Chooses the single expanded service row, respecting explicit collapse while defaulting to the first reviewed row. */
+function resolveExpandedCompactService(
+  activeServiceId: string | null | undefined,
+  rows: ServiceData[],
+  browsing: boolean,
+): string | null {
+  // Explicit user collapse keeps every service row closed until another row is opened.
+  if (activeServiceId === null) return null;
+  // Preserve the user's currently open service whenever it remains visible in the current list.
+  if (activeServiceId && rows.some((row) => row.service.id === activeServiceId)) return activeServiceId;
+  // Review mode opens only the first service by default; catalogue browsing starts collapsed for scannability.
+  return browsing ? null : (rows[0]?.service.id ?? null);
+}
+
 /** Embeds flat capabilities while preserving the shared catalogue, exact version pins and selection callbacks. */
 function BuilderCompactSelectionPane(props: BuilderSelectionPaneProps & {
   onLoadService: (id: string) => void;
@@ -1344,6 +1358,7 @@ function BuilderCompactSelectionPane(props: BuilderSelectionPaneProps & {
   preferredEventTabVersion?: number;
   eventCoverageNotice?: (serviceId: string, serviceName: string) => string;
 }) {
+  const [activeServiceId, setActiveServiceId] = useState<string | null | undefined>(undefined);
   const focused = props.focusedWebhookServiceIds;
   const selected = props.data.filter(
     /** Review includes services with selected capabilities plus services covered by the chosen webhook registration. */
@@ -1353,15 +1368,29 @@ function BuilderCompactSelectionPane(props: BuilderSelectionPaneProps & {
   // Clearing the last capability must keep discovery reachable.
   const browsing = props.browsingServices || orderedSelected.length === 0;
   const rows = browsing ? props.data : orderedSelected;
+  // Re-focusing a webhook registration expands its service at the top and collapses sibling services.
+  useEffect(() => {
+    if (props.preferredEventTabVersion) setActiveServiceId(undefined);
+  }, [props.preferredEventTabVersion]);
+  const expandedServiceId = resolveExpandedCompactService(activeServiceId, rows, browsing);
+  /** Keeps at most one service expanded at a time and loads unloaded catalogue rows on expand. */
+  function toggleCompactService(serviceId: string) {
+    const next = expandedServiceId === serviceId ? null : serviceId;
+    setActiveServiceId(next);
+    // Expanding an unloaded service fetches its exact versions and capabilities immediately.
+    if (next && !props.loadedServices[serviceId] && !props.loadingService[serviceId]) props.onLoadService(serviceId);
+  }
   return <div className="min-w-0 space-y-3">
     {/* Catalogue browsing is explicit, without nesting a second selected-services header inside the form section. */}
     {orderedSelected.length > 0 && <div className="flex justify-end"><button type="button" onClick={/** Switching catalogue visibility leaves all reviewed selections intact. */ () => props.setBrowsingServices(!browsing)} className="text-xs font-medium text-[var(--brand-violet)]">{browsing ? "Done selecting" : "Add services"}</button></div>}
     {browsing && <BuilderSearchForm {...props} />}
     {/* Empty catalogue results retain the existing permission-aware recovery guidance. */}
     {rows.length === 0 && <BuilderEmptyServices {...props} />}
-    {rows.map(/** Every service remains a flat block with direct capability rows and an inline version selector. */ (item) => <CompactServiceCapabilities key={item.service.id} item={item}
+    {rows.map(/** Every service remains a collapsible block with direct capability tabs and an inline version selector. */ (item) => <CompactServiceCapabilities key={item.service.id} item={item}
       selectedOperations={props.selections[item.service.id] ?? new Set<string>()} selectedEvents={props.webhookSelections[item.service.id] ?? new Set<string>()}
       version={props.versionSelections[item.service.id] ?? item.serviceVersions[0]?.id ?? ""} loaded={Boolean(props.loadedServices[item.service.id])} loading={Boolean(props.loadingService[item.service.id])} allowEvents={props.allowWebhooks}
+      expanded={expandedServiceId === item.service.id}
+      onToggleExpanded={/** Keep only one service expanded at a time while preserving selections in collapsed rows. */ () => toggleCompactService(item.service.id)}
       preferEventsVersion={focused?.has(item.service.id) ? props.preferredEventTabVersion : 0}
       eventNotice={props.eventCoverageNotice?.(item.service.id, item.service.name)}
       onLoad={/** Existing bootstrap owns authorization and remains directly retryable after a failed contract read. */ () => props.onLoadService(item.service.id)}

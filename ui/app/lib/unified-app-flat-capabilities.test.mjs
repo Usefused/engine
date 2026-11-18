@@ -45,6 +45,16 @@ test("flat capabilities expose direct operations, events and immutable versions"
     assert.match(document.querySelector('[role="note"]').textContent, /registers Stripe, not CRM/);
     await act(/** Switching back to Operations hides the Events-only coverage notice. */ async () => Simulate.click(document.querySelector('[role="tab"]')));
     assert.equal(document.querySelector('[role="note"]'), null);
+    // Collapsing a service hides its capability list while keeping its name, selection summary, and toggle button visible.
+    let toggleCount = 0;
+    await act(async () => root.render(createElement(exports.CompactServiceCapabilities, { ...props, expanded: false, onToggleExpanded: () => { toggleCount += 1; } })));
+    const toggle = document.querySelector('button[aria-expanded="false"]');
+    assert.ok(toggle, 'collapsed service exposes an aria-expanded="false" toggle');
+    assert.match(toggle.textContent, /CRM/);
+    assert.match(toggle.textContent, /1 op/);
+    assert.equal(document.querySelector('input[aria-label="getCustomer"]'), null);
+    await act(async () => Simulate.click(toggle));
+    assert.equal(toggleCount, 1);
   } finally {
     await act(/** Dispose mounted effects before restoring the caller's document. */ async () => root.unmount()); dom.window.close();
     globalThis.window = before.window; globalThis.document = before.document; globalThis.IS_REACT_ACT_ENVIRONMENT = before.act;

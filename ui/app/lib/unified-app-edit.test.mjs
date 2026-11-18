@@ -61,6 +61,10 @@ test("picker hydration retains saved service aliases", () => {
   const config = unifiedEditConfig(saved, { ...draft, services: selected }, "1.0.1");
   assert.deepEqual(config.services.Stripe.operations, ["GetCustomers", "PostCustomers"]);
   assert.equal(config.services.Stripe.bucket, "billing");
+  // An alias explicitly renamed in Code must survive later Config-tab checkbox updates.
+  const renamedCurrent = { "@provider/stripe": { ...draft.services.Stripe } };
+  const keptRename = unifiedEditSelections(saved, { "@provider/stripe": { ...draft.services.Stripe, operations: ["GetCustomers"] } }, renamedCurrent);
+  assert.deepEqual(Object.keys(keptRename), ["@provider/stripe"]);
 });
 
 // A service replacement cannot inherit secrets or routing intended for a different provider identity.

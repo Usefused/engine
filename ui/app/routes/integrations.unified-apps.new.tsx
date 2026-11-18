@@ -301,10 +301,10 @@ export default function CreateUnifiedApp() {
     }
   }
 
-  /** Manual operation changes retain saved aliases and source while invalidating earlier compilation receipts. */
+  /** Manual operation changes retain authored aliases and source while invalidating earlier compilation receipts. */
   function selectOperations(services: Record<string, AppServicePin>) {
-    // Existing source can refer to authored aliases that differ from the catalogue's qualified service names.
-    if (editSource) services = unifiedEditSelections(editSource, services);
+    // Existing source can refer to authored aliases (including keys renamed in Code) that differ from picker references.
+    if (editSource) services = unifiedEditSelections(editSource, services, currentDraft.current?.services);
     // Genuine manual edits invalidate a cached source retry; hydration of the same pins does not.
     if (pendingDescription.current && describeSelectionKey(services) !== describeSelectionKey(pendingDescription.current.proposal.services)) pendingDescription.current = null;
     setDraft((previous) => ({ name: "", description: "", source: "", ...previous, services }));

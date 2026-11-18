@@ -38,9 +38,16 @@ export function nextUnifiedVersion(version: string): string {
   return `${match[1]}.${match[2]}.${BigInt(match[3]) + 1n}`;
 }
 
-/** Keeps saved service aliases stable when the shared picker emits canonical provider-qualified names. */
-export function unifiedEditSelections(saved: UnifiedAppSource, selected: UnifiedDraft["services"]): UnifiedDraft["services"] {
+/** Keeps authored service aliases stable when the shared picker emits canonical provider-qualified names. */
+export function unifiedEditSelections(
+  saved: UnifiedAppSource,
+  selected: UnifiedDraft["services"],
+  current?: UnifiedDraft["services"],
+): UnifiedDraft["services"] {
   return Object.fromEntries(Object.entries(selected).flatMap(([key, pin]) => {
+    // Preserve an alias the author explicitly renamed in Code before falling back to the saved baseline's alias.
+    const active = current ? Object.entries(current).filter(([, entry]) => entry.service_id === pin.service_id).map(([alias]) => alias) : [];
+    if (active.length) return active.map((alias) => [alias, { ...pin }]);
     const originals = saved.service_pins.filter((item) => item.service_id === pin.service_id);
     // Newly selected providers use the picker's canonical reference; retained providers keep their authored names.
     if (!originals.length) return [[key, pin]];

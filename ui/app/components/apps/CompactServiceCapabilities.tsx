@@ -1,4 +1,5 @@
 import { useEffect, useId, useState, type KeyboardEvent } from "react";
+import { ChevronRight } from "lucide-react";
 import { Select } from "~/components/forms/Select";
 import type { IntegrationObject, Service, WebhookObject } from "~/lib/api";
 
@@ -8,6 +9,7 @@ interface CompactServiceData { service: Service; integrations: IntegrationObject
 interface Props {
   item: CompactServiceData; selectedOperations: Set<string>; selectedEvents: Set<string>;
   version: string; loaded: boolean; loading: boolean; allowEvents?: boolean;
+  expanded?: boolean; onToggleExpanded?: () => void;
   preferEventsVersion?: number; eventNotice?: string;
   onLoad: () => void; onVersion: (version: string) => void;
   onOperation: (id: string) => void; onEvent: (id: string) => void;
@@ -15,20 +17,73 @@ interface Props {
   resourceLoading: Record<string, boolean>; resourceMore: Record<string, boolean>;
 }
 
-/** Presents exact-version capabilities as a flat list with one pair of tabs and no nested disclosures. */
+/** Summarizes selected operations and events so collapsed service headers still show active scope. */
+function selectionSummary(operations: number, events: number, allowEvents?: boolean): string {
+  const parts: string[] = [];
+  // Omit zero counts so unselected services stay uncluttered in the collapsed list.
+  if (operations > 0) parts.push(`${operations} ${operations === 1 ? "op" : "ops"}`);
+  if (allowEvents && events > 0) parts.push(`${events} ${events === 1 ? "event" : "events"}`);
+  return parts.join(" · ");
+}
+
+/** Renders the service heading, selection summary, optional collapse toggle, and inline version picker. */
+function CompactServiceHeader({ props, id, isExpanded, summary }: { props: Props; id: string; isExpanded: boolean; summary: string }) {
+  const { item } = props;
+  const title = <>
+    <h4 title={item.service.canonical_ref ?? undefined} className="min-w-0 truncate text-sm font-semibold text-slate-900">{item.service.name}</h4>
+    {summary && <span className="shrink-0 text-xs font-normal text-slate-400">{summary}</span>}
+  </>;
+  return <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+    {/* Keep the toggle button separate from the version selector so changing versions never collapses the service. */}
+    {props.onToggleExpanded ? <button type="button" aria-expanded={isExpanded} aria-controls={`${id}-body`} onClick={props.onToggleExpanded} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+      <ChevronRight className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${isExpanded ? "rotate-90" : ""}`} aria-hidden="true" />
+      {title}
+    </button> : <div className="flex min-w-0 flex-1 items-center gap-2">{title}</div>}
+    {/* Version belongs beside the service identity, without a separate configuration card. */}
+    {item.serviceVersions.length > 0 && <Select aria-label={`${item.service.name} version`} density="compact" value={props.version} onChange={/** Pin every subsequent operation/resource read to the explicitly chosen immutable version. */ (event) => props.onVersion(event.target.value)} className="w-28">
+      {item.serviceVersions.map(/** Versions remain exact Registry identities rather than labels resolved at deployment time. */ (version) => <option key={version.id} value={version.id}>{version.header_value || version.name}</option>)}
+    </Select>}
+  </div>;
+}
+
+/** Renders the capability tabs and rows inside an expanded service block. */
+function CompactServiceBody({ props, id, tab, query, onTab, onQuery, onNavigate }: {
+  props: Props; id: string; tab: CapabilityTab; query: string;
+  onTab: (tab: CapabilityTab) => void; onQuery: (query: string) => void;
+  onNavigate: (event: KeyboardEvent<HTMLDivElement>) => void;
+}) {
+  const { item } = props;
+  // Catalogue rows load their contract explicitly; hydrated source selections are already ready to edit.
+  if (!props.loaded) {
+    return <button type="button" disabled={props.loading} onClick={props.onLoad} className="mt-2 text-xs font-medium text-[var(--brand-violet)] disabled:opacity-50">{props.loading ? "Loading capabilities…" : "Choose capabilities"}</button>;
+  }
+  return <div className="mt-2 space-y-2">
+    <div role="tablist" aria-label={`${item.service.name} capability type`} onKeyDown={onNavigate} className="flex gap-4 border-b border-slate-200">
+      <CapabilityTabButton id={id} value="operations" active={tab} label="Operations" count={item.service.endpoint_count ?? item.integrations.length} selected={props.selectedOperations.size} onSelect={onTab} />
+      {/* Event selection is available only to callers that explicitly enabled provider ingress capabilities. */}
+      {props.allowEvents && <CapabilityTabButton id={id} value="events" active={tab} label="Events" count={item.service.webhook_count ?? item.webhooks.length} selected={props.selectedEvents.size} onSelect={onTab} />}
+    </div>
+    <CapabilityOptions settings={props} id={id} tab={tab} query={query} onQuery={onQuery} />
+  </div>;
+}
+
+/** Presents exact-version capabilities in a collapsible service block with flat capability tabs inside. */
 export function CompactServiceCapabilities(props: Props) {
   const { item } = props;
+  const isExpanded = props.expanded ?? true;
+  const preferEvents = Boolean(props.allowEvents && props.preferEventsVersion);
   // Open directly on Events when this service was focused from a webhook registration choice.
-  const [tab, setTab] = useState<CapabilityTab>(props.allowEvents && props.preferEventsVersion ? "events" : "operations");
+  const [tab, setTab] = useState<CapabilityTab>(preferEvents ? "events" : "operations");
   const [query, setQuery] = useState("");
   const id = useId();
+  const summary = selectionSummary(props.selectedOperations.size, props.selectedEvents.size, props.allowEvents);
   // Re-choosing a webhook for an already-mounted service switches it directly to Events without altering selections.
   useEffect(() => {
-    if (props.allowEvents && props.preferEventsVersion) {
+    if (preferEvents) {
       setTab("events");
       setQuery("");
     }
-  }, [props.allowEvents, props.preferEventsVersion]);
+  }, [preferEvents, props.preferEventsVersion]);
   /** Keeps keyboard and pointer tab selection on the same visible list without carrying an unrelated search across categories. */
   function selectTab(next: CapabilityTab) { setTab(next); setQuery(""); }
   /** Provides native tab-list navigation while keeping one category in the page's tab order. */
@@ -45,22 +100,9 @@ export function CompactServiceCapabilities(props: Props) {
     target.click(); target.focus();
   }
   return <section aria-label={`${item.service.name} capabilities`} className="min-w-0 border-t border-slate-200 py-3 first:border-t-0 first:pt-0">
-    <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-      <h4 title={item.service.canonical_ref ?? undefined} className="min-w-0 truncate text-sm font-semibold text-slate-900">{item.service.name}</h4>
-      {/* Version belongs beside the service identity, without a separate configuration card. */}
-      {item.serviceVersions.length > 0 && <Select aria-label={`${item.service.name} version`} density="compact" value={props.version} onChange={/** Pin every subsequent operation/resource read to the explicitly chosen immutable version. */ (event) => props.onVersion(event.target.value)} className="w-28">
-        {item.serviceVersions.map(/** Versions remain exact Registry identities rather than labels resolved at deployment time. */ (version) => <option key={version.id} value={version.id}>{version.header_value || version.name}</option>)}
-      </Select>}
-    </div>
-    {/* Catalogue rows load their contract explicitly; hydrated source selections are already ready to edit. */}
-    {!props.loaded ? <button type="button" disabled={props.loading} onClick={props.onLoad} className="mt-2 text-xs font-medium text-[var(--brand-violet)] disabled:opacity-50">{props.loading ? "Loading capabilities…" : "Choose capabilities"}</button> : <div className="mt-2 space-y-2">
-      <div role="tablist" aria-label={`${item.service.name} capability type`} onKeyDown={navigate} className="flex gap-4 border-b border-slate-200">
-        <CapabilityTabButton id={id} value="operations" active={tab} label="Operations" count={item.service.endpoint_count ?? item.integrations.length} selected={props.selectedOperations.size} onSelect={selectTab} />
-        {/* Event selection is available only to callers that explicitly enabled provider ingress capabilities. */}
-        {props.allowEvents && <CapabilityTabButton id={id} value="events" active={tab} label="Events" count={item.service.webhook_count ?? item.webhooks.length} selected={props.selectedEvents.size} onSelect={selectTab} />}
-      </div>
-      <CapabilityOptions settings={props} id={id} tab={tab} query={query} onQuery={setQuery} />
-    </div>}
+    <CompactServiceHeader props={props} id={id} isExpanded={isExpanded} summary={summary} />
+    {/* Only the active service renders its capability list; collapsed services keep their selections intact. */}
+    {isExpanded && <div id={`${id}-body`}><CompactServiceBody props={props} id={id} tab={tab} query={query} onTab={selectTab} onQuery={setQuery} onNavigate={navigate} /></div>}
   </section>;
 }
 
