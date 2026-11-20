@@ -1009,11 +1009,6 @@ func engineSchemaQueries() []string {
 				 (owner_subject_id IS NOT NULL)::int + (owner_team_id IS NOT NULL)::int = 1)
 			)
 		);`,
-		// Source-format versions rerun additive authoring upgrades without changing immutable runtime or plan hashes.
-		`ALTER TABLE fused_config_states ADD COLUMN IF NOT EXISTS unified_source_migrated_at timestamptz;`,
-		`ALTER TABLE fused_config_states ADD COLUMN IF NOT EXISTS unified_source_format_version integer NOT NULL DEFAULT 0;`,
-		// The pending-work index bounds startup batches even after earlier format migrations marked every row.
-		`CREATE INDEX IF NOT EXISTS idx_fused_config_states_unified_source_v2 ON fused_config_states(id) WHERE config_type='unified_app' AND unified_source_format_version < 2;`,
 		// Live config state must admit the same distinct hosted App kind as a fresh database.
 		`ALTER TABLE fused_config_states DROP CONSTRAINT IF EXISTS fused_config_states_config_type_check;
 		ALTER TABLE fused_config_states ADD CONSTRAINT fused_config_states_config_type_check CHECK (config_type IN ('workspace', 'sdk', 'mcp', 'unified_app', 'webhook'));
