@@ -59,7 +59,7 @@ function ContractSchema({ direction, schema, view, appID }: { direction: "input"
       {/* Unavailable examples must never copy a blank or partial payload. */}
       {json !== undefined && <CopyButton label={label} value={json} />}
     </div>
-    {/* Fields remain a schema tree; their copy action supplies editable values without adding another view. */}
-    {view === "fields" ? <div className="max-h-96 flex-1 overflow-auto bg-[#161c27] p-4 [&>div]:text-sm [&>div]:leading-6"><SchemaViewer schema={schema} serviceId={appID} componentScope={appID} allowRemoteRefs={false} /></div> : <pre className="max-h-96 flex-1 overflow-auto p-4 text-sm leading-6 text-slate-700"><code>{json}</code></pre>}
+    {/* Fields remain a schema tree; JSON Schema wraps long strings and URLs instead of scrolling horizontally. */}
+    {view === "fields" ? <div className="max-h-96 flex-1 overflow-auto bg-[#161c27] p-4 [&>div]:text-sm [&>div]:leading-6"><SchemaViewer schema={schema} serviceId={appID} componentScope={appID} allowRemoteRefs={false} /></div> : <pre className="max-h-96 flex-1 overflow-x-hidden overflow-y-auto whitespace-pre-wrap break-words [overflow-wrap:anywhere] p-4 text-sm leading-6 text-slate-700"><code>{json}</code></pre>}
   </div>;
 }

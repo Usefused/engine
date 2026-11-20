@@ -2,15 +2,17 @@ import { UnifiedAppHeaderActions } from "~/components/apps/UnifiedAppHeaderActio
 import { UnifiedAppWebhooks } from "~/components/apps/UnifiedAppWebhooks";
 import { unifiedAppTabs, selectedUnifiedAppTab } from "~/lib/unified-app-tabs";
 import { UnifiedAppSchedules } from "~/components/apps/UnifiedAppSchedules";
-import { useEffect, useState } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "@remix-run/react";
+import { useEffect, useState, type ReactNode } from "react";
+import { useNavigate, useParams, useSearchParams } from "@remix-run/react";
 import { UnifiedAppContract } from "~/components/apps/UnifiedAppContract";
 import { UnifiedAppUsage } from "~/components/apps/UnifiedAppUsage";
+import { AppConnectedServices } from "~/components/apps/AppConnectedServices";
 import { AppExecutionEndpoint } from "~/components/apps/AppExecutionEndpoint";
 import { AppExecutionTokens } from "~/components/apps/AppExecutionTokens";
-import { ArrowUpRight, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { api } from "~/lib/api";
-import { serviceDetailPath } from "~/lib/service-navigation";
+import { appConnectedServiceSelections, type AppConnectedServiceSelection, type AppServiceSummary } from "~/lib/app-connected-services";
+import type { AppSelectionPayload } from "~/lib/app-selection-v3";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasResourcePermission, hasWorkspacePermission } from "~/lib/current-actor-access";
 import { AppDetailBackLink, AppDetailHeader, AppDetailTabs } from "~/components/apps/AppDetailChrome";
@@ -20,8 +22,7 @@ import { AppActivityOverview } from "~/components/activity/AppActivityOverview";
 import { AppRequestsPanel } from "~/components/activity/AppRequestsPanel";
 import { useToast } from "~/components/Toast";
 
-interface UnifiedApp { app_id: string; app_family_id: string; name: string; description: string; version: string; status: string; kind: string; created_at: string }
-interface AppService { service_id: string; service_name: string; service_slug: string; version: string; endpoint_count: number }
+interface UnifiedApp { app_id: string; app_family_id: string; name: string; description: string; version: string; status: string; kind: string; created_at: string; selections: AppSelectionPayload[] }
 
 /** Groups app automation and source actions behind family management and catalogue publication permissions. */
 export default function UnifiedAppDetails() {
@@ -32,7 +33,8 @@ export default function UnifiedAppDetails() {
   const toast = useToast();
   const { access } = useCurrentActorAccess();
   const [app, setApp] = useState<UnifiedApp | null>(null);
-  const [services, setServices] = useState<AppService[]>([]);
+  const [services, setServices] = useState<AppServiceSummary[]>([]);
+  const [selections, setSelections] = useState<AppConnectedServiceSelection[]>([]);
   const [versions, setVersions] = useState<AppVersionHistoryItem[]>([]);
   const [error, setError] = useState("");
   const [deleting, setDeleting] = useState("");
@@ -42,22 +44,26 @@ export default function UnifiedAppDetails() {
   // Late responses from a sibling version must never replace the current immutable app.
   useEffect(() => {
     let current = true;
-    setApp(null); setError(""); setServices([]); setVersions([]); setTraffic(null);
+    setApp(null); setError(""); setServices([]); setSelections([]); setVersions([]); setTraffic(null);
     /** Loads exact identity before asking for its authorized family history. */
     async function load() {
       try {
-        const data = await api.mcpGraphql<{ app: UnifiedApp; appServices: AppService[] }>(`query UnifiedAppDetails($id: String!) {
-          app(app_id: $id) { app_id app_family_id name description version status kind created_at }
-          appServices(app_id: $id) { service_id service_name service_slug version endpoint_count }
+        const data = await api.mcpGraphql<{ app: UnifiedApp; appServices: AppServiceSummary[] }>(`query UnifiedAppDetails($id: String!) {
+          app(app_id: $id) {
+            app_id app_family_id name description version status kind created_at
+            selections { mcp_capabilities { kind name operation_id } service_id service_version_id schema_version endpoint_ids operation_names webhook_ids webhook_names select_all webhook_select_all }
+          }
+          appServices(app_id: $id) { service_id service_name service_slug version select_all endpoint_count webhook_count }
         }`, { id });
         // Other adapters cannot accidentally render as a hosted Unified App.
         if (data.app?.kind !== "unified_app") throw new Error("Unified App not found.");
+        const detailedSelections = appConnectedServiceSelections(data.app.selections, data.appServices);
         const history = await api.mcpGraphql<{ appVersions: AppVersionHistoryItem[] }>(`query UnifiedAppVersions($family: String!) {
           appVersions(app_family_id: $family) { id: app_id version created_at }
         }`, { family: data.app.app_family_id });
         const deployment = await api.appConfig.traffic(id);
         // Cleanup owns the stale response boundary for both dependent requests.
-        if (current) { setApp(data.app); setServices(data.appServices); setVersions(history.appVersions); setTraffic(deployment.active_app_id); }
+        if (current) { setApp(data.app); setServices(data.appServices); setSelections(detailedSelections); setVersions(history.appVersions); setTraffic(deployment.active_app_id); }
       } catch (cause) { if (current) setError(String(cause)); }
     }
     void load();
@@ -130,14 +136,77 @@ export default function UnifiedAppDetails() {
     {/* Private source and successor deployment require management of this exact family. */}
     <AppDetailHeader kind="unified_app" name={app.name} summary={app.description} status={app.status} version={app.version} createdAt={app.created_at} action={<div className="flex shrink-0 items-center gap-2"><UnifiedAppUsage key={id} app={app} executionFamilyID={executionFamilyID} />{canManage && <UnifiedAppHeaderActions key={id} appID={id} canPublishTemplate={canPublishTemplate} />}</div>} />
     <AppDetailTabs label="Unified App details" active={active} tabs={tabs} onChange={(tab) => setParams({ tab })} />
-    {/* Only the selected permission-checked tab mounts its data consumer. */}
-    {active === "overview" && <div className="space-y-6"><section aria-label="API endpoint" className="rounded-xl border border-slate-200 bg-white p-5"><div className="flex items-center justify-between gap-3"><h2 className="font-semibold text-slate-900">API endpoint</h2><AppExecutionTokens familyID={app.app_family_id} kind="unified_app" /></div><AppExecutionEndpoint appID={app.app_family_id} appName={app.name} /><p className="mt-2 text-xs text-slate-500">This URL follows the active version. Your URL and tokens stay the same when traffic switches.</p></section><UnifiedAppContract key={id} appID={id} version={app.version} /><section className="overflow-hidden rounded-xl border border-slate-200 bg-white"><h2 className="border-b border-slate-100 px-5 py-4 font-semibold">Connected services</h2>{/* The whole row is a native link, preserving keyboard navigation and modifier-click behavior. */}{services.map((service) => <Link key={service.service_id} to={serviceDetailPath(service.service_id, service.service_slug)} className="group flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-5 py-4 text-sm transition hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-slate-950"><span className="font-medium text-slate-900 group-hover:text-[var(--brand-violet)]">{service.service_name}</span><span className="inline-flex items-center gap-3 text-slate-500">{service.version} · {service.endpoint_count} operations<ArrowUpRight aria-hidden="true" className="h-4 w-4 shrink-0" /></span></Link>)}</section></div>}
-    {active === "analytics" && <AppActivityOverview key={id} appId={id} downloads={null} pendingDriftCount={0} hostedSource services={services} />}
-    {active === "requests" && <AppRequestsPanel key={id} appId={id} consumerName={app.name} />}
-    {/* Webhook management follows current traffic even when viewing a retained version. */}
-    {active === "webhooks" && <UnifiedAppWebhooks key={traffic || id} appID={traffic || id} active={Boolean(traffic)} />}
-    {/* Scheduling reuses the current family traffic target even when viewing a retained version. */}
-    {active === "schedules" && <UnifiedAppSchedules key={app.app_family_id} appID={id} />}
-    {active === "changes" && <AppVersionSelect versions={versions} current={{ id, version: app.version, created_at: app.created_at }} activeId={traffic} busy={[promoting, deleting].some(Boolean)} canDelete={canManage} onSelect={(next) => navigate(`/integrations/unified-apps/${next}?tab=changes`)} onDelete={deleteVersion} actions={versionActions({ id, version: app.version, created_at: app.created_at })} />}
+    <UnifiedAppTabBody
+      active={active}
+      app={app}
+      id={id}
+      services={services}
+      selections={selections}
+      versions={versions}
+      traffic={traffic}
+      busy={[promoting, deleting].some(Boolean)}
+      canManage={canManage}
+      onSelectVersion={(next) => navigate(`/integrations/unified-apps/${next}?tab=changes`)}
+      onDeleteVersion={deleteVersion}
+      versionActions={versionActions({ id, version: app.version, created_at: app.created_at })}
+    />
   </div>;
+}
+
+/** Renders the active Unified App tab so only the selected permission-checked panel mounts its consumers. */
+function UnifiedAppTabBody({
+  active,
+  app,
+  id,
+  services,
+  selections,
+  versions,
+  traffic,
+  busy,
+  canManage,
+  onSelectVersion,
+  onDeleteVersion,
+  versionActions,
+}: {
+  active: string;
+  app: UnifiedApp;
+  id: string;
+  services: AppServiceSummary[];
+  selections: AppConnectedServiceSelection[];
+  versions: AppVersionHistoryItem[];
+  traffic: string | null;
+  busy: boolean;
+  canManage: boolean;
+  onSelectVersion: (next: string) => void;
+  onDeleteVersion: (version: AppVersionHistoryItem) => void;
+  versionActions: ReactNode;
+}) {
+  // Each tab branch mounts its own data consumer only when active.
+  if (active === "overview") {
+    return (
+      <div className="space-y-6">
+        <section aria-label="API endpoint" className="rounded-xl border border-slate-200 bg-white p-5">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="font-semibold text-slate-900">API endpoint</h2>
+            <AppExecutionTokens familyID={app.app_family_id} kind="unified_app" />
+          </div>
+          <AppExecutionEndpoint appID={app.app_family_id} appName={app.name} />
+          <p className="mt-2 text-xs text-slate-500">This URL follows the active version. Your URL and tokens stay the same when traffic switches.</p>
+        </section>
+        <UnifiedAppContract key={id} appID={id} version={app.version} />
+        <section aria-label="Connected services" className="space-y-3">
+          <h2 className="font-semibold text-slate-900">Connected services</h2>
+          <AppConnectedServices selections={selections} />
+        </section>
+      </div>
+    );
+  }
+  if (active === "analytics") return <AppActivityOverview key={id} appId={id} downloads={null} pendingDriftCount={0} hostedSource services={services} />;
+  if (active === "requests") return <AppRequestsPanel key={id} appId={id} consumerName={app.name} />;
+  // Webhook management follows current traffic even when viewing a retained version.
+  if (active === "webhooks") return <UnifiedAppWebhooks key={traffic || id} appID={traffic || id} active={Boolean(traffic)} />;
+  // Scheduling reuses the current family traffic target even when viewing a retained version.
+  if (active === "schedules") return <UnifiedAppSchedules key={app.app_family_id} appID={id} />;
+  if (active === "changes") return <AppVersionSelect versions={versions} current={{ id, version: app.version, created_at: app.created_at }} activeId={traffic} busy={busy} canDelete={canManage} onSelect={onSelectVersion} onDelete={onDeleteVersion} actions={versionActions} />;
+  return null;
 }
