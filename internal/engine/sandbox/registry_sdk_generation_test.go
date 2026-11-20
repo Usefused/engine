@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -79,5 +80,22 @@ func TestHTTPRegistryClientGenerateSDKBoundsAndRedactsFailures(t *testing.T) {
 	// The reader consumes at most one proof byte beyond the configured response ceiling.
 	if err == nil || !strings.Contains(err.Error(), "exceeded") {
 		t.Fatalf("oversized response error = %v", err)
+	}
+}
+
+// TestHTTPRegistryClientGenerateSDKClassifiesUnavailableGenerator proves a 409 retired-generator envelope maps to the terminal sentinel while redacting Registry prose.
+func TestHTTPRegistryClientGenerateSDKClassifiesUnavailableGenerator(t *testing.T) {
+	t.Setenv("FUSED_ENV", "development")
+	secret := "do-not-expose-registry-message"
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":{"code":"sdk_generator_version_unavailable","message":"` + secret + `"}}`))
+	}))
+	t.Cleanup(registry.Close)
+	_, err := NewHTTPRegistryClient(registry.URL, "engine-license").GenerateSDK(context.Background(), models.SDKGenerationRequest{})
+	// The finalizer needs the typed sentinel to stop retrying, without leaking Registry error prose.
+	if !errors.Is(err, models.ErrSDKGeneratorVersionUnavailable) || strings.Contains(err.Error(), secret) {
+		t.Fatalf("GenerateSDK() error = %v", err)
 	}
 }

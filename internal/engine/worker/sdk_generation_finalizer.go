@@ -220,6 +220,10 @@ func (w *SDKGenerationFinalizer) finalizeBuild(ctx context.Context, build *store
 	requestCtx, cancel := context.WithTimeout(ctx, w.opts.RequestTimeout)
 	defer cancel()
 	result, err := w.client.GenerateSDK(requestCtx, build.Request)
+	// A retired generator version can never succeed on retry, so fail the pending build to stop the poll loop.
+	if errors.Is(err, models.ErrSDKGeneratorVersionUnavailable) {
+		return w.failUnavailableGeneratorBuild(ctx, build)
+	}
 	// Transport ambiguity must preserve pending state for idempotent recovery.
 	if err != nil {
 		return "", err
@@ -233,6 +237,20 @@ func (w *SDKGenerationFinalizer) finalizeBuild(ctx context.Context, build *store
 		return result.Status, nil
 	}
 	return w.finalizeTerminalBuild(ctx, build, result)
+}
+
+// failUnavailableGeneratorBuild applies the terminal failure CAS when Registry rejects a retired generator version.
+func (w *SDKGenerationFinalizer) failUnavailableGeneratorBuild(ctx context.Context, build *store.SDKGenerationBuild) (string, error) {
+	// Retain the local identity guard so a malformed database row cannot mutate state.
+	if !validRetainedSDKGenerationIdentity(build) {
+		return "", errors.New("SDK generation build identity is invalid")
+	}
+	changed, err := w.store.FailSDKGeneration(ctx, build.Request.AppID, build.JobID, build.Request.IdempotencyKey)
+	// A lost CAS means another owner already settled the row; report no duplicate transition.
+	if err != nil || !changed {
+		return "", err
+	}
+	return models.SDKGenerationStatusFailed, nil
 }
 
 // finalizeTerminalBuild applies the job-and-attempt CAS and emits activation only for its exact winner.

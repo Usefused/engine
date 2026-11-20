@@ -183,10 +183,15 @@ func runEngine(cmd *cobra.Command) {
 		os.Exit(1)
 	}
 
-	entitlement, authorizationRevision, managedAuthBrokerURL := bootstrapRegistryIdentity(ctx, engineStore, registryClient, envLicense)
+	entitlement, authorizationRevision, engineID, managedAuthBrokerURL := bootstrapRegistryIdentity(ctx, engineStore, registryClient, envLicense)
 	// Private authoring is upgraded before HTTP or workers can expose an older split-source view.
 	if err := runUnifiedAppSourceMigration(ctx, postgresStore); err != nil {
 		slog.ErrorContext(ctx, "FATAL: Unified App source migration failed", slog.String("error_code", "unified_app_source_migration_failed"))
+		os.Exit(1)
+	}
+	// Retired v6/v7 SDK generator versions are upgraded before package renewal or finalization workers replay against Registry.
+	if err := runSDKGeneratorVersionMigration(ctx, postgresStore, engineID); err != nil {
+		slog.ErrorContext(ctx, "FATAL: SDK generator version migration failed", slog.String("error_code", "sdk_generator_version_migration_failed"))
 		os.Exit(1)
 	}
 	// Load the persisted entitlement into the in-memory cache so runtime limit checks
@@ -400,6 +405,22 @@ func runUnifiedAppSourceMigration(ctx context.Context, repository store.Store) e
 		return err
 	}
 	slog.InfoContext(ctx, "Unified App source migration complete", slog.Int("migrated", result.MigratedRows), slog.Int("already_owned", result.AlreadyOwned), slog.Int("skipped", result.SkippedRows))
+	return nil
+}
+
+// runSDKGeneratorVersionMigration upgrades v6/v7 SDK rows to the active generator contract before background workers start.
+func runSDKGeneratorVersionMigration(ctx context.Context, repository store.Store, engineID uuid.UUID) error {
+	migrator, ok := repository.(store.SDKGeneratorVersionMigrationStore)
+	// Production stores must support generator-version migration before finalization replays pending builds.
+	if !ok {
+		return errors.New("SDK generator version migration is unavailable")
+	}
+	result, err := migrator.MigrateSDKGeneratorVersions(ctx, engineID)
+	// Startup logs aggregate counts only so app identities never leak into operational logs.
+	if err != nil {
+		return err
+	}
+	slog.InfoContext(ctx, "SDK generator version migration complete", slog.Int("migrated", result.MigratedRows), slog.Int("rebound_jobs", result.ReboundJobIDs))
 	return nil
 }
 
@@ -726,7 +747,8 @@ func startConnectedAuthRefreshWorker(ctx context.Context, refreshStore worker.Co
 	return refreshWorker, nil
 }
 
-func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, envLicense string) (models.RuntimeEntitlement, int64, string) {
+// bootstrapRegistryIdentity authenticates the licensed Engine with Registry and initializes the singleton workspace.
+func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient, envLicense string) (models.RuntimeEntitlement, int64, uuid.UUID, string) {
 	slog.InfoContext(ctx, "FUSED_LICENSE_KEY present. Attempting Registry Handshake...")
 	handshake, err := registryClient.HandshakeWithEntitlements(ctx)
 	if err != nil {
@@ -738,6 +760,12 @@ func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, reg
 	accUUID, err := uuid.Parse(accountIDStr)
 	if err != nil {
 		slog.ErrorContext(ctx, "FATAL: Registry returned invalid account ID format", slog.Any("error", err))
+		os.Exit(1)
+	}
+	// Registry always issues a UUID engine_id for the authenticated license key, which deterministic SDK job migration requires.
+	engineUUID, err := uuid.Parse(handshake.EngineID)
+	if err != nil {
+		slog.ErrorContext(ctx, "FATAL: Registry returned invalid engine ID format", slog.Any("error", err))
 		os.Exit(1)
 	}
 
@@ -784,7 +812,7 @@ func bootstrapRegistryIdentity(ctx context.Context, engineStore store.Store, reg
 		slog.Int("owned_services_restored", ownedServices.Activated),
 		slog.Int("owned_services_already_active", ownedServices.AlreadyActive),
 	)
-	return entitlement, accessBootstrap.Revision, handshake.ManagedAuthBrokerURL
+	return entitlement, accessBootstrap.Revision, engineUUID, handshake.ManagedAuthBrokerURL
 }
 
 func newControlAuthenticator(ctx context.Context, engineStore store.Store, revision int64) *accesscontrol.Authenticator {

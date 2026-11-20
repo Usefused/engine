@@ -1170,6 +1170,9 @@ const MCPServerDescriptionMaxBytes = 1024
 // Version 8 shares operation planning and emits only selected Go runtime features.
 const SDKGeneratorVersion = "registry-generator-v8"
 
+// ErrSDKGeneratorVersionUnavailable classifies a terminal Registry rejection for a retired generator version.
+var ErrSDKGeneratorVersionUnavailable = errors.New("sdk_generator_version_unavailable")
+
 const (
 	SDKGenerationStatusPending  = "pending"
 	SDKGenerationStatusComplete = "complete"

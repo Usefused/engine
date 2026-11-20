@@ -2149,8 +2149,7 @@ func (c *HTTPRegistryClient) GenerateSDK(ctx context.Context, generation models.
 	defer response.Body.Close()
 	// Registry rejection is reported without reading provider-authored or generated content into the error.
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 16<<10))
-		return result, fmt.Errorf("Registry SDK generation returned status %d", response.StatusCode)
+		return result, classifySDKGenerationHTTPError(response.StatusCode, response.Body)
 	}
 	decoded, err := readBoundedSDKGenerationResponse(response.Body)
 	// An oversized or malformed response cannot become Engine runtime authority.
@@ -2162,6 +2161,35 @@ func (c *HTTPRegistryClient) GenerateSDK(ctx context.Context, generation models.
 		return models.SDKGenerationResult{}, errors.New("Registry SDK generation response was invalid")
 	}
 	return result, nil
+}
+
+// classifySDKGenerationHTTPError extracts only the allowlisted generator-unavailable conflict code without exposing raw Registry prose.
+func classifySDKGenerationHTTPError(statusCode int, body io.Reader) error {
+	payload, _ := io.ReadAll(io.LimitReader(body, 16<<10))
+	// Only HTTP 409 carrying the canonical nested Registry error envelope may classify as a retired generator version.
+	if statusCode == http.StatusConflict && registrySDKGenerationErrorCode(payload) == models.ErrSDKGeneratorVersionUnavailable.Error() {
+		return fmt.Errorf("Registry SDK generation returned status %d: %w", statusCode, models.ErrSDKGeneratorVersionUnavailable)
+	}
+	return fmt.Errorf("Registry SDK generation returned status %d", statusCode)
+}
+
+// registrySDKGenerationErrorCode decodes only the reviewed nested {"error":{"code":...}} Registry control-plane envelope.
+func registrySDKGenerationErrorCode(payload []byte) string {
+	var envelope struct {
+		Error json.RawMessage `json:"error"`
+	}
+	// Malformed or empty bodies cannot supply an allowlisted Registry error classification.
+	if json.Unmarshal(payload, &envelope) != nil || len(envelope.Error) == 0 {
+		return ""
+	}
+	var nested struct {
+		Code string `json:"code"`
+	}
+	// Only the structured nested code field is admitted; raw strings and error prose are ignored.
+	if json.Unmarshal(envelope.Error, &nested) == nil && nested.Code != "" {
+		return nested.Code
+	}
+	return ""
 }
 
 // readBoundedSDKGenerationResponse admits one complete JSON response while

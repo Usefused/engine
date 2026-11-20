@@ -67,6 +67,7 @@ func (s *sdkGenerationFinalizerStoreFixture) FailSDKGeneration(_ context.Context
 type sdkGenerationFinalizerClientFixture struct {
 	mu        sync.Mutex
 	responses []models.SDKGenerationResult
+	err       error
 	calls     int
 }
 
@@ -75,6 +76,11 @@ type sdkGenerationFinalizerClientFixture struct {
 func (c *sdkGenerationFinalizerClientFixture) GenerateSDK(_ context.Context, _ models.SDKGenerationRequest) (models.SDKGenerationResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Configured transport or rejection errors let tests verify terminal versus retryable failure paths.
+	if c.err != nil {
+		c.calls++
+		return models.SDKGenerationResult{}, c.err
+	}
 	// Exhaustion is a fixture failure rather than an invented Registry state.
 	if c.calls >= len(c.responses) {
 		return models.SDKGenerationResult{}, errors.New("unexpected generation replay")
@@ -176,6 +182,19 @@ func TestSDKGenerationFinalizerPersistsConfirmedFailure(t *testing.T) {
 	// Confirmed failure is terminal but must not call the completion transition.
 	if err != nil || outcome != models.SDKGenerationStatusFailed || storeFixture.failCalls != 1 || storeFixture.completeCalls != 0 {
 		t.Fatalf("failed outcome = %q, error = %v, complete = %d, failed = %d", outcome, err, storeFixture.completeCalls, storeFixture.failCalls)
+	}
+}
+
+// TestSDKGenerationFinalizerFailsUnavailableGeneratorVersion proves a retired generator rejection stops polling instead of looping forever.
+func TestSDKGenerationFinalizerFailsUnavailableGeneratorVersion(t *testing.T) {
+	build, _ := sdkGenerationFinalizerBuildFixture()
+	storeFixture := &sdkGenerationFinalizerStoreFixture{build: build}
+	client := &sdkGenerationFinalizerClientFixture{err: models.ErrSDKGeneratorVersionUnavailable}
+	worker := NewSDKGenerationFinalizer(storeFixture, client, SDKGenerationFinalizerOptions{})
+	outcome, err := worker.finalizeBuild(t.Context(), &build)
+	// Retired generator versions are permanently unrecoverable and must settle through the failure CAS.
+	if err != nil || outcome != models.SDKGenerationStatusFailed || storeFixture.failCalls != 1 || storeFixture.completeCalls != 0 {
+		t.Fatalf("unavailable generator outcome = %q, error = %v, complete = %d, failed = %d", outcome, err, storeFixture.completeCalls, storeFixture.failCalls)
 	}
 }
 
