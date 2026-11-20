@@ -408,7 +408,7 @@ func runUnifiedAppSourceMigration(ctx context.Context, repository store.Store) e
 	return nil
 }
 
-// runSDKGeneratorVersionMigration upgrades v6/v7 SDK rows to the active generator contract before background workers start.
+// runSDKGeneratorVersionMigration retires pre-v5 SDKs and upgrades v5-v7 SDK rows before background workers start.
 func runSDKGeneratorVersionMigration(ctx context.Context, repository store.Store, engineID uuid.UUID) error {
 	migrator, ok := repository.(store.SDKGeneratorVersionMigrationStore)
 	// Production stores must support generator-version migration before finalization replays pending builds.
@@ -420,7 +420,7 @@ func runSDKGeneratorVersionMigration(ctx context.Context, repository store.Store
 	if err != nil {
 		return err
 	}
-	slog.InfoContext(ctx, "SDK generator version migration complete", slog.Int("migrated", result.MigratedRows), slog.Int("rebound_jobs", result.ReboundJobIDs))
+	slog.InfoContext(ctx, "SDK generator version migration complete", slog.Int("migrated", result.MigratedRows), slog.Int("rebound_jobs", result.ReboundJobIDs), slog.Int("deleted", result.DeletedRows))
 	return nil
 }
 
