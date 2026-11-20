@@ -1729,6 +1729,25 @@ func engineSchemaQueries() []string {
 			expires_at timestamptz NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_webhook_diagnostics_expiry ON fused_webhook_diagnostics(expires_at);`,
+		// Per-consumer webhook receipts record which SDK, MCP, Unified App, or relay consumed an event and when.
+		// Consumers may acknowledge before the asynchronous ingress receipt is flushed, so reads join without a foreign key.
+		`CREATE TABLE IF NOT EXISTS fused_webhook_consumptions (
+			event_id uuid NOT NULL,
+			account_id uuid NOT NULL,
+			consumer_kind text NOT NULL CHECK (consumer_kind IN ('sdk', 'mcp', 'unified_app', 'relay')),
+			consumer_key text NOT NULL CHECK (octet_length(consumer_key) BETWEEN 1 AND 512),
+			app_family_id uuid,
+			app_id uuid,
+			app_version text NOT NULL DEFAULT '',
+			consumer_name text NOT NULL DEFAULT '',
+			receiver_name text NOT NULL DEFAULT '',
+			consumed_at timestamptz NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (event_id, consumer_kind, consumer_key)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_webhook_consumptions_account_event
+			ON fused_webhook_consumptions(account_id, event_id, consumed_at ASC);`,
+		`CREATE INDEX IF NOT EXISTS idx_fused_webhook_consumptions_consumed_at
+			ON fused_webhook_consumptions(consumed_at);`,
 		// Unified App diagnostics share the parent result retention.
 		`ALTER TABLE fused_unified_app_results ADD COLUMN IF NOT EXISTS diagnostic_dek text, ADD COLUMN IF NOT EXISTS diagnostic_payload text;`,
 		`CREATE INDEX IF NOT EXISTS idx_fused_unified_app_results_expiry

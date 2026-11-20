@@ -80,7 +80,37 @@ func cleanupExecutionRetentionPass(ctx context.Context, store executionRetention
 	if retentionDays <= 0 {
 		return
 	}
-	cleanupExpiredExecutionEvents(ctx, store, now.Add(-time.Duration(retentionDays)*24*time.Hour), batchSize)
+	cleanupExpiredWebhookConsumptions(ctx, store, cutoff, batchSize)
+	cleanupExpiredExecutionEvents(ctx, store, cutoff, batchSize)
+}
+
+// cleanupExpiredWebhookConsumptions expires per-consumer delivery rows on the same schedule as execution receipts.
+func cleanupExpiredWebhookConsumptions(ctx context.Context, repository executionRetentionStore, before time.Time, batchSize int) {
+	cleaner, ok := repository.(interface {
+		DeleteExpiredWebhookConsumptions(context.Context, time.Time, int) (int64, error)
+	})
+	// Older test stores without consumption persistence need no retention pass.
+	if !ok {
+		return
+	}
+	ctx, span := otel.Tracer("engine").Start(ctx, "engine.webhook.consumptions.retention")
+	defer span.End()
+	var total int64
+	for ctx.Err() == nil {
+		deleted, err := cleaner.DeleteExpiredWebhookConsumptions(ctx, before, batchSize)
+		// Log and stop this pass on storage failure so retention retries cleanly next cycle.
+		if err != nil {
+			span.RecordError(err)
+			slog.ErrorContext(ctx, "Failed to delete expired webhook consumptions", slog.Any("error", err))
+			return
+		}
+		total += deleted
+		// A short batch indicates every expired consumption row has been removed.
+		if deleted < int64(batchSize) {
+			span.SetAttributes(attribute.Int64("consumptions.deleted_count", total))
+			return
+		}
+	}
 }
 
 // cleanupWebhookDiagnostics drains bounded encrypted-body batches without recording payloads or raw storage errors.

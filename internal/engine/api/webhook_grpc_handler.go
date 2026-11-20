@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/executionevent"
 	enginev1 "github.com/Usefused/engine/internal/engine/grpc/v1"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/engine/webhookstream"
 	"github.com/Usefused/engine/internal/shared/messaging"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
@@ -41,6 +43,7 @@ type webhookSubscriptionScope struct {
 	tokenID        uuid.UUID
 	accountID      uuid.UUID
 	appFamilyID    uuid.UUID
+	receiverName   string
 	webhookLabel   string
 	providerEvents []string
 	filterSubjects []string
@@ -82,6 +85,7 @@ func (s *EngineGRPCServer) SubscribeWebhooks(stream enginev1.EngineService_Subsc
 	if err != nil {
 		return err
 	}
+	scope.receiverName = strings.TrimSpace(subscribeMsg.GetReceiverName())
 	registration, err := s.registerWebhookSubscription(ctx, scope)
 	// A token or exact-app invalidation racing initial authorization prevents any broker delivery from starting.
 	if err != nil {
@@ -439,7 +443,7 @@ func (s *EngineGRPCServer) processGRPCWebhookEvents(stream enginev1.EngineServic
 			if !open || result.err != nil {
 				return nil
 			}
-			applyWebhookClientMessage(stream.Context(), result.message, msgMap, scope.accountID)
+			applyWebhookClientMessage(stream.Context(), s.store, result.message, msgMap, scope)
 		}
 	}
 }
@@ -483,10 +487,10 @@ func (s *EngineGRPCServer) recheckWebhookSubscription(ctx context.Context, scope
 }
 
 // applyWebhookClientMessage advances one known delivery according to the generated receiver outcome.
-func applyWebhookClientMessage(ctx context.Context, message *enginev1.WebhookClientMessage, msgMap *pendingWebhookMsgs, accountID uuid.UUID) {
+func applyWebhookClientMessage(ctx context.Context, s store.Store, message *enginev1.WebhookClientMessage, msgMap *pendingWebhookMsgs, scope webhookSubscriptionScope) {
 	// ACK advances a known pending delivery and records provider analytics only when applicable.
 	if ack := message.GetAck(); ack != nil {
-		acknowledgeWebhookClientMessage(ctx, ack, msgMap, accountID)
+		acknowledgeWebhookClientMessage(ctx, s, ack, msgMap, scope)
 		return
 	}
 	// NACK applies a short broker-owned delay so reconnect loops cannot hot-spin one failing handler.
@@ -498,17 +502,36 @@ func applyWebhookClientMessage(ctx context.Context, message *enginev1.WebhookCli
 	}
 }
 
-// acknowledgeWebhookClientMessage records provider analytics without classifying Fused lifecycle delivery as ingress.
-func acknowledgeWebhookClientMessage(ctx context.Context, ack *enginev1.WebhookAck, msgMap *pendingWebhookMsgs, accountID uuid.UUID) {
+// acknowledgeWebhookClientMessage records provider analytics and SDK consumption without classifying Fused lifecycle delivery as ingress.
+func acknowledgeWebhookClientMessage(ctx context.Context, s store.Store, ack *enginev1.WebhookAck, msgMap *pendingWebhookMsgs, scope webhookSubscriptionScope) {
 	brokerMessage, ok := msgMap.Take(ack.GetEventId())
 	// Unknown or already-settled IDs cannot mutate durable delivery state twice.
 	if !ok {
 		return
 	}
 	_ = brokerMessage.Ack()
-	// Provider acknowledgements retain canonical analytics; Fused auth events intentionally do not masquerade as ingress.
+	// Provider acknowledgements retain canonical analytics and per-consumer receipts; Fused auth events intentionally do not masquerade as ingress.
 	if shouldPublishWebhookAnalytics(brokerMessage.Subject) {
-		publishSuccessAnalytics(ctx, accountID, ack.GetEventId(), brokerMessage)
+		publishSuccessAnalytics(ctx, scope.accountID, ack.GetEventId(), brokerMessage)
+		// Persist the exact SDK version and receiver that acknowledged this provider webhook.
+		if scope.appID != uuid.Nil {
+			appFamilyID, appID := scope.appFamilyID, scope.appID
+			var familyPtr *uuid.UUID
+			// Preserve optional family correlation when the authenticated scope includes it.
+			if appFamilyID != uuid.Nil {
+				familyPtr = &appFamilyID
+			}
+			recordWebhookConsumption(ctx, s, models.WebhookConsumption{
+				EventID:      executionevent.WebhookEventID(ack.GetEventId()),
+				AccountID:    scope.accountID,
+				ConsumerKind: "sdk",
+				ConsumerKey:  sdkWebhookConsumerKey(appID, scope.receiverName),
+				AppFamilyID:  familyPtr,
+				AppID:        &appID,
+				ReceiverName: scope.receiverName,
+				ConsumedAt:   time.Now().UTC(),
+			})
+		}
 	}
 }
 

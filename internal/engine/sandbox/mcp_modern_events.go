@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/executionevent"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
@@ -225,4 +227,40 @@ func readMCPEventSnapshot(resource mcpEventResource) (*mcpEventSnapshot, error) 
 	snapshot.PayloadBase64 = base64.StdEncoding.EncodeToString(message.Data)
 	snapshot.PayloadEncoding = "base64"
 	return snapshot, nil
+}
+
+// recordMCPWebhookConsumption persists when an MCP server reads or notifies a retained provider webhook event.
+func recordMCPWebhookConsumption(ctx context.Context, identity auth.RuntimeIdentity, messageID string) {
+	trimmedID := strings.TrimSpace(messageID)
+	// Legacy sequence-derived snapshot IDs and incomplete identities cannot match canonical webhook receipt UUIDs.
+	if trimmedID == "" || strings.HasPrefix(trimmedID, "nats:") || identity.AccountID == uuid.Nil || identity.AppID == uuid.Nil {
+		return
+	}
+	recorder, ok := globalMCPEventRuntimeStore.(store.WebhookConsumptionRecorder)
+	// Minimal test doubles without consumption storage continue serving MCP event resources normally.
+	if !ok {
+		return
+	}
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	appID := identity.AppID
+	var familyPtr *uuid.UUID
+	// Include family identity whenever runtime authentication resolved it.
+	if identity.AppFamilyID != uuid.Nil {
+		familyID := identity.AppFamilyID
+		familyPtr = &familyID
+	}
+	// Best-effort consumption tracking must never fail an already-authorized MCP read or SSE notification.
+	if err := recorder.RecordWebhookConsumption(writeCtx, models.WebhookConsumption{
+		EventID:      executionevent.WebhookEventID(trimmedID),
+		AccountID:    identity.AccountID,
+		ConsumerKind: "mcp",
+		ConsumerKey:  appID.String(),
+		AppFamilyID:  familyPtr,
+		AppID:        &appID,
+		AppVersion:   identity.AppVersion,
+		ConsumedAt:   time.Now().UTC(),
+	}); err != nil {
+		slog.WarnContext(ctx, "Failed to record MCP webhook consumption", slog.Any("error", err), slog.String("app_id", appID.String()))
+	}
 }

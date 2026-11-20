@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/auth"
+	"github.com/Usefused/engine/internal/engine/executionevent"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/messaging"
 	"github.com/Usefused/engine/internal/shared/models"
@@ -118,6 +119,21 @@ func (s *EngineGRPCServer) executeUnifiedWebhook(ctx context.Context, repository
 	// A persistence failure can retry delivery; the durable reservation prevents repeating provider effects.
 	if requestErr != nil {
 		return errors.New(requestErr.code)
+	}
+	// Record Unified App consumption and update provider delivery outcome once execution ownership settles.
+	if shouldPublishWebhookAnalytics(message.Subject) {
+		publishSuccessAnalytics(ctx, target.AccountID, spec.webhookEventID, message)
+		familyIDCopy, appIDCopy := target.FamilyID, target.AppID
+		recordWebhookConsumption(ctx, s.store, models.WebhookConsumption{
+			EventID:      executionevent.WebhookEventID(spec.webhookEventID),
+			AccountID:    target.AccountID,
+			ConsumerKind: "unified_app",
+			ConsumerKey:  target.FamilyID.String(),
+			AppFamilyID:  &familyIDCopy,
+			AppID:        &appIDCopy,
+			AppVersion:   target.Version,
+			ConsumedAt:   time.Now().UTC(),
+		})
 	}
 	return nil
 }

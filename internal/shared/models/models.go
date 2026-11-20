@@ -399,33 +399,48 @@ type WebhookObject struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// WebhookConsumption captures one consumer's receipt of a provider webhook event and when it occurred.
+type WebhookConsumption struct {
+	EventID      uuid.UUID  `json:"event_id"`
+	AccountID    uuid.UUID  `json:"account_id"`
+	ConsumerKind string     `json:"consumer_kind"`
+	ConsumerKey  string     `json:"consumer_key"`
+	AppFamilyID  *uuid.UUID `json:"app_family_id,omitempty"`
+	AppID        *uuid.UUID `json:"app_id,omitempty"`
+	AppVersion   string     `json:"app_version,omitempty"`
+	ConsumerName string     `json:"consumer_name,omitempty"`
+	ReceiverName string     `json:"receiver_name,omitempty"`
+	ConsumedAt   time.Time  `json:"consumed_at"`
+}
+
 type WebhookEvent struct {
 	// Canonical correlation and outcomes remain metadata; message bodies use a separate privileged store.
-	RegistrationID     *uuid.UUID `json:"registration_id,omitempty"`
-	ServiceVersionID   string     `json:"service_version_id"`
-	TraceID            string     `json:"trace_id"`
-	SpanID             string     `json:"span_id"`
-	ExecutionStatus    string     `json:"execution_status"`
-	FailureCategory    string     `json:"failure_category"`
-	FailureCode        string     `json:"failure_code"`
-	AttemptCount       int        `json:"attempt_count"`
-	EndedAt            time.Time  `json:"ended_at"`
-	RecordedAt         time.Time  `json:"recorded_at"`
-	ID                 uuid.UUID  `json:"event_id"`
-	AccountID          uuid.UUID  `json:"account_id"`
-	ServiceID          uuid.UUID  `json:"service_id"`
-	MsgID              string     `json:"msg_id"`
-	EventType          string     `json:"event_type"`
-	ErrorReason        string     `json:"error_reason"`
-	SDKRecordID        *uuid.UUID `json:"sdk_record_id,omitempty"`
-	VerificationStatus string     `json:"verification_status"`
-	DeliveryStatus     string     `json:"delivery_status"`
-	Environment        string     `json:"environment"`
-	LatencyMs          int        `json:"latency_ms"`
-	RetryCount         int        `json:"retry_count"`
-	CreditsConsumed    float64    `json:"credits_consumed"`
-	PayloadSize        int        `json:"payload_size"`
-	CreatedAt          time.Time  `json:"timestamp"`
+	RegistrationID     *uuid.UUID           `json:"registration_id,omitempty"`
+	ServiceVersionID   string               `json:"service_version_id"`
+	TraceID            string               `json:"trace_id"`
+	SpanID             string               `json:"span_id"`
+	ExecutionStatus    string               `json:"execution_status"`
+	FailureCategory    string               `json:"failure_category"`
+	FailureCode        string               `json:"failure_code"`
+	AttemptCount       int                  `json:"attempt_count"`
+	EndedAt            time.Time            `json:"ended_at"`
+	RecordedAt         time.Time            `json:"recorded_at"`
+	ID                 uuid.UUID            `json:"event_id"`
+	AccountID          uuid.UUID            `json:"account_id"`
+	ServiceID          uuid.UUID            `json:"service_id"`
+	MsgID              string               `json:"msg_id"`
+	EventType          string               `json:"event_type"`
+	ErrorReason        string               `json:"error_reason"`
+	SDKRecordID        *uuid.UUID           `json:"sdk_record_id,omitempty"`
+	VerificationStatus string               `json:"verification_status"`
+	DeliveryStatus     string               `json:"delivery_status"`
+	Environment        string               `json:"environment"`
+	LatencyMs          int                  `json:"latency_ms"`
+	RetryCount         int                  `json:"retry_count"`
+	CreditsConsumed    float64              `json:"credits_consumed"`
+	PayloadSize        int                  `json:"payload_size"`
+	CreatedAt          time.Time            `json:"timestamp"`
+	Consumptions       []WebhookConsumption `json:"consumptions,omitempty"`
 }
 
 type WebhookAnalytics struct {

@@ -87,7 +87,15 @@ func (s *postgresStore) ListWebhookActivity(ctx context.Context, filter WebhookA
 		return nil, 0, err
 	}
 	events, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.WebhookEvent])
-	return events, total, err
+	// Do not enrich partially decoded pages if row collection failed.
+	if err != nil {
+		return nil, 0, err
+	}
+	// Hydrate per-consumer delivery records so the receipt details drawer shows who consumed each webhook and when.
+	if err := s.attachWebhookConsumptions(ctx, filter.AccountID, events); err != nil {
+		return nil, 0, err
+	}
+	return events, total, nil
 }
 
 // GetWebhookAnalytics preserves the existing service aggregate API on the shared canonical receipt source.

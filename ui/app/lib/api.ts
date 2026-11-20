@@ -877,6 +877,17 @@ export interface ActivatedService {
   created_at: string;
 }
 
+/** Records one consumer (SDK, MCP, Unified App, or relay) that received a webhook event and when. */
+export interface WebhookConsumptionEntry {
+  consumer_kind: string;
+  consumer_name?: string;
+  app_family_id?: string;
+  app_id?: string;
+  app_version?: string;
+  receiver_name?: string;
+  consumed_at: string;
+}
+
 export interface WebhookEventEntry {
   registration_id?: string;
   service_version_id?: string;
@@ -903,6 +914,7 @@ export interface WebhookEventEntry {
   error_reason: string;
   payload_size: number;
   created_at: string;
+  consumptions?: WebhookConsumptionEntry[];
 }
 
 // Private bodies are retrieved only after an explicit, independently authorized reveal.
@@ -1798,6 +1810,15 @@ export const api = {
                 error_reason
                 payload_size
                 created_at
+                consumptions {
+                  consumer_kind
+                  consumer_name
+                  app_family_id
+                  app_id
+                  app_version
+                  receiver_name
+                  consumed_at
+                }
               }
             }
           }`,

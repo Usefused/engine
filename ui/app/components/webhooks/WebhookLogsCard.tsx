@@ -99,6 +99,7 @@ export function WebhookLogsCard({
   const [selectedEventID, setSelectedEventID] = useState("");
   const selectedEvent = webhookEvents.find((event) => event.id === selectedEventID) ?? null;
   return (
+    <>
     <div className="@container min-w-0 max-w-full rounded-lg border border-slate-200 bg-white">
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-t-lg border-b border-slate-100 bg-slate-50 px-4 py-3">
         <h2 className="text-sm font-semibold text-slate-800">
@@ -228,8 +229,10 @@ export function WebhookLogsCard({
           </div>
         </div>
       )}
-      {/* The selected receipt retains its recorded service in the inspector. */}
-      {selectedEvent && <WebhookEventDetailsDrawer event={selectedEvent} serviceName={receiptServiceName(selectedEvent, service)} onClose={() => setSelectedEventID("")} />}
+      {/* Render the detail drawer outside the @container box so container containment cannot trap fixed positioning. */}
     </div>
+    {/* The selected receipt retains its recorded service in the inspector. */}
+    {selectedEvent && <WebhookEventDetailsDrawer event={selectedEvent} serviceName={receiptServiceName(selectedEvent, service)} onClose={() => setSelectedEventID("")} />}
+    </>
   );
 }

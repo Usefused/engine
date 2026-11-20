@@ -35,7 +35,8 @@ function events() {
   return Array.from({ length: 45 }, (_, index) => {
     // Fixed outcomes exercise drill-downs; rejected requests retain no trusted event type.
     const status = index % 5 === 0 ? "rejected" : index % 3 === 0 ? "failed" : "delivered";
-    return { id: `receipt-${index}`, account_id: "fixture", service_id: service, msg_id: `event-${index}-very-long-provider-message-identifier`, event_name: status === "rejected" ? "UNKNOWN" : "invoice.paid", status, delivery_status: status, verification_status: status === "rejected" ? "credential_invalid" : "verified", environment: "production", latency_ms: 12 + index, retry_count: 0, credits_consumed: 0, payload_size: 1024, created_at: "2026-11-10T00:00:00Z", error_reason: status === "delivered" ? "" : "Synthetic verification or delivery failure" };
+    const consumptions = status === "delivered" ? [{ consumer_kind: index % 2 === 0 ? "sdk" : "unified_app", consumer_name: index % 2 === 0 ? "Billing SDK" : "Invoice Sync", app_version: "1.0.0", receiver_name: index % 2 === 0 ? "billing-worker" : "", consumed_at: "2026-11-10T00:00:02Z" }] : [];
+    return { id: `receipt-${index}`, account_id: "fixture", service_id: service, msg_id: `event-${index}-very-long-provider-message-identifier`, event_name: status === "rejected" ? "UNKNOWN" : "invoice.paid", status, delivery_status: status, verification_status: status === "rejected" ? "credential_invalid" : "verified", environment: "production", latency_ms: 12 + index, retry_count: 0, credits_consumed: 0, payload_size: 1024, created_at: "2026-11-10T00:00:00Z", error_reason: status === "delivered" ? "" : "Synthetic verification or delivery failure", consumptions };
   });
 }
 

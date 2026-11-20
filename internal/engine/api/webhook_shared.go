@@ -298,6 +298,31 @@ func publishWebhookOutcome(ctx context.Context, accountID uuid.UUID, serviceIDSt
 	}
 }
 
+// recordWebhookConsumption persists which consumer received a provider webhook event without blocking settlement.
+func recordWebhookConsumption(ctx context.Context, s store.Store, record models.WebhookConsumption) {
+	recorder, ok := s.(store.WebhookConsumptionRecorder)
+	// Older or minimal test stores without consumption persistence remain operational without altering ACK behavior.
+	if !ok {
+		return
+	}
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	// Best-effort recording never fails an already-acknowledged delivery.
+	if err := recorder.RecordWebhookConsumption(writeCtx, record); err != nil {
+		slog.WarnContext(ctx, "Failed to record webhook consumption", slog.Any("error", err), slog.String("event_id", record.EventID.String()), slog.String("consumer_kind", record.ConsumerKind))
+	}
+}
+
+// sdkWebhookConsumerKey builds one stable per-receiver deduplication key for an SDK subscription.
+func sdkWebhookConsumerKey(appID uuid.UUID, receiverName string) string {
+	trimmed := strings.TrimSpace(receiverName)
+	// Include the receiver name when present so distinct receivers under one SDK version stay distinguishable.
+	if trimmed != "" {
+		return appID.String() + ":" + trimmed
+	}
+	return appID.String()
+}
+
 // webhookDeliveryCount normalizes unavailable JetStream metadata to the first delivery attempt.
 func webhookDeliveryCount(message *nats.Msg) int {
 	metadata, err := message.Metadata()

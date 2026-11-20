@@ -49,15 +49,20 @@ test("execution details drawer is viewport safe on mobile", () => {
   assert.match(sharedDrawer, /xl:max-w-\[1080px\]/);
 });
 
-// Confirms canonical failure reasons remain inspectable while provider bodies and credentials stay excluded.
+// Confirms canonical failure reasons and consumption history remain inspectable while provider bodies and credentials stay excluded.
 test("webhook receipt rows open bounded webhook details", () => {
   assert.match(webhookLogs, /<WebhookReceiptRow[^>]+onSelect=\{setSelectedEventID\}/);
   assert.match(webhookLogs, /<button type="button" aria-haspopup="dialog"/);
   assert.doesNotMatch(webhookLogs, /<table|event\.environment/);
   assert.match(webhookLogs, /<WebhookEventDetailsDrawer event=\{selectedEvent\}/);
-  for (const label of ["Event", "Verification", "Delivery", "Service", "Delivery time", "Payload size", "Retries", "Received", "Message ID", "Receipt ID"]) {
+  // Keep the fixed drawer outside the @container box so container containment cannot trap fixed positioning.
+  assert.match(webhookLogs, /<\/div>\s*\{\/\*[^*]*\*\/\}\s*\{selectedEvent && <WebhookEventDetailsDrawer/);
+  for (const label of ["Event", "Verification", "Delivery", "Service", "Consumed by", "Consumed at", "Delivery time", "Payload size", "Retries", "Received", "Message ID", "Receipt ID"]) {
     assert.match(webhookDrawer, new RegExp(`label="${label}"`));
   }
+  assert.match(webhookDrawer, /createPortal\(drawer, workspaceDialogHost\(\)\)/);
+  assert.match(webhookDrawer, /h-dvh max-h-dvh w-full max-w-full/);
+  assert.match(webhookDrawer, /overscroll-contain/);
   assert.match(webhookDrawer, /Failure reason/);
   assert.match(webhookDrawer, /event\.error_reason/);
   assert.doesNotMatch(webhookDrawer, /event\.(?:payload(?!_size)|credentials?|secrets?)/i);

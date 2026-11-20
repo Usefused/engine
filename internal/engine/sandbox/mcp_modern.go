@@ -67,9 +67,10 @@ type mcpModernAdmission struct {
 	resources map[string]mcpEventResource
 }
 
-// mcpModernEvent carries only the authorized resource identity needed to construct a change notification.
+// mcpModernEvent carries only the authorized resource identity and optional message ID needed for change notifications.
 type mcpModernEvent struct {
-	resource mcpEventResource
+	resource  mcpEventResource
+	messageID string
 }
 
 // isMCPModernRequest detects the stateless protocol before session-oriented admission can require initialize.
@@ -339,7 +340,7 @@ func handleMCPModernResourceTemplatesList(w http.ResponseWriter, request mcpJSON
 }
 
 // handleMCPModernResourceRead returns the latest retained webhook payload for one authorized event URI.
-func handleMCPModernResourceRead(w http.ResponseWriter, request mcpJSONRPCRequest, admission *mcpModernAdmission) {
+func handleMCPModernResourceRead(ctx context.Context, w http.ResponseWriter, request mcpJSONRPCRequest, admission *mcpModernAdmission) {
 	uri, _, err := mcpModernRequestName(request)
 	// Header validation already admitted the URI, so this branch protects direct focused calls and future routing changes.
 	if err != nil {
@@ -369,6 +370,10 @@ func handleMCPModernResourceRead(w http.ResponseWriter, request mcpJSONRPCReques
 		"contents": []map[string]any{{"uri": uri, "mimeType": resource.MIMEType, "text": string(encoded)}},
 		"ttlMs":    0, "cacheScope": "private",
 	}, admission.server)
+	// Record MCP consumption only when an actual retained webhook occurrence was served.
+	if snapshot != nil {
+		recordMCPWebhookConsumption(ctx, admission.identity, snapshot.ID)
+	}
 }
 
 // handleMCPModernSubscriptionsListen opens one POST response stream for the exact resource URIs the server honors.
@@ -437,6 +442,10 @@ func handleMCPModernSubscriptionsListen(ctx context.Context, w http.ResponseWrit
 			if !writeMCPModernSSEMessage(w, flusher, notification) {
 				return
 			}
+			// Record consumption once the live update notification is written to the subscribed MCP client.
+			if event.messageID != "" {
+				recordMCPWebhookConsumption(streamCtx, admission.identity, event.messageID)
+			}
 		case <-ticker.C:
 			// Periodic authorization refresh closes revoked or deactivated subscriptions without leaking their cause on the stream.
 			identity, err := validateMCPToken(streamCtx, admission.target.AppID.String(), token)
@@ -500,10 +509,15 @@ func subscribeMCPModernResources(honored []string, resources map[string]mcpEvent
 	subscriptions := make([]*nats.Subscription, 0, len(honored))
 	for _, uri := range honored {
 		resource := resources[uri]
-		subscription, err := globalNATSClient.Subscribe(resource.Subject, func(_ *nats.Msg) {
+		subscription, err := globalNATSClient.Subscribe(resource.Subject, func(msg *nats.Msg) {
+			var messageID string
+			// Capture the publisher's stable message ID when present so SSE deliveries correlate to webhook receipts.
+			if msg != nil && msg.Header != nil {
+				messageID = strings.TrimSpace(msg.Header.Get("X-Webhook-Msg-ID"))
+			}
 			// The bounded queue preserves order while overload closes the stream instead of silently dropping an honored update.
 			select {
-			case events <- mcpModernEvent{resource: resource}:
+			case events <- mcpModernEvent{resource: resource, messageID: messageID}:
 			default:
 				overflowOnce.Do(func() { close(overflow) })
 			}
@@ -606,7 +620,7 @@ func dispatchMCPModernRequest(ctx context.Context, span trace.Span, w http.Respo
 	case "resources/templates/list":
 		handleMCPModernResourceTemplatesList(w, request, admission)
 	case "resources/read":
-		handleMCPModernResourceRead(w, request, admission)
+		handleMCPModernResourceRead(ctx, w, request, admission)
 	case "subscriptions/listen":
 		handleMCPModernSubscriptionsListen(ctx, w, token, request, admission)
 	default:

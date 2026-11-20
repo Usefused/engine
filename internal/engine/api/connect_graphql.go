@@ -259,6 +259,19 @@ var appTokenGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+var webhookConsumptionGraphQLType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "WebhookConsumption",
+	Fields: graphql.Fields{
+		"consumer_kind": &graphql.Field{Type: graphql.String},
+		"consumer_name": &graphql.Field{Type: graphql.String},
+		"app_family_id": &graphql.Field{Type: graphql.String},
+		"app_id":        &graphql.Field{Type: graphql.String},
+		"app_version":   &graphql.Field{Type: graphql.String},
+		"receiver_name": &graphql.Field{Type: graphql.String},
+		"consumed_at":   &graphql.Field{Type: graphql.String},
+	},
+})
+
 var webhookEventGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "WebhookEvent",
 	Fields: graphql.Fields{
@@ -288,6 +301,7 @@ var webhookEventGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"error_reason":        &graphql.Field{Type: graphql.String},
 		"payload_size":        &graphql.Field{Type: graphql.Int},
 		"created_at":          &graphql.Field{Type: graphql.String},
+		"consumptions":        &graphql.Field{Type: graphql.NewList(webhookConsumptionGraphQLType)},
 	},
 })
 
@@ -2887,6 +2901,23 @@ func projectGraphQLWebhookEvents(events []models.WebhookEvent) []map[string]inte
 	return items
 }
 
+// projectGraphQLWebhookConsumptions projects consumer delivery metadata without exposing payloads or tokens.
+func projectGraphQLWebhookConsumptions(consumptions []models.WebhookConsumption) []map[string]interface{} {
+	items := make([]map[string]interface{}, 0, len(consumptions))
+	for _, consumption := range consumptions {
+		items = append(items, map[string]interface{}{
+			"consumer_kind": consumption.ConsumerKind,
+			"consumer_name": consumption.ConsumerName,
+			"app_family_id": formatOptionalGraphQLUUID(consumption.AppFamilyID),
+			"app_id":        formatOptionalGraphQLUUID(consumption.AppID),
+			"app_version":   consumption.AppVersion,
+			"receiver_name": consumption.ReceiverName,
+			"consumed_at":   formatGraphQLTime(consumption.ConsumedAt),
+		})
+	}
+	return items
+}
+
 // projectGraphQLWebhookEvent exposes canonical metadata without private message bytes or credential material.
 func projectGraphQLWebhookEvent(event models.WebhookEvent) map[string]interface{} {
 	sdkRecordID := ""
@@ -2907,6 +2938,7 @@ func projectGraphQLWebhookEvent(event models.WebhookEvent) map[string]interface{
 		"retry_count": event.RetryCount, "credits_consumed": event.CreditsConsumed,
 		"sdk_record_id": sdkRecordID, "error_reason": event.ErrorReason,
 		"payload_size": event.PayloadSize, "created_at": formatGraphQLTime(event.CreatedAt),
+		"consumptions": projectGraphQLWebhookConsumptions(event.Consumptions),
 	}
 }
 
