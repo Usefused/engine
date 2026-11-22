@@ -3,9 +3,10 @@ import { AppExecutionEndpoint } from "~/components/apps/AppExecutionEndpoint";
 import { AppExecutionTokens } from "~/components/apps/AppExecutionTokens";
 import { CopyValue } from "~/components/CopyValue";
 import { useState, useEffect, isValidElement, type ReactNode } from "react";
-import { useParams, Link, useNavigate, useSearchParams, type MetaFunction } from "@remix-run/react";
+import { useParams, useNavigate, useSearchParams, type MetaFunction } from "@remix-run/react";
 import { Download, Copy, Check } from "lucide-react";
 import { api, type NotificationServiceRef, type WorkspaceNotification } from "~/lib/api";
+import { deleteAppFamilies } from "~/lib/app-family-deactivation";
 import { useToast } from "~/components/Toast";
 import { readBucketsForSDK } from "~/lib/buckets";
 import ReactMarkdown from "react-markdown";
@@ -18,6 +19,7 @@ import { McpTransportEndpoints, type McpTransportEndpointData } from "~/componen
 import { AppActivityOverview } from "~/components/activity/AppActivityOverview";
 import { type NestedActivityTabOption } from "~/components/activity/NestedActivityTabs";
 import { AppDetailBackLink, AppDetailHeader, AppDetailPrimaryAction, AppDetailTabs, AppVersionSwitcher, type AppDetailTab } from "~/components/apps/AppDetailChrome";
+import { AppHeaderActionsMenu } from "~/components/apps/AppHeaderActionsMenu";
 import { AppActivityBody, AppChangesBody, AppDetailBody, AppDetailSection, AppOverviewBody } from "~/components/apps/AppDetailBody";
 import { type AppVersionHistoryItem } from "~/components/apps/AppVersionHistory";
 import { type Bucket } from "~/lib/api";
@@ -147,6 +149,21 @@ function sdkPrimaryTabs(sdk: Sdk, canReadActivity: boolean): Array<AppDetailTab<
   return tabs;
 }
 
+/** Loads every immutable version in one SDK or REST API family for history and full-app deletion. */
+function readSdkVersions(appFamilyId: string): Promise<Array<{ app_id: string; version: string; created_at: string }>> {
+  const queryStr = `
+      query($appFamilyId: String!) {
+        appVersions(app_family_id: $appFamilyId) {
+            app_id
+            version
+            created_at
+        }
+      }
+    `;
+  return api.mcpGraphql<{ appVersions: Array<{ app_id: string; version: string; created_at: string }> }>(queryStr, { appFamilyId })
+    .then((res) => res.appVersions);
+}
+
 interface SdkVersionDeletionOptions {
   sdk: Sdk | null;
   currentId?: string;
@@ -156,9 +173,10 @@ interface SdkVersionDeletionOptions {
   toast: ReturnType<typeof useToast>;
 }
 
-/** Owns exact SDK/REST version deletion so the detail controller stays below the view-complexity bound. */
+/** Owns exact SDK/REST version and family deletion so the detail controller stays below the view-complexity bound. */
 function useSdkVersionDeletion({ sdk, currentId, versions, setVersions, navigate, toast }: SdkVersionDeletionOptions) {
   const [deletingVersionId, setDeletingVersionId] = useState("");
+  const [deletingApp, setDeletingApp] = useState(false);
 
   /** Permanently removes one exact app version and keeps the family detail view on a surviving sibling when possible. */
   const deleteVersion = async (version: AppVersionHistoryItem) => {
@@ -188,7 +206,43 @@ function useSdkVersionDeletion({ sdk, currentId, versions, setVersions, navigate
     }
   };
 
-  return { deletingVersionId, deleteVersion };
+  /** Permanently deactivates every version of this SDK or REST API family and moves its identity to Archive. */
+  const deleteApp = async () => {
+    // Require a loaded family and avoid overlapping deletion prompts.
+    if (!sdk || deletingApp) return;
+    const kind = sdk.delivery_mode === "api" ? "REST API" : "SDK";
+    const removalScope = sdk.delivery_mode === "api" ? "runtime" : "runtime and package";
+    setDeletingApp(true);
+    try {
+      const result = await deleteAppFamilies([sdk.app_family_id], {
+        listVersions: (familyId) => readSdkVersions(familyId).then((items) => items.map((item) => ({ app_id: item.app_id }))),
+        confirm: ({ versionCount }) => toast.confirm(
+          // Describe exact version deactivation scope when live runtimes must be removed before archiving.
+          versionCount > 0
+            ? `Delete ${kind} "${sdk.name}"? This permanently deactivates all ${versionCount} version(s) and removes its ${removalScope}. Its name becomes reusable and its historical identity remains in Archive.`
+            : `Delete ${kind} "${sdk.name}"? Its name becomes reusable and its historical identity remains in Archive.`
+        ),
+        deactivate: api.sdks.deactivate,
+        archiveFamily: api.sdks.archiveFamily,
+      });
+      // Cancellation keeps the app and all versions unchanged.
+      if (result.cancelled) return;
+      if (result.deletedFamilies.length === 1) {
+        toast.success(`${kind} "${sdk.name}" deleted and moved to Archive.`);
+        navigate(sdkCataloguePath(sdk));
+        return;
+      }
+      toast.error(`Failed to delete ${kind} "${sdk.name}". Deactivated ${result.deactivatedVersions} version(s); ${result.failedVersions} version deactivation(s) failed.`);
+      // Leave the detail page if any version was already deactivated so the user can retry from the catalogue.
+      if (result.deactivatedVersions > 0) navigate(sdkCataloguePath(sdk));
+    } catch (cause) {
+      toast.error(`Failed to delete ${kind}: ${cause instanceof Error ? cause.message : "Unknown error"}`);
+    } finally {
+      setDeletingApp(false);
+    }
+  };
+
+  return { deletingVersionId, deleteVersion, deletingApp, deleteApp };
 }
 
 /** Returns the owning Apps tab for a generated SDK or direct REST version. */
@@ -361,18 +415,9 @@ export default function SdkDetails() {
 
   /** Loads the readable immutable versions in one app family. */
   const fetchVersions = (appFamilyId: string) => {
-    const queryStr = `
-      query($appFamilyId: String!) {
-        appVersions(app_family_id: $appFamilyId) {
-            app_id
-            version
-            created_at
-        }
-      }
-    `;
-    api.mcpGraphql<{ appVersions: Array<{ app_id: string; version: string; created_at: string }> }>(queryStr, { appFamilyId })
-      .then(res => {
-        setVersions(res.appVersions.map(version => ({ ...version, id: version.app_id })));
+    readSdkVersions(appFamilyId)
+      .then(appVersions => {
+        setVersions(appVersions.map(version => ({ ...version, id: version.app_id })));
       })
       .catch(() => {}); // non-fatal
   };
@@ -463,9 +508,11 @@ export default function SdkDetails() {
     canReadActivity={canReadActivity}
     canManageVersions={canManageVersions}
     deletingVersionId={versionDeletion.deletingVersionId}
+    deletingApp={versionDeletion.deletingApp}
     onDownload={handleDownload}
     onVersionSwitch={handleVersionSwitch}
     onDeleteVersion={versionDeletion.deleteVersion}
+    onDeleteApp={versionDeletion.deleteApp}
     onTabChange={setActiveTab}
     onActivityChange={setActivitySection}
   />;
@@ -486,12 +533,56 @@ type SdkLoadedContentProps = {
   canReadActivity: boolean;
   canManageVersions: boolean;
   deletingVersionId: string;
+  deletingApp: boolean;
   onDownload: () => void;
   onVersionSwitch: (id: string) => void;
   onDeleteVersion: (version: AppVersionHistoryItem) => void;
+  onDeleteApp: () => void;
   onTabChange: (tab: SdkPrimaryTab) => void;
   onActivityChange: (section: SdkActivitySection) => void;
 };
+
+/** Renders the delivery-specific header action alongside the permission-gated overflow menu. */
+function SdkHeaderActions({
+  sdk,
+  canManageVersions,
+  deletingApp,
+  onDownload,
+  onDeleteApp,
+}: {
+  sdk: Sdk;
+  canManageVersions: boolean;
+  deletingApp: boolean;
+  onDownload: () => void;
+  onDeleteApp: () => void;
+}) {
+  // Only active or deprecated REST APIs expose live Try execution.
+  const showTry = sdk.delivery_mode === "api" && (sdk.status === "active" || sdk.status === "deprecated");
+  return (
+    <div className="flex shrink-0 items-center gap-2">
+      {/* REST versions use the shared Try session; SDK package delivery retains its existing action. */}
+      {showTry && <AppTryButton key={sdk.app_id} target={{ versionID: sdk.app_id, executionID: sdk.app_id, familyID: sdk.app_family_id, name: sdk.name, unified: false }} />}
+      {optionalNode(Boolean(sdk.is_downloadable), <AppDetailPrimaryAction icon={<Download className="h-4 w-4" />} label="Download package" onClick={onDownload} />)}
+      {canManageVersions && <AppHeaderActionsMenu canDelete={canManageVersions} deleting={deletingApp} onDelete={onDeleteApp} />}
+    </div>
+  );
+}
+
+/** Resolves the shared header kind badge from persisted adapter metadata. */
+function sdkHeaderKind(sdk: Sdk): "api" | "mcp" | "sdk" {
+  if (sdk.target_type === "api") return "api";
+  return sdk.target_type === "mcp" ? "mcp" : "sdk";
+}
+
+/** Maps SDK and REST delivery modes to the token panel kind without duplicating ternary checks. */
+function sdkTokenKind(sdk: Sdk): "api" | "sdk" {
+  return sdk.delivery_mode === "api" ? "api" : "sdk";
+}
+
+/** Returns true while an immutable app version remains runnable for MCP delivery. */
+function isSdkMcpRunnable(sdk: Sdk): boolean {
+  return sdk.status === "active" || sdk.status === "deprecated";
+}
 
 /** Renders the loaded app version after query and permission state settle. */
 function SdkLoadedContent({
@@ -509,13 +600,17 @@ function SdkLoadedContent({
   canReadActivity,
   canManageVersions,
   deletingVersionId,
+  deletingApp,
   onDownload: handleDownload,
   onVersionSwitch: handleVersionSwitch,
   onDeleteVersion: handleDeleteVersion,
+  onDeleteApp: handleDeleteApp,
   onTabChange: setActiveTab,
   onActivityChange: setActivitySection,
 }: SdkLoadedContentProps) {
   const currentVersionId = sdkCurrentVersionId(id, sdk);
+  const selections = sdk.detailed_selections ?? [];
+  const headerLanguage = sdk.target_type === "sdk" ? sdk.target_language : undefined;
 
   return (
     <div className="space-y-6">
@@ -524,13 +619,13 @@ function SdkLoadedContent({
       {/* Adapter-owned metadata and actions slot into one shared app identity hierarchy. */}
       <AppDetailHeader
         name={sdk.name}
-        kind={sdk.target_type === "api" ? "api" : sdk.target_type === "mcp" ? "mcp" : "sdk"}
+        kind={sdkHeaderKind(sdk)}
         status={sdk.status}
         version={sdk.version}
         createdAt={sdk.created_at}
-        language={sdk.target_type === "sdk" ? sdk.target_language : undefined}
+        language={headerLanguage}
         bucket={bucket}
-        action={<div className="flex items-center gap-3">{/* REST versions use the shared Try session; SDK package delivery retains its existing action. */}{sdk.delivery_mode === "api" && (sdk.status === "active" || sdk.status === "deprecated") && <AppTryButton key={sdk.app_id} target={{ versionID: sdk.app_id, executionID: sdk.app_id, familyID: sdk.app_family_id, name: sdk.name, unified: false }} />}{optionalNode(Boolean(sdk.is_downloadable), <AppDetailPrimaryAction icon={<Download className="h-4 w-4" />} label="Download package" onClick={handleDownload} />)}</div>}
+        action={<SdkHeaderActions sdk={sdk} canManageVersions={canManageVersions} deletingApp={deletingApp} onDownload={handleDownload} onDeleteApp={handleDeleteApp} />}
       />
 
       {/* The immutable app key resets disclosure state when switching versions or families. */}
@@ -552,14 +647,14 @@ function SdkLoadedContent({
       <AppDetailBody>
         {optionalNode(activeTab === "overview", (
           <AppOverviewBody
-            selections={sdk.detailed_selections ?? []}
+            selections={selections}
             adapterDetails={<>
             <AppDetailSection title="Execution"><AppExecutionEndpoint appID={sdk.app_id} /></AppDetailSection>
-            <AppExecutionTokens familyID={sdk.app_family_id} kind={sdk.delivery_mode === "api" ? "api" : "sdk"} />
+            <AppExecutionTokens familyID={sdk.app_family_id} kind={sdkTokenKind(sdk)} />
             {optionalNode(sdk.hosted_mcp === true, (
               <AppDetailSection title="MCP delivery">
                 {/* Engine projects the exact and stable routes for this shared App version. */}
-                <McpTransportEndpoints endpoints={sdk} enabled={sdk.status === "active" || sdk.status === "deprecated"} />
+                <McpTransportEndpoints endpoints={sdk} enabled={isSdkMcpRunnable(sdk)} />
               </AppDetailSection>
             ))}
             {optionalNode(hasSandboxURL(sdk), (

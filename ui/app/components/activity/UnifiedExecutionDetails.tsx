@@ -4,7 +4,15 @@ import { unifiedAppOutcome } from "~/lib/unified-app-outcome";
 import { UnifiedAppTrace } from "~/components/activity/UnifiedAppTrace";
 import { CheckCircle2, ChevronRight, Loader2, Server, XCircle } from "lucide-react";
 import type { EngineExecutionEventEntry, UnifiedExecutionStep } from "~/lib/api";
-import { unifiedPhaseSummary, unifiedStepKey, unifiedStepStatus, type UnifiedStepRow } from "~/lib/unified-receipt";
+import {
+  unifiedPhaseSummary,
+  unifiedStepDisplayName,
+  unifiedStepKey,
+  unifiedStepMissingReceiptMessage,
+  unifiedStepStatus,
+  type UnifiedStepRow,
+} from "~/lib/unified-receipt";
+import { formatDuration } from "~/lib/format";
 
 interface UnifiedExecutionDetailsProps {
   event: EngineExecutionEventEntry;
@@ -21,12 +29,18 @@ function ReceiptField({ label, value }: { label: string; value: string }) {
   return <div className="min-w-0"><dt className="text-[11px] text-slate-400">{label}</dt><dd className="mt-1 break-words text-xs text-slate-700">{value}</dd></div>;
 }
 
+/** Formats elapsed execution time while preserving an explicit fallback for absent values. */
+function elapsedLabel(ms: number): string {
+  // Missing or invalid latencies stay distinct from a measured zero duration.
+  return formatDuration(ms) || "Not recorded";
+}
+
 // OperationReceiptMetadata shows useful provider metadata without depending on access to raw diagnostics.
-function OperationReceiptMetadata({ receipt }: { receipt?: EngineExecutionEventEntry }) {
-  // A missing child receipt must stay distinct from an operation that never ran.
-  if (!receipt) return <p className="mt-1 text-xs text-slate-500">Physical receipt not available</p>;
+function OperationReceiptMetadata({ step, receipt }: { step: UnifiedExecutionStep; receipt?: EngineExecutionEventEntry }) {
+  // A missing child receipt must stay distinct from an operation that never ran or delegated to another Unified App.
+  if (!receipt) return <p className="mt-1 text-xs text-slate-500">{unifiedStepMissingReceiptMessage(step)}</p>;
   return <>
-    <p className="mt-1 text-xs text-slate-500">{receipt.service_name || receipt.service_slug || "Service metadata unavailable"} · {receipt.latency_ms} ms</p>
+    <p className="mt-1 text-xs text-slate-500">{receipt.service_name || receipt.service_slug || "Service metadata unavailable"} · {formatDuration(receipt.latency_ms)}</p>
     {/* HTTP status is ordinary execution metadata; provider response bodies remain private. */}
     {receipt.provider_http_status ? <p className="mt-1 text-xs text-slate-500">HTTP {receipt.provider_http_status} · {receipt.attempt_count} attempt(s)</p> : null}
   </>;
@@ -36,20 +50,21 @@ function OperationReceiptMetadata({ receipt }: { receipt?: EngineExecutionEventE
 function UnifiedStep({ row, onSelect }: { row: UnifiedStepRow; onSelect: UnifiedExecutionDetailsProps["onSelect"] }) {
   const { step, receipt } = row;
   const state = unifiedStepStatus(step.status);
+  const label = unifiedStepDisplayName(step, receipt);
   // Only stored physical receipts are interactive; a skipped or mapping-failed target has no fabricated detail view.
   const content = <>
     <div className="min-w-0 flex-1">
-      {/* Receipt operation names help ordinary readers identify the failed call without opening raw payloads. */}
-      <div className="break-words font-mono text-xs font-medium text-slate-950">{receipt?.operation || step.target}</div>
+      {/* Receipt or recorded operation names help readers identify each step without exposing raw call_N correlation keys. */}
+      <div className="break-words font-mono text-xs font-medium text-slate-950">{label}</div>
       {/* A compensation is associated with its authored forward target, not a second logical success. */}
-      {step.phase === "rollback" ? <p className="mt-1 text-xs text-slate-500">Compensates {step.target}</p> : null}
-      <OperationReceiptMetadata receipt={receipt} />
+      {step.phase === "rollback" ? <p className="mt-1 text-xs text-slate-500">Compensates {label}</p> : null}
+      <OperationReceiptMetadata step={step} receipt={receipt} />
     </div>
     <span className={`shrink-0 text-xs font-medium ${state.className}`}>{state.label}</span>
     {receipt ? <ChevronRight className="h-4 w-4 shrink-0 text-slate-400" /> : null}
   </>;
   // Keep the complete target row keyboard-accessible when authoritative detail is available.
-  if (receipt) return <li><button type="button" aria-label={`Inspect ${step.phase} execution ${step.target}`} onClick={() => onSelect(receipt)} className="flex w-full items-start gap-3 px-3 py-4 text-left transition-colors hover:bg-slate-50 focus:bg-slate-50 focus:outline-none">{content}</button></li>;
+  if (receipt) return <li><button type="button" aria-label={`Inspect ${step.phase} execution ${label}`} onClick={() => onSelect(receipt)} className="flex w-full items-start gap-3 px-3 py-4 text-left transition-colors hover:bg-slate-50 focus:bg-slate-50 focus:outline-none">{content}</button></li>;
   return <li className="flex items-start gap-3 px-3 py-4">{content}</li>;
 }
 
@@ -86,7 +101,7 @@ export function UnifiedExecutionDetails({ event, consumerName, rows, loading, un
       <p className="font-semibold">{outcome.title}</p>
       <UnifiedAppFailureMessage event={event} fallback={`${outcome.message} ${outcome.action}`} />
     </div>
-    <dl className="mt-6 grid grid-cols-2 gap-4"><ReceiptField label="App" value={consumerName} /><ReceiptField label="Version" value={event.app_version || "Not recorded"} /><ReceiptField label="Access path" value={event.transport.toUpperCase()} /><ReceiptField label="Total elapsed" value={`${event.latency_ms} ms`} /></dl>
+    <dl className="mt-6 grid grid-cols-2 gap-4"><ReceiptField label="App" value={consumerName} /><ReceiptField label="Version" value={event.app_version || "Not recorded"} /><ReceiptField label="Access path" value={event.transport.toUpperCase()} /><ReceiptField label="Total elapsed" value={elapsedLabel(event.latency_ms)} /></dl>
     <UnifiedAppTrace event={event} consumerName={consumerName} />
     {/* Loading and unavailable states cannot silently imply that every child was skipped. */}
     {loading ? <p role="status" className="mt-4 flex items-center gap-2 text-xs text-slate-500"><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading execution receipts…</p> : null}

@@ -34,7 +34,7 @@ function WebhookReceiptRow({ event, service, onSelect }: { event: WebhookEventEn
   const received = new Date(event.created_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
   return (
     <li className="min-w-0">
-      <button type="button" aria-haspopup="dialog" onClick={() => onSelect(event.id)} className={`grid w-full min-w-0 cursor-pointer grid-cols-[minmax(0,1fr)_1rem] items-center gap-x-3 gap-y-1 px-4 py-3.5 text-left transition-colors hover:bg-slate-50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-blue-500 ${receiptColumns}`}>
+      <button type="button" aria-haspopup="dialog" onClick={() => onSelect(event.id)} className={`relative grid w-full min-w-0 cursor-pointer grid-cols-[minmax(0,1fr)_1rem] items-center gap-x-3 gap-y-1 px-4 py-3.5 text-left transition-colors hover:bg-slate-50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-blue-500 ${receiptColumns}`}>
         <span className="col-start-1 row-start-1 min-w-0 text-sm font-semibold text-slate-900 [overflow-wrap:anywhere]">
           {/* Failed verification can leave an event without a recognized name. */}
           {event.event_name || "Unnamed event"}

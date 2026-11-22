@@ -4,6 +4,7 @@ import { ActivityMetric } from "~/components/activity/AppActivityOverview";
 import { WebhookLogsCard } from "./WebhookLogsCard";
 import { webhookRegistrationAnalytics, webhookRegistrationEvents, type RegistrationAnalytics, type WebhookActivityInput } from "~/lib/webhook-detail-api";
 import { webhookEventNameOptions, type WebhookEventStatus } from "~/lib/webhook-detail";
+import { formatDuration } from "~/lib/format";
 
 /** Cancels obsolete reports and clears stale values so failed refreshes never look like verified zero activity. */
 function useRegistrationReport<T>(load: (input: WebhookActivityInput, signal: AbortSignal) => Promise<T>, input: WebhookActivityInput, refresh: number) {
@@ -29,10 +30,10 @@ function useRegistrationReport<T>(load: (input: WebhookActivityInput, signal: Ab
   return { ...current, loading: !current.data && !current.error };
 }
 
-/** Uses the app analytics latency convention for the same canonical receipt measurements. */
+/** Uses the shared duration formatter for canonical webhook receipt latency measurements. */
 function latency(value: number): string {
-  // Subsecond deliveries remain readable without rounding slow requests down to milliseconds.
-  return value < 1000 ? `${Math.round(value)} ms` : `${(value / 1000).toFixed(2)} s`;
+  // Missing or invalid aggregates fall back to a dash instead of a fabricated zero duration.
+  return formatDuration(value) || "—";
 }
 
 /** Shows the same period controls and explicit refresh action on registration analytics and received events. */

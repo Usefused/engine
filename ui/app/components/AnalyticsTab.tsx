@@ -27,7 +27,7 @@ import { WebhookLogsCard } from "~/components/webhooks/WebhookLogsCard";
 import { NestedActivityTabs } from "~/components/activity/NestedActivityTabs";
 import { ExecutionDetailsDrawer } from "~/components/activity/ExecutionDetailsDrawer";
 import { activateReceiptRow } from "~/components/activity/receiptRow";
-import { formatVersion } from "~/lib/format";
+import { formatDuration, formatVersion } from "~/lib/format";
 
 interface ActivityTabProps {
   res: ServiceGenerationResult;
@@ -58,10 +58,10 @@ interface ActivityTabProps {
   dependentMCPs: ServiceConsumerEntry[];
 }
 
+/** Formats recorded receipt and aggregate durations while keeping absent measurements explicit. */
 function formatLatency(value?: number | null) {
-  if (value == null) return "Not recorded";
-  if (value < 1000) return `${Math.round(value)} ms`;
-  return `${(value / 1000).toFixed(2)} s`;
+  // Missing or invalid timing evidence stays distinct from a real zero-millisecond duration.
+  return formatDuration(value) || "Not recorded";
 }
 
 function formatTime(value: string) {

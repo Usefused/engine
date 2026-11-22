@@ -25,8 +25,10 @@ export const SEARCH_DOCS_DEFINITION = {
       .max(SEARCH_DOCS_MAX_LIMIT)
       .optional()
       .describe(SEARCH_DOCS_ARGUMENT_DESCRIPTIONS.limit),
+    // Use a refined string schema so JSON Schema export succeeds under Zod v4 while preserving exact section validation.
     section: z
-      .custom(isDocumentationSection, "invalid public documentation section")
+      .string()
+      .refine(isDocumentationSection, "invalid public documentation section")
       .optional()
       .describe(SEARCH_DOCS_ARGUMENT_DESCRIPTIONS.section),
     schemaPath: z

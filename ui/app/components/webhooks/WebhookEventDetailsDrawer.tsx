@@ -6,6 +6,7 @@ import type { WebhookConsumptionEntry, WebhookEventEntry } from "~/lib/api";
 import { WebhookMessageDiagnostics } from "./WebhookMessageDiagnostics";
 import { OperationDisclosure } from "~/components/OperationDetailsParts";
 import { workspaceDialogHost } from "~/lib/workspace-dialog-host";
+import { formatDuration } from "~/lib/format";
 
 /** Shows the recorded service, consumption history, and receipt outcomes while keeping correlation and private messages behind disclosures. */
 export function WebhookEventDetailsDrawer({ event, serviceName, onClose }: { event: WebhookEventEntry; serviceName?: string; onClose: () => void }) {
@@ -74,7 +75,8 @@ function WebhookSummaryCard({ event, serviceName, deliveryStatus, consumptions }
         <WebhookDetail label="Service" value={serviceName} />
         <WebhookDetail label="Consumed by" value={formatConsumedBySummary(consumptions, deliveryStatus)} />
         <WebhookDetail label="Consumed at" value={formatConsumedAtSummary(consumptions, deliveryStatus, event.ended_at)} />
-        <WebhookDetail label="Delivery time" value={event.latency_ms > 0 ? `${event.latency_ms} ms` : ""} />
+        {/* Convert recorded delivery latency into readable units while treating zero or missing values as unrecorded. */}
+        <WebhookDetail label="Delivery time" value={event.latency_ms > 0 ? formatDuration(event.latency_ms) : ""} />
         <WebhookDetail label="Payload size" value={formatBytes(event.payload_size)} />
         <WebhookDetail label="Retries" value={event.retry_count.toLocaleString()} />
         <WebhookDetail label="Attempts" value={event.attempt_count?.toLocaleString()} />

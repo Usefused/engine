@@ -2,11 +2,14 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/executionevent"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/engine/unified"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/codes"
@@ -96,7 +99,18 @@ func (host *recordingCapabilityHost) receiptSteps() []models.UnifiedExecutionSte
 	defer host.mu.Unlock()
 	steps := make([]models.UnifiedExecutionStep, 0, len(host.calls))
 	for _, call := range host.calls {
-		step := models.UnifiedExecutionStep{Target: fmt.Sprintf("call_%d", call.Ordinal), Phase: "forward", Status: "success"}
+		operation, kind, include := receiptStepDescriptor(call.Request)
+		// Internal snapshot checkpoints are not external executions and never emit physical receipts.
+		if !include {
+			continue
+		}
+		step := models.UnifiedExecutionStep{
+			Target:    fmt.Sprintf("call_%d", call.Ordinal),
+			Operation: operation,
+			Kind:      kind,
+			Phase:     "forward",
+			Status:    "success",
+		}
 		// Pending calls after cancellation cannot be represented as successful provider work.
 		if call.Error != "" || call.Completion == 0 {
 			step.Status = "error"
@@ -105,4 +119,44 @@ func (host *recordingCapabilityHost) receiptSteps() []models.UnifiedExecutionSte
 		steps = append(steps, step)
 	}
 	return steps
+}
+
+// receiptStepDescriptor classifies a recorded host call into bounded receipt metadata without leaking inputs.
+func receiptStepDescriptor(raw json.RawMessage) (operation, kind string, include bool) {
+	var envelope struct {
+		Snapshot   string `json:"snapshot"`
+		UnifiedApp string `json:"unifiedApp"`
+		Bridge     string `json:"bridge"`
+		Operation  string `json:"operation"`
+	}
+	// Preserve unparseable call entries as unnamed steps rather than dropping failure evidence.
+	if len(raw) == 0 || json.Unmarshal(raw, &envelope) != nil {
+		return "", "", true
+	}
+	// Snapshot reads and writes are internal Engine checkpoints, not external forward executions.
+	if strings.TrimSpace(envelope.Snapshot) != "" {
+		return "", "", false
+	}
+	// Nested Unified App calls run under the called app's family rather than emitting a physical child receipt here.
+	if alias := strings.TrimSpace(envelope.UnifiedApp); alias != "" {
+		return safeUnifiedStepOperation(alias), "unified_app", true
+	}
+	// Bridge calls match the canonical "bridge:<alias>" operation label used in physical Bridge receipts.
+	if alias := strings.TrimSpace(envelope.Bridge); alias != "" {
+		return safeUnifiedStepOperation("bridge:" + alias), "bridge", true
+	}
+	// Workspace provider operations retain their selected operation name so pre-dispatch failures stay readable.
+	if op := strings.TrimSpace(envelope.Operation); op != "" {
+		return safeUnifiedStepOperation(op), "operation", true
+	}
+	return "", "", true
+}
+
+// safeUnifiedStepOperation keeps optional display names within the canonical public-name validator contract.
+func safeUnifiedStepOperation(value string) string {
+	// Reject malformed or overlong authored names instead of causing receipt validation to drop the entire event.
+	if !unified.ValidPublicName(value, 256) {
+		return ""
+	}
+	return value
 }

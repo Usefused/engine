@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:24.22.1-alpine AS execution-compiler-builder
+FROM node:24.22.3-alpine AS execution-compiler-builder
 
 WORKDIR /app/runtime/execution
 RUN apk upgrade --no-cache
@@ -11,14 +11,14 @@ COPY runtime/execution/src ./src
 RUN npm run build && npm prune --omit=dev
 
 # The optional pinned Python agent runtime requires glibc.
-FROM node:24.22.1-bookworm-slim AS engine-runtime
+FROM node:24.22.3-bookworm-slim AS engine-runtime
 
 WORKDIR /app
 
 # Node remains part of the runtime because MCP sessions execute in isolated
 # processes. GoReleaser builds the bundled MCP runtime before compiling the Go
 # binary, so containers never install dependencies into tenant storage.
-RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates gosu tini && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends bash ca-certificates gosu tini && rm -rf /var/lib/apt/lists/*
 
 # GoReleaser copies the selected binary to the root context. Headless release
 # images pass ENGINE_BINARY=fused-engine-headless but keep /app/fused-engine as

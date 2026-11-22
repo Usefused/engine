@@ -2,6 +2,7 @@ import { Activity } from "lucide-react";
 import type { EngineExecutionEventEntry } from "~/lib/api";
 import { unifiedAppTraceRows } from "~/lib/unified-app-trace";
 import { unifiedAppFailureStage } from "~/lib/unified-app-outcome";
+import { formatDuration } from "~/lib/format";
 
 // UnifiedAppTrace combines durable phase durations with explicit failure evidence, without accessing private errors.
 export function UnifiedAppTrace({ event, consumerName }: { event: EngineExecutionEventEntry; consumerName: string }) {
@@ -14,12 +15,12 @@ export function UnifiedAppTrace({ event, consumerName }: { event: EngineExecutio
     <div className="mt-3 overflow-hidden rounded-lg border border-slate-200">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-3 py-3">
         <span className="min-w-0 break-words text-xs font-semibold text-slate-800">{consumerName} · {event.app_version}</span>
-        <span className="text-xs tabular-nums text-slate-600">{event.latency_ms} ms total</span>
+        <span className="text-xs tabular-nums text-slate-600">{formatDuration(event.latency_ms)} total</span>
       </div>
       <ol className="divide-y divide-slate-100">
         {/* Only the explicitly recorded failure stage receives an error marker; timing alone cannot prove failure. */}
         {phases.map((phase) => <li key={phase.name} className="px-3 py-3">
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className="text-slate-700">{phase.label}{phase.name === failedStage ? <span className="ml-2 font-semibold text-red-700">Failed</span> : null}</span><span className="shrink-0 tabular-nums text-slate-500">{phase.duration_ms.toLocaleString(undefined, { maximumFractionDigits: 2 })} ms</span></div>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className="text-slate-700">{phase.label}{phase.name === failedStage ? <span className="ml-2 font-semibold text-red-700">Failed</span> : null}</span><span className="shrink-0 tabular-nums text-slate-500">{formatDuration(phase.duration_ms)}</span></div>
           <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100" aria-hidden="true"><div className={`h-full rounded-full ${phase.name === failedStage ? "bg-red-500" : "bg-violet-500"}`} style={{ width: `${phase.percent}%`, minWidth: "2px" }} /></div>
         </li>)}
       </ol>

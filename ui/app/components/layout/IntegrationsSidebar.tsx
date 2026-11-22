@@ -216,10 +216,12 @@ function MobileAuthFooter({ isAuth, onSignIn, onSignOut }: { isAuth: boolean; on
   );
 }
 
+/** Renders the collapsible desktop navigation rail pinned to the workspace scroller height. */
 function DesktopSidebar({ isAuth, access, isCollapsed, onCollapse, onExpand, onSignIn, onSignOut }: { isAuth: boolean; access: CurrentActorAccess | null; isCollapsed: boolean; onCollapse: () => void; onExpand: () => void; onSignIn: () => void; onSignOut: () => void }) {
+  // Collapse the rail to icon width when the user requests more workspace room.
   const widthClass = isCollapsed ? "w-16" : "w-64";
   return (
-    <aside className={`hidden lg:flex flex-col border-r border-slate-200 bg-white sticky top-0 h-screen shrink-0 transition-[width] duration-300 ${widthClass}`}>
+    <aside className={`hidden lg:flex flex-col border-r border-slate-200 bg-white sticky top-0 h-dvh shrink-0 transition-[width] duration-300 ${widthClass}`}>
       <DesktopHeader isCollapsed={isCollapsed} onCollapse={onCollapse} />
       <DesktopNav isAuth={isAuth} access={access} isCollapsed={isCollapsed} onSignIn={onSignIn} />
       <DesktopFooter isAuth={isAuth} isCollapsed={isCollapsed} onExpand={onExpand} onSignIn={onSignIn} onSignOut={onSignOut} />

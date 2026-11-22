@@ -1,5 +1,6 @@
 import { Activity, Clock, ServerCrash, Users, Wrench } from "lucide-react";
 import type { McpSession } from "~/lib/mcp-sessions";
+import { formatDuration } from "~/lib/format";
 
 // The per-server activity route owns data loading; this component renders its
 // overview without coupling presentation to GraphQL or route state.
@@ -55,7 +56,7 @@ function McpUsageCards({ entries }: { entries: McpUsageCardEntry[] }) {
             <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
               <div><dt className="text-xs text-slate-500">Calls</dt><dd className="mt-0.5 font-medium tabular-nums text-slate-800">{entry.count.toLocaleString()}</dd></div>
               <div><dt className="text-xs text-slate-500">Failed</dt><dd className={`mt-0.5 tabular-nums ${entry.failed > 0 ? "font-semibold text-red-600" : "text-slate-400"}`}>{entry.failed.toLocaleString()}</dd></div>
-              <div><dt className="text-xs text-slate-500">Average latency</dt><dd className="mt-0.5 tabular-nums text-slate-700">{Math.round(entry.averageLatency || 0)} ms</dd></div>
+              <div><dt className="text-xs text-slate-500">Average latency</dt><dd className="mt-0.5 tabular-nums text-slate-700">{formatDuration(entry.averageLatency || 0)}</dd></div>
               <div><dt className="text-xs text-slate-500">Success rate</dt><dd className={`mt-0.5 tabular-nums ${entry.failed > 0 ? "text-amber-600" : "text-emerald-600"}`}>{successRate}%</dd></div>
             </dl>
           </div>
@@ -93,7 +94,7 @@ function McpAnalyticsStats({ data }: { data: McpAnalyticsData }) {
           <Clock className="w-16 h-16 text-blue-600" />
         </div>
         <span className="text-slate-500 text-sm font-medium mb-1">Avg Latency</span>
-        <span className="text-3xl font-bold text-slate-900">{Math.round(data.average_latency)}<span className="text-xl text-slate-400 ml-1">ms</span></span>
+        <span className="text-3xl font-bold tabular-nums text-slate-900">{formatDuration(data.average_latency || 0)}</span>
       </div>
       <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col relative overflow-hidden">
         <div className="absolute top-0 right-0 p-4 opacity-5">
@@ -153,8 +154,8 @@ function McpToolUsageTable({ toolUsage }: { toolUsage: NonNullable<McpAnalyticsD
                           {tool.failed.toLocaleString()}
                         </span>
                       </td>
-                      <td className="px-6 py-4 text-right font-medium text-slate-600">
-                        {Math.round(tool.average_latency || 0)}ms
+                      <td className="px-6 py-4 text-right font-medium tabular-nums text-slate-600">
+                        {formatDuration(tool.average_latency || 0)}
                       </td>
                       <td className="px-6 py-4 text-right">
                         <div className="flex items-center justify-end gap-2">
@@ -221,8 +222,8 @@ function McpServiceUsageTable({ serviceUsage }: { serviceUsage: NonNullable<McpA
                           {svc.failed.toLocaleString()}
                         </span>
                       </td>
-                      <td className="px-6 py-4 text-right font-medium text-slate-600">
-                        {Math.round(svc.average_latency || 0)}ms
+                      <td className="px-6 py-4 text-right font-medium tabular-nums text-slate-600">
+                        {formatDuration(svc.average_latency || 0)}
                       </td>
                       <td className="px-6 py-4 text-right">
                         <div className="flex items-center justify-end gap-2">

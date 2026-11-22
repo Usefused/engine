@@ -1426,6 +1426,8 @@ type EngineExecutionEvent struct {
 // UnifiedExecutionStep is bounded execution metadata, never mapped input or provider output.
 type UnifiedExecutionStep struct {
 	Target    string `json:"target"`
+	Operation string `json:"operation,omitempty"`
+	Kind      string `json:"kind,omitempty"`
 	Phase     string `json:"phase"`
 	Status    string `json:"status"`
 	ErrorCode string `json:"error_code,omitempty"`

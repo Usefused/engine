@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { createGzip } from "node:zlib";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const clientDir = path.join(__dirname, "build", "client");
+const clientDir = path.resolve(__dirname, "build", "client");
+const clientDirPrefix = clientDir.endsWith(path.sep) ? clientDir : `${clientDir}${path.sep}`;
 const port = Number(process.env.PORT || 3000);
 const backendURL = process.env.BACKEND_URL || "http://localhost:8081";
 const enginePublicURL = process.env.FUSED_ENGINE_PUBLIC_URL || "";
@@ -21,24 +22,38 @@ const contentTypes = {
 	".txt": "text/plain; charset=utf-8",
 };
 
+// Handle incoming SPA static asset and fallback navigation requests safely.
 const server = createServer(async (req, res) => {
+	// Serve runtime environment configuration directly for standalone UI hosting.
 	if (req.url === "/env.js") {
 		serveEnv(res);
 		return;
 	}
 
+	// Reject mutating methods since the static server only serves read-only assets.
 	if (req.method !== "GET" && req.method !== "HEAD") {
 		res.writeHead(405);
 		res.end();
 		return;
 	}
 
-	const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+	// Reject malformed Host headers or request targets instead of crashing the async handler.
+	let url;
+	try {
+		url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+	} catch {
+		res.writeHead(400);
+		res.end("Bad request");
+		return;
+	}
+
 	const assetPath = resolveAssetPath(url.pathname);
+	// Return matched static assets directly before falling back to SPA index routing.
 	if (assetPath && (await serveFile(res, req, assetPath))) {
 		return;
 	}
 
+	// Route browser HTML navigations to the SPA entry point so client routing takes over.
 	if (isNavigation(req)) {
 		await serveFile(res, req, path.join(clientDir, "index.html"));
 		return;
@@ -71,11 +86,27 @@ function serveEnv(res) {
 	);
 }
 
+// resolveAssetPath maps a URL pathname to a file strictly inside clientDir.
 function resolveAssetPath(rawPath) {
-	const cleanPath = path.posix.normalize(`/${rawPath}`).replace(/^\/+/, "");
+	// Reject percent-encoding errors or null bytes before normalizing filesystem paths.
+	let decodedPath;
+	try {
+		decodedPath = decodeURIComponent(rawPath);
+	} catch {
+		return null;
+	}
+	if (decodedPath.includes("\0")) return null;
+
+	const cleanPath = path.posix.normalize(`/${decodedPath}`).replace(/^\/+/, "");
+	// Empty or root paths fall through to SPA navigation handling rather than directory reads.
 	if (!cleanPath || cleanPath === ".") return null;
+	// Guard against POSIX traversal prefixes before resolving against the host filesystem.
 	if (cleanPath.startsWith("..")) return null;
-	return path.join(clientDir, cleanPath);
+
+	const resolvedPath = path.resolve(clientDir, cleanPath);
+	// Enforce absolute path containment inside clientDir even when path separators differ by OS.
+	if (!resolvedPath.startsWith(clientDirPrefix)) return null;
+	return resolvedPath;
 }
 
 async function serveFile(res, req, filePath) {

@@ -3,6 +3,7 @@ import { Link } from "@remix-run/react";
 import { Activity, ArrowDownToLine, Clock3, Code2, Database, Server, ServerCrash } from "lucide-react";
 import type { ComponentType, ReactNode } from "react";
 import type { EngineExecutionBreakdown, WorkspaceExecutionAnalytics } from "~/lib/api";
+import { formatDuration } from "~/lib/format";
 
 export type WorkspaceActivityRange = "24h" | "7d" | "30d" | "90d";
 
@@ -115,10 +116,10 @@ function EmptyLine({ children }: { children: ReactNode }) {
   return <div className="py-10 text-center text-sm text-slate-500">{children}</div>;
 }
 
-// formatLatency keeps aggregate durations readable across millisecond and second scales.
+// formatLatency scales workspace aggregate durations consistently from milliseconds to multi-day spans.
 function formatLatency(value: number) {
-  if (value < 1000) return `${Math.round(value)} ms`;
-  return `${(value / 1000).toFixed(2)} s`;
+  // Missing or invalid aggregates display a dash instead of blank metric cards.
+  return formatDuration(value) || "—";
 }
 
 // successRate handles empty windows without producing a non-finite percentage.

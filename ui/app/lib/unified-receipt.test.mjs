@@ -8,6 +8,7 @@ import ts from "typescript";
 import * as helpers from "./unified-receipt.ts";
 import * as traceHelpers from "./unified-app-trace.ts";
 import * as outcomeHelpers from "./unified-app-outcome.ts";
+import * as formatHelpers from "./format.ts";
 
 const require = createRequire(import.meta.url);
 
@@ -24,7 +25,7 @@ function loadDetails(path = "../components/activity/UnifiedExecutionDetails.tsx"
   const exports = {};
   // App aliases use real local implementations; framework imports keep their installed behavior.
   const resolve = (name) => {
-    const local = { "~/lib/unified-receipt": helpers, "~/lib/unified-app-trace": traceHelpers, "~/lib/unified-app-outcome": outcomeHelpers };
+    const local = { "~/lib/unified-receipt": helpers, "~/lib/unified-app-trace": traceHelpers, "~/lib/unified-app-outcome": outcomeHelpers, "~/lib/format": formatHelpers };
     // Server rendering exercises the real fallback while effects remain deferred to the browser.
     if (name === "~/components/activity/UnifiedAppFailureMessage") return loadDetails("../components/activity/UnifiedAppFailureMessage.tsx");
     // The narrow API is unused during SSR and prevents accidental live requests from this fixture.
@@ -55,15 +56,17 @@ function parentFixture(overrides = {}) {
 
 // childFixture intentionally gives both phases the same target to detect incorrect name-only joining.
 function childFixture(phase, overrides = {}) {
-  return { id: `child-${phase}`, parent_execution_id: "parent", unified_target: "first", execution_phase: phase,
-    execution_kind: "physical", service_name: "Sample service", latency_ms: 50, ...overrides };
+  return {
+    id: `child-${phase}`, parent_execution_id: "parent", unified_target: "first", execution_phase: phase,
+    execution_kind: "physical", service_name: "Sample service", latency_ms: 50, ...overrides
+  };
 }
 
 // renderParent exercises the real markup with synthetic metadata, including unknown fields that must stay private.
 function renderParent(event, children = [], overrides = {}) {
   return renderToStaticMarkup(createElement(UnifiedExecutionDetails, {
     event, consumerName: "Sample app", rows: helpers.unifiedStepRows(event, children), loading: false,
-    unavailable: false, onRetry: () => {}, onSelect: () => {}, ...overrides,
+    unavailable: false, onRetry: () => { }, onSelect: () => { }, ...overrides,
   }));
 }
 
@@ -110,7 +113,8 @@ test("renders SDK and MCP parent receipts with clickable forward and rollback ev
 
 // The ordinary receipt remains useful with no diagnostics client and never renders accidental private fields.
 test("ordinary app receipt explains a failed stage with version and provider outcomes", () => {
-  const event = parentFixture({ app_version: "1.0.0", failure_reason: "unified_app_execute_failed", failure_code: "execution_failed",
+  const event = parentFixture({
+    app_version: "1.0.0", failure_reason: "unified_app_execute_failed", failure_code: "execution_failed",
     error: "PRIVATE_EXCEPTION", request: "PRIVATE_REQUEST", response: "PRIVATE_RESPONSE",
     timings: [{ name: "unified_app_execute", duration_ms: 40 }],
   });
@@ -127,8 +131,10 @@ test("ordinary app receipt explains a failed stage with version and provider out
 
 // Metadata is rendered as text and even accidental payload properties are excluded from this audit-only projection.
 test("escapes target names and never renders personal payloads or credentials", () => {
-  const event = parentFixture({ operation: "<sample&operation>", payload: "PRIVATE_PAYLOAD", credentials: "PRIVATE_SECRET",
-    unified_steps: [{ target: "<target&value>", phase: "forward", status: "error", error_code: "input_mapping_failed" }] });
+  const event = parentFixture({
+    operation: "<sample&operation>", payload: "PRIVATE_PAYLOAD", credentials: "PRIVATE_SECRET",
+    unified_steps: [{ target: "<target&value>", phase: "forward", status: "error", error_code: "input_mapping_failed" }]
+  });
   const html = renderParent(event);
   assert.match(html, /&lt;sample&amp;operation&gt;/);
   assert.match(html, /&lt;target&amp;value&gt;/);
@@ -167,6 +173,23 @@ test("child navigation reuses canonical receipt data and restores parent positio
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(css, /animation: none/);
   assert.match(api, /parent_execution_id: \$parentExecutionId/);
-  assert.match(api, /unified_steps \{ target phase status error_code \}/);
+  assert.match(api, /unified_steps \{ target operation kind phase status error_code \}/);
   assert.doesNotMatch(inspector, /executeResolved|api\.[a-zA-Z.]*execute\(/);
+});
+
+// Internal call_N correlation keys must never leak raw into receipts when physical child rows are absent.
+test("hides raw call_N correlation tokens and explains nested Unified App steps cleanly", () => {
+  const event = parentFixture({
+    unified_steps: [
+      { target: "call_1", operation: "billing_customer", kind: "unified_app", phase: "forward", status: "success" },
+      { target: "call_2", operation: "createCustomer", kind: "operation", phase: "forward", status: "error", error_code: "execution_failed" },
+      { target: "call_3", phase: "forward", status: "success" },
+    ],
+  });
+  const html = renderParent(event, []);
+  assert.match(html, /billing_customer/);
+  assert.match(html, /Unified App call/);
+  assert.match(html, /createCustomer/);
+  assert.match(html, /Call 3/);
+  assert.doesNotMatch(html, /call_1|call_2|call_3/);
 });

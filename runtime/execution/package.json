@@ -1,11 +1,11 @@
 {
   "engines": {
-    "node": "^24.22.1"
+    "node": "^24.22.3"
   },
   "devEngines": {
     "runtime": {
       "name": "node",
-      "version": "^24.22.1",
+      "version": "^24.22.3",
       "onFail": "error"
     }
   },
@@ -25,6 +25,6 @@
     "test": "npm run build && npm run test:complexity && node --test dist/test/*.test.js",
     "test:complexity": "node scripts/check-complexity.cjs"
   },
-  "dependencies": { "esbuild": "0.27.3", "zod": "4.4.3", "typescript": "6.0.3" },
+  "dependencies": { "esbuild": "0.28.2", "zod": "4.6.7", "typescript": "6.0.3" },
   "devDependencies": { "@types/node": "25.9.1" }
 }

@@ -11,6 +11,7 @@ import { compileInputContract, validateInputText } from "~/lib/schedule-input-va
 import { UnifiedAppInput } from "./UnifiedAppInput";
 import { AppTryReadiness } from "./AppTryReadiness";
 import { CopyButton } from "~/components/CopyValue";
+import { formatDuration } from "~/lib/format";
 import type { AppTryTarget } from "./AppTrySidebar";
 
 const fieldClass = "mt-2 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm font-normal disabled:opacity-50";
@@ -129,7 +130,7 @@ function TryInputValidation({ validation }: { validation: ReturnType<typeof vali
 function TryResponse({ result }: { result?: { text: string; status: number; elapsed: number; ok: boolean } }) {
   return <>
     {/* Preserve both successful and failed HTTP bodies, including empty responses. */}
-    {result && <section aria-label="Execution response" className="overflow-hidden rounded-xl border border-slate-200"><div className="flex items-center justify-between gap-3 bg-slate-50 px-4 py-3"><h3 className="text-sm font-semibold">Response</h3><p role="status" className={`text-xs ${result.ok ? "text-emerald-700" : "text-red-700"}`}>HTTP {result.status} · {result.elapsed} ms</p></div><pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words bg-slate-950 p-4 text-xs leading-6 text-slate-200">{result.text || "Empty response"}</pre></section>}
+    {result && <section aria-label="Execution response" className="overflow-hidden rounded-xl border border-slate-200"><div className="flex items-center justify-between gap-3 bg-slate-50 px-4 py-3"><h3 className="text-sm font-semibold">Response</h3><p role="status" className={`text-xs ${result.ok ? "text-emerald-700" : "text-red-700"}`}>HTTP {result.status} · {formatDuration(result.elapsed)}</p></div><pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words bg-slate-950 p-4 text-xs leading-6 text-slate-200">{result.text || "Empty response"}</pre></section>}
   </>;
 }
 

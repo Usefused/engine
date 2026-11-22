@@ -5,8 +5,9 @@
 # encryption in Engine-local storage, and connect session state signing.
 # Override in production via the FUSED_ENCRYPTION_KEY environment variable.
 # Generate a secure key: openssl rand -base64 32
+encryption_key: ""
 database:
-  url: "postgres://opensync:password@192.168.0.112:5432/opensync?sslmode=disable"
+  url: "postgres://user:password@localhost:5432/engine?sslmode=disable"
   # YAML fills absent environment settings; inherited environment values still win.
   max_conns: 10
   max_conn_idle_time: 30m
@@ -36,6 +37,7 @@ engine:
     queue_capacity: 256
     queue_timeout_seconds: 5
   registry_endpoint: "http://127.0.0.1:8090/graphql"
+  license_key: "" # your fused license key
   # Run payload retention is independent of activity history; zero keeps it indefinitely.
   execution_result_retention_days: 7
   execution_retention_days: 30

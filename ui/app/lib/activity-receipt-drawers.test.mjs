@@ -11,6 +11,9 @@ const sharedDrawer = readFileSync(new URL("../components/activity/ExecutionDetai
 const appInspector = readFileSync(new URL("../components/activity/AppExecutionInspector.tsx", import.meta.url), "utf8");
 const webhookLogs = readFileSync(new URL("../components/webhooks/WebhookLogsCard.tsx", import.meta.url), "utf8");
 const webhookDrawer = readFileSync(new URL("../components/webhooks/WebhookEventDetailsDrawer.tsx", import.meta.url), "utf8");
+const agentProvider = readFileSync(new URL("../components/agent/FusedAgentProvider.tsx", import.meta.url), "utf8");
+const integrationsLayout = readFileSync(new URL("../routes/integrations.tsx", import.meta.url), "utf8");
+const integrationsSidebar = readFileSync(new URL("../components/layout/IntegrationsSidebar.tsx", import.meta.url), "utf8");
 
 // Confirms App and MCP receipt rows open the same wide canonical detail drawer.
 test("app receipt rows open shared execution details", () => {
@@ -66,4 +69,16 @@ test("webhook receipt rows open bounded webhook details", () => {
   assert.match(webhookDrawer, /Failure reason/);
   assert.match(webhookDrawer, /event\.error_reason/);
   assert.doesNotMatch(webhookDrawer, /event\.(?:payload(?!_size)|credentials?|secrets?)/i);
+});
+
+// Confirms absolute descendants like sr-only cannot escape the h-dvh shell and create a root document scrollbar.
+test("workspace shell contains absolute descendants so fixed overlays cannot scroll past navigation", () => {
+  // Both the h-dvh shell and workspace scroller must be positioned without transform so absolute nodes stay clipped while fixed drawers stay viewport-anchored.
+  assert.match(agentProvider, /className="relative flex h-dvh min-w-0 flex-col overflow-hidden overscroll-none md:flex-row"/);
+  assert.match(agentProvider, /data-fused-workspace-pane className="relative isolate min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain"/);
+  assert.doesNotMatch(agentProvider, /data-fused-workspace-pane[^>]*transform/);
+  // Workspace root and sticky rail must align to the scroller's dynamic viewport height and contain absolute row labels.
+  assert.match(integrationsLayout, /data-fused-workspace className="relative min-h-full flex flex-col lg:flex-row/);
+  assert.match(integrationsSidebar, /sticky top-0 h-dvh shrink-0/);
+  assert.match(webhookLogs, /<button type="button" aria-haspopup="dialog" onClick=\{\(\) => onSelect\(event\.id\)\} className=\{`relative grid /);
 });

@@ -11,6 +11,7 @@ import { AppExecutionEndpoint } from "~/components/apps/AppExecutionEndpoint";
 import { AppExecutionTokens } from "~/components/apps/AppExecutionTokens";
 import { Loader2 } from "lucide-react";
 import { api } from "~/lib/api";
+import { deleteAppFamilies } from "~/lib/app-family-deactivation";
 import { appConnectedServiceSelections, type AppConnectedServiceSelection, type AppServiceSummary } from "~/lib/app-connected-services";
 import type { AppSelectionPayload } from "~/lib/app-selection-v3";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
@@ -23,6 +24,13 @@ import { AppRequestsPanel } from "~/components/activity/AppRequestsPanel";
 import { useToast } from "~/components/Toast";
 
 interface UnifiedApp { app_id: string; app_family_id: string; name: string; description: string; version: string; status: string; kind: string; created_at: string; selections: AppSelectionPayload[] }
+
+/** Loads every immutable version of one Unified App family for history display and full-app deletion. */
+function readUnifiedAppVersions(family: string): Promise<AppVersionHistoryItem[]> {
+  return api.mcpGraphql<{ appVersions: AppVersionHistoryItem[] }>(`query UnifiedAppVersions($family: String!) {
+          appVersions(app_family_id: $family) { id: app_id version created_at }
+        }`, { family }).then((history) => history.appVersions);
+}
 
 /** Groups app automation and source actions behind family management and catalogue publication permissions. */
 export default function UnifiedAppDetails() {
@@ -38,6 +46,7 @@ export default function UnifiedAppDetails() {
   const [versions, setVersions] = useState<AppVersionHistoryItem[]>([]);
   const [error, setError] = useState("");
   const [deleting, setDeleting] = useState("");
+  const [deletingApp, setDeletingApp] = useState(false);
   const [promoting, setPromoting] = useState("");
   const [traffic, setTraffic] = useState<string | null>(null);
 
@@ -58,12 +67,10 @@ export default function UnifiedAppDetails() {
         // Other adapters cannot accidentally render as a hosted Unified App.
         if (data.app?.kind !== "unified_app") throw new Error("Unified App not found.");
         const detailedSelections = appConnectedServiceSelections(data.app.selections, data.appServices);
-        const history = await api.mcpGraphql<{ appVersions: AppVersionHistoryItem[] }>(`query UnifiedAppVersions($family: String!) {
-          appVersions(app_family_id: $family) { id: app_id version created_at }
-        }`, { family: data.app.app_family_id });
+        const appVersions = await readUnifiedAppVersions(data.app.app_family_id);
         const deployment = await api.appConfig.traffic(id);
         // Cleanup owns the stale response boundary for both dependent requests.
-        if (current) { setApp(data.app); setServices(data.appServices); setSelections(detailedSelections); setVersions(history.appVersions); setTraffic(deployment.active_app_id); }
+        if (current) { setApp(data.app); setServices(data.appServices); setSelections(detailedSelections); setVersions(appVersions); setTraffic(deployment.active_app_id); }
       } catch (cause) { if (current) setError(String(cause)); }
     }
     void load();
@@ -87,6 +94,40 @@ export default function UnifiedAppDetails() {
       }
     } catch (cause) { toast.error(String(cause)); }
     finally { setDeleting(""); }
+  }
+
+  /** Permanently deactivates every version of this Unified App and archives the family identity. */
+  async function deleteApp() {
+    // Family deletion requires a loaded app identity and an active family management grant.
+    if (!app || deletingApp || !hasResourcePermission(access, "app.unified_app.manage", "APP", app.app_family_id)) return;
+    setDeletingApp(true);
+    try {
+      const result = await deleteAppFamilies([app.app_family_id], {
+        listVersions: (familyId) => readUnifiedAppVersions(familyId).then((items) => items.map((item) => ({ app_id: item.id }))),
+        confirm: ({ versionCount }) => toast.confirm(
+          // Name the exact deactivated version count when active runtimes must be removed before archiving.
+          versionCount > 0
+            ? `Delete Unified App "${app.name}"? This permanently deactivates all ${versionCount} version(s) and removes its runtime. Its name becomes reusable and its historical identity remains in Archive.`
+            : `Delete Unified App "${app.name}"? Its name becomes reusable and its historical identity remains in Archive.`
+        ),
+        deactivate: api.sdks.deactivate,
+        archiveFamily: api.sdks.archiveFamily,
+      });
+      // Cancellation keeps the Unified App and its versions untouched.
+      if (result.cancelled) return;
+      if (result.deletedFamilies.length === 1) {
+        toast.success(`Unified App "${app.name}" deleted and moved to Archive.`);
+        navigate("/integrations/sdks?type=unified_app");
+        return;
+      }
+      toast.error(`Failed to delete Unified App "${app.name}". Deactivated ${result.deactivatedVersions} version(s); ${result.failedVersions} version deactivation(s) failed.`);
+      // Leave the detail route if any version was already deactivated so the user can retry from the catalogue.
+      if (result.deactivatedVersions > 0) navigate("/integrations/sdks?type=unified_app");
+    } catch (cause) {
+      toast.error(`Failed to delete Unified App: ${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally {
+      setDeletingApp(false);
+    }
   }
 
   /** Switches new traffic only after the user reviews the exact retained version. */
@@ -133,8 +174,8 @@ export default function UnifiedAppDetails() {
   const active = selectedUnifiedAppTab(tabs, params.get("tab"));
   return <div className="space-y-6">
     <AppDetailBackLink to="/integrations/sdks?type=unified_app" />
-    {/* Private source and successor deployment require management of this exact family. */}
-    <AppDetailHeader kind="unified_app" name={app.name} summary={app.description} status={app.status} version={app.version} createdAt={app.created_at} action={<div className="flex shrink-0 items-center gap-2"><UnifiedAppUsage key={id} app={app} executionFamilyID={executionFamilyID} />{canManage && <UnifiedAppHeaderActions key={id} appID={id} canPublishTemplate={canPublishTemplate} />}</div>} />
+    {/* Private source, successor deployment, and family deletion require management of this exact family. */}
+    <AppDetailHeader kind="unified_app" name={app.name} summary={app.description} status={app.status} version={app.version} createdAt={app.created_at} action={<div className="flex shrink-0 items-center gap-2"><UnifiedAppUsage key={id} app={app} executionFamilyID={executionFamilyID} />{canManage && <UnifiedAppHeaderActions key={id} appID={id} canPublishTemplate={canPublishTemplate} canDelete={canManage} deleting={deletingApp} onDelete={deleteApp} />}</div>} />
     <AppDetailTabs label="Unified App details" active={active} tabs={tabs} onChange={(tab) => setParams({ tab })} />
     <UnifiedAppTabBody
       active={active}
@@ -144,7 +185,7 @@ export default function UnifiedAppDetails() {
       selections={selections}
       versions={versions}
       traffic={traffic}
-      busy={[promoting, deleting].some(Boolean)}
+      busy={[promoting, deleting, deletingApp].some(Boolean)}
       canManage={canManage}
       onSelectVersion={(next) => navigate(`/integrations/unified-apps/${next}?tab=changes`)}
       onDeleteVersion={deleteVersion}

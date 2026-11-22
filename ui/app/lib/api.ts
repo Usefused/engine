@@ -579,42 +579,42 @@ export interface DiscoveryStartRequest {
 
 export type DiscoveryActionRequest =
   | {
-      version: 1;
-      session_id: string;
-      expected_revision: number;
-      action: "select_operations";
-      payload: { operations: DiscoveryOperationSelection[] };
-    }
+    version: 1;
+    session_id: string;
+    expected_revision: number;
+    action: "select_operations";
+    payload: { operations: DiscoveryOperationSelection[] };
+  }
   | {
-      version: 1;
-      session_id: string;
-      expected_revision: number;
-      draft_revision: number;
-      action: "accept_enrichment" | "reject_enrichment";
-      payload: { proposal_ids: string[] };
-    }
+    version: 1;
+    session_id: string;
+    expected_revision: number;
+    draft_revision: number;
+    action: "accept_enrichment" | "reject_enrichment";
+    payload: { proposal_ids: string[] };
+  }
   | {
-      version: 1;
-      session_id: string;
-      expected_revision: number;
-      draft_revision: number;
-      action: "update_overlay";
-      payload: { overlay: Record<string, unknown> };
-    }
+    version: 1;
+    session_id: string;
+    expected_revision: number;
+    draft_revision: number;
+    action: "update_overlay";
+    payload: { overlay: Record<string, unknown> };
+  }
   | {
-      version: 1;
-      session_id: string;
-      expected_revision: number;
-      draft_revision: number;
-      action: "request_plan";
-    }
+    version: 1;
+    session_id: string;
+    expected_revision: number;
+    draft_revision: number;
+    action: "request_plan";
+  }
   | {
-      version: 1;
-      session_id: string;
-      expected_revision: number;
-      draft_revision?: number;
-      action: "cancel";
-    };
+    version: 1;
+    session_id: string;
+    expected_revision: number;
+    draft_revision?: number;
+    action: "cancel";
+  };
 
 export interface WebhookIdentifier {
   name: string;
@@ -622,12 +622,12 @@ export interface WebhookIdentifier {
 }
 
 export interface SpecificationImportDiagnostic {
- severity: string;
- code: string;
- message: string;
- pointer?: string;
- disposition?: string;
- correction?: { rule: string; version: string; before_hash: string; after_hash: string };
+  severity: string;
+  code: string;
+  message: string;
+  pointer?: string;
+  disposition?: string;
+  correction?: { rule: string; version: string; before_hash: string; after_hash: string };
 }
 
 export type ImportRepairMode = "safe" | "report_only";
@@ -938,6 +938,8 @@ export interface WebhookAnalyticsSummary {
 // UnifiedExecutionStep describes orchestration outcomes without exposing mapped or provider data.
 export interface UnifiedExecutionStep {
   target: string;
+  operation?: string;
+  kind?: "operation" | "bridge" | "unified_app";
   phase: "forward" | "rollback";
   status: "success" | "error" | "skipped";
   error_code?: string;
@@ -1029,7 +1031,7 @@ const engineExecutionEventSelection = `
   parent_execution_id
   unified_target
   execution_phase
-  unified_steps { target phase status error_code }
+  unified_steps { target operation kind phase status error_code }
   trace_id
   span_id
   app_family_id
@@ -1295,7 +1297,7 @@ const workspaceConnectionProfileSelection = `
 export interface SecretMeta {
   exportable?: boolean;
   service_name?: string | null;
-  service_slug?: string | null;  id: string;
+  service_slug?: string | null; id: string;
   workspace_id?: string;
   bucket_id: string;
   service_id: string;
@@ -1328,17 +1330,17 @@ export interface OAuthConnectedApp {
   granted_at: string;
 }
 
-export interface BridgeInstallation { pairing_id:string; name:string; scope:"workspace"|"profiles"; profile_ids:string[]; generation:number; }
-export interface BridgeManifest { state:"online"|"offline"; profile_id:string; revision:string; manifest_hash:string; document:{ operations:Array<{connection_id:string;operation_id:string;contract_hash:string;contract_json:string}> }; }
+export interface BridgeInstallation { pairing_id: string; name: string; scope: "workspace" | "profiles"; profile_ids: string[]; generation: number; }
+export interface BridgeManifest { state: "online" | "offline"; profile_id: string; revision: string; manifest_hash: string; document: { operations: Array<{ connection_id: string; operation_id: string; contract_hash: string; contract_json: string }> }; }
 
 export const api = {
   bridges: {
     /** Read only sanitized installation metadata through the normal browser session. */
-    list: () => req<{bridges:BridgeInstallation[]}>("/bridges"),
+    list: () => req<{ bridges: BridgeInstallation[] }>("/bridges"),
     /** Use Engine's persisted digest rather than hashing reformatted JSON in the browser. */
-    manifests: (id:string) => req<{manifests:BridgeManifest[]}>(`/bridges/${encodeURIComponent(id)}/manifests`),
+    manifests: (id: string) => req<{ manifests: BridgeManifest[] }>(`/bridges/${encodeURIComponent(id)}/manifests`),
     /** Revoke only the explicitly selected installation using the shared CSRF boundary. */
-    revoke: (id:string) => req<{revoked:boolean}>(`/bridges/${encodeURIComponent(id)}`,{method:"DELETE"}),
+    revoke: (id: string) => req<{ revoked: boolean }>(`/bridges/${encodeURIComponent(id)}`, { method: "DELETE" }),
   },
   mcpCatalog: {
     /** Reads the caller's saved snapshot without contacting the upstream server. */
@@ -1662,8 +1664,8 @@ export const api = {
       window.URL.revokeObjectURL(url);
     },
     deactivate: (appId: string) => req<void>(`/apps/${appId}/`, { method: "DELETE" }),
-	// archiveFamily releases a versionless app name while retaining its historical identity.
-	archiveFamily: (appFamilyId: string) => req<void>(`/app-families/${appFamilyId}`, { method: "DELETE" }),
+    // archiveFamily releases a versionless app name while retaining its historical identity.
+    archiveFamily: (appFamilyId: string) => req<void>(`/app-families/${appFamilyId}`, { method: "DELETE" }),
   },
 
   // The hosted Connect runtime API was removed with its obsolete browser
@@ -2430,15 +2432,15 @@ export const api = {
       serviceIds.length === 0
         ? Promise.resolve([] as NotificationServiceRef[])
         : api
-            .graphql<{ servicesByIds: NotificationServiceRef[] }>(
-              `query($serviceIds: [String!]!) {
+          .graphql<{ servicesByIds: NotificationServiceRef[] }>(
+            `query($serviceIds: [String!]!) {
                 servicesByIds(serviceIds: $serviceIds) {
                   id name slug
                 }
               }`,
-              { serviceIds }
-            )
-            .then(({ servicesByIds }) => servicesByIds),
+            { serviceIds }
+          )
+          .then(({ servicesByIds }) => servicesByIds),
 
     // getServiceIds reads local membership only, avoiding Registry metadata work for catalogue activation markers.
     getServiceIds: () =>
@@ -2493,14 +2495,14 @@ export const api = {
 };
 
 export type BillingState = {
- available: boolean;
- plan: string;
- status: string;
- access_until: string | null;
- cancel_at_period_end: boolean;
- subscription_plan?: string;
- pending_plan?: string;
- pending_change?: "" | "scheduled" | "awaiting_payment";
- change_at?: string | null;
- plans: Array<{ id: string; name: string; monthly_price_cents: number; currency: string; entitlements?: Record<string, number | boolean | string> }>;
+  available: boolean;
+  plan: string;
+  status: string;
+  access_until: string | null;
+  cancel_at_period_end: boolean;
+  subscription_plan?: string;
+  pending_plan?: string;
+  pending_change?: "" | "scheduled" | "awaiting_payment";
+  change_at?: string | null;
+  plans: Array<{ id: string; name: string; monthly_price_cents: number; currency: string; entitlements?: Record<string, number | boolean | string> }>;
 };

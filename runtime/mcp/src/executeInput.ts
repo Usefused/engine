@@ -5,7 +5,8 @@ import { EXECUTE_ARGUMENT_DESCRIPTIONS } from "./toolDescriptions.js";
 /** Both wire transports advertise this shape; cross-field admission happens before provider execution. */
 export const EXECUTE_INPUT_SHAPE = {
   operationId: z.string().min(1).max(256).optional().describe(EXECUTE_ARGUMENT_DESCRIPTIONS.operationId),
-  params: z.record(z.unknown()).optional().describe(EXECUTE_ARGUMENT_DESCRIPTIONS.params),
+  // Zod v4 requires an explicit key schema so string-keyed parameter objects validate consistently.
+  params: z.record(z.string(), z.unknown()).optional().describe(EXECUTE_ARGUMENT_DESCRIPTIONS.params),
   select: z.array(z.string().min(1).max(256)).min(1).max(64).optional().describe(EXECUTE_ARGUMENT_DESCRIPTIONS.select),
   saveAs: z.string().min(1).max(128).optional().describe(EXECUTE_ARGUMENT_DESCRIPTIONS.saveAs),
   script: z.string().min(1).optional().describe(EXECUTE_ARGUMENT_DESCRIPTIONS.script),

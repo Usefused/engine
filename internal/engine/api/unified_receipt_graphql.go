@@ -12,7 +12,8 @@ import (
 var unifiedExecutionStepGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "UnifiedExecutionStep",
 	Fields: graphql.Fields{
-		"target": &graphql.Field{Type: graphql.String}, "phase": &graphql.Field{Type: graphql.String},
+		"target": &graphql.Field{Type: graphql.String}, "operation": &graphql.Field{Type: graphql.String},
+		"kind": &graphql.Field{Type: graphql.String}, "phase": &graphql.Field{Type: graphql.String},
 		"status": &graphql.Field{Type: graphql.String}, "error_code": &graphql.Field{Type: graphql.String},
 	},
 })
@@ -45,7 +46,10 @@ func projectUnifiedReceiptSteps(steps []models.UnifiedExecutionStep) []map[strin
 	items := make([]map[string]interface{}, 0, len(steps))
 	// The canonical event validator bounds this list to the admitted scheduler graph.
 	for _, step := range steps {
-		items = append(items, map[string]interface{}{"target": step.Target, "phase": step.Phase, "status": step.Status, "error_code": step.ErrorCode})
+		items = append(items, map[string]interface{}{
+			"target": step.Target, "operation": step.Operation, "kind": step.Kind,
+			"phase": step.Phase, "status": step.Status, "error_code": step.ErrorCode,
+		})
 	}
 	return items
 }

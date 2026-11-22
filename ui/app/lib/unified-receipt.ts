@@ -43,6 +43,27 @@ export function unifiedPhaseSummary(rows: UnifiedStepRow[], phase: UnifiedExecut
   return `${counts.success} succeeded · ${counts.error} failed · ${counts.skipped} skipped`;
 }
 
+// unifiedStepDisplayName avoids exposing raw internal call_N correlation tokens in the UI.
+export function unifiedStepDisplayName(step: UnifiedExecutionStep, receipt?: EngineExecutionEventEntry): string {
+  // Prefer the matched physical receipt's operation name whenever child evidence is available.
+  if (receipt?.operation) return receipt.operation;
+  // Fall back to the bounded operation, Bridge alias, or Unified App alias recorded on the step itself.
+  if (step.operation) return step.operation;
+  // Format historical internal correlation keys (call_1, call_2) into readable call numbers instead of raw tokens.
+  const ordinalMatch = /^call_(\d+)$/.exec(step.target);
+  if (ordinalMatch) return `Call ${ordinalMatch[1]}`;
+  return step.target;
+}
+
+// unifiedStepMissingReceiptMessage explains why a step has no clickable physical child receipt.
+export function unifiedStepMissingReceiptMessage(step: UnifiedExecutionStep): string {
+  // Nested Unified App calls produce their own receipt under the called app's activity stream.
+  if (step.kind === "unified_app") return "Unified App call · tracked under the called app's activity";
+  // Skipped steps never dispatched to a provider, so no physical receipt exists.
+  if (step.status === "skipped") return "Skipped before execution";
+  return "Physical receipt not available";
+}
+
 // unifiedStepStatus uses the existing receipt vocabulary while keeping scheduler skips distinct.
 export function unifiedStepStatus(status: UnifiedExecutionStep["status"]): { label: string; className: string } {
   const states = {

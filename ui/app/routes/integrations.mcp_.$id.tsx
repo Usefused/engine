@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams, useSearchParams, type MetaFunction } from "@remix-run/react";
 import { CopyButton } from "~/components/CopyValue";
 import { AppDetailBackLink, AppDetailHeader, AppDetailTabs, AppVersionSwitcher, type AppDetailTab } from "~/components/apps/AppDetailChrome";
+import { AppHeaderActionsMenu } from "~/components/apps/AppHeaderActionsMenu";
 import { AppExecutionTokens } from "~/components/apps/AppExecutionTokens";
 import { AppChangesBody, AppDetailBody, AppDetailSection, AppOverviewBody } from "~/components/apps/AppDetailBody";
 import { type AppConnectedServiceSelection } from "~/components/apps/AppConnectedServices";
@@ -10,6 +11,7 @@ import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { McpTransportEndpoints, McpVersionTransportEndpoints, type McpTransportEndpointData, type McpTransportName, type McpTransportURLs } from "~/components/mcp/McpTransportEndpoints";
 import { useToast } from "~/components/Toast";
 import { api } from "~/lib/api";
+import { deleteAppFamilies } from "~/lib/app-family-deactivation";
 import { appConnectedServiceSelections, type AppServiceSummary } from "~/lib/app-connected-services";
 import type { AppSelectionPayload } from "~/lib/app-selection-v3";
 import { hasResourcePermission, hasWorkspacePermission } from "~/lib/current-actor-access";
@@ -185,6 +187,7 @@ export default function McpServerDetails() {
   const { access } = useCurrentActorAccess();
   const [searchParams, setSearchParams] = useSearchParams();
   const [deletingVersionId, setDeletingVersionId] = useState("");
+  const [deletingApp, setDeletingApp] = useState(false);
   const state = useMcpServerDetail(id);
 
   const canReadActivity = Boolean(state.server) && hasResourcePermission(access, "app.mcp.read", "APP", state.server?.app_family_id ?? "") && hasWorkspacePermission(access, "audit.read");
@@ -220,30 +223,67 @@ export default function McpServerDetails() {
     }
   };
 
-  return <McpDetailState id={id} state={state} activeTab={activeTab} canReadActivity={canReadActivity} canManageVersions={canManageVersions} deletingVersionId={deletingVersionId} onNavigate={navigate} onTabChange={setActiveTab} onDeleteVersion={handleDeleteVersion} onCopied={(transport) => toast.success(`${mcpTransportLabel(transport)} URL copied to clipboard!`)} />;
+  /** Permanently deactivates all versions of this MCP server and archives its family identity. */
+  const handleDeleteApp = async () => {
+    // Family deletion requires a loaded server identity and explicit MCP family management permission.
+    if (!state.server || deletingApp || !canManageVersions) return;
+    const server = state.server;
+    setDeletingApp(true);
+    try {
+      const result = await deleteAppFamilies([server.app_family_id], {
+        listVersions: (familyId) => readMcpVersions(familyId).then((items) => items.map((item) => ({ app_id: item.id }))),
+        confirm: ({ versionCount }) => toast.confirm(
+          // Show exact version cleanup scope when active MCP runtimes must be removed before archiving.
+          versionCount > 0
+            ? `Delete MCP server "${server.name}"? This permanently deactivates all ${versionCount} version(s) and removes its runtime. Its name becomes reusable and its historical identity remains in Archive.`
+            : `Delete MCP server "${server.name}"? Its name becomes reusable and its historical identity remains in Archive.`
+        ),
+        deactivate: api.sdks.deactivate,
+        archiveFamily: api.sdks.archiveFamily,
+      });
+      // Cancellation preserves the MCP server and all of its versions.
+      if (result.cancelled) return;
+      if (result.deletedFamilies.length === 1) {
+        toast.success(`MCP server "${server.name}" deleted and moved to Archive.`);
+        navigate("/integrations/sdks");
+        return;
+      }
+      toast.error(`Failed to delete MCP server "${server.name}". Deactivated ${result.deactivatedVersions} version(s); ${result.failedVersions} version deactivation(s) failed.`);
+      // Return to the catalogue if any version was already deactivated so the user is not stranded on a removed version URL.
+      if (result.deactivatedVersions > 0) navigate("/integrations/sdks");
+    } catch (cause) {
+      toast.error(`Failed to delete MCP server: ${cause instanceof Error ? cause.message : "Unknown error"}`);
+    } finally {
+      setDeletingApp(false);
+    }
+  };
+
+  return <McpDetailState id={id} state={state} activeTab={activeTab} canReadActivity={canReadActivity} canManageVersions={canManageVersions} deletingVersionId={deletingVersionId} deletingApp={deletingApp} onNavigate={navigate} onTabChange={setActiveTab} onDeleteVersion={handleDeleteVersion} onDeleteApp={handleDeleteApp} onCopied={(transport) => toast.success(`${mcpTransportLabel(transport)} URL copied to clipboard!`)} />;
 }
 
 /** Selects the bounded loading, failure, or immutable-version detail surface. */
-function McpDetailState({ id, state, activeTab, canReadActivity, canManageVersions, deletingVersionId, onNavigate, onTabChange, onDeleteVersion, onCopied }: {
+function McpDetailState({ id, state, activeTab, canReadActivity, canManageVersions, deletingVersionId, deletingApp, onNavigate, onTabChange, onDeleteVersion, onDeleteApp, onCopied }: {
   id?: string;
   state: ReturnType<typeof useMcpServerDetail>;
   activeTab: McpDetailTab;
   canReadActivity: boolean;
   canManageVersions: boolean;
   deletingVersionId: string;
+  deletingApp: boolean;
   onNavigate: (path: string) => void;
   onTabChange: (tab: McpDetailTab) => void;
   onDeleteVersion: (version: McpVersion) => void;
+  onDeleteApp: () => void;
   onCopied: (transport: McpTransportName) => void;
 }) {
   // Loading and failure states must not mount version lifecycle controls without an authorized family.
   if (state.loading) return <div className="flex flex-col items-center justify-center py-20 text-slate-500"><div className="mb-4 h-8 w-8 animate-spin rounded-full border-4 border-blue-500 border-t-transparent" />Loading MCP server details...</div>;
   if (state.error || !state.server || !id) return <div className="space-y-6"><AppDetailBackLink to="/integrations/sdks" /><div className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">{state.error || "MCP server not found"}</div></div>;
-  return <McpLoadedContent id={id} server={state.server} versions={state.versions} activeTab={activeTab} canReadActivity={canReadActivity} canManageVersions={canManageVersions} deletingVersionId={deletingVersionId} onNavigate={onNavigate} onTabChange={onTabChange} onDeleteVersion={onDeleteVersion} onCopied={onCopied} />;
+  return <McpLoadedContent id={id} server={state.server} versions={state.versions} activeTab={activeTab} canReadActivity={canReadActivity} canManageVersions={canManageVersions} deletingVersionId={deletingVersionId} deletingApp={deletingApp} onNavigate={onNavigate} onTabChange={onTabChange} onDeleteVersion={onDeleteVersion} onDeleteApp={onDeleteApp} onCopied={onCopied} />;
 }
 
 /** Renders one loaded MCP version while routing transport copy events through fixed labels. */
-function McpLoadedContent({ id, server, versions, activeTab, canReadActivity, canManageVersions, deletingVersionId, onNavigate, onTabChange, onDeleteVersion, onCopied }: {
+function McpLoadedContent({ id, server, versions, activeTab, canReadActivity, canManageVersions, deletingVersionId, deletingApp, onNavigate, onTabChange, onDeleteVersion, onDeleteApp, onCopied }: {
   id: string;
   server: McpServerDetail;
   versions: McpVersion[];
@@ -251,24 +291,32 @@ function McpLoadedContent({ id, server, versions, activeTab, canReadActivity, ca
   canReadActivity: boolean;
   canManageVersions: boolean;
   deletingVersionId: string;
+  deletingApp: boolean;
   onNavigate: (path: string) => void;
   onTabChange: (tab: McpDetailTab) => void;
   onDeleteVersion: (version: McpVersion) => void;
+  onDeleteApp: () => void;
   onCopied: (transport: McpTransportName) => void;
 }) {
   const primaryURL = mcpPrimaryURL(server);
+  const headerAction = (primaryURL || canManageVersions) ? (
+    <div className="flex shrink-0 items-center gap-2">
+      {primaryURL ? <CopyButton value={primaryURL} label="server URL" /> : null}
+      {canManageVersions && <AppHeaderActionsMenu canDelete={canManageVersions} deleting={deletingApp} onDelete={onDeleteApp} />}
+    </div>
+  ) : null;
 
   return (
     <div className="min-w-0 space-y-6">
       <AppDetailBackLink to="/integrations/sdks" />
-      {/* The header action copies the stable family URL; immutable routes belong to Changes. */}
+      {/* The header action copies the stable family URL and exposes permission-gated family deletion. */}
       <AppDetailHeader
         name={server.name}
         kind="mcp"
         status={server.status}
         version={server.version}
         createdAt={server.created_at}
-        action={primaryURL ? <CopyButton value={primaryURL} label="server URL" /> : null}
+        action={headerAction}
       />
 
       <AppVersionSwitcher label="App version" versions={versions} currentId={id} onSelect={(appId) => onNavigate(`/integrations/mcp/${appId}`)} />

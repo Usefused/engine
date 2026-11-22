@@ -102,6 +102,14 @@ func validateUnifiedStep(step models.UnifiedExecutionStep) error {
 	if !unified.ValidPublicName(step.Target, 253) || len(step.ErrorCode) > 128 {
 		return errors.New("invalid unified step metadata")
 	}
+	// Optional display operation names must satisfy the same bounded public-name grammar as targets.
+	if step.Operation != "" && !unified.ValidPublicName(step.Operation, 256) {
+		return errors.New("invalid unified step operation")
+	}
+	// Optional step kind stays within the closed vocabulary of external Unified App host effects.
+	if step.Kind != "" && step.Kind != "operation" && step.Kind != "bridge" && step.Kind != "unified_app" {
+		return errors.New("invalid unified step kind")
+	}
 	// Phase is server-owned and explicitly separates compensation from forward work.
 	if step.Phase != "forward" && step.Phase != "rollback" {
 		return errors.New("invalid unified execution phase")

@@ -3,6 +3,7 @@ import { Activity, AlertTriangle, Clock3, Download, FileCode, ServerCrash } from
 import { api, type AppExecutionAnalytics, type EngineExecutionBreakdown } from "~/lib/api";
 import { appActivityIssue, type AppActivityIssue } from "~/lib/app-activity-error";
 import { formatAppDownloadCount } from "~/lib/app-downloads";
+import { formatDuration } from "~/lib/format";
 
 export interface AppActivityService {
   service_id: string;
@@ -21,11 +22,10 @@ interface ServiceUsageRow extends EngineExecutionBreakdown {
   name: string;
 }
 
-// formatLatency keeps millisecond values compact while preserving readable
-// seconds for slower providers.
+// formatLatency delegates to the shared duration formatter so app analytics scale consistently from ms to days.
 function formatLatency(value: number): string {
-  if (value < 1000) return `${Math.round(value)} ms`;
-  return `${(value / 1000).toFixed(2)} s`;
+  // Missing or invalid aggregates display a dash instead of blank cells.
+  return formatDuration(value) || "—";
 }
 
 // failureRate presents an empty app as a stable zero-rate state.

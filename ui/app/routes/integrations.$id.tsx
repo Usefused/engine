@@ -121,7 +121,7 @@ import { NotificationBanner } from "~/components/notifications/NotificationBanne
 import { useWorkspaceNotifications } from "~/components/notifications/useWorkspaceNotifications";
 import { isPending, matchesService } from "~/components/notifications/notificationHelpers";
 import { useToast } from "~/components/Toast";
-import { formatServiceName } from "~/lib/format";
+import { formatDuration, formatServiceName } from "~/lib/format";
 import { ServiceIcon } from "~/components/ServiceIcon";
 import { useEndpointSearch } from "~/hooks/useEndpointSearch";
 import { useResourceLoader } from "~/hooks/useResourceLoader";
@@ -1947,7 +1947,7 @@ function RetryRuleCard({ rule }: { rule: NonNullable<Service["retry_config"]>["r
     <div className="rounded border border-slate-200 bg-white p-2">
       <div className="font-medium text-slate-900">{retryPredicateSummary(rule)}</div>
       <ConfigRow label="Max attempts" value={String(rule.action.max_attempts)} />
-      <ConfigRow label="Max elapsed" value={`${rule.action.max_elapsed_ms}ms`} />
+      <ConfigRow label="Max elapsed" value={formatDuration(rule.action.max_elapsed_ms) || "Not recorded"} />
       <ConfigRow label="Backoff" value={rule.action.backoff.strategy} />
     </div>
   );

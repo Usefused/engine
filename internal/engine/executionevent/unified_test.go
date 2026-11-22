@@ -31,12 +31,14 @@ func TestUnifiedPublisherPreservesZeroProviderAttempts(t *testing.T) {
 // TestUnifiedMetadataRejectsMalformedHierarchy prevents invalid durable documents from entering either producer or worker paths.
 func TestUnifiedMetadataRejectsMalformedHierarchy(t *testing.T) {
 	parent := validUnifiedReceipt()
-	tests := []models.EngineExecutionEvent{parent, parent, parent, parent, parent}
+	tests := []models.EngineExecutionEvent{parent, parent, parent, parent, parent, parent, parent}
 	tests[0].ExecutionKind = "unknown"
 	tests[1].AttemptCount = 1
 	tests[2].ParentExecutionID = uuid.New()
 	tests[3].UnifiedSteps = []models.UnifiedExecutionStep{{Target: "bad\nname", Phase: "forward", Status: "success"}}
 	tests[4].UnifiedSteps = append(append([]models.UnifiedExecutionStep{}, parent.UnifiedSteps...), parent.UnifiedSteps...)
+	tests[5].UnifiedSteps = []models.UnifiedExecutionStep{{Target: "call_1", Operation: "bad\nop", Kind: "operation", Phase: "forward", Status: "success"}}
+	tests[6].UnifiedSteps = []models.UnifiedExecutionStep{{Target: "call_1", Operation: "ok", Kind: "snapshot", Phase: "forward", Status: "success"}}
 	for _, event := range tests {
 		// Malformed metadata must fail before a provider receipt can be misclassified or orphaned.
 		if ValidateUnifiedMetadata(event) == nil {

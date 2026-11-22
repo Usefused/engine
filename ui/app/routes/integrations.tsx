@@ -75,7 +75,8 @@ export default function IntegrationsLayout() {
   return (
     <CurrentActorAccessProvider isAuth={isAuth}>
       <FusedAgentProvider authenticated={isAuth}>
-      <div data-fused-workspace className="min-h-screen flex flex-col lg:flex-row bg-[var(--brand-paper)]">
+      {/* Confine absolute descendants to the workspace shell and match the h-dvh scroller height without extra root overflow. */}
+      <div data-fused-workspace className="relative min-h-full flex flex-col lg:flex-row bg-[var(--brand-paper)]">
         <IntegrationsSidebar isAuth={isAuth} handleSignOut={handleSignOut} />
 
         {/* Main content */}

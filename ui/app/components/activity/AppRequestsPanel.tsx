@@ -5,6 +5,7 @@ import { activateReceiptRow } from "~/components/activity/receiptRow";
 import { api, type EngineExecutionEventEntry } from "~/lib/api";
 import { appActivityIssue, type AppActivityIssue } from "~/lib/app-activity-error";
 import { receiptRequestLabel } from "~/lib/unified-receipt";
+import { formatDuration } from "~/lib/format";
 
 type RequestStatus = "all" | "success" | "failed";
 
@@ -41,7 +42,7 @@ function RequestRow({ event, onSelect }: { event: EngineExecutionEventEntry; onS
         </span>
         {event.failure_reason ? <div className="mt-1 max-w-xs text-xs text-red-600">{event.failure_reason}</div> : null}
       </td>
-      <td className="px-4 py-3 text-sm text-slate-600">{event.latency_ms} ms</td>
+      <td className="px-4 py-3 text-sm tabular-nums text-slate-600">{formatDuration(event.latency_ms)}</td>
       <td className="px-4 py-3 text-right text-xs text-slate-500">
         <div>{new Date(event.started_at).toLocaleString()}</div>
         {event.trace_id ? <div className="mt-1 font-mono" title={event.trace_id}>trace {event.trace_id.slice(0, 8)}</div> : null}
@@ -67,7 +68,7 @@ function RequestCard({ event, onSelect }: { event: EngineExecutionEventEntry; on
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
         <span className={`inline-flex rounded-full px-2 py-0.5 font-medium ${failed ? "bg-red-50 text-red-700" : "bg-emerald-50 text-emerald-700"}`}>{event.status}</span>
-        <span className="text-slate-500">{event.latency_ms} ms</span>
+        <span className="tabular-nums text-slate-500">{formatDuration(event.latency_ms)}</span>
         {event.provider_http_status ? <span className="text-slate-400">HTTP {event.provider_http_status}</span> : null}
       </div>
       <div className="mt-3 flex min-w-0 items-end justify-between gap-3 text-xs text-slate-500">

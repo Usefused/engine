@@ -7,6 +7,7 @@ import { createRoot } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import ts from "typescript";
 import * as workspaceDialogHost from "./workspace-dialog-host.ts";
+import * as formatHelpers from "./format.ts";
 
 const require = createRequire(import.meta.url);
 const drawerSource = readFileSync(new URL("../components/webhooks/WebhookEventDetailsDrawer.tsx", import.meta.url), "utf8");
@@ -23,6 +24,7 @@ function loadDrawer() {
     if (name === "./WebhookMessageDiagnostics") return { WebhookMessageDiagnostics: () => null };
     if (name === "~/components/OperationDetailsParts") return { OperationDisclosure: ({ label, children }) => React.createElement("section", null, label, children) };
     if (name === "~/lib/workspace-dialog-host") return workspaceDialogHost;
+    if (name === "~/lib/format") return formatHelpers;
     return require(name);
   }
   new Function("require", "exports", code)(resolve, exports);
@@ -133,15 +135,17 @@ test("webhook details drawer portals into workspace host and displays consumers 
     assert.match(dialogHost.textContent, /Order Sync/);
     assert.equal(dialogHost.querySelectorAll('section[aria-label="Webhook consumption"] li').length, 3);
 
-    // Historical delivered receipt without consumer records avoids falsely claiming nobody consumed it.
+    // Historical delivered receipt without consumer records avoids falsely claiming nobody consumed it, and formats multi-day delivery latency cleanly.
     await act(async () => {
       root.render(React.createElement(Drawer, {
-        event: baseEvent({ status: "success", delivery_status: "success", ended_at: "2026-11-20T16:46:20Z", consumptions: [] }),
+        event: baseEvent({ status: "success", delivery_status: "success", latency_ms: 278_925_548, ended_at: "2026-11-20T16:46:20Z", consumptions: [] }),
         serviceName: "@martins-joseph/stripe",
         onClose: () => {},
       }));
     });
     assert.match(dialogHost.textContent, /Consumed byConsumer not recorded/);
+    assert.match(dialogHost.textContent, /Delivery time3d 5h/);
+    assert.doesNotMatch(dialogHost.textContent, /278925548 ms/);
     assert.match(dialogHost.textContent, /consumer details were not recorded for this historical receipt/);
   } finally {
     await act(async () => root.unmount());
