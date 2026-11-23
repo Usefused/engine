@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="166" height="32" viewBox="0 0 166 32" role="img" aria-label="Deploy on Coolify">
+  <rect x="0.5" y="0.5" width="165" height="31" rx="5.5" fill="#111116" stroke="#6B16ED" stroke-width="1"/>
+  <g transform="translate(11, 7)">
+    <rect x="0" y="0" width="18" height="18" rx="4" fill="#6B16ED"/>
+    <path d="M12.6 6.7a4.2 4.2 0 1 0 0 4.6" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>
+  </g>
+  <text x="37" y="20.5" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="600">Deploy on Coolify</text>
+</svg>

@@ -47,7 +47,7 @@ func readDeployFile(t *testing.T, relPath string) string {
 	return string(data)
 }
 
-// TestOneClickDeployTemplates validates syntax and invariants across Cloudflare, Vercel, Coolify, and Pxxl templates.
+// TestOneClickDeployTemplates validates syntax and invariants across Cloudflare, Vercel, Railway, Coolify, Pxxl, and Hostlier templates.
 func TestOneClickDeployTemplates(t *testing.T) {
 	// Validate Cloudflare Containers wrangler.jsonc and package.json.
 	var wrangler struct {
@@ -208,11 +208,88 @@ func TestOneClickDeployTemplates(t *testing.T) {
 
 	// Validate Pxxl config declares schema version and default port.
 	pxxlToml := readDeployFile(t, "deploy/pxxl/pxxl.toml")
+	// Pxxl Web Service template must declare schema version 1 and Engine's default HTTP port.
 	if !strings.Contains(pxxlToml, "version = 1") || !strings.Contains(pxxlToml, "port = 8081") {
 		t.Fatalf("deploy/pxxl/pxxl.toml missing expected version or port: %q", pxxlToml)
 	}
 
-	// Confirm docs and READMEs exist and expose one-click deploy entrypoints.
+	// Validate Hostlier v2 managed-Postgres and sidecar-Postgres manifests.
+	type hostlierManifest struct {
+		Version         int    `yaml:"version"`
+		Name            string `yaml:"name"`
+		Workload        string `yaml:"workload"`
+		PrimaryEndpoint string `yaml:"primaryEndpoint"`
+		Source          struct {
+			Image string `yaml:"image"`
+		} `yaml:"source"`
+		Endpoints map[string]struct {
+			Exposure string `yaml:"exposure"`
+			Port     int    `yaml:"port"`
+			Protocol string `yaml:"protocol"`
+		} `yaml:"endpoints"`
+		Secrets map[string]string `yaml:"secrets"`
+		Volumes map[string]struct {
+			Mount string `yaml:"mount"`
+		} `yaml:"volumes"`
+		Health struct {
+			Path string `yaml:"path"`
+		} `yaml:"health"`
+		Dependencies map[string]struct {
+			Type   string `yaml:"type"`
+			Source string `yaml:"source"`
+		} `yaml:"dependencies"`
+		Bindings map[string]string `yaml:"bindings"`
+		Sidecars map[string]struct {
+			Source struct {
+				Image string `yaml:"image"`
+			} `yaml:"source"`
+			Endpoint struct {
+				Exposure string `yaml:"exposure"`
+				Port     int    `yaml:"port"`
+			} `yaml:"endpoint"`
+		} `yaml:"sidecars"`
+	}
+
+	var hostlierManaged hostlierManifest
+	// Primary Hostlier manifest must parse as valid v2 YAML.
+	if err := yaml.Unmarshal([]byte(readDeployFile(t, "deploy/hostlier/.hostlier")), &hostlierManaged); err != nil {
+		t.Fatalf("parse deploy/hostlier/.hostlier: %v", err)
+	}
+	// Primary manifest must pull the public GHCR image and route HTTP traffic on port 8081 with /health readiness.
+	if hostlierManaged.Version != 2 || hostlierManaged.Workload != "service" || !strings.HasPrefix(hostlierManaged.Source.Image, "ghcr.io/usefused/engine:") {
+		t.Fatalf("unexpected deploy/hostlier/.hostlier metadata: %+v", hostlierManaged)
+	}
+	httpEP, hasHTTP := hostlierManaged.Endpoints["http"]
+	// Primary endpoint must expose port 8081 over HTTP for Admin UI, CLI, REST, and MCP traffic.
+	if hostlierManaged.PrimaryEndpoint != "http" || !hasHTTP || httpEP.Exposure != "public" || httpEP.Port != 8081 || httpEP.Protocol != "http" || hostlierManaged.Health.Path != "/health" {
+		t.Fatalf("unexpected deploy/hostlier/.hostlier endpoint or health config: %+v", hostlierManaged)
+	}
+	// Managed Postgres dependency must provision postgres and bind its URL to FUSED_DATABASE_URL.
+	dbDep, hasDBDep := hostlierManaged.Dependencies["database"]
+	if !hasDBDep || dbDep.Type != "postgres" || dbDep.Source != "provision" || hostlierManaged.Bindings["FUSED_DATABASE_URL"] != "database.url" {
+		t.Fatalf("unexpected deploy/hostlier/.hostlier postgres dependency/binding: deps=%+v bindings=%+v", hostlierManaged.Dependencies, hostlierManaged.Bindings)
+	}
+	// Engine secrets must reference Hostlier controller secrets rather than inline credentials.
+	if hostlierManaged.Secrets["FUSED_LICENSE_KEY"] != "secret://fused-license-key" || hostlierManaged.Secrets["FUSED_ENCRYPTION_KEY"] != "secret://fused-encryption-key" {
+		t.Fatalf("unexpected deploy/hostlier/.hostlier secrets: %+v", hostlierManaged.Secrets)
+	}
+	// Persistent runtime volume must mount at /app/data so embedded NATS and sandbox cache survive restarts.
+	if hostlierManaged.Volumes["runtime-data"].Mount != "/app/data" {
+		t.Fatalf("unexpected deploy/hostlier/.hostlier volume mount: %+v", hostlierManaged.Volumes)
+	}
+
+	var hostlierSidecar hostlierManifest
+	// Sidecar Hostlier manifest must parse as valid v2 YAML with a loopback PostgreSQL 16 sidecar.
+	if err := yaml.Unmarshal([]byte(readDeployFile(t, "deploy/hostlier/sidecar.hostlier")), &hostlierSidecar); err != nil {
+		t.Fatalf("parse deploy/hostlier/sidecar.hostlier: %v", err)
+	}
+	pgSidecar, hasPGSidecar := hostlierSidecar.Sidecars["database"]
+	// Sidecar variant must use postgres:16-alpine on loopback port 5432 and reference FUSED_DATABASE_URL as a secret.
+	if hostlierSidecar.Version != 2 || !hasPGSidecar || pgSidecar.Source.Image != "postgres:16-alpine" || pgSidecar.Endpoint.Exposure != "loopback" || pgSidecar.Endpoint.Port != 5432 || hostlierSidecar.Secrets["FUSED_DATABASE_URL"] != "secret://fused-database-url" {
+		t.Fatalf("unexpected deploy/hostlier/sidecar.hostlier database sidecar config: %+v", hostlierSidecar)
+	}
+
+	// Confirm docs, READMEs, and local deploy button SVG assets exist and are non-empty.
 	for _, docPath := range []string{
 		"docs/one-click-deploy.md",
 		"deploy/cloudflare/README.md",
@@ -220,8 +297,13 @@ func TestOneClickDeployTemplates(t *testing.T) {
 		"deploy/railway/README.md",
 		"deploy/coolify/README.md",
 		"deploy/pxxl/README.md",
+		"deploy/hostlier/README.md",
+		".github/readme/deploy-coolify.svg",
+		".github/readme/deploy-pxxl.svg",
+		".github/readme/deploy-hostlier.svg",
 	} {
 		content := readDeployFile(t, docPath)
+		// Reject blank documentation or SVG assets so README badges never render broken links.
 		if strings.TrimSpace(content) == "" {
 			t.Fatalf("%s must not be empty", docPath)
 		}

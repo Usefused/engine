@@ -1,0 +1,41 @@
+# Hostlier v2 deployment manifest for Fused Engine with managed PostgreSQL.
+# Validate offline: hostlier app validate --file .hostlier
+# Deploy:           hostlier app deploy --file .hostlier --route https://engine.apps.example.com --server production
+version: 2
+name: fused-engine
+workload: service
+source:
+  image: ghcr.io/usefused/engine:latest
+primaryEndpoint: http
+endpoints:
+  http:
+    exposure: public
+    port: 8081
+    protocol: http
+    streaming: true
+    websocket: true
+    httpVersions: [h1, h2]
+env:
+  FUSED_ENGINE_ENVIRONMENT: production
+  FUSED_DATABASE_MAX_CONNS: "10"
+  FUSED_DATABASE_MAX_CONN_IDLE_TIME: 2m
+secrets:
+  FUSED_LICENSE_KEY: secret://fused-license-key
+  FUSED_ENCRYPTION_KEY: secret://fused-encryption-key
+volumes:
+  runtime-data:
+    mount: /app/data
+    size: 2Gi
+resources:
+  cpu: "1"
+  memory: 1Gi
+health:
+  path: /health
+  timeoutSeconds: 120
+dependencies:
+  database:
+    type: postgres
+    source: provision
+    storage: 2Gi
+bindings:
+  FUSED_DATABASE_URL: database.url

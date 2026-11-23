@@ -1,0 +1,58 @@
+# Hostlier v2 deployment manifest for Fused Engine with a bundled PostgreSQL 16 sidecar.
+# Use this variant when the Hostlier controller does not have the postgres resource package installed.
+# Validate offline: hostlier app validate --file sidecar.hostlier
+# Deploy:           hostlier app deploy --file sidecar.hostlier --route https://engine.apps.example.com --server production
+version: 2
+name: fused-engine
+workload: service
+source:
+  image: ghcr.io/usefused/engine:latest
+primaryEndpoint: http
+endpoints:
+  http:
+    exposure: public
+    port: 8081
+    protocol: http
+    streaming: true
+    websocket: true
+    httpVersions: [h1, h2]
+env:
+  FUSED_ENGINE_ENVIRONMENT: production
+  FUSED_DATABASE_MAX_CONNS: "10"
+  FUSED_DATABASE_MAX_CONN_IDLE_TIME: 2m
+secrets:
+  FUSED_DATABASE_URL: secret://fused-database-url
+  FUSED_LICENSE_KEY: secret://fused-license-key
+  FUSED_ENCRYPTION_KEY: secret://fused-encryption-key
+volumes:
+  runtime-data:
+    mount: /app/data
+    size: 2Gi
+resources:
+  cpu: "1"
+  memory: 1Gi
+health:
+  path: /health
+  timeoutSeconds: 120
+sidecars:
+  database:
+    source:
+      image: postgres:16-alpine
+    endpoint:
+      exposure: loopback
+      port: 5432
+    env:
+      POSTGRES_USER: fused
+      POSTGRES_DB: fused
+    secrets:
+      POSTGRES_PASSWORD: secret://fused-postgres-password
+    volumes:
+      data:
+        mount: /var/lib/postgresql/data
+        size: 2Gi
+    resources:
+      cpu: "0.5"
+      memory: 256Mi
+    health:
+      exec: [pg_isready, -U, fused, -d, fused]
+      timeoutSeconds: 60

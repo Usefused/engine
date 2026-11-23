@@ -66,12 +66,19 @@ fused-cli whoami
 
 Deploy the published `ghcr.io/usefused/engine` container directly to your preferred host. See the [one-click deployment guide](docs/one-click-deploy.md) for platform capabilities, PostgreSQL requirements, and secret setup.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button?paid=true)](https://deploy.workers.cloudflare.com/?url=https://github.com/Usefused/engine/tree/main/deploy/cloudflare&paid=true)
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FUsefused%2Fengine&root-directory=deploy%2Fvercel&project-name=fused-engine&env=FUSED_DATABASE_URL,FUSED_LICENSE_KEY,FUSED_ENCRYPTION_KEY&envDescription=PostgreSQL%2016%2B%20DSN%2C%20Fused%20license%20key%2C%20and%2032-byte%20base64%20encryption%20key%20(openssl%20rand%20-base64%2032)&envLink=https%3A%2F%2Fgithub.com%2FUsefused%2Fengine%2Fblob%2Fmain%2Fdocs%2Fengine-configuration.md)
+<p>
+  <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/Usefused/engine/tree/main/deploy/cloudflare&paid=true"><img src="https://deploy.workers.cloudflare.com/button?paid=true" alt="Deploy to Cloudflare" height="32"></a>
+  <a href="https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FUsefused%2Fengine&root-directory=deploy%2Fvercel&project-name=fused-engine&env=FUSED_DATABASE_URL,FUSED_LICENSE_KEY,FUSED_ENCRYPTION_KEY&envDescription=PostgreSQL%2016%2B%20DSN%2C%20Fused%20license%20key%2C%20and%2032-byte%20base64%20encryption%20key%20(openssl%20rand%20-base64%2032)&envLink=https%3A%2F%2Fgithub.com%2FUsefused%2Fengine%2Fblob%2Fmain%2Fdocs%2Fengine-configuration.md"><img src="https://vercel.com/button" alt="Deploy with Vercel" height="32"></a>
+  <a href="deploy/railway/README.md"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="32"></a>
+  <a href="deploy/coolify/README.md"><img src=".github/readme/deploy-coolify.svg" alt="Deploy on Coolify" height="32"></a>
+  <a href="deploy/pxxl/README.md"><img src=".github/readme/deploy-pxxl.svg" alt="Deploy on Pxxl" height="32"></a>
+  <a href="deploy/hostlier/README.md"><img src=".github/readme/deploy-hostlier.svg" alt="Deploy on Hostlier" height="32"></a>
+</p>
 
 - **Railway**: Managed PostgreSQL 16 + Engine template, `railway.json`, and `.railway/railway.ts` IaC in [deploy/railway](deploy/railway/README.md).
 - **Coolify**: Ready-to-deploy Compose stack with bundled PostgreSQL 16 in [deploy/coolify](deploy/coolify/README.md).
 - **Pxxl (`pxxl.app`)**: Web Service Dockerfile and `pxxl.toml` template in [deploy/pxxl](deploy/pxxl/README.md).
+- **Hostlier**: Hostlier v2 `.hostlier` manifests with managed PostgreSQL or bundled PostgreSQL 16 sidecar and native gRPC support in [deploy/hostlier](deploy/hostlier/README.md).
 
 ## Create an integration interface
 
