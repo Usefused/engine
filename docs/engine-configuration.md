@@ -53,7 +53,7 @@ engine:
 | `database.url` | `FUSED_DATABASE_URL` | Existing `DATABASE_URL` alias also takes priority over YAML |
 | `database.max_conns` | `FUSED_DATABASE_MAX_CONNS` | `10`, positive integer |
 | `database.max_conn_idle_time` | `FUSED_DATABASE_MAX_CONN_IDLE_TIME` | `30m`, positive Go duration |
-| `server.http_port` | `FUSED_ENGINE_HTTP_PORT` | `8081`; `--port` |
+| `server.http_port` | `FUSED_ENGINE_HTTP_PORT` | `8081`; `--port` (standard PaaS `PORT` also acts as a fallback over YAML) |
 | `server.grpc_host` | `FUSED_ENGINE_GRPC_HOST` | `127.0.0.1`; `--grpc-host` |
 | `server.grpc_port` | `FUSED_ENGINE_GRPC_PORT` | `50051`; `--grpc-port` |
 | `server.webhook_port` | `FUSED_ENGINE_WEBHOOK_PORT` | Empty shares HTTP; `--webhook-port` |

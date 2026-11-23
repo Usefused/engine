@@ -1,0 +1,34 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "fused-engine",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "containers": [
+    {
+      "class_name": "FusedEngineContainer",
+      "image": "./Dockerfile",
+      "instance_type": "standard-1",
+      // Single instance keeps embedded NATS consistent; configure external NATS_URL before scaling above 1.
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "FUSED_ENGINE",
+        "class_name": "FusedEngineContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["FusedEngineContainer"]
+    }
+  ],
+  "vars": {
+    "FUSED_ENGINE_ENVIRONMENT": "production",
+    "FUSED_DATABASE_MAX_CONNS": "10",
+    "FUSED_DATABASE_MAX_CONN_IDLE_TIME": "2m"
+  }
+}

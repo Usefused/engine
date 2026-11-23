@@ -6,7 +6,7 @@
 
 Bring internal, partner, and third-party APIs into Fused. Your teams, apps, and AI agents can reuse those integrations while you stay in control of who can access what.
 
-[Run locally](#install-and-start) · [Connect an app or agent](#create-an-integration-interface) · [Documentation](https://usefused.com/docs) · [Fused Cloud](https://usefused.com/docs/deploy-an-engine)
+[Run locally](#install-and-start) · [One-click deploy](#one-click-deploy) · [Connect an app or agent](#create-an-integration-interface) · [Documentation](https://usefused.com/docs) · [Fused Cloud](https://usefused.com/docs/deploy-an-engine)
 
 ## How it works
 
@@ -61,6 +61,17 @@ fused-cli whoami
 **Docker and hosted setup.** Follow the [deployment guide](https://usefused.com/docs/deploy-an-engine). For Unified Apps in Docker, extract the [bundled worker files](deploy/unified-app-workers/README.md) before launch. Both image variants include the seccomp profile, its license, and a Compose example at `/app/deploy/unified-app-workers`. Release archives include the same files. Apply the profile with Docker’s `--security-opt`, set `FUSED_UNIFIED_APP_WORKER_REQUIRED=true`, and verify that `/health` reports `unified_app_worker_ready: true`.
 
 </details>
+
+## One-click deploy
+
+Deploy the published `ghcr.io/usefused/engine` container directly to your preferred host. See the [one-click deployment guide](docs/one-click-deploy.md) for platform capabilities, PostgreSQL requirements, and secret setup.
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button?paid=true)](https://deploy.workers.cloudflare.com/?url=https://github.com/Usefused/engine/tree/main/deploy/cloudflare&paid=true)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FUsefused%2Fengine&root-directory=deploy%2Fvercel&project-name=fused-engine&env=FUSED_DATABASE_URL,FUSED_LICENSE_KEY,FUSED_ENCRYPTION_KEY&envDescription=PostgreSQL%2016%2B%20DSN%2C%20Fused%20license%20key%2C%20and%2032-byte%20base64%20encryption%20key%20(openssl%20rand%20-base64%2032)&envLink=https%3A%2F%2Fgithub.com%2FUsefused%2Fengine%2Fblob%2Fmain%2Fdocs%2Fengine-configuration.md)
+
+- **Railway**: Managed PostgreSQL 16 + Engine template, `railway.json`, and `.railway/railway.ts` IaC in [deploy/railway](deploy/railway/README.md).
+- **Coolify**: Ready-to-deploy Compose stack with bundled PostgreSQL 16 in [deploy/coolify](deploy/coolify/README.md).
+- **Pxxl (`pxxl.app`)**: Web Service Dockerfile and `pxxl.toml` template in [deploy/pxxl](deploy/pxxl/README.md).
 
 ## Create an integration interface
 

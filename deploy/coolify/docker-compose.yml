@@ -1,0 +1,52 @@
+# documentation: https://usefused.com/docs/setup/self-hosted
+# slogan: Connect your APIs once and expose governed SDKs, REST APIs, and MCP servers.
+# category: developer-tools
+# tags: fused,api,mcp,sdk,gateway,webhooks
+# port: 8081
+
+services:
+  engine:
+    image: ghcr.io/usefused/engine:${FUSED_ENGINE_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - SERVICE_URL_ENGINE_8081
+      - FUSED_ENGINE_PUBLIC_URL=${SERVICE_URL_ENGINE_8081}
+      - FUSED_ENGINE_HTTP_PORT=8081
+      - FUSED_ENGINE_GRPC_HOST=0.0.0.0
+      - FUSED_ENGINE_GRPC_PORT=50051
+      - FUSED_DATABASE_URL=postgres://${SERVICE_USER_POSTGRES}:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/${POSTGRES_DB:-fused}?sslmode=disable
+      - FUSED_LICENSE_KEY=${FUSED_LICENSE_KEY:?Set FUSED_LICENSE_KEY in Coolify Environment Variables}
+      - FUSED_ENCRYPTION_KEY=${FUSED_ENCRYPTION_KEY:?Generate once with openssl rand -base64 32 and set in Coolify Environment Variables}
+      - FUSED_ENGINE_ENVIRONMENT=${FUSED_ENGINE_ENVIRONMENT:-production}
+      - FUSED_DATABASE_MAX_CONNS=${FUSED_DATABASE_MAX_CONNS:-10}
+      - FUSED_DATABASE_MAX_CONN_IDLE_TIME=${FUSED_DATABASE_MAX_CONN_IDLE_TIME:-30m}
+    volumes:
+      - fused-engine-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8081/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${SERVICE_USER_POSTGRES}
+      - POSTGRES_PASSWORD=${SERVICE_PASSWORD_POSTGRES}
+      - POSTGRES_DB=${POSTGRES_DB:-fused}
+    volumes:
+      - fused-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  fused-engine-data:
+  fused-postgres-data:

@@ -15,7 +15,7 @@ func isolateEnvironmentExport(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, name := range []string{"DATABASE_URL", "NATS_TOKEN", "NATS_USERNAME", "NATS_PASSWORD"} {
+	for _, name := range []string{"DATABASE_URL", "PORT", "NATS_TOKEN", "NATS_USERNAME", "NATS_PASSWORD"} {
 		t.Setenv(name, "")
 	}
 }
@@ -80,6 +80,7 @@ func TestInheritedEnvironmentWins(t *testing.T) {
 	isolateEnvironmentExport(t)
 	t.Setenv("FUSED_DATABASE_MAX_CONNS", "4")
 	t.Setenv("DATABASE_URL", "postgres://localhost/inherited")
+	t.Setenv("PORT", "3000")
 	t.Setenv("NATS_TOKEN", "test-token")
 	t.Setenv("NATS_URL", "nats://inherited:4222")
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://inherited:4318")
@@ -88,6 +89,8 @@ func TestInheritedEnvironmentWins(t *testing.T) {
 	cfg, err := loadAdmissionYAML(t, `database:
   url: postgres://localhost/yaml
   max_conns: 7
+server:
+  http_port: 9010
 nats:
   url: nats://yaml:4222
   credentials_file: /run/secrets/yaml.creds
@@ -105,6 +108,7 @@ observability:
 	}
 	for name, want := range map[string]string{
 		"FUSED_DATABASE_MAX_CONNS": "4", "DATABASE_URL": "postgres://localhost/inherited", "FUSED_DATABASE_URL": "",
+		"PORT": "3000", "FUSED_ENGINE_HTTP_PORT": "",
 		"NATS_URL": "nats://inherited:4222", "NATS_TOKEN": "test-token", "NATS_CREDS_FILE": "",
 		"OTEL_EXPORTER_OTLP_ENDPOINT": "http://inherited:4318", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "",
 		"FUSED_ENGINE_ENVIRONMENT": "production", "FUSED_ENGINE_GRPC_PORT": "7000",

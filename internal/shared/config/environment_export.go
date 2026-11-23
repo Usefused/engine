@@ -108,6 +108,7 @@ func (cfg *Config) ExportEnvironment() error {
 		inherited[name] = os.Getenv(name)
 	}
 	inherited["DATABASE_URL"] = os.Getenv("DATABASE_URL")
+	inherited["PORT"] = strings.TrimSpace(os.Getenv("PORT"))
 	for _, name := range []string{"NATS_TOKEN", "NATS_USERNAME", "NATS_PASSWORD"} {
 		inherited[name] = os.Getenv(name)
 	}
@@ -132,6 +133,10 @@ func skipYAMLEnvironmentDefault(name string, inherited map[string]string) bool {
 	}
 	// The legacy database alias still wins over a YAML connection string.
 	if name == "FUSED_DATABASE_URL" && inherited["DATABASE_URL"] != "" {
+		return true
+	}
+	// Standard PaaS PORT takes priority over a YAML http_port unless FUSED_ENGINE_HTTP_PORT is set.
+	if name == "FUSED_ENGINE_HTTP_PORT" && inherited["PORT"] != "" {
 		return true
 	}
 	// An inherited shared OTLP endpoint outranks YAML per-signal destinations.

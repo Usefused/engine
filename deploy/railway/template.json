@@ -1,0 +1,85 @@
+{
+  "name": "Fused Engine",
+  "description": "Self-hosted Fused Engine with managed PostgreSQL 16 and persistent runtime storage.",
+  "services": {
+    "Postgres": {
+      "source": {
+        "image": "ghcr.io/railwayapp-templates/postgres-ssl:16"
+      },
+      "volumes": [
+        {
+          "mountPath": "/var/lib/postgresql/data"
+        }
+      ],
+      "variables": {
+        "POSTGRES_USER": {
+          "defaultValue": "fused"
+        },
+        "POSTGRES_PASSWORD": {
+          "defaultValue": "${{secret(32)}}"
+        },
+        "POSTGRES_DB": {
+          "defaultValue": "fused"
+        },
+        "PGDATA": {
+          "defaultValue": "/var/lib/postgresql/data/pgdata"
+        },
+        "DATABASE_URL": {
+          "defaultValue": "postgresql://${{POSTGRES_USER}}:${{POSTGRES_PASSWORD}}@${{RAILWAY_PRIVATE_DOMAIN}}:5432/${{POSTGRES_DB}}"
+        }
+      }
+    },
+    "FusedEngine": {
+      "source": {
+        "image": "ghcr.io/usefused/engine:latest"
+      },
+      "networking": {
+        "serviceDomains": {
+          "fused-engine": {}
+        }
+      },
+      "deploy": {
+        "healthcheckPath": "/health",
+        "healthcheckTimeout": 300,
+        "restartPolicyType": "ON_FAILURE",
+        "restartPolicyMaxRetries": 10
+      },
+      "volumes": [
+        {
+          "mountPath": "/app/data"
+        }
+      ],
+      "variables": {
+        "FUSED_DATABASE_URL": {
+          "defaultValue": "${{Postgres.DATABASE_URL}}"
+        },
+        "FUSED_ENGINE_PUBLIC_URL": {
+          "defaultValue": "https://${{RAILWAY_PUBLIC_DOMAIN}}"
+        },
+        "FUSED_ENCRYPTION_KEY": {
+          "description": "Persistent 32-byte base64 AES encryption key. Auto-generated once per deployment; retain across backups and restores.",
+          "defaultValue": "${{secret(42, \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\")}}${{secret(1, \"AEIMQUYcgkosw048\")}}="
+        },
+        "FUSED_LICENSE_KEY": {
+          "description": "Your Fused Engine license key from https://usefused.com/signup (choose License key only).",
+          "isOptional": false
+        },
+        "FUSED_ENGINE_ENVIRONMENT": {
+          "defaultValue": "production"
+        },
+        "FUSED_DATABASE_MAX_CONNS": {
+          "defaultValue": "10"
+        },
+        "FUSED_DATABASE_MAX_CONN_IDLE_TIME": {
+          "defaultValue": "2m"
+        },
+        "FUSED_ENGINE_GRPC_HOST": {
+          "defaultValue": "0.0.0.0"
+        },
+        "FUSED_ENGINE_GRPC_PORT": {
+          "defaultValue": "50051"
+        }
+      }
+    }
+  }
+}

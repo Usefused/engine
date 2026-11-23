@@ -79,13 +79,17 @@ func (policy DatabaseConfig) Validate() error {
 
 // ResolveServerConfig admits new environment equivalents without changing explicit flag precedence.
 func ResolveServerConfig(server ServerConfig) ServerConfig {
+	// Standard PaaS PORT acts as a lower-priority HTTP port alias when FUSED_ENGINE_HTTP_PORT is unset.
+	if port := strings.TrimSpace(os.Getenv("PORT")); port != "" {
+		server.HTTPPort = port
+	}
 	for name, destination := range map[string]*string{
 		"FUSED_ENGINE_HTTP_PORT":    &server.HTTPPort,
 		"FUSED_ENGINE_GRPC_HOST":    &server.GRPCHost,
 		"FUSED_ENGINE_GRPC_PORT":    &server.GRPCPort,
 		"FUSED_ENGINE_WEBHOOK_PORT": &server.WebhookPort,
 	} {
-		// Unset or empty variables preserve YAML and historical listener defaults.
+		// Unset or empty variables preserve YAML, PORT fallback, and historical listener defaults.
 		if value := os.Getenv(name); value != "" {
 			*destination = value
 		}

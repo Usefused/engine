@@ -12,6 +12,7 @@ func TestOperatorYAMLAndEnvironment(t *testing.T) {
 	t.Setenv("FUSED_DATABASE_MAX_CONNS", "")
 	t.Setenv("FUSED_DATABASE_MAX_CONN_IDLE_TIME", "")
 	t.Setenv("FUSED_ENGINE_HTTP_PORT", "")
+	t.Setenv("PORT", "")
 	body := "database:\n  max_conns: 7\n  max_conn_idle_time: 2m\nserver:\n  http_port: 9010\nnats:\n  url: nats://broker:4222\nobservability:\n  environment: staging\n  service_name: test-engine\n"
 	cfg, err := loadAdmissionYAML(t, body)
 	// Omitted neighboring fields must retain historical defaults.
@@ -40,6 +41,8 @@ func TestOperatorYAMLAndEnvironment(t *testing.T) {
 func TestYAMLEnvironmentReferences(t *testing.T) {
 	t.Setenv("FUSED_DATABASE_MAX_CONNS", "")
 	t.Setenv("FUSED_DATABASE_MAX_CONN_IDLE_TIME", "")
+	t.Setenv("FUSED_ENGINE_HTTP_PORT", "")
+	t.Setenv("PORT", "")
 	t.Setenv("FUSED_TEST_POOL", "6")
 	t.Setenv("FUSED_TEST_IDLE", "45s")
 	t.Setenv("FUSED_TEST_BROKER", "true")
@@ -86,5 +89,38 @@ func TestOperatorInvalidPoolSettings(t *testing.T) {
 		if err == nil {
 			t.Fatalf("accepted invalid setting %s", field)
 		}
+	}
+}
+
+// TestResolveServerConfigPortFallback verifies PaaS PORT fallback and FUSED_ENGINE_HTTP_PORT precedence.
+func TestResolveServerConfigPortFallback(t *testing.T) {
+	t.Setenv("FUSED_ENGINE_HTTP_PORT", "")
+	t.Setenv("PORT", "3000")
+
+	// Standard PaaS PORT must override YAML and default ports when FUSED_ENGINE_HTTP_PORT is unset.
+	cfg, err := loadAdmissionYAML(t, "server:\n  http_port: 9010\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.HTTPPort != "3000" {
+		t.Fatalf("expected PORT fallback 3000, got %q", cfg.Server.HTTPPort)
+	}
+	if err := cfg.ExportEnvironment(); err != nil {
+		t.Fatal(err)
+	}
+	// Exporting YAML defaults must not overwrite the inherited PaaS PORT with YAML http_port.
+	if got := os.Getenv("FUSED_ENGINE_HTTP_PORT"); got != "" {
+		t.Fatalf("expected FUSED_ENGINE_HTTP_PORT to stay empty when PORT is set, got %q", got)
+	}
+	resolved := ResolveServerConfig(ServerConfig{HTTPPort: "8081", GRPCHost: "127.0.0.1", GRPCPort: "50051"})
+	if resolved.HTTPPort != "3000" {
+		t.Fatalf("expected startup listener resolution to keep PORT 3000, got %q", resolved.HTTPPort)
+	}
+
+	// Explicit FUSED_ENGINE_HTTP_PORT must still win over generic PaaS PORT.
+	t.Setenv("FUSED_ENGINE_HTTP_PORT", "9025")
+	resolved = ResolveServerConfig(ServerConfig{HTTPPort: "8081", GRPCHost: "127.0.0.1", GRPCPort: "50051"})
+	if resolved.HTTPPort != "9025" {
+		t.Fatalf("expected FUSED_ENGINE_HTTP_PORT 9025 to override PORT, got %q", resolved.HTTPPort)
 	}
 }
