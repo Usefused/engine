@@ -5,7 +5,6 @@ import (
 	"time"
 
 	bridgev1 "github.com/Usefused/engine/pkg/bridge/v1"
-	"github.com/jackc/pgx/v5"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -20,41 +19,9 @@ type revocableStream struct {
 // Context preserves the transport lifetime while adding server-side authorization cancellation.
 func (s *revocableStream) Context() context.Context { return s.ctx }
 
-// listenRevocations dedicates one connection per replica without consuming the request pool.
-func (s *Server) listenRevocations(ctx context.Context) (*pgx.Conn, error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	config := s.repo.Pool.Config().ConnConfig.Copy()
-	config.RuntimeParams["application_name"] = "bridge-revocation-" + s.instance
-	conn, err := pgx.ConnectConfig(ctx, config)
-	// A failed subscription must never admit a session without an invalidation path.
-	if err != nil {
-		return nil, err
-	}
-	var channel string
-	err = conn.QueryRow(ctx, `SELECT 'fused_bridge_revoked_' || md5(current_schema())`).Scan(&channel)
-	// Channel names are schema-specific so isolated workspaces cannot invalidate one another.
-	if err == nil {
-		_, err = conn.Exec(ctx, "LISTEN "+pgx.Identifier{channel}.Sanitize())
-	}
-	// Do not leak a dedicated connection when LISTEN cannot be established.
-	if err != nil {
-		closeRevocationConnection(conn)
-		return nil, err
-	}
-	return conn, nil
-}
-
-// closeRevocationConnection bounds shutdown even if PostgreSQL has disappeared.
-func closeRevocationConnection(conn *pgx.Conn) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = conn.Close(ctx)
-}
-
 // startRevocations establishes LISTEN before the first session can become visible.
 func (s *Server) startRevocations(ctx context.Context) error {
-	conn, err := s.listenRevocations(ctx)
+	listener, err := s.repo.SubscribeRevocations(ctx, s.instance)
 	// Startup fails rather than silently falling back to heartbeat-only revocation.
 	if err != nil {
 		return err
@@ -62,31 +29,31 @@ func (s *Server) startRevocations(ctx context.Context) error {
 	s.mu.Lock()
 	s.revocationsReady = true
 	s.mu.Unlock()
-	go s.watchRevocations(ctx, conn)
+	go s.watchRevocations(ctx, listener)
 	return nil
 }
 
 // watchRevocations fails closed on listener loss and reconnects before admitting new sessions.
-func (s *Server) watchRevocations(ctx context.Context, conn *pgx.Conn) {
+func (s *Server) watchRevocations(ctx context.Context, listener *revocationListener) {
 	for {
-		notification, err := conn.WaitForNotification(ctx)
+		pairingID, err := listener.Wait(ctx)
 		// Notifications arrive only after the revoking transaction commits.
 		if err == nil {
-			s.cancelRevokedSession(notification.Payload)
+			s.cancelRevokedSession(pairingID)
 			continue
 		}
 		s.stopRevocations()
-		closeRevocationConnection(conn)
-		conn = s.reconnectRevocations(ctx)
+		listener.Close()
+		listener = s.reconnectRevocations(ctx)
 		// Cancellation releases the dedicated connection and every active session.
-		if conn == nil {
+		if listener == nil {
 			return
 		}
 	}
 }
 
 // reconnectRevocations bounds retries while the transport remains closed to new installations.
-func (s *Server) reconnectRevocations(ctx context.Context) *pgx.Conn {
+func (s *Server) reconnectRevocations(ctx context.Context) *revocationListener {
 	for {
 		timer := time.NewTimer(time.Second)
 		select {
@@ -95,13 +62,13 @@ func (s *Server) reconnectRevocations(ctx context.Context) *pgx.Conn {
 			return nil
 		case <-timer.C:
 		}
-		conn, err := s.listenRevocations(ctx)
+		listener, err := s.repo.SubscribeRevocations(ctx, s.instance)
 		// A fresh subscription cannot lose previously admitted sessions: they were all cancelled.
 		if err == nil {
 			s.mu.Lock()
 			s.revocationsReady = true
 			s.mu.Unlock()
-			return conn
+			return listener
 		}
 	}
 }

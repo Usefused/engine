@@ -3,15 +3,14 @@ package bridgehost
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"github.com/Usefused/engine/internal/shared/messaging"
-	bridgev1 "github.com/Usefused/engine/pkg/bridge/v1"
-	"github.com/jackc/pgx/v5"
-	"github.com/nats-io/nats.go"
-	"google.golang.org/protobuf/proto"
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/Usefused/engine/internal/shared/messaging"
+	bridgev1 "github.com/Usefused/engine/pkg/bridge/v1"
+	"github.com/nats-io/nats.go"
+	"google.golang.org/protobuf/proto"
 )
 
 // EventName binds receiver delivery to the exact original manifest and operation contract.
@@ -27,8 +26,7 @@ func EventSubject(account string, pin Pin) string {
 
 // AuthorizeEventPin retains historical delivery while rechecking live installation and profile authority.
 func (s *Server) AuthorizeEventPin(ctx context.Context, account string, pin Pin) error {
-	var raw []byte
-	err := s.repo.Pool.QueryRow(ctx, `SELECT m.document FROM fused_bridge_pairings p JOIN fused_bridge_manifests m ON m.pairing_id=p.id AND m.profile_id=$3 AND m.hash=$4 WHERE p.id=$1 AND p.account_id=$2 AND p.revoked_at IS NULL AND p.scope='workspace' AND p.inventory_generation=p.generation AND EXISTS(SELECT 1 FROM fused_bridge_profiles c WHERE c.pairing_id=p.id AND c.profile_id=$3 AND c.state<>'removed') AND `+ownerAuthorized, pin.PairingID, account, pin.ProfileID, pin.ManifestHash).Scan(&raw)
+	raw, err := s.repo.EventManifestDocument(ctx, account, pin)
 	// Offline installations may drain accepted events; a reconnect must reconcile deletions before delivery resumes.
 	if err != nil {
 		return ErrDenied
@@ -39,6 +37,7 @@ func (s *Server) AuthorizeEventPin(ctx context.Context, account string, pin Pin)
 		return ErrContract
 	}
 	contract, err := operation(doc, pin.ConnectionID, pin.OperationID, pin.ContractHash)
+	// Reject non-event contracts so unary operations cannot be subscribed as webhook streams.
 	if err != nil || contract.Kind != "event" {
 		return ErrContract
 	}
@@ -81,44 +80,21 @@ func (s *Server) StartEventDelivery(ctx context.Context, client *messaging.NATSC
 
 // DeliverEvent atomically claims one accepted envelope and clears its payload only after broker acknowledgement.
 func (r *Repository) DeliverEvent(ctx context.Context, js nats.JetStreamContext) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	tx, err := r.Pool.Begin(ctx)
-	// A worker without a transaction cannot reserve a delivery across replicas.
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(context.WithoutCancel(ctx))
-	var account, pairing, destination, eventID string
-	var raw []byte
-	err = tx.QueryRow(ctx, `SELECT p.account_id,e.pairing_id,e.destination_id,e.event_id,e.envelope FROM fused_bridge_events e JOIN fused_bridge_pairings p ON p.id=e.pairing_id WHERE e.delivered_at IS NULL AND p.revoked_at IS NULL AND p.scope='workspace' AND p.inventory_generation=p.generation AND EXISTS(SELECT 1 FROM fused_bridge_profiles c WHERE c.pairing_id=p.id AND c.profile_id=e.profile_id AND c.state<>'removed') AND `+ownerAuthorized+` ORDER BY e.accepted_at FOR UPDATE OF e SKIP LOCKED LIMIT 1`).Scan(&account, &pairing, &destination, &eventID, &raw)
-	// Competing workers, pending inventory reconciliation, or an empty outbox are ordinary idle states.
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	event := &bridgev1.Event{}
-	// Corrupt envelopes remain retained for diagnosis rather than being silently discarded.
-	if proto.Unmarshal(raw, event) != nil {
-		return false, ErrContract
-	}
-	pin := Pin{PairingID: pairing, ProfileID: event.ProfileId, ManifestHash: event.ManifestHash, ConnectionID: event.ConnectionId, OperationID: event.OperationId, ContractHash: event.ContractHash}
-	message := nats.NewMsg(EventSubject(account, pin))
-	message.Data = event.PayloadJson
-	id := Digest([]byte(pairing + "\n" + destination + "\n" + eventID))
-	message.Header.Set(nats.MsgIdHdr, id)
-	message.Header.Set("X-Webhook-Msg-ID", id)
-	message.Header.Set("X-Bridge-Event-ID", eventID)
-	// Lost broker acknowledgements keep the same message ID for safe at-least-once retry.
-	if _, err = js.PublishMsg(message, nats.Context(ctx)); err != nil {
-		return false, err
-	}
-	_, err = tx.Exec(ctx, `UPDATE fused_bridge_events SET delivered_at=now(),envelope=''::bytea WHERE pairing_id=$1 AND destination_id=$2 AND event_id=$3`, pairing, destination, eventID)
-	// Keep the small content-hash tombstone so late Bridge retries cannot recreate a settled event.
-	if err != nil {
-		return false, err
-	}
-	return true, tx.Commit(ctx)
+	return r.claimAndAckPendingEvent(ctx, func(txCtx context.Context, item pendingBridgeEvent) error {
+		event := &bridgev1.Event{}
+		// Corrupt envelopes remain retained for diagnosis rather than being silently discarded.
+		if proto.Unmarshal(item.Envelope, event) != nil {
+			return ErrContract
+		}
+		pin := Pin{PairingID: item.Pairing, ProfileID: event.ProfileId, ManifestHash: event.ManifestHash, ConnectionID: event.ConnectionId, OperationID: event.OperationId, ContractHash: event.ContractHash}
+		message := nats.NewMsg(EventSubject(item.Account, pin))
+		message.Data = event.PayloadJson
+		id := Digest([]byte(item.Pairing + "\n" + item.Destination + "\n" + item.EventID))
+		message.Header.Set(nats.MsgIdHdr, id)
+		message.Header.Set("X-Webhook-Msg-ID", id)
+		message.Header.Set("X-Bridge-Event-ID", item.EventID)
+		// Lost broker acknowledgements keep the same message ID for safe at-least-once retry.
+		_, err := js.PublishMsg(message, nats.Context(txCtx))
+		return err
+	})
 }

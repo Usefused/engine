@@ -13,11 +13,11 @@ import (
 
 	"github.com/Usefused/engine/internal/engine/mcpsession"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/db"
 	"github.com/Usefused/engine/internal/shared/messaging"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/nats-io/nats.go"
 )
 
@@ -57,11 +57,10 @@ func persistMCPSessionMessage(ctx context.Context, engineStore store.Store, mess
 		errorType := fmt.Sprintf("%T", err)
 		attrs := []any{slog.String("error_type", errorType)}
 		traceContext := map[string]any{"error.type": errorType}
-		var postgresError *pgconn.PgError
 		// SQLSTATE identifies the database failure without exposing its detail string or bound values.
-		if errors.As(err, &postgresError) {
-			attrs = append(attrs, slog.String("sqlstate", postgresError.Code))
-			traceContext["db.sqlstate"] = postgresError.Code
+		if sqlState, ok := db.SQLState(err); ok {
+			attrs = append(attrs, slog.String("sqlstate", sqlState))
+			traceContext["db.sqlstate"] = sqlState
 		}
 		metadata, metadataErr := message.Metadata()
 		// Five delayed redeliveries give transient database faults time to recover before terminal logging.

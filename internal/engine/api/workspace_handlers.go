@@ -12,7 +12,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -22,6 +21,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/managedauthclient"
 	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/db"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 )
 
@@ -484,9 +484,9 @@ func workspaceServiceTimeoutError(err error) (workspaceConfigHTTPError, bool) {
 
 // workspaceServiceDatabaseUnavailableError maps PostgreSQL non-writable SQLSTATEs to a safe actionable dependency receipt.
 func workspaceServiceDatabaseUnavailableError(err error) (workspaceConfigHTTPError, bool) {
-	var postgresError *pgconn.PgError
+	sqlState, unavailable := db.IsDatabaseUnavailable(err)
 	// Explicit read-only and shutdown/restart states prove that workspace persistence is temporarily unavailable.
-	if !errors.As(err, &postgresError) || (postgresError.Code != "25006" && postgresError.Code != "57P01" && postgresError.Code != "57P02" && postgresError.Code != "57P03") {
+	if !unavailable {
 		return workspaceConfigHTTPError{}, false
 	}
 	phase, commitState := "workspace_mutation", "unknown"
@@ -498,7 +498,7 @@ func workspaceServiceDatabaseUnavailableError(err error) (workspaceConfigHTTPErr
 	return workspaceConfigHTTPError{
 		status: http.StatusServiceUnavailable, code: "workspace_database_unavailable",
 		message: "The Engine database was not writable for workspace activation.", category: "dependency", retryable: true,
-		details:     map[string]any{"sqlstate": postgresError.Code, "server_detail": "PostgreSQL is read-only, shutting down, restarting, or not ready to accept this activation."},
+		details:     map[string]any{"sqlstate": sqlState, "server_detail": "PostgreSQL is read-only, shutting down, restarting, or not ready to accept this activation."},
 		remediation: "Wait for the Engine database to become healthy, then check whether the service is active before retrying.",
 		phase:       phase, commitState: commitState,
 	}, true

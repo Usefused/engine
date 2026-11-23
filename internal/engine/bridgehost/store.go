@@ -308,3 +308,104 @@ func checkEventCapacity(ctx context.Context, tx pgx.Tx, pairing string, size int
 	}
 	return nil
 }
+
+// EventManifestDocument loads the persisted manifest bytes for an authorized, non-revoked Bridge event pin.
+func (r *Repository) EventManifestDocument(ctx context.Context, account string, pin Pin) ([]byte, error) {
+	var raw []byte
+	err := r.Pool.QueryRow(ctx, `SELECT m.document FROM fused_bridge_pairings p JOIN fused_bridge_manifests m ON m.pairing_id=p.id AND m.profile_id=$3 AND m.hash=$4 WHERE p.id=$1 AND p.account_id=$2 AND p.revoked_at IS NULL AND p.scope='workspace' AND p.inventory_generation=p.generation AND EXISTS(SELECT 1 FROM fused_bridge_profiles c WHERE c.pairing_id=p.id AND c.profile_id=$3 AND c.state<>'removed') AND `+ownerAuthorized, pin.PairingID, account, pin.ProfileID, pin.ManifestHash).Scan(&raw)
+	// Offline installations may drain accepted events; missing or revoked authority denies subscription.
+	if err != nil {
+		return nil, ErrDenied
+	}
+	return raw, nil
+}
+
+// pendingBridgeEvent holds one locked outbox row awaiting broker handoff.
+type pendingBridgeEvent struct {
+	Account     string
+	Pairing     string
+	Destination string
+	EventID     string
+	Envelope    []byte
+}
+
+// claimAndAckPendingEvent locks one undelivered Bridge outbox row, invokes publish,
+// and clears its payload tombstone only after the broker acknowledges receipt.
+func (r *Repository) claimAndAckPendingEvent(ctx context.Context, publish func(context.Context, pendingBridgeEvent) error) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	tx, err := r.Pool.Begin(ctx)
+	// A worker without a transaction cannot reserve a delivery across replicas.
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	var item pendingBridgeEvent
+	err = tx.QueryRow(ctx, `SELECT p.account_id,e.pairing_id,e.destination_id,e.event_id,e.envelope FROM fused_bridge_events e JOIN fused_bridge_pairings p ON p.id=e.pairing_id WHERE e.delivered_at IS NULL AND p.revoked_at IS NULL AND p.scope='workspace' AND p.inventory_generation=p.generation AND EXISTS(SELECT 1 FROM fused_bridge_profiles c WHERE c.pairing_id=p.id AND c.profile_id=e.profile_id AND c.state<>'removed') AND `+ownerAuthorized+` ORDER BY e.accepted_at FOR UPDATE OF e SKIP LOCKED LIMIT 1`).Scan(&item.Account, &item.Pairing, &item.Destination, &item.EventID, &item.Envelope)
+	// Competing workers, pending inventory reconciliation, or an empty outbox are ordinary idle states.
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	// Propagate storage errors so the caller backs off and retries on the next poll tick.
+	if err != nil {
+		return false, err
+	}
+	// Roll back without clearing the outbox envelope when decoding or broker publish fails.
+	if err := publish(ctx, item); err != nil {
+		return false, err
+	}
+	_, err = tx.Exec(ctx, `UPDATE fused_bridge_events SET delivered_at=now(),envelope=''::bytea WHERE pairing_id=$1 AND destination_id=$2 AND event_id=$3`, item.Pairing, item.Destination, item.EventID)
+	// Keep the small content-hash tombstone so late Bridge retries cannot recreate a settled event.
+	if err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
+}
+
+// revocationListener encapsulates the dedicated PostgreSQL LISTEN connection for pairing revocations.
+type revocationListener struct {
+	conn *pgx.Conn
+}
+
+// SubscribeRevocations opens a dedicated connection per replica and subscribes to the schema-scoped revocation channel.
+func (r *Repository) SubscribeRevocations(ctx context.Context, instance string) (*revocationListener, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	config := r.Pool.Config().ConnConfig.Copy()
+	config.RuntimeParams["application_name"] = "bridge-revocation-" + instance
+	conn, err := pgx.ConnectConfig(ctx, config)
+	// A failed subscription must never admit a session without an invalidation path.
+	if err != nil {
+		return nil, err
+	}
+	var channel string
+	err = conn.QueryRow(ctx, `SELECT 'fused_bridge_revoked_' || md5(current_schema())`).Scan(&channel)
+	// Channel names are schema-specific so isolated workspaces cannot invalidate one another.
+	if err == nil {
+		_, err = conn.Exec(ctx, "LISTEN "+pgx.Identifier{channel}.Sanitize())
+	}
+	listener := &revocationListener{conn: conn}
+	// Do not leak a dedicated connection when LISTEN cannot be established.
+	if err != nil {
+		listener.Close()
+		return nil, err
+	}
+	return listener, nil
+}
+
+// Wait blocks until the next committed revocation payload arrives or the connection fails.
+func (l *revocationListener) Wait(ctx context.Context) (string, error) {
+	notification, err := l.conn.WaitForNotification(ctx)
+	// Return connection or cancellation errors directly so the server fails closed and reconnects.
+	if err != nil {
+		return "", err
+	}
+	return notification.Payload, nil
+}
+
+// Close bounds revocation listener shutdown even if PostgreSQL has disappeared.
+func (l *revocationListener) Close() {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = l.conn.Close(ctx)
+}
