@@ -1,7 +1,7 @@
 import { api } from "./api";
 import type { UnifiedAppSource } from "./unified-app-edit";
 import type { UnifiedTemplate } from "./unified-app-contract";
-import { checkTemplateDependency, type TemplateChecks, type TemplateDependency } from "./unified-template";
+import { canonicalTemplateServiceKey, checkTemplateDependency, type TemplateChecks, type TemplateDependency } from "./unified-template";
 
 export interface TemplateApp { app_family_id: string; app_id: string | null; name: string; version: string | null }
 export interface TemplateAppVersion { app_id: string; version: string }
@@ -42,7 +42,11 @@ export async function checkTemplate(template: Pick<UnifiedTemplate, "services">)
       serviceVersions(serviceId: $id) { id name status is_public }
       serviceOperations(serviceId: $id, version: $version) { name }
     }`, { id: pin.service_id, version: pin.version });
-    return checkTemplateDependency(key, pin, data);
+    return [canonicalTemplateServiceKey(key, data), pin, checkTemplateDependency(key, pin, data)] as const;
   }));
-  return { blockers: checks.flatMap((item) => item.blockers), publicBlockers: checks.flatMap((item) => item.publicBlockers) };
+  return {
+    blockers: checks.flatMap(([, , item]) => item.blockers),
+    publicBlockers: checks.flatMap(([, , item]) => item.publicBlockers),
+    services: Object.fromEntries(checks.map(([key, pin]) => [key, pin])),
+  };
 }

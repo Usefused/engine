@@ -65,6 +65,13 @@ test("picker hydration retains saved service aliases", () => {
   const renamedCurrent = { "@provider/stripe": { ...draft.services.Stripe } };
   const keptRename = unifiedEditSelections(saved, { "@provider/stripe": { ...draft.services.Stripe, operations: ["GetCustomers"] } }, renamedCurrent);
   assert.deepEqual(Object.keys(keptRename), ["@provider/stripe"]);
+  // An authored canonical reference must be restored even when Engine saved the service under its display name.
+  const authoredSaved = structuredClone(saved);
+  authoredSaved.service_pins[0].authored_key = "@provider/stripe";
+  const authoredDraft = unifiedEditDraft(authoredSaved);
+  assert.deepEqual(Object.keys(authoredDraft.services), ["@provider/stripe"]);
+  const authoredConfig = unifiedEditConfig(authoredSaved, authoredDraft, "1.0.1");
+  assert.equal(authoredConfig.services["@provider/stripe"].bucket, "billing");
 });
 
 // A service replacement cannot inherit secrets or routing intended for a different provider identity.

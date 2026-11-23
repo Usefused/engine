@@ -207,10 +207,13 @@ test("specification import apply submits the reviewed artifact receipt", async (
 
 test("service catalog requests only public Registry services", async () => {
   const source = await readFile(integrationsIndexPath, "utf8");
-  const catalogQuery = sourceSection(source, "const CATALOG_SEARCH_QUERY", "// searchCatalogServices");
+  const catalogPageQuery = sourceSection(source, "const CATALOG_PAGE_QUERY", "const CATALOG_SEARCH_QUERY");
+  const catalogSearchQuery = sourceSection(source, "const CATALOG_SEARCH_QUERY", "// browseCatalogServices");
 
-  assert.match(catalogQuery, /searchServices\(q:\s*\$q,\s*publicOnly:\s*true\)/);
-  assert.match(catalogQuery, /\bis_public\b/);
+  assert.match(catalogPageQuery, /services\(page:\s*\$page,\s*limit:\s*\$limit,\s*publicOnly:\s*true\)/);
+  assert.match(catalogPageQuery, /\bis_public\b/);
+  assert.match(catalogSearchQuery, /searchServices\(q:\s*\$q,\s*publicOnly:\s*true\)/);
+  assert.match(catalogSearchQuery, /\bis_public\b/);
 });
 
 test("notification mutations reject live Registry snapshots", () => {

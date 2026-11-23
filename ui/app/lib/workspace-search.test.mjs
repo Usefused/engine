@@ -141,3 +141,90 @@ test('workspace search keeps pagination controls visible', async () => {
   assert.match(renderToStaticMarkup(createElement(exports.IntegrationPagination, { ...props, viewType: 'search' })), /11-20 of 25/);
   assert.equal(renderToStaticMarkup(createElement(exports.IntegrationPagination, { ...props, viewType: 'catalog' })), '');
 });
+
+// Enabling "Show catalog" must page through all public services independently of the workspace page.
+test('show catalog paginates public Registry services beyond one page without resetting workspace pagination', async () => {
+  const dom = new JSDOM('<div id="root"></div>');
+  const previous = { window: globalThis.window, document: globalThis.document, act: globalThis.IS_REACT_ACT_ENVIRONMENT };
+  globalThis.window = dom.window; globalThis.document = dom.window.document; globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const lists = {}, workspaceRequests = [], catalogPages = [];
+  let params;
+  // Retain URL parameters across real React renders for both workspace and catalog pagination.
+  function useSearchParams() {
+    const [value, setValue] = useState(new URLSearchParams('page=2'));
+    params = value;
+    const update = useCallback(next => setValue(current => typeof next === 'function' ? next(current) : next), []);
+    return [value, update];
+  }
+  // Capture each rendered list section's pagination props by view type.
+  function List(value) {
+    lists[value.viewType] = value;
+    return createElement('div', { 'data-service-list': value.viewType });
+  }
+  // Keep unrelated chrome and drawers inert in this focused catalog pagination test.
+  function Hidden() { return null; }
+  const publicCatalog = Array.from({ length: 25 }, (_, index) => ({ id: `pub-${index}`, name: `Public ${index}`, is_public: true }));
+  const dependencies = {
+    '~/components/ImportDiagnostics': loadImportDiagnostics(),
+    '~/components/layout/CataloguePageHeader': { CataloguePageHeader: Hidden },
+    '~/components/layout/IntegrationSourceTabs': { IntegrationSourceTabs: Hidden },
+    '@remix-run/react': { useSearchParams, useNavigate: () => () => {}, useRouteLoaderData: () => ({ isAuth: true }) },
+    '~/lib/api': { api: {
+      // Serve paginated public services for catalog browse queries and fail loudly if searchServices is called with empty q.
+      graphql: async (document, variables) => {
+        // Browse mode must use the paginated services query rather than bounded searchServices.
+        if (document.includes('services(page:')) {
+          const { page, limit } = variables;
+          catalogPages.push({ page, limit });
+          const start = (page - 1) * limit;
+          return { services: { data: publicCatalog.slice(start, start + limit), total: publicCatalog.length, page, limit } };
+        }
+        throw new Error(`unexpected GraphQL document during catalog browse: ${document}`);
+      },
+      workspace: {
+        // Non-empty membership keeps Show catalog collapsed until explicitly toggled on.
+        getServiceIds: async () => ['ws-0'],
+        // Record every workspace page request to prove catalog paging does not reload workspace services.
+        getServicesPage: async (limit, offset, names, q) => {
+          workspaceRequests.push({ limit, offset, names, q });
+          const data = Array.from({ length: 15 }, (_, index) => ({ id: `ws-${index}`, name: `Workspace ${index}` }));
+          return { data: data.slice(offset, offset + limit), total: data.length };
+        },
+      },
+    } },
+    '~/components/IntegrationsListTab': { default: List, fromActivatedService: value => value, fromService: value => value },
+    '~/components/ExtractionWizard': { default: Hidden },
+    '~/components/IntegrationsPendingTab': { default: Hidden },
+    '~/components/DefineServiceDrawer': { DefineServiceDrawer: Hidden },
+    '~/components/Toast': { useToast: () => ({}) },
+    '~/lib/authorization-error': {},
+    '~/lib/discovery-navigation': { discoveryNavigationFromQuery: () => ({ sessionID: null }) },
+  };
+  const source = readFileSync(new URL('../routes/integrations._index.tsx', import.meta.url), 'utf8');
+  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+  const exports = {};
+  new Function('require', 'exports', compiled)(name => dependencies[name] ?? require(name), exports);
+  const root = createRoot(document.getElementById('root'));
+  try {
+    await act(async () => root.render(createElement(exports.default)));
+    assert.equal(workspaceRequests.length, 1);
+    assert.equal(catalogPages.length, 0);
+    await act(async () => { document.querySelector('[role="switch"]').click(); });
+    assert.deepEqual(catalogPages.at(-1), { page: 1, limit: 10 });
+    assert.equal(lists.catalog.page, 1);
+    assert.equal(lists.catalog.totalPages, 3);
+    assert.equal(lists.catalog.totalItems, 25);
+    assert.equal(lists.catalog.integrations.length, 10);
+    assert.equal(workspaceRequests.length, 1, 'toggling Show catalog should not reload workspace services');
+    await act(async () => lists.catalog.onPageChange(2));
+    assert.deepEqual(catalogPages.at(-1), { page: 2, limit: 10 });
+    assert.equal(lists.catalog.page, 2);
+    assert.equal(lists.catalog.integrations[0].id, 'pub-10');
+    assert.equal(params.get('page'), '2', 'catalog pagination preserves the workspace page parameter');
+    assert.equal(params.get('catalogPage'), '2');
+    assert.equal(workspaceRequests.length, 1, 'paging the catalog should not reload workspace services');
+  } finally {
+    await act(async () => root.unmount()); dom.window.close();
+    globalThis.window = previous.window; globalThis.document = previous.document; globalThis.IS_REACT_ACT_ENVIRONMENT = previous.act;
+  }
+});

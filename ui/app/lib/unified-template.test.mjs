@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { templateFromApp, parseTemplate, checkTemplateDependency, templatePublishPath } from "./unified-template.ts";
+import { templateFromApp, parseTemplate, canonicalTemplateServiceKey, checkTemplateDependency, templatePublishPath } from "./unified-template.ts";
 
 /** Includes sensitive deployment settings to exercise the publication allowlist. */
 function savedApp() {
@@ -51,6 +51,12 @@ test("extraction rejects missing source, missing pins, webhook and child-app dep
 // Publication validation must retain the same credential-free envelope after metadata changes.
 test("publication validation rejects private fields, malformed metadata, and oversized scopes", () => {
   const draft = templateFromApp(savedApp());
+  const sixtyFour = structuredClone(draft);
+  sixtyFour.services["@crm/customer"].operations = Array.from({ length: 64 }, (_, index) => `op${index}`);
+  assert.equal(parseTemplate(JSON.stringify(sixtyFour)).services["@crm/customer"].operations.length, 64);
+  const sixtyFive = structuredClone(draft);
+  sixtyFive.services["@crm/customer"].operations = Array.from({ length: 65 }, (_, index) => `op${index}`);
+  assert.throws(() => parseTemplate(JSON.stringify(sixtyFive)), /1–64 operations/);
   assert.throws(() => parseTemplate(JSON.stringify({ ...draft, bucket: "private" })), /without credentials/);
   const nested = structuredClone(draft);
   nested.services["@crm/customer"].auth = { secret: "private" };
@@ -65,6 +71,9 @@ test("dependency checks distinguish private visibility from invalid pinned contr
   const pin = templateFromApp(savedApp()).services["@crm/customer"];
   const data = { service: { id: "service-one", canonical_ref: "@crm/customer", is_public: false }, serviceVersions: [{ id: "version-one", name: "v1", is_public: false, status: "active" }], serviceOperations: [{ name: "getCustomer" }] };
   assert.deepEqual(checkTemplateDependency("@crm/customer", pin, data).blockers, []);
+  assert.deepEqual(checkTemplateDependency("customer", pin, data).blockers, []);
+  assert.equal(canonicalTemplateServiceKey("customer", data), "@crm/customer");
+  assert.equal(canonicalTemplateServiceKey("alias", data), "alias");
   assert.equal(checkTemplateDependency("@crm/customer", pin, data).publicBlockers.length, 2);
   assert.match(checkTemplateDependency("alias", pin, data).blockers[0], /canonical service name/);
   data.serviceVersions[0].status = "deprecated";

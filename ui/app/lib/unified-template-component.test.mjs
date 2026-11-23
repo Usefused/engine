@@ -87,6 +87,31 @@ test("publisher selects versions, preserves metadata, reviews source, and publis
   } finally { await ui.close(); }
 });
 
+// Unqualified service keys with an identical compiled call alias must publish under Registry's canonical reference.
+test("publisher upgrades unqualified service keys returned by dependency checks before publishing", async () => {
+  const unqualified = source("stripe-app");
+  unqualified.config.services = { stripe: { version: "v1", operations: Array.from({ length: 20 }, (_, index) => `op${index}`), bucket: "private-provider-bucket" } };
+  unqualified.service_pins = [{ key: "stripe", authored_key: "stripe", service_id: "service", service_version_id: "version" }];
+  const ui = await mountPublisher({
+    readTemplateApp: async () => unqualified,
+    /** Simulates Registry dependency validation returning a canonicalized @publisher/service reference. */
+    checkTemplate: async (candidate) => ({
+      blockers: [],
+      publicBlockers: [],
+      // Upgrade the unqualified stripe key while preserving the pinned service contract.
+      services: { "@stripe/stripe": candidate.services.stripe },
+    }),
+  }, { initialAppID: "stripe-app" });
+  try {
+    await ui.submit();
+    assert.match(document.body.textContent, /@stripe\/stripe/);
+    await ui.submit();
+    assert.equal(ui.publications.length, 1);
+    assert.deepEqual(Object.keys(ui.publications[0].draft.services), ["@stripe/stripe"]);
+    assert.equal(ui.publications[0].draft.services["@stripe/stripe"].operations.length, 20);
+  } finally { await ui.close(); }
+});
+
 // A slow private-source request cannot overwrite a newer app choice or leak its source into review.
 test("late source responses are discarded after choosing another app", async () => {
   let finish;

@@ -1,7 +1,7 @@
 import { decodeUnifiedRelease, type UnifiedTemplate } from "./unified-app-contract.ts";
 import type { UnifiedAppSource } from "./unified-app-edit.ts";
 
-export interface TemplateChecks { blockers: string[]; publicBlockers: string[] }
+export interface TemplateChecks { blockers: string[]; publicBlockers: string[]; services?: UnifiedTemplate["services"] }
 export interface TemplateDependency {
   service: { id: string; canonical_ref?: string | null; is_public: boolean } | null;
   serviceVersions: { id: string; name: string; status?: string; is_public: boolean }[];
@@ -66,9 +66,29 @@ function validateTemplatePins(template: UnifiedTemplate): void {
   // The publication schema admits only finite, unique provider dependencies.
   if (pins.length > 16 || new Set(pins.map((pin) => pin.service_id)).size !== pins.length) throw new Error("Templates support up to 16 unique services.");
   for (const [key, pin] of Object.entries(template.services)) {
-    // Service config is strictly allowlisted so private routing cannot escape through nested fields.
-    if (Object.keys(pin).some((field) => !["service_id", "service_version_id", "version", "operations"].includes(field)) || pin.operations.length > 16 || pin.operations.some((op) => !boundedText(op, 256, true))) throw new Error(`Use exact service pins and 1–16 operations for ${key}, without credential settings.`);
+    // Service config is strictly allowlisted and bounded by Engine's 64-operation Unified App ceiling.
+    if (Object.keys(pin).some((field) => !["service_id", "service_version_id", "version", "operations"].includes(field)) || pin.operations.length > 64 || pin.operations.some((op) => !boundedText(op, 256, true))) throw new Error(`Use exact service pins and 1–64 operations for ${key}, without credential settings.`);
   }
+}
+
+/** Computes the generated @fused/operations service identifier to compare unqualified keys with canonical references. */
+function serviceCallAlias(value: string): string {
+  const display = value.slice(value.lastIndexOf("/") + 1);
+  const words = display.match(/[A-Za-z0-9]+/g) ?? [];
+  // Names without ASCII identifier characters fall back to the compiler's default service prefix.
+  if (!words.length) return "service";
+  // Lowercase the first word and capitalize subsequent word boundaries to match compiler camelCase aliases.
+  const name = words.map((word, index) => index === 0 ? word[0].toLowerCase() + word.slice(1) : word[0].toUpperCase() + word.slice(1)).join("");
+  // Leading digits receive the compiler's prefix so dot-access bindings remain valid identifiers.
+  return /^[0-9]/.test(name) ? `service${name}` : name;
+}
+
+/** Upgrades unqualified slug or display keys to canonical catalogue references when the compiled call alias is identical. */
+export function canonicalTemplateServiceKey(key: string, data: TemplateDependency): string {
+  const canonical = data.service?.canonical_ref;
+  // Preserve the existing key unless Registry supplies an equivalent canonical @publisher/service reference.
+  if (!canonical || key === canonical || key.startsWith("@") || serviceCallAlias(key) !== serviceCallAlias(canonical)) return key;
+  return canonical;
 }
 
 /** Explains dependency failures before publication while leaving Registry authoritative at commit time. */
@@ -77,8 +97,9 @@ export function checkTemplateDependency(key: string, pin: UnifiedTemplate["servi
   const version = data.serviceVersions.find((item) => item.id === pin.service_version_id && item.name === pin.version);
   // Missing immutable identities cannot be repaired by silently upgrading the dependency.
   if (!data.service || data.service.id !== pin.service_id || !version) return { blockers: [`${key} ${pin.version}: the pinned service version is unavailable.`], publicBlockers };
-  // Renaming a source alias would change executable code, so require an explicit source correction.
-  if (data.service.canonical_ref !== key) blockers.push(`${key}: templates require the canonical service name ${data.service.canonical_ref ?? "from the service catalogue"}. Update the app's service references before publishing.`);
+  const resolvedKey = canonicalTemplateServiceKey(key, data);
+  // Renaming a custom source alias would change executable code, so require an explicit source correction.
+  if (data.service.canonical_ref !== resolvedKey) blockers.push(`${key}: templates require the canonical service name ${data.service.canonical_ref ?? "from the service catalogue"}. Update the app's service references before publishing.`);
   // Deprecated versions and removed operations are rejected for private and public publication alike.
   if (version.status === "deprecated") blockers.push(`${key} ${pin.version}: this version is deprecated.`);
   const missing = pin.operations.filter((op) => !data.serviceOperations.some((item) => item.name === op));

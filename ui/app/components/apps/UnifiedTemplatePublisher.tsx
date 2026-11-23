@@ -114,8 +114,10 @@ export function UnifiedTemplatePublisher({ initialAppID, canCreate, onPublished,
     if (!draft || saving || loading || checking) return;
     setSaving(true); setError("");
     try {
-      const template = parseTemplate(JSON.stringify(draft));
-      const fresh = await checkTemplate(template);
+      const parsed = parseTemplate(JSON.stringify(draft));
+      const fresh = await checkTemplate(parsed);
+      // Apply canonical catalogue service keys when an unqualified key compiles to the same call alias.
+      const template = fresh.services ? { ...parsed, services: fresh.services } : parsed;
       setChecks(fresh);
       // Private dependency warnings block only public releases; structural failures block every release.
       const blockers = [...fresh.blockers, ...(isPublic ? fresh.publicBlockers : [])];
@@ -235,7 +237,7 @@ function TemplateEditor({ draft, checks, checking, saving, blocked, reviewing, i
   const blockers = visibleTemplateBlockers(checks, isPublic);
   return <form onSubmit={onSubmit} className="space-y-6 rounded-xl border border-slate-200 bg-white p-6">
     {/* Only the active step is mounted; review does not repeat a disabled editing form. */}
-    {reviewing ? <TemplateReview draft={draft} isPublic={isPublic} /> : <>
+    {reviewing ? <TemplateReview draft={draft} checks={checks} isPublic={isPublic} /> : <>
       <h2 className="text-lg font-semibold">Template details</h2>
       <TemplateMetadata draft={draft} onEdit={onEdit} />
       <label className="flex items-start gap-3 text-sm"><input type="checkbox" checked={isPublic} onChange={(event) => onPublic(event.target.checked)} /><span>Make publicly discoverable<span className="mt-1 block text-xs text-slate-500">Let other catalogue users find and use this template.</span></span></label>
@@ -268,11 +270,13 @@ function TemplateMetadata({ draft, onEdit }: TemplateMetadataProps) {
 }
 
 /** Summarizes exactly what will be shared without repeating metadata inputs or app selection. */
-function TemplateReview({ draft, isPublic }: { draft: UnifiedTemplate; isPublic: boolean }) {
+function TemplateReview({ draft, checks, isPublic }: { draft: UnifiedTemplate; checks: TemplateChecks | null; isPublic: boolean }) {
+  // Show canonical catalogue service references resolved during admission checks when available.
+  const services = checks?.services ?? draft.services;
   return <div className="space-y-5">
     <div><h2 className="text-lg font-semibold">Review and publish</h2><p className="mt-1 text-sm text-slate-500">Check the included source for secrets or private data before sharing.</p></div>
     <div className="space-y-1"><h3 className="font-medium">{draft.name}</h3><p className="text-sm text-slate-500">{draft.version} · {isPublic ? "Public template" : "Private template"}</p><p className="text-sm text-slate-600">{draft.description}</p></div>
-    <details><summary className="cursor-pointer text-sm font-medium">Included services</summary><ul className="mt-3 space-y-2 break-words text-sm text-slate-600">{Object.entries(draft.services).map(([key, pin]) => <li key={key}>{key} · {pin.version} · {pin.operations.join(", ")}</li>)}</ul></details>
+    <details><summary className="cursor-pointer text-sm font-medium">Included services</summary><ul className="mt-3 space-y-2 break-words text-sm text-slate-600">{Object.entries(services).map(([key, pin]) => <li key={key}>{key} · {pin.version} · {pin.operations.join(", ")}</li>)}</ul></details>
     <details open><summary className="cursor-pointer text-sm font-medium">Included source</summary><pre className="mt-3 max-h-80 overflow-auto rounded-lg bg-slate-950 p-4 text-xs text-slate-100">{draft.source}</pre></details>
     <p className="text-xs text-slate-500">Credential configuration and bucket bindings are excluded. Each installer connects their own accounts.</p>
   </div>;

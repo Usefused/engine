@@ -35,7 +35,23 @@ type CatalogPage = {
   page: number;
   limit: number;
 };
-type CatalogLoadOptions = { knownWorkspaceServiceIds?: string[]; query?: string };
+type CatalogLoadOptions = { knownWorkspaceServiceIds?: string[]; query?: string; page?: number };
+
+const CATALOG_PAGE_LIMIT = 10;
+
+const CATALOG_PAGE_QUERY = `
+  query($page: Int!, $limit: Int!) {
+    services(page: $page, limit: $limit, publicOnly: true) {
+      data {
+        id name description icon_url endpoint_count webhook_count base_url servers { url description }
+        is_public is_owner slug provider { name handle } canonical_ref
+      }
+      total
+      page
+      limit
+    }
+  }
+`;
 
 const CATALOG_SEARCH_QUERY = `
   query($q: String!) {
@@ -46,6 +62,13 @@ const CATALOG_SEARCH_QUERY = `
   }
 `;
 
+// browseCatalogServices pages the public Registry catalog without exposing private services.
+async function browseCatalogServices(page: number, limit: number = CATALOG_PAGE_LIMIT): Promise<CatalogPage> {
+  const response = await api.graphql<{ services: CatalogPage | null }>(CATALOG_PAGE_QUERY, { page, limit });
+  // Normalize absent payloads into an empty page so pagination controls stay bounded.
+  return response.services ?? { data: [], total: 0, page, limit };
+}
+
 // searchCatalogServices keeps the global catalog public-only even for owners,
 // whose private services remain available through Workspace services.
 async function searchCatalogServices(q: string): Promise<Service[]> {
@@ -53,12 +76,63 @@ async function searchCatalogServices(q: string): Promise<Service[]> {
   return response.searchServices || [];
 }
 
-// fetchCatalogPage describes one bounded browse or search result as an honest UI page.
-async function fetchCatalogPage(query: string = ""): Promise<CatalogPage> {
+// fetchCatalogPage uses paginated public listing for browsing and bounded lexical search for queries.
+async function fetchCatalogPage(query: string = "", page: number = 1): Promise<CatalogPage> {
+  // Empty browse requests use server pagination so every page of public services is reachable.
+  if (!query.trim()) {
+    return browseCatalogServices(page, CATALOG_PAGE_LIMIT);
+  }
   const data = await searchCatalogServices(query);
   // Registry search is deliberately capped in SQL, so advertising a second
   // page would promise a pagination contract this query does not have.
   return { data, total: data.length, page: 1, limit: Math.max(data.length, 1) };
+}
+
+// parsePageParam converts an untrusted URL page parameter into a positive page index.
+function parsePageParam(value: string | null): number {
+  const parsed = value ? parseInt(value, 10) : 1;
+  // Non-numeric or non-positive URL page parameters fall back to page 1.
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+// pageCount computes a positive total-page count from a bounded page response.
+function pageCount(total: number, limit: number): number {
+  // Always expose at least one page so empty or zero-limit responses stay valid.
+  return Math.ceil(total / Math.max(limit, 1)) || 1;
+}
+
+// catalogLoadTarget resolves default query and page arguments for a catalog request.
+function catalogLoadTarget(options: CatalogLoadOptions, activeSearch: string): { searchQuery: string; targetPage: number } {
+  // Explicit caller options take precedence over URL defaults during search transitions.
+  return { searchQuery: options.query ?? activeSearch, targetPage: options.page ?? 1 };
+}
+
+// catalogPaginationForAuth binds public visitors to the primary page param while keeping signed-in catalog paging independent.
+function catalogPaginationForAuth(
+  isAuth: boolean,
+  page: number,
+  catalogPage: number,
+  setPage: (p: number | ((prev: number) => number)) => void,
+  setCatalogPage: (p: number | ((prev: number) => number)) => void,
+) {
+  // Signed-in browsing renders Workspace and Service catalog together, so each needs its own pager.
+  return isAuth
+    ? { page: catalogPage, onPageChange: setCatalogPage }
+    : { page, onPageChange: setPage };
+}
+
+// filterCatalogMatches hides already-enabled workspace services only during combined search.
+function filterCatalogMatches(services: Service[], workspaceServiceIds: string[], query: string): Service[] {
+  // Browse mode retains every public page row with "In workspace" badges rather than shortening pages.
+  if (!query.trim()) return services;
+  const membership = new Set(workspaceServiceIds);
+  return services.filter(service => !membership.has(service.id));
+}
+
+// catalogErrorMessage extracts a readable failure message from unknown transport errors.
+function catalogErrorMessage(error: unknown): string {
+  // Prefer concrete Error messages while falling back to a safe generic string.
+  return error instanceof Error ? error.message : "Failed to load services";
 }
 
 function importSource(method: "openapi" | "docs", sourceType: "url" | "text", url: string, content: string): ImportSource {
@@ -284,6 +358,8 @@ export default function IntegrationsIndex() {
 
   const [integrations, setIntegrations] = useState<Service[]>([]);
   const [activeWorkspaceServiceIds, setActiveWorkspaceServiceIds] = useState<string[] | null>(null);
+  const activeWorkspaceServiceIdsRef = useRef<string[] | null>(null);
+  activeWorkspaceServiceIdsRef.current = activeWorkspaceServiceIds;
   const pendingWorkspaceServiceIdsRef = useRef<Set<string>>(new Set());
   const [pendingWorkspaceServiceIds, setPendingWorkspaceServiceIds] = useState<string[]>([]);
   const [workspaceServicePageData, setWorkspaceServicePageData] = useState<{ data: ActivatedService[]; total: number } | null>(null);
@@ -296,6 +372,7 @@ export default function IntegrationsIndex() {
   const activeSearch = searchParams.get("q")?.trim() ?? "";
   const workspaceRequest = useRef(0);
   const catalogRequest = useRef(0);
+  const loadedBrowsePageRef = useRef<number | null>(null);
   const [activeSessions, setActiveSessions] = useState<DiscoverySnapshot[]>([]);
   const [totalPages, setTotalPages] = useState(1);
   const [totalItems, setTotalItems] = useState(0);
@@ -305,18 +382,33 @@ export default function IntegrationsIndex() {
   const discoveryNavigation = discoveryNavigationFromQuery(searchParams);
   const activeDiscoverySessionID = discoveryNavigation.sessionID;
 
-    // Pagination
-  const pageParam = searchParams.get("page");
-  const page = pageParam ? parseInt(pageParam, 10) : 1;
-  
+  // Workspace and catalog browse keep separate URL page parameters so paging one never resets the other.
+  const page = parsePageParam(searchParams.get("page"));
+  const catalogPage = parsePageParam(searchParams.get("catalogPage"));
+  const catalogPageRef = useRef(catalogPage);
+  catalogPageRef.current = catalogPage;
+
+  // setPage updates the primary page parameter for workspace results, combined search, or public catalog browsing.
   const setPage = (p: number | ((prev: number) => number)) => {
-    const newPage = typeof p === 'function' ? p(page) : p;
+    const newPage = typeof p === "function" ? p(page) : p;
     setSearchParams(prev => {
       const newParams = new URLSearchParams(prev);
       newParams.set("page", newPage.toString());
       return newParams;
     }, { replace: true });
   };
+
+  // setCatalogPage updates the catalog browse page independently of the authenticated workspace page.
+  const setCatalogPage = (p: number | ((prev: number) => number)) => {
+    const newPage = typeof p === "function" ? p(catalogPage) : p;
+    setSearchParams(prev => {
+      const newParams = new URLSearchParams(prev);
+      newParams.set("catalogPage", newPage.toString());
+      return newParams;
+    }, { replace: true });
+  };
+
+  const catalogPagination = catalogPaginationForAuth(isAuth, page, catalogPage, setPage, setCatalogPage);
 
   const setView = (newTab: ServicesView) => {
     setSearchParams(prev => {
@@ -357,77 +449,75 @@ export default function IntegrationsIndex() {
   // loadCatalogData normalizes authenticated and public catalogue pages for UI state.
   const loadCatalogData = useCallback(async (options: CatalogLoadOptions = {}) => {
     const request = ++catalogRequest.current;
+    const { searchQuery, targetPage } = catalogLoadTarget(options, activeSearch);
+    // Record the active browse page before awaiting so parallel effects skip duplicate requests.
+    if (!searchQuery.trim()) loadedBrowsePageRef.current = targetPage;
     setCatalogLoading(true);
     try {
-      const [catalogPage, workspaceServiceIds] = await Promise.all([
-        fetchCatalogPage(options.query ?? activeSearch),
+      const [catalogResult, workspaceServiceIds] = await Promise.all([
+        fetchCatalogPage(searchQuery, targetPage),
         // Workspace loading already knows membership, so reuse it instead of repeating the Engine query.
         options.knownWorkspaceServiceIds !== undefined
           ? Promise.resolve(options.knownWorkspaceServiceIds)
           : isAuth ? api.workspace.getServiceIds() : Promise.resolve([]),
       ]);
-      // An older search must not replace results from a newer query.
+      // An older search or page request must not replace results from a newer request.
       if (request !== catalogRequest.current) return;
-      // Existing memberships come from the workspace search; retain newly added cards until the next search refresh.
-      const membership = new Set(workspaceServiceIds);
-      const catalogMatches = (options.query ?? activeSearch).trim()
-        ? catalogPage.data.filter(service => !membership.has(service.id))
-        : catalogPage.data;
-      setIntegrations(catalogMatches);
+      setIntegrations(filterCatalogMatches(catalogResult.data, workspaceServiceIds, searchQuery));
       setActiveWorkspaceServiceIds(workspaceServiceIds);
-      setTotalPages(Math.ceil(catalogPage.total / catalogPage.limit) || 1);
-      setTotalItems(catalogPage.total);
-
+      setTotalPages(pageCount(catalogResult.total, catalogResult.limit));
+      setTotalItems(catalogResult.total);
     } catch (e) {
       // Ignore errors from superseded searches.
       if (request !== catalogRequest.current) return;
-      setError(e instanceof Error ? e.message : "Failed to load services");
+      setError(catalogErrorMessage(e));
     } finally {
       // Only the latest request owns the visible loading state.
       if (request === catalogRequest.current) setCatalogLoading(false);
     }
   }, [isAuth, activeSearch]);
 
-  // loadWorkspaceData keeps local services first and optionally loads catalogue cards beneath them.
+  // loadWorkspaceData keeps local services first and pairs combined search or expanded browse with Registry matches.
   const loadWorkspaceData = useCallback(async (p: number = page, searchQuery: string = activeSearch) => {
     const request = ++workspaceRequest.current;
-    // Invalidate catalog results tied to the previous workspace search.
+    // Invalidate catalog results tied to the previous workspace search or reload.
     ++catalogRequest.current;
     setWorkspaceLoading(true);
     setError("");
     try {
       const [wsPageRes, workspaceServiceIds] = await Promise.all([
-        isAuth ? api.workspace.getServicesPage(10, (p - 1) * 10, undefined, searchQuery) : null,
-        isAuth ? api.workspace.getServiceIds() : Promise.resolve([]),
+        api.workspace.getServicesPage(10, (p - 1) * 10, undefined, searchQuery),
+        api.workspace.getServiceIds(),
       ]);
       // Paging and fast typing can complete out of order; only the newest request may publish.
       if (request !== workspaceRequest.current) return;
       setActiveWorkspaceServiceIds(workspaceServiceIds);
       // The workspace tab renders only the requested page, so it must not issue a second unpaginated membership projection.
       setWorkspaceServicePageData(wsPageRes);
-      // Search includes catalogue matches regardless of the separate browse preference.
+      // Search and auto-expanded empty workspaces load catalogue matches alongside Engine results.
       if (catalogVisible(isAuth, catalogPreference, workspaceServiceIds, searchQuery)) {
-        await loadCatalogData({ knownWorkspaceServiceIds: workspaceServiceIds, query: searchQuery });
+        await loadCatalogData({ knownWorkspaceServiceIds: workspaceServiceIds, query: searchQuery, page: searchQuery ? 1 : catalogPageRef.current });
       }
     } catch (e) {
       // Superseded failures must not mask the latest successful result.
       if (request !== workspaceRequest.current) return;
-      setError(e instanceof Error ? e.message : "Failed to load services");
+      setError(catalogErrorMessage(e));
     } finally {
       // Earlier requests cannot clear the latest search spinner.
       if (request === workspaceRequest.current) setWorkspaceLoading(false);
     }
-  }, [page, isAuth, activeSearch, catalogPreference, loadCatalogData]);
+  // Catalog browse toggle and catalog page changes are handled by their own effect without reloading Workspace.
+  }, [page, isAuth, activeSearch, loadCatalogData]);
 
   // loadVisibleData routes URL-backed search and paging to the visible collection.
   const loadVisibleData = useCallback(async (p: number = page) => {
     // Public browsing has no workspace collection to request first.
     if (!isAuth) {
-      await loadCatalogData();
+      await loadCatalogData({ page: p });
       return;
     }
 
-    // Workspace owns both local results and the optional catalogue below them.
+    // Workspace owns local results and combined search; catalog browsing loads independently below.
     if (view === "workspace") {
       await loadWorkspaceData(p);
       return;
@@ -437,12 +527,32 @@ export default function IntegrationsIndex() {
     if (view === "pending") refreshSessions();
   }, [view, isAuth, page, loadCatalogData, loadWorkspaceData]);
 
-  // URL changes are the single trigger for search, browser history, and pagination loads.
+  // URL changes are the single trigger for search, browser history, and primary pagination loads.
   useEffect(() => {
     void loadVisibleData(page);
     // Navigation invalidates in-flight results without discarding the last visible page.
     return () => { ++workspaceRequest.current; ++catalogRequest.current; };
   }, [page, loadVisibleData]);
+
+  const showCatalog = catalogVisible(isAuth, catalogPreference, activeWorkspaceServiceIds, activeSearch);
+
+  // Authenticated catalog browsing loads and pages independently without reloading Workspace services.
+  useEffect(() => {
+    // Reset cached browse page whenever authenticated catalog browse is inactive.
+    if (!isAuth || view !== "workspace" || !showCatalog || activeSearch) {
+      loadedBrowsePageRef.current = null;
+      return;
+    }
+    // Skip duplicate fetches when loadWorkspaceData already loaded this exact browse page.
+    if (loadedBrowsePageRef.current === catalogPage) return;
+    void loadCatalogData({
+      page: catalogPage,
+      query: "",
+      knownWorkspaceServiceIds: activeWorkspaceServiceIdsRef.current ?? undefined,
+    });
+    // Cancel stale browse pages if the user pages again, searches, or hides the catalog.
+    return () => { ++catalogRequest.current; };
+  }, [isAuth, view, showCatalog, activeSearch, catalogPage, loadCatalogData]);
 
   // Back/forward navigation must restore the search field as well as its result set.
   useEffect(() => { setQuery(activeSearch); }, [activeSearch]);
@@ -597,7 +707,6 @@ export default function IntegrationsIndex() {
   }
 
   const workspaceList = workspaceListProjection(workspaceServicePageData);
-  const showCatalog = catalogVisible(isAuth, catalogPreference, activeWorkspaceServiceIds, activeSearch);
   // Onboarding copy is reserved for authenticated workspaces whose membership has been authoritatively loaded as empty.
   const emptyWorkspace = workspaceIsEmpty(isAuth, activeWorkspaceServiceIds);
   // Authenticated requests share one error above Workspace; public visitors need it on their only collection.
@@ -640,7 +749,7 @@ export default function IntegrationsIndex() {
         onToggleCatalog={handleCatalogToggle}
         catalog={{
           integrations: integrations.map(fromService), loading: catalogLoading, error: catalogError, query, setQuery, handleSearch, handleClear,
-          searching, setShowNewPanel, page: 1, onPageChange: setPage, totalPages, totalItems, isAuth,
+          searching, setShowNewPanel, ...catalogPagination, totalPages, totalItems, isAuth,
           viewType: "catalog", handleAddWorkspace,
           activeServiceIds: activeWorkspaceServiceIds ?? [],
           pendingServiceIds: pendingWorkspaceServiceIds,

@@ -1,6 +1,6 @@
 {
-  "call_count": 125,
-  "document_count": 143,
+  "call_count": 126,
+  "document_count": 144,
   "calls": [
     {
       "endpoint": "engine",
@@ -660,6 +660,12 @@
       "endpoint": "registry",
       "file": "app/routes/integrations._index.tsx",
       "call": 1,
+      "document_count": 1
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations._index.tsx",
+      "call": 2,
       "document_count": 1
     },
     {
@@ -1626,6 +1632,13 @@
       "endpoint": "registry",
       "file": "app/routes/integrations._index.tsx",
       "call": 1,
+      "variant": 1,
+      "document": "\n  query($page: Int!, $limit: Int!) {\n    services(page: $page, limit: $limit, publicOnly: true) {\n      data {\n        id name description icon_url endpoint_count webhook_count base_url servers { url description }\n        is_public is_owner slug provider { name handle } canonical_ref\n      }\n      total\n      page\n      limit\n    }\n  }\n"
+    },
+    {
+      "endpoint": "registry",
+      "file": "app/routes/integrations._index.tsx",
+      "call": 2,
       "variant": 1,
       "document": "\n  query($q: String!) {\n    searchServices(q: $q, publicOnly: true) {\n      id name description icon_url endpoint_count webhook_count base_url servers { url description }\n      is_public is_owner slug provider { name handle } canonical_ref\n    }\n  }\n"
     },
