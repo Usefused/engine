@@ -100,7 +100,7 @@ func (h *mcpOAuthHandler) resourceMetadata(w http.ResponseWriter, r *http.Reques
 		http.NotFound(w, r)
 		return
 	}
-	writeOAuthJSON(w, http.StatusOK, map[string]any{
+	writeJSONStatus(w, http.StatusOK, map[string]any{
 		"resource": h.publicURL + "/mcp/" + id.String(), "authorization_servers": []string{h.publicURL + "/mcp/oauth"},
 		"scopes_supported": []string{store.OAuthMCPScope}, "bearer_methods_supported": []string{"header"},
 	})

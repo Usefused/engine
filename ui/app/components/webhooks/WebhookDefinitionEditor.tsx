@@ -3,6 +3,7 @@ import { Upload, X } from "lucide-react";
 import { useEffect, useId, useRef, useState, type ChangeEvent } from "react";
 import { useBeforeUnload, useBlocker } from "@remix-run/react";
 import type { Service, SpecificationImportPlan } from "~/lib/api";
+import { handleDrawerKeyboard } from "~/lib/focus-trap";
 import { useFusedAgent } from "~/components/agent/FusedAgentContext";
 import { useWebhookEditor } from "./useWebhookEditor";
 import { WebhookEventEditor } from "./WebhookEventEditor";
@@ -110,16 +111,10 @@ function DiscardNotice({ busy, onKeep, onDiscard }: { busy: boolean; onKeep: () 
 
 // Retain Escape handling while allowing keyboard access to a concurrently open assistant.
 function handleEditorKeyboard(event: React.KeyboardEvent, panel: HTMLDivElement | null, close: () => void, trapFocus: boolean) {
-  // Escape follows the same dirty/busy guard as every other close gesture.
-  if (event.key === "Escape") { event.stopPropagation(); close(); return; }
-  // Only modal editors trap Tab; shared assistant sessions need access to both panels.
-  if (!trapFocus || event.key !== "Tab" || !panel) return;
-  const controls = Array.from(panel.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex="0"]')).filter((node) => node.getClientRects().length > 0);
-  const first = controls[0];
-  const last = controls[controls.length - 1];
-  // Wrapping at either edge prevents focus from reaching the dimmed read-only page.
-  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  handleDrawerKeyboard(event, panel, close, {
+    selector: 'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex="0"]',
+    trapFocus,
+  });
 }
 
 // File selection stays secondary to editing and starts only a review, never an automatic save.

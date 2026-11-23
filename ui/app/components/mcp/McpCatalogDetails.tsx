@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent }
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, Copy, X } from "lucide-react";
 import { SchemaViewer } from "~/components/SchemaViewer";
+import { handleDrawerKeyboard } from "~/lib/focus-trap";
 import { mcpItemKey, type McpCatalogItem, type McpCatalogKind } from "~/lib/mcp-catalog";
 
 export const catalogTypeBadges: Record<McpCatalogKind, { label: string; color: string }> = {
@@ -100,16 +101,11 @@ function McpDetailsHeading({ kind, item, onClose }: { kind: McpCatalogKind; item
 
 /** Keeps keyboard users inside the inspector until they explicitly dismiss it. */
 function inspectorKeyboard(event: KeyboardEvent, panel: HTMLElement | null, close: () => void) {
-  // Escape closes only the active inspection, without changing the selected catalog filter.
-  if (event.key === "Escape") { event.preventDefault(); close(); return; }
-  // Ordinary key presses remain available to schema disclosures and copy controls.
-  if (event.key !== "Tab" || !panel) return;
-  const controls = Array.from(panel.querySelectorAll<HTMLElement>('button:not(:disabled):not([tabindex="-1"]), a[href], summary, [tabindex="0"]')).filter((node) => node.getClientRects().length > 0);
-  const first = controls[0];
-  const last = controls[controls.length - 1];
-  // The initial panel focus joins the same backward wrap as the first focusable control.
-  if (event.shiftKey && [first, panel].includes(document.activeElement as HTMLElement)) { event.preventDefault(); last?.focus(); }
-  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  handleDrawerKeyboard(event, panel, close, {
+    selector: 'button:not(:disabled):not([tabindex="-1"]), a[href], summary, [tabindex="0"]',
+    includePanelOnShiftTab: true,
+    preventEscapeDefault: true,
+  });
 }
 
 /** Shows only metadata supplied by resource and resource-template definitions. */

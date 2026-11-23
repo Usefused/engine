@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import ts from "typescript";
 import * as importContract from "./webhook-editor-import.ts";
+import * as focusTrap from "./focus-trap.ts";
 
 const require = createRequire(import.meta.url);
 
@@ -49,6 +50,7 @@ function harness(overrides = {}) {
       // No synthetic navigation should interfere with review and recovery.
       useBlocker() { return { state: "unblocked" }; },
     },
+    "~/lib/focus-trap": focusTrap,
     "~/lib/webhook-editor-import": importContract,
     "~/lib/api": { api: { integrations: {
       // Capture the real pinned request and optionally simulate a mismatched server receipt.

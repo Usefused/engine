@@ -21,7 +21,7 @@ func TestDeploymentRouteOwnsOnlyItsExactPOSTAuthentication(t *testing.T) {
 	} {
 		reached := false
 		// A nil management authenticator proves the specialized bearer is not processed as a broad control credential.
-		handler := controlActorMiddleware(nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler := controlActorMiddlewareWithAudit(nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			reached = true
 			// The dedicated handler must receive the exact bearer so it can enforce its own family ceiling.
 			if r.Header.Get("Authorization") != "Bearer fot_deployment" {

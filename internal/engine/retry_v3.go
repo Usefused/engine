@@ -113,7 +113,8 @@ func firstRetryRule(rules []retrypolicy.Rule, obj *models.IntegrationObject, sta
 }
 
 func retryRuleMatches(p retrypolicy.Predicates, obj *models.IntegrationObject, status int, capture *retryAttemptCapture) bool {
-	if !containsString(p.Methods, obj.Method) || !containsOperationKind(p.OperationKinds, retryOperationKind(obj, capture)) {
+	// Empty method or kind lists act as wildcards, matching any operation.
+	if !matchesAllowed(p.Methods, obj.Method) || !matchesAllowed(p.OperationKinds, retryOperationKind(obj, capture)) {
 		return false
 	}
 	if !retryFailureMatches(p, status, capture.errorKind) || !bodyReplayabilityMatches(p.BodyReplayability, capture.bodyReplayable) {
@@ -215,23 +216,14 @@ func requiredHeadersPresent(required []string, headers http.Header) bool {
 	return true
 }
 
-func containsString(values []string, target string) bool {
+// matchesAllowed reports whether target satisfies an optional allowlist; an empty list permits any value.
+func matchesAllowed[T comparable](values []T, target T) bool {
+	// An omitted allowlist places no restriction on this predicate dimension.
 	if len(values) == 0 {
 		return true
 	}
 	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
-}
-
-func containsOperationKind(values []retrypolicy.OperationKind, target retrypolicy.OperationKind) bool {
-	if len(values) == 0 {
-		return true
-	}
-	for _, value := range values {
+		// Stop as soon as an explicit allowlist member matches.
 		if value == target {
 			return true
 		}

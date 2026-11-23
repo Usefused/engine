@@ -394,22 +394,9 @@ func validAppOpenAPIMatch(selections []models.SDKSelection, match store.ServiceC
 }
 
 // appOpenAPISelectionContains applies the same explicit ID/name/select-all
-// admission semantics as the set-based store query.
+// admission semantics as runtime enforcement via models.SDKSelection.AllowsEndpoint.
 func appOpenAPISelectionContains(selection models.SDKSelection, endpoint fusedobject.Endpoint) bool {
-	if selection.SelectAll {
-		return true
-	}
-	for _, endpointID := range selection.EndpointIDs {
-		if endpointID == endpoint.ID {
-			return true
-		}
-	}
-	for _, operationName := range selection.OperationNames {
-		if operationName == endpoint.Name {
-			return true
-		}
-	}
-	return false
+	return selection.AllowsEndpoint(endpoint.ID, endpoint.Name)
 }
 
 // missingExplicitAppOpenAPISelection checks only selectors the bounded query

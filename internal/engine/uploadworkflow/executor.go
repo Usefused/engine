@@ -192,7 +192,7 @@ func (e Executor) executeChunks(ctx context.Context, step workflowcontract.Uploa
 	buffer := make([]byte, chunkSize)
 	var offset int64
 	for offset < input.MediaSize {
-		expected := minInt64(chunkSize, input.MediaSize-offset)
+		expected := min(chunkSize, input.MediaSize-offset)
 		count, readErr := io.ReadFull(input.Media, buffer[:expected])
 		// Never mutate the provider with a partial chunk when the caller's
 		// declared size exceeds the available media stream.
@@ -227,13 +227,6 @@ func classifyChunkResponse(response *http.Response, step workflowcontract.Upload
 		return false, fmt.Errorf("upload transfer returned status %d", response.StatusCode)
 	}
 	return false, nil
-}
-
-func minInt64(left, right int64) int64 {
-	if left < right {
-		return left
-	}
-	return right
 }
 
 func selectedChunkSize(chunking *workflowcontract.Chunking, requested int64) (int64, error) {

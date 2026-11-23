@@ -11,7 +11,7 @@ import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { McpTransportEndpoints, McpVersionTransportEndpoints, type McpTransportEndpointData, type McpTransportName, type McpTransportURLs } from "~/components/mcp/McpTransportEndpoints";
 import { useToast } from "~/components/Toast";
 import { api } from "~/lib/api";
-import { deleteAppFamilies } from "~/lib/app-family-deactivation";
+import { deleteAppFamilyWithFeedback } from "~/lib/app-family-deactivation";
 import { appConnectedServiceSelections, type AppServiceSummary } from "~/lib/app-connected-services";
 import type { AppSelectionPayload } from "~/lib/app-selection-v3";
 import { hasResourcePermission, hasWorkspacePermission } from "~/lib/current-actor-access";
@@ -228,34 +228,18 @@ export default function McpServerDetails() {
     // Family deletion requires a loaded server identity and explicit MCP family management permission.
     if (!state.server || deletingApp || !canManageVersions) return;
     const server = state.server;
-    setDeletingApp(true);
-    try {
-      const result = await deleteAppFamilies([server.app_family_id], {
-        listVersions: (familyId) => readMcpVersions(familyId).then((items) => items.map((item) => ({ app_id: item.id }))),
-        confirm: ({ versionCount }) => toast.confirm(
-          // Show exact version cleanup scope when active MCP runtimes must be removed before archiving.
-          versionCount > 0
-            ? `Delete MCP server "${server.name}"? This permanently deactivates all ${versionCount} version(s) and removes its runtime. Its name becomes reusable and its historical identity remains in Archive.`
-            : `Delete MCP server "${server.name}"? Its name becomes reusable and its historical identity remains in Archive.`
-        ),
-        deactivate: api.sdks.deactivate,
-        archiveFamily: api.sdks.archiveFamily,
-      });
-      // Cancellation preserves the MCP server and all of its versions.
-      if (result.cancelled) return;
-      if (result.deletedFamilies.length === 1) {
-        toast.success(`MCP server "${server.name}" deleted and moved to Archive.`);
-        navigate("/integrations/sdks");
-        return;
-      }
-      toast.error(`Failed to delete MCP server "${server.name}". Deactivated ${result.deactivatedVersions} version(s); ${result.failedVersions} version deactivation(s) failed.`);
-      // Return to the catalogue if any version was already deactivated so the user is not stranded on a removed version URL.
-      if (result.deactivatedVersions > 0) navigate("/integrations/sdks");
-    } catch (cause) {
-      toast.error(`Failed to delete MCP server: ${cause instanceof Error ? cause.message : "Unknown error"}`);
-    } finally {
-      setDeletingApp(false);
-    }
+    await deleteAppFamilyWithFeedback({
+      familyId: server.app_family_id,
+      name: server.name,
+      kindLabel: "MCP server",
+      redirectTo: "/integrations/sdks",
+      listVersions: (familyId) => readMcpVersions(familyId).then((items) => items.map((item) => ({ app_id: item.id }))),
+      deactivate: api.sdks.deactivate,
+      archiveFamily: api.sdks.archiveFamily,
+      toast,
+      navigate,
+      setDeleting: setDeletingApp,
+    });
   };
 
   return <McpDetailState id={id} state={state} activeTab={activeTab} canReadActivity={canReadActivity} canManageVersions={canManageVersions} deletingVersionId={deletingVersionId} deletingApp={deletingApp} onNavigate={navigate} onTabChange={setActiveTab} onDeleteVersion={handleDeleteVersion} onDeleteApp={handleDeleteApp} onCopied={(transport) => toast.success(`${mcpTransportLabel(transport)} URL copied to clipboard!`)} />;

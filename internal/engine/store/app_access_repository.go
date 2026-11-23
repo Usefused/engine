@@ -12,7 +12,6 @@ import (
 )
 
 var (
-	ErrAppOwnershipDenied      = errors.New("app ownership authorization denied")
 	ErrAppOwnerMismatch        = errors.New("app owner is immutable")
 	ErrInvalidAppAccessRequest = errors.New("invalid app access request")
 )

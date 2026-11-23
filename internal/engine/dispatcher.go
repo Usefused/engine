@@ -575,10 +575,6 @@ func normalizeError(err error, status int) error {
 	return fmt.Errorf("execution failed after retries: %w", err)
 }
 
-func prepareRequestParts(srv *models.Service, obj *models.IntegrationObject, params map[string]any, bucketValues []store.BucketValue) (string, map[string]string, io.Reader, error) {
-	return prepareRequestPartsWithContext(context.Background(), srv, obj, params, bucketValues)
-}
-
 // prepareRequestPartsWithContext resolves forced path bindings before mapping
 // caller input because later whole-query parsing would otherwise escape braces.
 func prepareRequestPartsWithContext(ctx context.Context, srv *models.Service, obj *models.IntegrationObject, params map[string]any, bucketValues []store.BucketValue) (string, map[string]string, io.Reader, error) {
@@ -955,10 +951,6 @@ func buildSelectedRequestBodyWithContext(ctx context.Context, obj *models.Integr
 	return buildSelectedRESTRequestBodyWithContext(ctx, content, headerParams, bodyParams)
 }
 
-func buildRESTRequestBody(content *models.RequestContent, headerParams map[string]string, bodyParams map[string]any) (io.Reader, error) {
-	return buildRESTRequestBodyWithContext(context.Background(), content, headerParams, bodyParams)
-}
-
 func buildRESTRequestBodyWithContext(ctx context.Context, content *models.RequestContent, headerParams map[string]string, bodyParams map[string]any) (io.Reader, error) {
 	// The reviewed contract is the only authority for whether a REST body
 	// exists. Method and service defaults cannot recreate a body the importer
@@ -1053,10 +1045,6 @@ func buildFormRequestBody(content *SelectedRequestRepresentation, bodyParams map
 		}
 	}
 	return strings.NewReader(formValues.EncodeForm()), nil
-}
-
-func buildMultipartRequestBody(content *SelectedRequestRepresentation, headers map[string]string, bodyParams map[string]any) (io.Reader, error) {
-	return buildMultipartRequestBodyWithContext(context.Background(), content, headers, bodyParams)
 }
 
 func buildMultipartRequestBodyWithContext(ctx context.Context, content *SelectedRequestRepresentation, headers map[string]string, bodyParams map[string]any) (io.Reader, error) {
@@ -1327,11 +1315,6 @@ func setRequestContentSpanAttributes(ctx context.Context, obj *models.Integratio
 		attribute.Bool("request.item_schema.present", content != nil && content.ItemSchema != nil),
 		attribute.Bool("request.positional_encoding.present", content != nil && hasPositionalMultipart(content)),
 	)
-}
-
-func requestContentTelemetry(obj *models.IntegrationObject) (string, string) {
-	content, _, _ := SelectRequestContent(obj.RequestContent)
-	return requestContentTelemetryForSelection(obj, content)
 }
 
 func requestContentTelemetryForSelection(obj *models.IntegrationObject, content *SelectedRequestRepresentation) (string, string) {

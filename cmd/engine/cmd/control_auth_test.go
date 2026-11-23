@@ -48,7 +48,7 @@ func TestControlActorMiddlewareAuthenticatesBearerToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
-	handler := controlActorMiddleware(authenticator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := controlActorMiddlewareWithAudit(authenticator, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		actor, ok := accesscontrol.ActorFromContext(r.Context())
 		if !ok || actor.SubjectID != loader.principal.SubjectID {
 			t.Fatalf("request actor = %#v, %v", actor, ok)
@@ -76,7 +76,7 @@ func TestControlActorMiddlewareHydratesActorAndReusesCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
-	handler := controlActorMiddleware(authenticator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := controlActorMiddlewareWithAudit(authenticator, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		actor, ok := accesscontrol.ActorFromContext(r.Context())
 		if !ok || actor.SubjectID != loader.principal.SubjectID || actor.WorkspaceID != loader.principal.WorkspaceID || actor.DisplayName != loader.principal.DisplayName || actor.Email != loader.principal.Email {
 			t.Fatalf("request actor = %#v, %v", actor, ok)
@@ -113,7 +113,7 @@ func TestControlAuthenticationAndAuthorizationReuseOneCachedSnapshot(t *testing.
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
 	called := 0
-	handler := controlActorMiddleware(authenticator)(
+	handler := controlActorMiddlewareWithAudit(authenticator, nil)(
 		controlAuthorizationMiddleware(accesscontrol.SnapshotAuthorizer{})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			called++
 			w.WriteHeader(http.StatusNoContent)
@@ -140,7 +140,7 @@ func TestControlAuthenticationAndAuthorizationReuseOneCachedSnapshot(t *testing.
 func TestControlActorMiddlewareRejectsMissingCredential(t *testing.T) {
 	loader := &controlPrincipalLoaderStub{principal: controlTestPrincipal()}
 	authenticator, _ := accesscontrol.NewAuthenticator(loader, 1, accesscontrol.AuthenticatorOptions{})
-	handler := controlActorMiddleware(authenticator)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	handler := controlActorMiddlewareWithAudit(authenticator, nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("protected handler must not execute")
 	}))
 	response := httptest.NewRecorder()
@@ -239,7 +239,7 @@ func TestControlActorMiddlewareExcludesRuntimeAndPublicRoutes(t *testing.T) {
 	loader := &controlPrincipalLoaderStub{principal: controlTestPrincipal()}
 	authenticator, _ := accesscontrol.NewAuthenticator(loader, 1, accesscontrol.AuthenticatorOptions{})
 	called := 0
-	handler := controlActorMiddleware(authenticator)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := controlActorMiddlewareWithAudit(authenticator, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called++
 		w.WriteHeader(http.StatusNoContent)
 	}))

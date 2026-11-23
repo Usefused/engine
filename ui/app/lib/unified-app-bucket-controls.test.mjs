@@ -38,21 +38,16 @@ function loadComponent(path) {
   return exports;
 }
 
-// Exercise schema admission with real controls so invalid input and bucket scope cannot bypass execution checks.
-test("runtime bucket controls preserve explicit scope and send a single scoped execution", async () => {
+// Exercise runtime bucket scope controls so invalid free-text buckets cannot bypass allowed selections.
+test("runtime bucket controls preserve explicit scope and default routing", async () => {
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
-  const previous = { window: globalThis.window, document: globalThis.document, fetch: globalThis.fetch, act: globalThis.IS_REACT_ACT_ENVIRONMENT };
+  const previous = { window: globalThis.window, document: globalThis.document, act: globalThis.IS_REACT_ACT_ENVIRONMENT };
   globalThis.window = dom.window; globalThis.document = dom.window.document; globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const { createRoot } = await import("react-dom/client");
   const root = createRoot(document.getElementById("root"));
   const { UnifiedAppBucketScope } = loadComponent("../components/apps/UnifiedAppBucketScope.tsx");
-  const { UnifiedAppInvocation } = loadComponent("../components/apps/UnifiedAppInvocation.tsx");
-  const bucketID = "11111111-1111-4111-8111-111111111111";
-  const versionID = "22222222-2222-4222-8222-222222222222";
   let scope = [];
   let defaultBucket = "";
-  let finish;
-  const requests = [];
   /** Mirrors the editor's controlled configuration without granting any bucket permissions locally. */
   function ScopeEditor() {
     const [value, setValue] = useState([]);
@@ -74,11 +69,6 @@ test("runtime bucket controls preserve explicit scope and send a single scoped e
     });
     return input;
   }
-  /** Keeps the response pending to verify duplicate clicks and secret cleanup around completion. */
-  globalThis.fetch = async (url, options) => {
-    requests.push({ url, options });
-    return new Promise((resolve) => { finish = resolve; });
-  };
   try {
     await act(async () => { root.render(createElement(ScopeEditor)); });
     assert.deepEqual(scope, []);
@@ -109,43 +99,10 @@ test("runtime bucket controls preserve explicit scope and send a single scoped e
     assert.equal(defaultBucket, "bucket-b");
     // Returning to a fixed bucket removes the runtime tag editor again.
     assert.equal(document.querySelector('input[placeholder="Add a bucket…"]'), null);
-
-    await act(async () => { root.render(createElement(UnifiedAppInvocation, { appID: "app-family", versionID, buckets: [{ id: bucketID, name: "tenant-a" }], example: '{"customer":"fabricated example"}', schema: { type: "object", required: ["customer"], properties: { customer: { type: "string", minLength: 1 } }, additionalProperties: false } })); });
-    assert.equal(requests.length, 0);
-    const select = document.querySelector("select");
-    await act(async () => { select.value = bucketID; select.dispatchEvent(new window.Event("change", { bubbles: true })); });
-    const token = document.querySelector('input[type="password"]');
-    await act(async () => {
-      // Use the native setter so React observes an actual input change rather than a tracked programmatic assignment.
-      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(token, "synthetic-execution-token");
-      token.dispatchEvent(new window.Event("input", { bubbles: true }));
-    });
-    const run = [...document.querySelectorAll("button")].find((button) => button.textContent === "Run app");
-    assert.equal(run.disabled, true, "required values start unset, even when an example exists");
-    const value = document.querySelector("textarea");
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set.call(value, "a");
-      value.dispatchEvent(new window.Event("input", { bubbles: true }));
-    });
-    assert.equal(run.disabled, false, "valid inline values are executable without a Save step");
-    assert.equal(run.disabled, false);
-    await act(async () => { run.click(); });
-    assert.equal(run.disabled, true);
-    await act(async () => { run.click(); });
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].url, "/v1/apps/app-family/executions");
-    assert.deepEqual(JSON.parse(requests[0].options.body), { operation: "execute", input: { customer: "a" }, bucket_id: bucketID, expected_app_id: versionID });
-    assert.equal(requests[0].options.headers.Authorization, "Bearer synthetic-execution-token");
-    assert.equal(requests[0].options.credentials, "omit");
-    assert.doesNotMatch(requests[0].options.body, /synthetic-execution-token/);
-    await act(async () => { finish({ json: async () => ({ error: { code: "bucket_selection_denied" } }) }); });
-    assert.equal(token.value, "");
-    assert.match(document.querySelector("pre").textContent, /bucket_selection_denied/);
-    assert.equal(requests.length, 1, "denial must not cause automatic retries");
   } finally {
     await act(async () => { root.unmount(); });
     dom.window.close();
     globalThis.window = previous.window; globalThis.document = previous.document;
-    globalThis.fetch = previous.fetch; globalThis.IS_REACT_ACT_ENVIRONMENT = previous.act;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous.act;
   }
 });

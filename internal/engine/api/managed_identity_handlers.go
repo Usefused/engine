@@ -60,7 +60,7 @@ func managedLoginStartHandler(service ManagedLoginService, cookies *browserauth.
 			return
 		}
 		cookies.SetLoginBinding(w, result.TransactionID.String(), result.PollToken, result.ExpiresAt)
-		writeManagedLoginJSON(w, http.StatusCreated, map[string]string{
+		writeJSONStatus(w, http.StatusCreated, map[string]string{
 			"transaction_id": result.TransactionID.String(),
 			"poll_token":     result.PollToken, "verification_url": result.VerificationURL,
 			"expires_at": result.ExpiresAt.Format(time.RFC3339),
@@ -95,7 +95,7 @@ func managedLoginPollHandler(service ManagedLoginService, cookies *browserauth.C
 		}
 		credential, err := service.Poll(r.Context(), id, request.PollToken)
 		if errors.Is(err, store.ErrManagedLoginPending) {
-			writeManagedLoginJSON(w, http.StatusAccepted, map[string]string{"status": "pending"})
+			writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "pending"})
 			return
 		}
 		// Non-pending failures are mapped through the stable managed-login taxonomy.
@@ -105,7 +105,7 @@ func managedLoginPollHandler(service ManagedLoginService, cookies *browserauth.C
 		}
 		cookies.SetSession(w, credential.RawKey, credential.ExpiresAt)
 		cookies.ClearLoginBinding(w)
-		writeManagedLoginJSON(w, http.StatusOK, map[string]string{
+		writeJSONStatus(w, http.StatusOK, map[string]string{
 			"status": "authenticated", "expires_at": credential.ExpiresAt.Format(time.RFC3339),
 		})
 	}
@@ -192,12 +192,6 @@ func managedLoginErrorGuidance(code string) (string, string) {
 	default:
 		return "The Engine could not complete the authentication request.", "Retry and check Engine logs if the problem continues."
 	}
-}
-
-func writeManagedLoginJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
 }
 
 func setManagedLoginResponseHeaders(w http.ResponseWriter) {

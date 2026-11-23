@@ -133,11 +133,9 @@ func (c *Config) Scan(value interface{}) error {
 }
 
 const (
-	maxRules           = 32
-	maxPredicateValues = 32
-	maxAttempts        = 16
-	maxElapsedMs       = int64(300_000)
-	maxDelayMs         = int64(86_400_000)
+	maxRules    = 32
+	maxAttempts = 16
+	maxDelayMs  = int64(86_400_000)
 )
 
 // Validate accepts only exact v3 at the Engine boundary because Registry owns

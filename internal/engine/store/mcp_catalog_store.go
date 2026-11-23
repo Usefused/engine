@@ -83,15 +83,6 @@ func lockMCPCatalog(ctx context.Context, tx pgx.Tx, scope MCPCatalogScope) (*uui
 	return current, err
 }
 
-// sameCatalogRevision treats the absence of a saved catalog as a real compare-and-swap base.
-func sameCatalogRevision(a, b *uuid.UUID) bool {
-	// Nil denotes the first import rather than an arbitrary current revision.
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return *a == *b
-}
-
 // SaveMCPCatalogDraft retains one pending preview per actor/version and rejects discovery based on a superseded snapshot.
 func (s *postgresStore) SaveMCPCatalogDraft(ctx context.Context, scope MCPCatalogScope, draft MCPCatalogDraft) error {
 	raw, err := json.Marshal(draft)
@@ -111,7 +102,7 @@ func (s *postgresStore) SaveMCPCatalogDraft(ctx context.Context, scope MCPCatalo
 		return err
 	}
 	// A concurrent import invalidates the diff the user would otherwise review.
-	if !sameCatalogRevision(current, draft.BaseID) {
+	if !equalOptionalUUID(current, draft.BaseID) {
 		return ErrMCPCatalogConflict
 	}
 	_, err = tx.Exec(ctx, `DELETE FROM fused_service_mcp_catalog_revisions WHERE service_id=$1 AND service_version_id=$2 AND subject_id=$3 AND applied_at IS NULL`, scope.ServiceID, scope.VersionID, scope.SubjectID)
@@ -119,20 +110,12 @@ func (s *postgresStore) SaveMCPCatalogDraft(ctx context.Context, scope MCPCatalo
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO fused_service_mcp_catalog_revisions(id,service_id,service_version_id,subject_id,base_id,bucket_id,payload,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, draft.ID, scope.ServiceID, scope.VersionID, scope.SubjectID, draft.BaseID, nullableMCPCatalogBucket(draft.BucketID), raw, draft.ExpiresAt)
+	_, err = tx.Exec(ctx, `INSERT INTO fused_service_mcp_catalog_revisions(id,service_id,service_version_id,subject_id,base_id,bucket_id,payload,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, draft.ID, scope.ServiceID, scope.VersionID, scope.SubjectID, draft.BaseID, optionalUUID(draft.BucketID), raw, draft.ExpiresAt)
 	// Preview insertion and old-preview cleanup must commit together.
 	if err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
-}
-
-// nullableMCPCatalogBucket stores no fabricated bucket reference for unauthenticated servers.
-func nullableMCPCatalogBucket(id uuid.UUID) *uuid.UUID {
-	if id == uuid.Nil {
-		return nil
-	}
-	return &id
 }
 
 // readMCPCatalogDraft always includes the actor/version tuple so an opaque draft ID alone grants no access.
@@ -223,7 +206,7 @@ func validateMCPCatalogPromotion(current *uuid.UUID, draft *MCPCatalogDraft, app
 		return true, nil
 	}
 	// Every new promotion must still match the reviewed base and its review lifetime.
-	if applied != nil || !draft.ExpiresAt.After(time.Now()) || !sameCatalogRevision(current, draft.BaseID) {
+	if applied != nil || !draft.ExpiresAt.After(time.Now()) || !equalOptionalUUID(current, draft.BaseID) {
 		return false, ErrMCPCatalogConflict
 	}
 	return false, nil

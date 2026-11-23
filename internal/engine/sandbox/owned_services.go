@@ -2,12 +2,9 @@ package sandbox
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/google/uuid"
@@ -120,28 +117,14 @@ func (c *HTTPRegistryClient) fetchOwnedServicesPage(ctx context.Context, page in
 		return ownedServicesPage{}, fmt.Errorf("FetchOwnedServices: request failed: %w", err)
 	}
 	defer response.Body.Close()
-	// Only a successful Registry response can describe the account's owned services.
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		return ownedServicesPage{}, fmt.Errorf("FetchOwnedServices: registry returned %d: %s", response.StatusCode, string(body))
+	data, err := decodeAPIKeyGraphQLResponse[struct {
+		Services ownedServicesPage `json:"services"`
+	}](response, "FetchOwnedServices", true)
+	// Reject HTTP, decode, or GraphQL errors before trusting any owned service identities.
+	if err != nil {
+		return ownedServicesPage{}, err
 	}
-	var decoded struct {
-		Data struct {
-			Services ownedServicesPage `json:"services"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	// Reject malformed responses before trusting any service identities.
-	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
-		return ownedServicesPage{}, fmt.Errorf("FetchOwnedServices: decode response: %w", err)
-	}
-	// GraphQL errors invalidate even a partially populated page.
-	if len(decoded.Errors) > 0 {
-		return ownedServicesPage{}, fmt.Errorf("FetchOwnedServices: graphql error: %s", decoded.Errors[0].Message)
-	}
-	return decoded.Data.Services, nil
+	return data.Services, nil
 }
 
 type ownedServiceRegistry interface {

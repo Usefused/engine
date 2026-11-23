@@ -6,15 +6,6 @@ import (
 	"time"
 )
 
-// CacheService defines the interface for our caching layer.
-type CacheService interface {
-	Set(key string, val any, ttl time.Duration)
-	Get(key string) (any, bool)
-	Delete(key string)
-	DeletePrefix(prefix string)
-	Clear()
-}
-
 type item struct {
 	value     any
 	expiresAt time.Time

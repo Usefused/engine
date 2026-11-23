@@ -257,9 +257,9 @@ func cloneWorkspaceBindings(bindings []WorkspaceConnectionBinding) []WorkspaceCo
 // cloneWorkspaceBinding copies the slice and pointer fields that otherwise
 // alias one cached binding across requests.
 func cloneWorkspaceBinding(binding WorkspaceConnectionBinding) WorkspaceConnectionBinding {
-	binding.LiteralValue = cloneStringPointer(binding.LiteralValue)
-	binding.SourcePath = cloneStringPointer(binding.SourcePath)
-	binding.SourceProfileRevision = cloneIntPointer(binding.SourceProfileRevision)
+	binding.LiteralValue = clonePointer(binding.LiteralValue)
+	binding.SourcePath = clonePointer(binding.SourcePath)
+	binding.SourceProfileRevision = clonePointer(binding.SourceProfileRevision)
 	binding.OperationIDs = append([]string(nil), binding.OperationIDs...)
 	return binding
 }
@@ -294,18 +294,9 @@ func decodeRuntimePolicyValue(value runtimePolicyValue) (*WorkspaceExecutionPoli
 	return &override, nil
 }
 
-// cloneStringPointer prevents cache callers from sharing mutable literals and
-// source paths retained inside binding rows.
-func cloneStringPointer(value *string) *string {
-	if value == nil {
-		return nil
-	}
-	cloned := *value
-	return &cloned
-}
-
-// cloneIntPointer prevents source-revision and timeout pointer aliasing.
-func cloneIntPointer(value *int) *int {
+// clonePointer copies a non-nil pointer value so cached rows cannot alias caller-owned fields.
+func clonePointer[T any](value *T) *T {
+	// Preserve nil to distinguish unset optional fields from zero values.
 	if value == nil {
 		return nil
 	}

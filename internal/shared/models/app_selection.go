@@ -7,6 +7,29 @@ import (
 	"github.com/google/uuid"
 )
 
+// AllowsEndpoint reports whether this SDKSelection admits an endpoint by
+// select-all, explicit endpoint ID, or canonical operation name so OpenAPI
+// projection and runtime governance share one admission predicate.
+func (selection SDKSelection) AllowsEndpoint(endpointID uuid.UUID, operationName string) bool {
+	// SelectAll grants every endpoint on the pinned service version.
+	if selection.SelectAll {
+		return true
+	}
+	for _, allowedID := range selection.EndpointIDs {
+		// Match explicit endpoint UUID pins before checking operation names.
+		if allowedID == endpointID {
+			return true
+		}
+	}
+	for _, allowedName := range selection.OperationNames {
+		// Match versioned operation names for name-pinned selections.
+		if allowedName == operationName {
+			return true
+		}
+	}
+	return false
+}
+
 var ErrAppSelectionSchemaMismatch = errors.New("app_selection_schema_version_mismatch")
 
 // ValidateAppSelections keeps every persisted app consumer on one exact

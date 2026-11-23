@@ -33,7 +33,6 @@ var (
 	ErrUserEmailConflict         = errors.New("user email already exists")
 	ErrUserArchived              = errors.New("archived user cannot be changed")
 	ErrInvalidTeamMembership     = errors.New("invalid team membership")
-	ErrTeamMembershipNotFound    = errors.New("team membership not found")
 	ErrInvalidControlCredential  = errors.New("invalid control credential")
 	ErrControlCredentialNotFound = errors.New("control credential not found")
 	ErrLastEffectiveOwner        = errors.New("operation would remove the last effective Owner")

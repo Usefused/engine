@@ -44,12 +44,10 @@ test("normalizes scope names while preserving existing descriptions", () => {
 
 test("UI queries and renderers consume only the canonical OAuth2 flow map", () => {
   const route = readFileSync(new URL("../routes/integrations.$id.tsx", import.meta.url), "utf8");
-  const editor = readFileSync(new URL("../components/integration-details/AuthConfigSection.tsx", import.meta.url), "utf8");
   const directSingularAccess = /auth\.(?:flow|token_url|authorization_url|scopes)\b/;
   const singularGraphQLSelection = /auth_configs\s*\{[^}]*\b(?:flow|token_url|authorization_url|scopes)\b[^}]*\}/s;
 
   assert.doesNotMatch(route, directSingularAccess);
-  assert.doesNotMatch(editor, directSingularAccess);
   assert.doesNotMatch(route, singularGraphQLSelection);
   assert.match(route, /auth_configs\s*\{[^}]*\boauth2_flows\b[^}]*\}/s);
 });

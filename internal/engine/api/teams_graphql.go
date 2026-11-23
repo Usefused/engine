@@ -18,6 +18,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/observability"
 )
 
 var (
@@ -329,32 +330,78 @@ func teamBindingMutationField(s store.Store, action string, resourceType accessc
 
 type teamMutationResolver func(graphql.ResolveParams, store.TeamRepository, store.MutationActor) (interface{}, error)
 
-func teamMutationField(resultType graphql.Output, args graphql.FieldConfigArgument, action string, s store.Store, resolve teamMutationResolver) *graphql.Field {
+type graphQLMutationConfig[Svc, Actor any] struct {
+	action          string
+	includeAction   bool
+	precheck        func(context.Context) error
+	loadService     func() (Svc, error)
+	loadActor       func(context.Context) (Actor, error)
+	actorSubjectID  func(Actor) uuid.UUID
+	execute         func(graphql.ResolveParams, trace.Span, Svc, Actor) (interface{}, error)
+	mapResolveError func(error) error
+}
+
+// buildTracedGraphQLMutationField creates a traced GraphQL mutation field with
+// shared service lookup, actor authentication, span recording, and error mapping.
+func buildTracedGraphQLMutationField[Svc, Actor any](resultType graphql.Output, args graphql.FieldConfigArgument, cfg graphQLMutationConfig[Svc, Actor]) *graphql.Field {
 	return &graphql.Field{Type: resultType, Args: args, Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-		ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql."+action)
+		ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql."+cfg.action)
 		defer span.End()
 		p.Context = ctx
-		if !entitlement.LiveEntitlement.Load().SSOEnabled {
-			slog.InfoContext(ctx, "team mutation denied: sso not enabled on current plan")
-			return nil, teamGraphQLError(errors.New("team management (SSO) not enabled on current plan"))
+		// Enforce optional plan or feature gates before inspecting store or actor state.
+		if cfg.precheck != nil {
+			if err := cfg.precheck(ctx); err != nil {
+				return nil, err
+			}
 		}
-		repository, err := teamRepository(s)
+		svc, err := cfg.loadService()
+		// Surface unavailable repository or service backends before running the resolver.
 		if err != nil {
-			return nil, recordTeamMutationError(span, err)
+			return nil, recordMutationError(span, err)
 		}
-		actor, err := teamMutationActor(ctx)
+		actor, err := cfg.loadActor(ctx)
+		// Control-plane GraphQL mutations require an authenticated actor context.
 		if err != nil {
-			return nil, recordTeamMutationError(span, err)
+			return nil, recordMutationError(span, err)
 		}
-		span.SetAttributes(attribute.String("user_action", action), attribute.String("actor_subject_id", actor.SubjectID.String()))
-		result, err := resolve(p, repository, actor)
+		// Attach action and actor identity attributes for mutation audit correlation.
+		if cfg.includeAction {
+			span.SetAttributes(attribute.String("user_action", cfg.action), attribute.String("actor_subject_id", cfg.actorSubjectID(actor).String()))
+		} else {
+			span.SetAttributes(attribute.String("actor_subject_id", cfg.actorSubjectID(actor).String()))
+		}
+		result, err := cfg.execute(p, span, svc, actor)
+		// Record raw resolver errors on the span while returning sanitized GraphQL messages.
 		if err != nil {
-			recordTeamMutationError(span, err)
-			return nil, teamGraphQLError(err)
+			recordMutationError(span, err)
+			return nil, cfg.mapResolveError(err)
 		}
 		span.SetAttributes(attribute.String("outcome", "success"))
 		return result, nil
 	}}
+}
+
+// teamMutationField builds an SSO-gated, traced GraphQL mutation for team management.
+func teamMutationField(resultType graphql.Output, args graphql.FieldConfigArgument, action string, s store.Store, resolve teamMutationResolver) *graphql.Field {
+	return buildTracedGraphQLMutationField(resultType, args, graphQLMutationConfig[store.TeamRepository, store.MutationActor]{
+		action:        action,
+		includeAction: true,
+		precheck: func(ctx context.Context) error {
+			// Team mutations require an active SSO entitlement on the current plan.
+			if !entitlement.LiveEntitlement.Load().SSOEnabled {
+				slog.InfoContext(ctx, "team mutation denied: sso not enabled on current plan")
+				return teamGraphQLError(errors.New("team management (SSO) not enabled on current plan"))
+			}
+			return nil
+		},
+		loadService:    func() (store.TeamRepository, error) { return teamRepository(s) },
+		loadActor:      accessMutationActor,
+		actorSubjectID: func(actor store.MutationActor) uuid.UUID { return actor.SubjectID },
+		execute: func(p graphql.ResolveParams, _ trace.Span, repository store.TeamRepository, actor store.MutationActor) (interface{}, error) {
+			return resolve(p, repository, actor)
+		},
+		mapResolveError: teamGraphQLError,
+	})
 }
 
 func teamRepository(s store.Store) (store.TeamRepository, error) {
@@ -365,26 +412,21 @@ func teamRepository(s store.Store) (store.TeamRepository, error) {
 	return repository, nil
 }
 
-func teamMutationActor(ctx context.Context) (store.MutationActor, error) {
+// accessMutationActor constructs a store.MutationActor with request and trace correlation from the GraphQL context.
+func accessMutationActor(ctx context.Context) (store.MutationActor, error) {
 	actor, ok := accesscontrol.ActorFromContext(ctx)
+	// Reject unauthenticated mutations before opening access-control transactions.
 	if !ok {
 		return store.MutationActor{}, accesscontrol.ErrAuthenticationRequired
 	}
 	return store.MutationActor{
 		SubjectID: actor.SubjectID, CredentialID: actor.CredentialID,
-		RequestID: middleware.GetReqID(ctx), TraceID: teamMutationTraceID(ctx),
+		RequestID: middleware.GetReqID(ctx), TraceID: observability.TraceIDFromContext(ctx),
 	}, nil
 }
 
-func teamMutationTraceID(ctx context.Context) string {
-	spanContext := trace.SpanContextFromContext(ctx)
-	if !spanContext.IsValid() {
-		return ""
-	}
-	return spanContext.TraceID().String()
-}
-
-func recordTeamMutationError(span trace.Span, err error) error {
+// recordMutationError records a GraphQL mutation error on its span and marks the outcome as failed.
+func recordMutationError(span trace.Span, err error) error {
 	span.RecordError(err)
 	span.SetAttributes(attribute.String("outcome", "failure"))
 	return err

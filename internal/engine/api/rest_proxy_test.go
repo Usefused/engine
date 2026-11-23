@@ -15,7 +15,7 @@ func TestRESTProxy_POST_EmitsOTELSpan(t *testing.T) {
 	exporter := setupTestTracer(t)
 	s := &mockKeyStore{accountID: uuid.New()}
 	fwd := &mockForwarder{}
-	handler := RESTProxyHandler(fwd, s)
+	handler := RESTProxyHandlerWithRuntimeContracts(fwd, s, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/integrations", bytes.NewBufferString(`{"name":"stripe"}`))
 	req.Header.Set("X-API-Key", "fsk_valid")
@@ -40,7 +40,7 @@ func TestRESTProxy_GET_NoSpan(t *testing.T) {
 	exporter := setupTestTracer(t)
 	s := &mockKeyStore{accountID: uuid.New()}
 	fwd := &mockForwarder{}
-	handler := RESTProxyHandler(fwd, s)
+	handler := RESTProxyHandlerWithRuntimeContracts(fwd, s, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/integrations/svc-123", nil)
 	req.Header.Set("X-API-Key", "fsk_valid")
@@ -61,7 +61,7 @@ func TestRESTProxy_GET_NoSpan(t *testing.T) {
 func TestRESTProxy_InvalidKey_Returns401(t *testing.T) {
 	s := &mockKeyStore{err: errors.New("api key not found")}
 	fwd := &mockForwarder{}
-	handler := RESTProxyHandler(fwd, s)
+	handler := RESTProxyHandlerWithRuntimeContracts(fwd, s, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/integrations", bytes.NewBufferString(`{}`))
 	req.Header.Set("X-API-Key", "fsk_invalid")

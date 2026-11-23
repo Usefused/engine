@@ -8,7 +8,6 @@ import { createContext, useContext, useState, useEffect, useRef } from "react";
 import { AuthNameField } from "~/components/AuthNameField";
 import {
   useParams,
-  Link,
   useSearchParams,
   useLoaderData,
   useRouteLoaderData,
@@ -1867,21 +1866,42 @@ function ConfigRow({ label, value, mono = false }: { label: string; value: strin
   return <div className="mt-1 flex justify-between"><span className="text-slate-500">{label}</span><span className={mono ? "font-mono text-slate-900" : "font-medium text-slate-900"}>{value}</span></div>;
 }
 
+// ExpandablePolicyCard renders a collapsible policy summary tile shared by rate-limit and retry policies.
+function ExpandablePolicyCard({
+  label,
+  summary,
+  hasDetails,
+  children,
+}: {
+  label: string;
+  summary: string;
+  hasDetails: boolean;
+  children?: React.ReactNode;
+}) {
+  return (
+    <details className={`${configCardClass} ${hasDetails ? "cursor-pointer hover:bg-slate-100" : ""}`}>
+      <summary className="flex list-none items-start justify-between outline-none">
+        <div><dt className="text-xs text-slate-500">{label}</dt><dd className="mt-1 text-slate-800">{summary}</dd></div>
+        {/* Only expandable policies render a disclosure chevron. */}
+        {hasDetails && <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />}
+      </summary>
+      {/* Keep detail body unmounted when no policy rules are configured. */}
+      {hasDetails && (
+        <div className="mt-3 space-y-2 border-t border-slate-200 pt-3 text-xs text-slate-700">
+          {children}
+        </div>
+      )}
+    </details>
+  );
+}
+
 // RateLimitConfigCard summarizes the v3 policy set and reveals exact policy details on demand.
 function RateLimitConfigCard({ srv }: { srv: Service }) {
   const rateLimit = srv.rate_limit;
   return (
-    <details className={`${configCardClass} ${rateLimit ? "cursor-pointer hover:bg-slate-100" : ""}`}>
-      <summary className="flex list-none items-start justify-between outline-none">
-        <div><dt className="text-xs text-slate-500">Rate limit</dt><dd className="mt-1 text-slate-800">{rateLimitSummary(rateLimit)}</dd></div>
-        {rateLimit && <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />}
-      </summary>
-      {rateLimit && (
-        <div className="mt-3 space-y-2 border-t border-slate-200 pt-3 text-xs text-slate-700">
-          {rateLimit.policies.map((policy) => <RateLimitPolicyCard key={policy.name} policy={policy} />)}
-        </div>
-      )}
-    </details>
+    <ExpandablePolicyCard label="Rate limit" summary={rateLimitSummary(rateLimit)} hasDetails={Boolean(rateLimit)}>
+      {rateLimit?.policies.map((policy) => <RateLimitPolicyCard key={policy.name} policy={policy} />)}
+    </ExpandablePolicyCard>
   );
 }
 
@@ -1957,17 +1977,9 @@ function RetryRuleCard({ rule }: { rule: NonNullable<Service["retry_config"]>["r
 function RetryConfigCard({ srv }: { srv: Service }) {
   const retry = srv.retry_config;
   return (
-    <details className={`${configCardClass} ${retry ? "cursor-pointer hover:bg-slate-100" : ""}`}>
-      <summary className="flex list-none items-start justify-between outline-none">
-        <div><dt className="text-xs text-slate-500">Retry</dt><dd className="mt-1 text-slate-800">{retrySummary(retry)}</dd></div>
-        {retry && <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />}
-      </summary>
-      {retry && (
-        <div className="mt-3 space-y-2 border-t border-slate-200 pt-3 text-xs text-slate-700">
-          {retry.rules.map((rule, index) => <RetryRuleCard key={index} rule={rule} />)}
-        </div>
-      )}
-    </details>
+    <ExpandablePolicyCard label="Retry" summary={retrySummary(retry)} hasDetails={Boolean(retry)}>
+      {retry?.rules.map((rule, index) => <RetryRuleCard key={index} rule={rule} />)}
+    </ExpandablePolicyCard>
   );
 }
 

@@ -102,7 +102,7 @@ func TestControlAuditRecordsMutationOutcome(t *testing.T) {
 	loader := &controlPrincipalLoaderStub{principal: principal}
 	authenticator, _ := accesscontrol.NewAuthenticator(loader, 1, accesscontrol.AuthenticatorOptions{})
 	recorder := &controlAuditRecorderStub{}
-	handler := controlActorMiddleware(authenticator)(
+	handler := controlActorMiddlewareWithAudit(authenticator, nil)(
 		controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, nil, recorder)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 		})),
@@ -136,7 +136,7 @@ func TestControlAuditRecordsBoundedNoopEvidenceOnFinalOutcome(t *testing.T) {
 	loader := &controlPrincipalLoaderStub{principal: principal}
 	authenticator, _ := accesscontrol.NewAuthenticator(loader, 1, accesscontrol.AuthenticatorOptions{})
 	recorder := &controlAuditRecorderStub{}
-	handler := controlActorMiddleware(authenticator)(
+	handler := controlActorMiddlewareWithAudit(authenticator, nil)(
 		controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, nil, recorder)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			accesscontrol.MarkMutationAuditUnchanged(r.Context())
 			w.WriteHeader(http.StatusNoContent)
@@ -258,7 +258,7 @@ func TestControlAuditFailureBlocksMutationBeforeExecution(t *testing.T) {
 	authenticator, _ := accesscontrol.NewAuthenticator(loader, 1, accesscontrol.AuthenticatorOptions{})
 	recorder := &controlAuditRecorderStub{err: errors.New("audit unavailable")}
 	executed := false
-	handler := controlActorMiddleware(authenticator)(
+	handler := controlActorMiddlewareWithAudit(authenticator, nil)(
 		controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, nil, recorder)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 			executed = true
 		})),
@@ -281,7 +281,7 @@ func TestControlAuditNilRecorderBlocksMutationBeforeExecution(t *testing.T) {
 	loader := &controlPrincipalLoaderStub{principal: principal}
 	authenticator, _ := accesscontrol.NewAuthenticator(loader, 1, accesscontrol.AuthenticatorOptions{})
 	executed := false
-	handler := controlActorMiddleware(authenticator)(
+	handler := controlActorMiddlewareWithAudit(authenticator, nil)(
 		controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, nil, nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 			executed = true
 		})),
@@ -304,7 +304,7 @@ func TestControlAuditFinalFailurePreservesBufferedMutationSuccess(t *testing.T) 
 	loader := &controlPrincipalLoaderStub{principal: principal}
 	authenticator, _ := accesscontrol.NewAuthenticator(loader, 1, accesscontrol.AuthenticatorOptions{})
 	recorder := &controlAuditRecorderStub{failFromCall: 2}
-	handler := controlActorMiddleware(authenticator)(
+	handler := controlActorMiddlewareWithAudit(authenticator, nil)(
 		controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, nil, recorder)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 		})),
@@ -387,7 +387,7 @@ func TestControlAuditRecordsAuthenticatedPermissionDenial(t *testing.T) {
 	loader := &controlPrincipalLoaderStub{principal: principal}
 	authenticator, _ := accesscontrol.NewAuthenticator(loader, 1, accesscontrol.AuthenticatorOptions{})
 	recorder := &controlAuditRecorderStub{}
-	handler := controlActorMiddleware(authenticator)(
+	handler := controlActorMiddlewareWithAudit(authenticator, nil)(
 		controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, nil, recorder)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 			t.Fatal("handler must not execute")
 		})),
@@ -548,7 +548,7 @@ func TestControlAuditOversizedMutationResponsePreservesOriginalResult(t *testing
 	loader := &controlPrincipalLoaderStub{principal: principal}
 	authenticator, _ := accesscontrol.NewAuthenticator(loader, 1, accesscontrol.AuthenticatorOptions{})
 	recorder := &controlAuditRecorderStub{}
-	handler := controlActorMiddleware(authenticator)(
+	handler := controlActorMiddlewareWithAudit(authenticator, nil)(
 		controlAuthorizationMiddlewareWithAudit(accesscontrol.SnapshotAuthorizer{}, nil, recorder)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write(bytes.Repeat([]byte("x"), maxAuditResponseBytes+1))
 		})),

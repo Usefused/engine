@@ -55,28 +55,14 @@ func canonicalModelAuthType(auth models.AuthConfig) string {
 }
 
 // canonicalAuthConfigType collapses OpenAPI and Fused aliases into user-facing
-// auth families; callers should not need to remember imported schema spelling.
+// auth families using authrouting.CanonicalType while normalizing unknown HTTP
+// schemes to "http".
 func canonicalAuthConfigType(rawType, scheme string) string {
-	authType := strings.ToLower(strings.TrimSpace(rawType))
-	authType = strings.ReplaceAll(authType, "-", "_")
-	switch authType {
-	case "apikey", "api_key":
-		return "api_key"
-	case "oauth", "oauth2", "oauth2_authorization_code":
-		return "oauth"
-	case "openidconnect", "open_id_connect", "oidc":
-		return "oidc"
-	case "mutualtls", "mutual_tls", "mtls":
-		return "mtls"
-	case "oauth1":
-		return "oauth1"
-	case "basic", "bearer":
-		return authType
-	case "http":
+	// OpenAPI "http" schemes only expose known HTTP auth families as selectable auth types.
+	if strings.EqualFold(strings.TrimSpace(rawType), "http") {
 		return canonicalHTTPScheme(scheme)
-	default:
-		return authType
 	}
+	return authrouting.CanonicalType(rawType, scheme)
 }
 
 // canonicalHTTPScheme treats OpenAPI http schemes as selectable auth families

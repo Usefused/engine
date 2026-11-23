@@ -71,7 +71,7 @@ func cliWhoAmIHandler() http.HandlerFunc {
 			writeCLILoginError(w, r.Context(), http.StatusUnauthorized, "authentication_required")
 			return
 		}
-		writeManagedLoginJSON(w, http.StatusOK, cliWhoAmIResponse{
+		writeJSONStatus(w, http.StatusOK, cliWhoAmIResponse{
 			Authenticated: true, AccountID: actor.AccountID, WorkspaceID: actor.WorkspaceID,
 			SubjectID: actor.SubjectID, SubjectKind: actor.Kind, DisplayName: actor.DisplayName,
 			Email: actor.Email, CredentialID: actor.CredentialID,
@@ -129,7 +129,7 @@ func cliLoginStartHandler(service CLILoginService) http.HandlerFunc {
 			writeCLILoginServiceError(w, r.Context(), err)
 			return
 		}
-		writeManagedLoginJSON(w, http.StatusCreated, map[string]string{
+		writeJSONStatus(w, http.StatusCreated, map[string]string{
 			"transaction_id": result.TransactionID.String(), "poll_token": result.PollToken,
 			"browser_token": result.BrowserToken, "expires_at": result.ExpiresAt.Format(time.RFC3339),
 		})
@@ -153,7 +153,7 @@ func cliLoginPollHandler(service CLILoginService) http.HandlerFunc {
 		}
 		credential, err := service.Poll(r.Context(), id, request.Token)
 		if errors.Is(err, store.ErrCLILoginPending) {
-			writeManagedLoginJSON(w, http.StatusAccepted, map[string]string{"status": "pending"})
+			writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "pending"})
 			return
 		}
 		// Non-pending service failures use the stable login error taxonomy.
@@ -161,7 +161,7 @@ func cliLoginPollHandler(service CLILoginService) http.HandlerFunc {
 			writeCLILoginServiceError(w, r.Context(), err)
 			return
 		}
-		writeManagedLoginJSON(w, http.StatusOK, map[string]string{
+		writeJSONStatus(w, http.StatusOK, map[string]string{
 			"status": "authenticated", "credential_id": credential.CredentialID.String(),
 			"expires_at": credential.ExpiresAt.Format(time.RFC3339),
 		})
@@ -257,7 +257,7 @@ func writeCLILoginServiceError(w http.ResponseWriter, ctx context.Context, err e
 		writeCLILoginError(w, ctx, http.StatusForbidden, "cli_login_denied")
 	// Pending is normal protocol state rather than an error envelope.
 	case errors.Is(err, store.ErrCLILoginPending):
-		writeManagedLoginJSON(w, http.StatusAccepted, map[string]string{"status": "pending"})
+		writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "pending"})
 	// Unknown service failures are bounded as availability problems.
 	default:
 		writeCLILoginError(w, ctx, http.StatusServiceUnavailable, "cli_login_unavailable")

@@ -792,6 +792,32 @@ function deleteBucketPrompt(
   return `Type "${bucket.name}" to delete this bucket.${usage}`;
 }
 
+/** Executes one bucket upsert mutation with shared busy-state tracking, reload, and toast feedback. */
+async function runBucketSave(
+  bucket: BucketSummary | undefined,
+  setSaving: (saving: boolean) => void,
+  loadContents: (bucketId: string) => void,
+  toast: ReturnType<typeof useToast>,
+  persist: (bucketId: string) => Promise<unknown>,
+  successMessage: string,
+  errorFallback: string
+) {
+  // Mutations require an active selected bucket before invoking Engine.
+  if (!bucket) return;
+  const err = await withSaving(
+    setSaving,
+    async () => {
+      await persist(bucket.id);
+      loadContents(bucket.id);
+      toast.success(successMessage);
+    },
+    (cause) => toast.error(errorMessage(cause, errorFallback))
+  );
+  // Re-throw so the composer keeps form state open on failure.
+  if (err) throw err;
+}
+
+/** Saves a single service-scoped secret into the selected bucket. */
 async function saveBucketSecret(
   bucket: BucketSummary | undefined,
   payload: SecretFormPayload,
@@ -799,19 +825,18 @@ async function saveBucketSecret(
   loadContents: (bucketId: string) => void,
   toast: ReturnType<typeof useToast>
 ) {
-  if (!bucket) return;
-  const err = await withSaving(
+  await runBucketSave(
+    bucket,
     setSaving,
-    async () => {
-      await api.workspace.upsertSecret({ bucketId: bucket.id, ...payload });
-      loadContents(bucket.id);
-      toast.success("Service Auth saved");
-    },
-    (err) => toast.error(errorMessage(err, "Failed to save service auth"))
+    loadContents,
+    toast,
+    (bucketId) => api.workspace.upsertSecret({ bucketId, ...payload }),
+    "Service Auth saved",
+    "Failed to save service auth"
   );
-  if (err) throw err;
 }
 
+/** Saves a batch of multi-field service secrets into the selected bucket. */
 async function saveBucketSecrets(
   bucket: BucketSummary | undefined,
   payloads: SecretFormPayload[],
@@ -819,22 +844,20 @@ async function saveBucketSecrets(
   loadContents: (bucketId: string) => void,
   toast: ReturnType<typeof useToast>
 ) {
-  if (!bucket || payloads.length === 0) return;
-  const err = await withSaving(
+  // Skip empty batches so no redundant upsert request is sent.
+  if (payloads.length === 0) return;
+  await runBucketSave(
+    bucket,
     setSaving,
-    async () => {
-      await api.workspace.upsertSecrets({
-        bucketId: bucket.id,
-        secrets: payloads,
-      });
-      loadContents(bucket.id);
-      toast.success("Service Auth entries saved");
-    },
-    (err) => toast.error(errorMessage(err, "Failed to save service auth entries"))
+    loadContents,
+    toast,
+    (bucketId) => api.workspace.upsertSecrets({ bucketId, secrets: payloads }),
+    "Service Auth entries saved",
+    "Failed to save service auth entries"
   );
-  if (err) throw err;
 }
 
+/** Saves a non-secret configuration value into the selected bucket. */
 async function saveBucketValue(
   bucket: BucketSummary | undefined,
   payload: ValueFormPayload,
@@ -842,20 +865,15 @@ async function saveBucketValue(
   loadContents: (bucketId: string) => void,
   toast: ReturnType<typeof useToast>
 ) {
-  if (!bucket) return;
-  const err = await withSaving(
+  await runBucketSave(
+    bucket,
     setSaving,
-    async () => {
-      await api.workspace.upsertBucketValue({
-        bucketId: bucket.id,
-        ...payload,
-      });
-      loadContents(bucket.id);
-      toast.success("Value saved");
-    },
-    (err) => toast.error(errorMessage(err, "Failed to save value"))
+    loadContents,
+    toast,
+    (bucketId) => api.workspace.upsertBucketValue({ bucketId, ...payload }),
+    "Value saved",
+    "Failed to save value"
   );
-  if (err) throw err;
 }
 
 // OAuth/OIDC application registrations go through Engine's semantic
@@ -867,20 +885,15 @@ async function saveBucketCredentialFamily(
   loadContents: (bucketId: string) => void,
   toast: ReturnType<typeof useToast>
 ) {
-  if (!bucket) return;
-  const err = await withSaving(
+  await runBucketSave(
+    bucket,
     setSaving,
-    async () => {
-      await api.workspace.upsertCredentialFamily({
-        bucketId: bucket.id,
-        ...payload,
-      });
-      loadContents(bucket.id);
-      toast.success("Credentials saved");
-    },
-    (err) => toast.error(errorMessage(err, "Failed to save credentials"))
+    loadContents,
+    toast,
+    (bucketId) => api.workspace.upsertCredentialFamily({ bucketId, ...payload }),
+    "Credentials saved",
+    "Failed to save credentials"
   );
-  if (err) throw err;
 }
 
 // A generic bucket secret has no service_id: it is referenced directly
@@ -892,20 +905,15 @@ async function saveBucketGenericSecret(
   loadContents: (bucketId: string) => void,
   toast: ReturnType<typeof useToast>
 ) {
-  if (!bucket) return;
-  const err = await withSaving(
+  await runBucketSave(
+    bucket,
     setSaving,
-    async () => {
-      await api.workspace.upsertBucketSecret({
-        bucketId: bucket.id,
-        ...payload,
-      });
-      loadContents(bucket.id);
-      toast.success("Secret saved");
-    },
-    (err) => toast.error(errorMessage(err, "Failed to save secret"))
+    loadContents,
+    toast,
+    (bucketId) => api.workspace.upsertBucketSecret({ bucketId, ...payload }),
+    "Secret saved",
+    "Failed to save secret"
   );
-  if (err) throw err;
 }
 
 /** Requires explicit consent for the exact stored keys before deleting a credential. */

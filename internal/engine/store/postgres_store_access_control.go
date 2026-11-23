@@ -29,6 +29,7 @@ func (s *postgresStore) LoadControlPrincipal(ctx context.Context, credentialHash
 	return s.loadOAuthTokenPrincipal(ctx, credentialHash)
 }
 
+// loadControlCredentialPrincipal resolves a control-plane API key or session hash and its effective grants.
 func (s *postgresStore) loadControlCredentialPrincipal(ctx context.Context, credentialHash string) (accesscontrol.ControlPrincipal, error) {
 	query := `
 		WITH candidate AS (
@@ -53,54 +54,8 @@ func (s *postgresStore) loadControlCredentialPrincipal(ctx context.Context, cred
 				candidate.subject_id, candidate.display_name, candidate.email_display,
 				candidate.expires_at, candidate.source, candidate.auth_method,
 				candidate.kind, candidate.revision
-		), principals(subject_type, subject_id) AS (
-			SELECT 'subject'::text, subject_id FROM authenticated
-			UNION ALL
-			SELECT 'team'::text, membership.team_id
-			FROM authenticated actor
-			JOIN fused_team_memberships membership ON membership.member_subject_id = actor.subject_id
-			JOIN fused_teams team ON team.id = membership.team_id AND team.status = 'active'
-			UNION ALL
-			-- Workspace shares are another principal so cached authorization still
-			-- resolves the complete permission set in one database round trip.
-			SELECT 'workspace'::text, workspace_id FROM authenticated
-		), effective_grants AS (
-			SELECT DISTINCT permission.permission, binding.resource_type, binding.resource_id
-			FROM principals principal
-			JOIN fused_role_bindings binding
-				ON binding.subject_type = principal.subject_type
-				AND binding.subject_id = principal.subject_id
-			JOIN fused_roles role
-				ON role.id = binding.role_id AND role.scope_type = binding.resource_type
-			JOIN fused_role_permissions permission ON permission.role_id = role.id
-			WHERE binding.resource_type <> 'workspace'
-				OR binding.resource_id = (SELECT workspace_id FROM authenticated)
-		)
-		SELECT actor.account_id, actor.workspace_id, actor.subject_id, actor.display_name,
-			actor.email_display, actor.credential_id, actor.kind, actor.expires_at,
-			actor.source, actor.auth_method, actor.revision,
-			effective.permission, effective.resource_type,
-			effective.resource_id
-		FROM authenticated actor
-		LEFT JOIN effective_grants effective ON true
-		ORDER BY effective.permission, effective.resource_type, effective.resource_id
-	`
-	rows, err := s.db.Query(ctx, query, credentialHash)
-	if err != nil {
-		return accesscontrol.ControlPrincipal{}, fmt.Errorf("load control principal: %w", err)
-	}
-	defer rows.Close()
-
-	principal, found, err := scanControlPrincipal(rows)
-	if err != nil {
-		return accesscontrol.ControlPrincipal{}, err
-	}
-	if !found {
-		return accesscontrol.ControlPrincipal{}, accesscontrol.ErrAuthenticationRequired
-	}
-	// The authenticated store owns app-kind resolution for this account.
-	principal.AppPermissions = s
-	return principal, nil
+		)` + controlPrincipalGrantsSQL("authenticated", "expires_at", "")
+	return s.queryControlPrincipal(ctx, "load control principal", query, credentialHash)
 }
 
 // loadOAuthTokenPrincipal mirrors loadControlCredentialPrincipal's shape
@@ -136,15 +91,24 @@ func (s *postgresStore) loadOAuthPrincipal(ctx context.Context, credentialHash s
 				AND t.access_expires_at > NOW()
 				AND (client.expires_at IS NULL OR client.expires_at > NOW())
 				AND s.status = 'active'
-		), principals(subject_type, subject_id) AS (
-			SELECT 'subject'::text, subject_id FROM candidate
+		)` + controlPrincipalGrantsSQL("candidate", "access_expires_at", "AND ($2 OR permission.permission = ANY(actor.token_scope))")
+	return s.queryControlPrincipal(ctx, "load OAuth token principal", query, credentialHash, deployment)
+}
+
+// controlPrincipalGrantsSQL builds the shared principal-expansion and effective-grants
+// CTE suffix so control-credential and OAuth token lookups stay in lockstep.
+func controlPrincipalGrantsSQL(actorCTE, expiryCol, extraGrantFilter string) string {
+	return fmt.Sprintf(`, principals(subject_type, subject_id) AS (
+			SELECT 'subject'::text, subject_id FROM %[1]s
 			UNION ALL
 			SELECT 'team'::text, membership.team_id
-			FROM candidate actor
+			FROM %[1]s actor
 			JOIN fused_team_memberships membership ON membership.member_subject_id = actor.subject_id
 			JOIN fused_teams team ON team.id = membership.team_id AND team.status = 'active'
 			UNION ALL
-			SELECT 'workspace'::text, workspace_id FROM candidate
+			-- Workspace shares are another principal so cached authorization still
+			-- resolves the complete permission set in one database round trip.
+			SELECT 'workspace'::text, workspace_id FROM %[1]s
 		), effective_grants AS (
 			SELECT DISTINCT permission.permission, binding.resource_type, binding.resource_id
 			FROM principals principal
@@ -154,29 +118,37 @@ func (s *postgresStore) loadOAuthPrincipal(ctx context.Context, credentialHash s
 			JOIN fused_roles role
 				ON role.id = binding.role_id AND role.scope_type = binding.resource_type
 			JOIN fused_role_permissions permission ON permission.role_id = role.id
-			JOIN candidate ON true
-			WHERE (binding.resource_type <> 'workspace' OR binding.resource_id = candidate.workspace_id)
-				AND ($2 OR permission.permission = ANY(candidate.token_scope))
+			JOIN %[1]s actor ON true
+			WHERE (binding.resource_type <> 'workspace' OR binding.resource_id = actor.workspace_id)
+				%[3]s
 		)
-		SELECT candidate.account_id, candidate.workspace_id, candidate.subject_id, candidate.display_name,
-			candidate.email_display, candidate.credential_id, candidate.kind, candidate.access_expires_at,
-			candidate.source, candidate.auth_method, candidate.revision,
+		SELECT actor.account_id, actor.workspace_id, actor.subject_id, actor.display_name,
+			actor.email_display, actor.credential_id, actor.kind, actor.%[2]s,
+			actor.source, actor.auth_method, actor.revision,
 			effective.permission, effective.resource_type,
 			effective.resource_id
-		FROM candidate
+		FROM %[1]s actor
 		LEFT JOIN effective_grants effective ON true
 		ORDER BY effective.permission, effective.resource_type, effective.resource_id
-	`
-	rows, err := s.db.Query(ctx, query, credentialHash, deployment)
+	`, actorCTE, expiryCol, extraGrantFilter)
+}
+
+// queryControlPrincipal executes a principal lookup query, scans its permission
+// rows, and attaches the store's app-kind permission resolver.
+func (s *postgresStore) queryControlPrincipal(ctx context.Context, label, query string, args ...any) (accesscontrol.ControlPrincipal, error) {
+	rows, err := s.db.Query(ctx, query, args...)
+	// Propagate query failures with the caller's operation label.
 	if err != nil {
-		return accesscontrol.ControlPrincipal{}, fmt.Errorf("load OAuth token principal: %w", err)
+		return accesscontrol.ControlPrincipal{}, fmt.Errorf("%s: %w", label, err)
 	}
 	defer rows.Close()
 
 	principal, found, err := scanControlPrincipal(rows)
+	// Row-scanning errors indicate unexpected schema or driver failures.
 	if err != nil {
 		return accesscontrol.ControlPrincipal{}, err
 	}
+	// Absent rows mean the credential is unknown, revoked, or expired.
 	if !found {
 		return accesscontrol.ControlPrincipal{}, accesscontrol.ErrAuthenticationRequired
 	}

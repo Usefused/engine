@@ -265,7 +265,7 @@ func TestRESTProxyHandler_SDKGenerate_BlocksUnactivatedService(t *testing.T) {
 	svcA := uuid.New()
 	s := &sdkGenerateGateMockStore{accountID: accountID, activated: map[uuid.UUID]bool{}}
 	fwd := &recordingForwarder{}
-	handler := RESTProxyHandler(fwd, s)
+	handler := RESTProxyHandlerWithRuntimeContracts(fwd, s, nil)
 
 	body := `{"selections":[{"service_id":"` + svcA.String() + `","service_name":"Stripe Billing","service_slug":"stripe-billing"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/sdks/generate", bytes.NewBufferString(body))
@@ -303,7 +303,7 @@ func TestRESTProxyHandler_SDKGenerate_ForwardsWhenAllActivated(t *testing.T) {
 		versions:    map[uuid.UUID][]store.WorkspaceServiceVersion{svcA: {{ServiceID: svcA, ServiceVersionID: versionA}}},
 	}
 	fwd := &recordingForwarder{}
-	handler := RESTProxyHandler(fwd, s)
+	handler := RESTProxyHandlerWithRuntimeContracts(fwd, s, nil)
 
 	body := `{"selections":[{"service_id":"` + svcA.String() + `","service_version_id":"` + versionA.String() + `"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/sdks/generate", bytes.NewBufferString(body))

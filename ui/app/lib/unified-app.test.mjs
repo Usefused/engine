@@ -86,7 +86,7 @@ test("revision leaves the baseline intact when source generation fails or only d
   assert.deepEqual(revised.services, baseline.services);
   assert.equal(revised.source, baseline.source);
   assert.match(revised.explanation, /Engine serialization/);
-  mock.api.graphql = async (query) => { throw new Error("offline"); }; // A failed first stage cannot mutate baseline objects.
+  mock.api.graphql = async () => { throw new Error("offline"); }; // A failed first stage cannot mutate baseline objects.
   await assert.rejects(client(mock.api).reviseUnifiedApp("Add lookup", baseline, () => {}), /offline/);
   assert.deepEqual(baseline, original);
 });

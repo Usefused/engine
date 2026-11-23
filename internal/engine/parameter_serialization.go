@@ -3,9 +3,11 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	neturl "net/url"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -418,13 +420,9 @@ func flattenedObject(object map[string]string, pairDelimiter, itemDelimiter stri
 	return strings.Join(items, itemDelimiter)
 }
 
+// serializationSortedKeys returns map keys in lexicographical order so serialized parameter output is deterministic.
 func serializationSortedKeys[T any](values map[string]T) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
+	return slices.Sorted(maps.Keys(values))
 }
 
 func boolValue(value *bool) bool { return value != nil && *value }

@@ -92,7 +92,7 @@ func TestImportResponseWindowFailureDoesNotForwardOrLeak(t *testing.T) {
 	forwarder := &recordingForwarder{}
 	accountID := uuid.New()
 	request := controlTestRequest(httptest.NewRequest(http.MethodPost, "/integrations/import/apply", nil), accountID)
-	RESTProxyHandler(forwarder, &autoRegisterMockStore{accountID: accountID}).ServeHTTP(writer, request)
+	RESTProxyHandlerWithRuntimeContracts(forwarder, &autoRegisterMockStore{accountID: accountID}, nil).ServeHTTP(writer, request)
 	// No Registry or workspace work is authorized after response admission fails.
 	if forwarder.forwardCalled || forwarder.forwardAndInspectCalled || writer.Code != http.StatusServiceUnavailable {
 		t.Fatalf("forwarder=%#v response=%d", forwarder, writer.Code)
@@ -132,7 +132,7 @@ func TestImportResponseWindowDoesNotChangeOrdinaryRoutes(t *testing.T) {
 	forwarder := &recordingForwarder{}
 	accountID := uuid.New()
 	request := controlTestRequest(httptest.NewRequest(http.MethodPost, "/integrations/import/plan", nil), accountID)
-	RESTProxyHandler(forwarder, &autoRegisterMockStore{accountID: accountID}).ServeHTTP(writer, request)
+	RESTProxyHandlerWithRuntimeContracts(forwarder, &autoRegisterMockStore{accountID: accountID}, nil).ServeHTTP(writer, request)
 	// Scope must follow the exact apply route, not every proxied mutation.
 	if !forwarder.forwardCalled || !writer.deadline.IsZero() {
 		t.Fatalf("forwarded=%v changed deadline=%v", forwarder.forwardCalled, writer.deadline)

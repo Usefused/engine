@@ -474,6 +474,39 @@ func (s *postgresStore) GetMCPAnalyticsDashboard(ctx context.Context, appID uuid
 	return dashboard, nil
 }
 
+// queryMCPUsage executes an aggregated MCP usage query returning (name, count,
+// failed, avg_latency_ms) tuples and projects each row via build.
+func queryMCPUsage[T any](
+	ctx context.Context,
+	db storeDatabase,
+	appID uuid.UUID,
+	label, query string,
+	build func(name string, count, failed int64, avgLatencyMs float64) T,
+) ([]T, error) {
+	rows, err := db.Query(ctx, query, appID)
+	// Preserve the dimension label on query errors for dashboard diagnostics.
+	if err != nil {
+		return nil, fmt.Errorf("query %s: %w", label, err)
+	}
+	defer rows.Close()
+
+	var usage []T
+	for rows.Next() {
+		var (
+			name         string
+			count        int64
+			failed       int64
+			avgLatencyMs float64
+		)
+		// Abort scanning if any row fails type conversion so partial metrics are not returned.
+		if err := rows.Scan(&name, &count, &failed, &avgLatencyMs); err != nil {
+			return nil, fmt.Errorf("scan %s: %w", label, err)
+		}
+		usage = append(usage, build(name, count, failed, avgLatencyMs))
+	}
+	return usage, rows.Err()
+}
+
 // queryMCPToolUsage counts provider receipts through the enclosing store's database executor, excluding logical wrappers that own children.
 func queryMCPToolUsage(ctx context.Context, db storeDatabase, appID uuid.UUID) ([]models.MCPToolUsage, error) {
 	query := `
@@ -483,21 +516,9 @@ func queryMCPToolUsage(ctx context.Context, db storeDatabase, appID uuid.UUID) (
 		GROUP BY endpoint_name
 		ORDER BY COUNT(*) DESC
 	`
-	rows, err := db.Query(ctx, query, appID)
-	if err != nil {
-		return nil, fmt.Errorf("query mcp tool usage: %w", err)
-	}
-	defer rows.Close()
-
-	var usage []models.MCPToolUsage
-	for rows.Next() {
-		var u models.MCPToolUsage
-		if err := rows.Scan(&u.ToolName, &u.Count, &u.Failed, &u.AverageLatencyMs); err != nil {
-			return nil, fmt.Errorf("scan mcp tool usage: %w", err)
-		}
-		usage = append(usage, u)
-	}
-	return usage, rows.Err()
+	return queryMCPUsage(ctx, db, appID, "mcp tool usage", query, func(name string, count, failed int64, avgLatencyMs float64) models.MCPToolUsage {
+		return models.MCPToolUsage{ToolName: name, Count: count, Failed: failed, AverageLatencyMs: avgLatencyMs}
+	})
 }
 
 // queryMCPServiceUsage preserves provider-only analytics through the enclosing store's database executor.
@@ -512,21 +533,9 @@ func queryMCPServiceUsage(ctx context.Context, db storeDatabase, appID uuid.UUID
 		GROUP BY COALESCE(workspace_service.service_name, NULLIF(lifecycle.service_name,''), event.service_id::text)
 		ORDER BY COUNT(*) DESC
 	`
-	rows, err := db.Query(ctx, query, appID)
-	if err != nil {
-		return nil, fmt.Errorf("query mcp service usage: %w", err)
-	}
-	defer rows.Close()
-
-	var usage []models.MCPServiceUsage
-	for rows.Next() {
-		var u models.MCPServiceUsage
-		if err := rows.Scan(&u.ServiceName, &u.Count, &u.Failed, &u.AverageLatencyMs); err != nil {
-			return nil, fmt.Errorf("scan mcp service usage: %w", err)
-		}
-		usage = append(usage, u)
-	}
-	return usage, rows.Err()
+	return queryMCPUsage(ctx, db, appID, "mcp service usage", query, func(name string, count, failed int64, avgLatencyMs float64) models.MCPServiceUsage {
+		return models.MCPServiceUsage{ServiceName: name, Count: count, Failed: failed, AverageLatencyMs: avgLatencyMs}
+	})
 }
 
 // queryRecentMCPSessions uses the enclosing database executor and caps the UI summary at 10 rows.

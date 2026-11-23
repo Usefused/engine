@@ -966,20 +966,7 @@ func selectionServiceVersionID(sel models.SDKSelection) string {
 // endpointAllowed reports whether the endpoint is in the selection's enabled
 // set (governance layer 2: the SDK may only call endpoints it was generated for).
 func endpointAllowed(sel models.SDKSelection, ep *fusedobject.Endpoint) bool {
-	if sel.SelectAll {
-		return true
-	}
-	for _, id := range sel.EndpointIDs {
-		if id == ep.ID {
-			return true
-		}
-	}
-	for _, name := range sel.OperationNames {
-		if name == ep.Name {
-			return true
-		}
-	}
-	return false
+	return sel.AllowsEndpoint(ep.ID, ep.Name)
 }
 
 // sanitiseParams removes known credential keys from a params map before the

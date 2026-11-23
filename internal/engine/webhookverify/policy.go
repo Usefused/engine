@@ -29,7 +29,6 @@ const (
 	CodeSecretUnavailable  = "secret_unavailable"
 	CodeChallengeResponded = "challenge_responded"
 	CodeJWTInvalid         = "jwt_invalid"
-	CodeJWTUnsupported     = "jwt_unsupported"
 	maxSignatureBodyBytes  = 2 << 20
 )
 

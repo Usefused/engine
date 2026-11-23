@@ -16,6 +16,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/credentialkeys"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
+	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/Usefused/engine/internal/shared/secretref"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -412,7 +413,8 @@ func extractDynamicKeys(values []store.BucketValue) ([]string, []string, error) 
 type dynamicKeyStore int
 
 const (
-	dynamicKeyIgnore dynamicKeyStore = iota // not a bucket.* tag at all -- not this function's concern
+	// Reserve zero for non-bucket expressions so dynamicKeyStore zero values never match a store.
+	_ dynamicKeyStore = iota
 	dynamicKeyBucket
 	dynamicKeySecret
 )
@@ -897,23 +899,13 @@ func (r *secretResolver) recordConnectedAuthFailure(ctx context.Context, credent
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.auth_connection.failure_record")
 	defer span.End()
 	span.SetAttributes(attribute.String("connection_id", id.String()), attribute.String("failure_code", code))
-	err = r.db.RecordAuthConnectionFailure(ctx, id, code, executionTraceID(ctx), time.Now().UTC())
+	err = r.db.RecordAuthConnectionFailure(ctx, id, code, observability.TraceIDFromContext(ctx), time.Now().UTC())
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return false, err
 	}
 	span.SetStatus(codes.Ok, "auth connection failure recorded")
 	return true, nil
-}
-
-// executionTraceID returns only a valid OTEL correlation identifier, avoiding
-// placeholder values that would send users searching for a nonexistent trace.
-func executionTraceID(ctx context.Context) string {
-	spanContext := trace.SpanContextFromContext(ctx)
-	if !spanContext.IsValid() {
-		return ""
-	}
-	return spanContext.TraceID().String()
 }
 
 // authConnectionSpanAttrs keeps refresh/usage spans free of token material

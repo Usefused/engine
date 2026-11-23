@@ -95,7 +95,7 @@ func TestProviderRateLimitDenialDoesNotSleep(t *testing.T) {
 	srv := &models.Service{ServiceVersionID: uuid.New(), RateLimit: fixedRateLimitFixture(5)}
 	ctx := WithProviderRateLimitIdentity(context.Background(), uuid.New(), uuid.New(), uuid.Nil)
 	started := time.Now()
-	_, err := dispatcher.awaitProviderRateLimit(ctx, srv, &models.IntegrationObject{StableKey: "rest:GET:/items"})
+	_, _, err := dispatcher.awaitProviderRateLimitPermit(ctx, srv, &models.IntegrationObject{StableKey: "rest:GET:/items"})
 	if err != ErrProviderRateLimited {
 		t.Fatalf("error = %v, want local denial", err)
 	}
@@ -115,7 +115,7 @@ func TestProviderRateLimitDenialDoesNotReacquire(t *testing.T) {
 	srv := &models.Service{ServiceVersionID: uuid.New(), RateLimit: fixedRateLimitFixture(5)}
 	ctx := WithProviderRateLimitIdentity(context.Background(), uuid.New(), uuid.New(), uuid.Nil)
 	started := time.Now()
-	_, err := dispatcher.awaitProviderRateLimit(ctx, srv, &models.IntegrationObject{StableKey: "rest:GET:/items"})
+	_, _, err := dispatcher.awaitProviderRateLimitPermit(ctx, srv, &models.IntegrationObject{StableKey: "rest:GET:/items"})
 	if err != ErrProviderRateLimited {
 		t.Fatalf("error = %v, want local denial", err)
 	}

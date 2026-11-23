@@ -7,15 +7,9 @@ import (
 	"github.com/Usefused/engine/internal/engine/store"
 )
 
-// registerProxyRoutes mounts the Registry-proxied routes (GraphQL + REST)
-// onto r. Split out from main() so this wiring can be exercised in
-// routes_test.go without booting the Engine's full dependency graph (DB,
-// NATS, gRPC) -- the tests only need a chi.Router, a Forwarder, and a Store.
-func registerProxyRoutes(r chi.Router, proxy api.Forwarder, s store.Store) {
-	registerProxyRoutesWithRuntimeContracts(r, proxy, s, nil)
-}
-
-// registerProxyRoutesWithRuntimeContracts keeps billing identity server-side after the shared Engine authorization boundary.
+// registerProxyRoutesWithRuntimeContracts mounts the Registry-proxied GraphQL
+// and REST routes while keeping billing identity server-side after the shared
+// Engine authorization boundary.
 func registerProxyRoutesWithRuntimeContracts(r chi.Router, proxy api.Forwarder, s store.Store, contractFetcher api.RuntimeContractFetcher) {
 	// Proxy routes authenticate locally, then RegistryProxy replaces inbound
 	// auth with the Engine's licensed workspace identity.

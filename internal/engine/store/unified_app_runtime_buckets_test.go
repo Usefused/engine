@@ -119,7 +119,7 @@ func TestRuntimeBucketPostgresRetainedRouting(t *testing.T) {
 func assertRetainedRuntimeBucket(t *testing.T, f runtimeBucketDBFixture, record ExecutionResult) {
 	t.Helper()
 	stored, err := f.repository.GetExecutionResult(f.base.ctx, f.accountID, f.appID, record.ID)
-	if err != nil || !sameRuntimeBucket(stored.BucketID, record.BucketID) {
+	if err != nil || !equalOptionalUUID(stored.BucketID, record.BucketID) {
 		t.Fatalf("retained routing err=%v", err)
 	}
 	record.ID = uuid.New()

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -629,7 +630,7 @@ func revokeOAuthTokenFamily(ctx context.Context, tx pgx.Tx, familyID uuid.UUID, 
 		INSERT INTO fused_audit_events (action, resource_type, trace_id, outcome, metadata)
 		SELECT $1, 'workspace', $2, 'succeeded',
 			jsonb_build_object('token_family_id', $3::text, 'revoked_count', $4::int, 'authorization_revision', $5::bigint)
-	`, auditAction, accesscontrolTraceID(ctx), familyID, command.RowsAffected(), revision)
+	`, auditAction, observability.TraceIDFromContext(ctx), familyID, command.RowsAffected(), revision)
 	if err != nil {
 		return fmt.Errorf("audit OAuth token family revocation: %w", err)
 	}
@@ -673,7 +674,7 @@ func auditOAuthTokenLifecycle(ctx context.Context, tx pgx.Tx, clientID, subjectI
 	_, err := tx.Exec(ctx, `
 		INSERT INTO fused_audit_events (actor_subject_id, action, resource_type, trace_id, outcome, metadata)
 		VALUES ($1, $2, 'app', $3, 'succeeded', jsonb_build_object('oauth_client_id', $4::text, 'oauth_token_id', $5::text))
-	`, subjectID, action, accesscontrolTraceID(ctx), clientID, tokenID)
+	`, subjectID, action, observability.TraceIDFromContext(ctx), clientID, tokenID)
 	if err != nil {
 		return fmt.Errorf("audit OAuth token lifecycle: %w", err)
 	}

@@ -39,20 +39,40 @@ type PhysicalExecutionResult struct {
 	StatusCode int
 }
 
+// statusCapture tracks one immutable provider HTTP status and any sticky
+// collection error shared across response collectors.
+type statusCapture struct {
+	status int
+	err    error
+}
+
+// captureStatus ignores empty status frames and rejects conflicting nonzero statuses.
+func (capture *statusCapture) captureStatus(status int) error {
+	// Stream frames without an HTTP status leave the recorded status unchanged.
+	if status <= 0 {
+		return nil
+	}
+	// Once observed, the response status must remain immutable across frames.
+	if capture.status != 0 && capture.status != status {
+		capture.err = errors.New("physical response status changed during collection")
+		return capture.err
+	}
+	capture.status = status
+	return nil
+}
+
 // boundedJSONResponseCollector deliberately implements only the dispatcher's
 // response stream contracts. It never records or logs captured provider data.
 type boundedJSONResponseCollector struct {
+	statusCapture
 	body        bytes.Buffer
-	status      int
 	mediaFamily string
-	err         error
 }
 
 // successfulResponseCollector discards compensation response bodies while
 // retaining the provider status required to prove rollback success.
 type successfulResponseCollector struct {
-	status int
-	err    error
+	statusCapture
 }
 
 // Send deliberately discards rollback bodies because they are neither public
@@ -80,19 +100,6 @@ func (collector *successfulResponseCollector) Result() error {
 	if collector.status < 200 || collector.status >= 300 {
 		return &PhysicalResponseStatusError{StatusCode: collector.status}
 	}
-	return nil
-}
-
-// captureStatus ignores empty status frames and rejects conflicting nonzero statuses.
-func (collector *successfulResponseCollector) captureStatus(status int) error {
-	if status <= 0 {
-		return nil
-	}
-	if collector.status != 0 && collector.status != status {
-		collector.err = errors.New("physical response status changed during collection")
-		return collector.err
-	}
-	collector.status = status
 	return nil
 }
 
@@ -145,17 +152,4 @@ func (collector *boundedJSONResponseCollector) Result() (PhysicalExecutionResult
 		return PhysicalExecutionResult{}, ErrPhysicalResponseNotJSON
 	}
 	return PhysicalExecutionResult{Body: bytes.Clone(canonical), StatusCode: collector.status}, nil
-}
-
-// captureStatus ignores empty status frames and rejects conflicting nonzero statuses.
-func (collector *boundedJSONResponseCollector) captureStatus(status int) error {
-	if status <= 0 {
-		return nil
-	}
-	if collector.status != 0 && collector.status != status {
-		collector.err = errors.New("physical response status changed during collection")
-		return collector.err
-	}
-	collector.status = status
-	return nil
 }

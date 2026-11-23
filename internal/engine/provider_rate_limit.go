@@ -50,11 +50,6 @@ func WithProviderRateLimitIdentity(ctx context.Context, accountID, bucketID, con
 	})
 }
 
-func (d *Dispatcher) awaitProviderRateLimit(ctx context.Context, srv *models.Service, obj *models.IntegrationObject) (ratelimitpolicy.Decision, error) {
-	decision, _, err := d.awaitProviderRateLimitPermit(ctx, srv, obj)
-	return decision, err
-}
-
 func (d *Dispatcher) awaitProviderRateLimitPermit(ctx context.Context, srv *models.Service, obj *models.IntegrationObject) (ratelimitpolicy.Decision, ratelimitpolicy.ReleaseRequest, error) {
 	if srv.RateLimit == nil {
 		return ratelimitpolicy.Decision{Allowed: true}, ratelimitpolicy.ReleaseRequest{}, nil

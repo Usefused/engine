@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/go-chi/chi/v5"
@@ -194,7 +195,7 @@ func TestRegistrySDKGenerationErrorCode(t *testing.T) {
 		// The subtest closure keeps each payload and expected code paired safely.
 		t.Run(test.name, func(t *testing.T) {
 			// Exact extraction keeps message text outside the classification path.
-			if got := registrySDKGenerationErrorCode([]byte(test.payload)); got != test.want {
+			if got := sandbox.RegistrySDKGenerationErrorCode([]byte(test.payload)); got != test.want {
 				t.Fatalf("code = %q, want %q", got, test.want)
 			}
 		})

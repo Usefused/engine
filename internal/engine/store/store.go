@@ -30,7 +30,6 @@ var (
 	ErrAppFamilyNotEmpty              = errors.New("app family still has active versions")
 	ErrAppNotFound                    = errors.New("app not found")
 	ErrAppVersionImmutable            = errors.New("app version is immutable: same version with changed source or scope")
-	ErrAppVersionExists               = errors.New("app version already exists in family")
 	ErrAppDeactivated                 = errors.New("app is deactivated")
 	ErrAppDeliveryModeMismatch        = errors.New("app delivery mode is immutable")
 	ErrAppTokenNotFound               = errors.New("app token not found")
@@ -284,7 +283,6 @@ func (mode AppTokenBindingMode) Valid() bool {
 type AppTokenStatus string
 
 const (
-	AppTokenStatusActive  AppTokenStatus = "active"
 	AppTokenStatusExpired AppTokenStatus = "expired"
 	AppTokenStatusRevoked AppTokenStatus = "revoked"
 )
@@ -346,20 +344,6 @@ type AuthProjection struct {
 	AppStatus   AppStatus
 	TokenPolicy AppTokenPolicy
 	BindingMode AppTokenBindingMode
-}
-
-// CapabilityDiff describes what changed between two versions for plan output
-// and audit purposes.
-type CapabilityDiff struct {
-	ServicesAdded         []string `json:"services_added,omitempty"`
-	ServicesRemoved       []string `json:"services_removed,omitempty"`
-	OperationsAdded       []string `json:"operations_added,omitempty"`
-	OperationsRemoved     []string `json:"operations_removed,omitempty"`
-	WebhooksAdded         []string `json:"webhooks_added,omitempty"`
-	WebhooksRemoved       []string `json:"webhooks_removed,omitempty"`
-	AuthFamiliesChanged   bool     `json:"auth_families_changed,omitempty"`
-	ConnectCeilingChanged bool     `json:"connect_ceiling_changed,omitempty"`
-	Expands               bool     `json:"expands"`
 }
 
 type Bucket struct {

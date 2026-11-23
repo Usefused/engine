@@ -17,7 +17,7 @@ test('unknown or composed input never gets a misleading empty argument example',
   // Exercise unsupported shapes without assuming that every object accepts empty input.
   for (const schema of [null, true, false, { type: 'object' }, { type: 'object', additionalProperties: false, allOf: [{ required: ['id'] }] }]) {
     assert.equal(bridgeHasNoInput(schema), false);
-    assert.match(bridgeUsage('pair', 'profile', 'hash', 'connection', 'op', { input_schema: schema }).code, /  input,/);
+    assert.match(bridgeUsage('pair', 'profile', 'hash', 'connection', 'op', { input_schema: schema }).code, / {2}input,/);
   }
 });
 
@@ -27,7 +27,7 @@ test('code and binding stay aligned without mixing profiles or unsafe identity t
   const a = bridgeUsage('pair', 'upstairs', 'hash-a', 'speaker', 'volume.get', contract);
   const b = bridgeUsage('pair', 'downstairs"\n', 'hash-b', 'speaker', 'volume.get', contract);
   assert.match(a.code, /fused.callBridge/);
-  assert.match(a.code, /  {},/);
+  assert.match(a.code, / {2}\{\},/);
   assert.equal(JSON.parse(a.binding).bridges.local_operation.profile_id, 'upstairs');
   assert.equal(JSON.parse(b.binding).bridges.local_operation.profile_id, 'downstairs"\n');
   assert.equal(JSON.parse(b.binding).bridges.local_operation.manifest_hash, 'hash-b');

@@ -1,27 +1,8 @@
-import { useState, useRef, useEffect } from "react";
+import { useState } from "react";
 import { ChevronDown, ChevronRight, Search, X, Loader2 } from "lucide-react";
 import { type IntegrationObject } from "~/lib/api";
 import { stripLinks } from "~/lib/format";
-
-const ObserverTarget = ({ onIntersect, disabled }: { onIntersect: () => void, disabled: boolean }) => {
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (disabled || !ref.current) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          onIntersect();
-        }
-      },
-      { rootMargin: "100px" }
-    );
-    observer.observe(ref.current);
-    return () => observer.disconnect();
-  }, [onIntersect, disabled]);
-
-  return <div ref={ref} className="h-4 w-full flex justify-center items-center py-2">{!disabled && <Loader2 className="w-4 h-4 animate-spin text-slate-400" />}</div>;
-};
+import { ObserverTarget } from "~/components/ObserverTarget";
 
 function matchesSearchTerm(ep: IntegrationObject, term: string): boolean {
   return Boolean(

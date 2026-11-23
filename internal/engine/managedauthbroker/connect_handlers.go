@@ -104,25 +104,46 @@ type connectExchangeRequest struct {
 	Verifier    string                         `json:"verifier"`
 }
 
-func exchangeHandler(connect *ConnectService) http.HandlerFunc {
+// handleConnectTokenRequest validates the route identity and bounded JSON
+// payload for provider OAuth token endpoints before returning the broker response.
+func handleConnectTokenRequest[Req any](
+	validate func(Req) bool,
+	missingFieldMsg, failureMsg string,
+	execute func(context.Context, uuid.UUID, string, Req) (any, error),
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		serviceID, authName, ok := connectRouteIdentity(r)
+		// Both route identity fields are required to look up the operator-managed app.
 		if !ok {
 			writeBrokerError(w, http.StatusBadRequest, "service id and auth name are required")
 			return
 		}
-		var req connectExchangeRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxManagedAuthConnectBodyBytes)).Decode(&req); err != nil || req.Code == "" {
-			writeBrokerError(w, http.StatusBadRequest, "code is required")
+		var req Req
+		// Reject malformed, oversized, or incomplete token payloads before calling the provider.
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxManagedAuthConnectBodyBytes)).Decode(&req); err != nil || !validate(req) {
+			writeBrokerError(w, http.StatusBadRequest, missingFieldMsg)
 			return
 		}
-		token, err := connect.Exchange(r.Context(), serviceID, authName, req.RedirectURI, req.Auth, req.Flow, req.Code, req.Verifier)
+		token, err := execute(r.Context(), serviceID, authName, req)
+		// Collapse upstream provider or proof failures into a generic 502 so secrets never leak.
 		if err != nil {
-			writeBrokerError(w, http.StatusBadGateway, "provider token exchange failed")
+			writeBrokerError(w, http.StatusBadGateway, failureMsg)
 			return
 		}
 		writeBrokerJSON(w, http.StatusOK, token)
 	}
+}
+
+// exchangeHandler redeems an OAuth authorization code through the managed-auth broker.
+func exchangeHandler(connect *ConnectService) http.HandlerFunc {
+	return handleConnectTokenRequest(
+		func(req connectExchangeRequest) bool { return req.Code != "" },
+		"code is required",
+		"provider token exchange failed",
+		func(ctx context.Context, serviceID uuid.UUID, authName string, req connectExchangeRequest) (any, error) {
+			return connect.Exchange(ctx, serviceID, authName, req.RedirectURI, req.Auth, req.Flow, req.Code, req.Verifier)
+		},
+	)
 }
 
 type connectRefreshRequest struct {
@@ -137,22 +158,12 @@ type connectRefreshRequest struct {
 // different things (the installation's own broker credential vs. the
 // end-user's provider tokens) and deliberately stay separate endpoints.
 func connectRefreshHandler(connect *ConnectService) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		serviceID, authName, ok := connectRouteIdentity(r)
-		if !ok {
-			writeBrokerError(w, http.StatusBadRequest, "service id and auth name are required")
-			return
-		}
-		var req connectRefreshRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxManagedAuthConnectBodyBytes)).Decode(&req); err != nil || req.RefreshToken == "" {
-			writeBrokerError(w, http.StatusBadRequest, "refresh_token is required")
-			return
-		}
-		token, err := connect.Refresh(r.Context(), serviceID, authName, req.RedirectURI, req.Auth, req.Flow, req.RefreshToken)
-		if err != nil {
-			writeBrokerError(w, http.StatusBadGateway, "provider token refresh failed")
-			return
-		}
-		writeBrokerJSON(w, http.StatusOK, token)
-	}
+	return handleConnectTokenRequest(
+		func(req connectRefreshRequest) bool { return req.RefreshToken != "" },
+		"refresh_token is required",
+		"provider token refresh failed",
+		func(ctx context.Context, serviceID uuid.UUID, authName string, req connectRefreshRequest) (any, error) {
+			return connect.Refresh(ctx, serviceID, authName, req.RedirectURI, req.Auth, req.Flow, req.RefreshToken)
+		},
+	)
 }

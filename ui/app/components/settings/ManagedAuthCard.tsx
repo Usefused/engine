@@ -59,36 +59,34 @@ export function ManagedAuthCard() {
     };
   }, [refresh]);
 
-  // handleEnable saves explicit opt-in before the Engine attempts enrollment.
-  async function handleEnable() {
-    setEnabling(true);
+  // handleToggle coordinates Managed Auth enrollment or opt-out while keeping status and revocation flags synced.
+  async function handleToggle(enabled: boolean) {
+    // Track enabling and disabling separately so each action button renders its own busy label.
+    const setBusy = enabled ? setEnabling : setDisabling;
+    setBusy(true);
     try {
-      const response = await api.managedAuth.enable();
+      const response = enabled ? await api.managedAuth.enable() : await api.managedAuth.disable();
       setStatus(response.status);
       setRevocationPending(response.revocation_pending);
-      setLoadError("");
-      toast.success("Fused Managed Auth is enrolled.");
+      // Clearing stale load errors on enrollment lets the card reflect the newly enrolled state immediately.
+      if (enabled) setLoadError("");
+      toast.success(enabled ? "Fused Managed Auth is enrolled." : "Fused Managed Auth is disabled.");
     } catch (error: unknown) {
-      toast.error(errorMessage(error, "Enrollment is unavailable; retry shortly."));
+      toast.error(
+        errorMessage(
+          error,
+          enabled ? "Enrollment is unavailable; retry shortly." : "Could not save the managed-auth preference."
+        )
+      );
     } finally {
-      setEnabling(false);
+      setBusy(false);
     }
   }
 
+  // handleEnable saves explicit opt-in before the Engine attempts enrollment.
+  const handleEnable = () => handleToggle(true);
   // handleDisable acknowledges local opt-out while showing any remote revocation still awaiting retry.
-  async function handleDisable() {
-    setDisabling(true);
-    try {
-      const response = await api.managedAuth.disable();
-      setStatus(response.status);
-      setRevocationPending(response.revocation_pending);
-      toast.success("Fused Managed Auth is disabled.");
-    } catch (error: unknown) {
-      toast.error(errorMessage(error, "Could not save the managed-auth preference."));
-    } finally {
-      setDisabling(false);
-    }
-  }
+  const handleDisable = () => handleToggle(false);
 
   return (
     <section className="bg-white border border-slate-200 rounded-xl shadow-sm p-6">

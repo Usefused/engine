@@ -69,7 +69,7 @@ func GetConnectBrandingHandler(s store.Store) http.HandlerFunc {
 			}, r.Context())
 			return
 		}
-		writeConnectJSON(w, http.StatusOK, branding)
+		writeJSONStatus(w, http.StatusOK, branding)
 	}
 }
 
@@ -126,7 +126,7 @@ func UpsertConnectBrandingHandler(s store.Store) http.HandlerFunc {
 		if changes.Count() == 0 {
 			// A converged PUT remains successful and avoids an unnecessary database write.
 			accesscontrol.MarkMutationAuditUnchanged(ctx)
-			writeConnectJSON(w, http.StatusOK, existing)
+			writeJSONStatus(w, http.StatusOK, existing)
 			return
 		}
 		saved, err := s.UpsertConnectBranding(ctx, branding)
@@ -141,7 +141,7 @@ func UpsertConnectBrandingHandler(s store.Store) http.HandlerFunc {
 			}, ctx)
 			return
 		}
-		writeConnectJSON(w, http.StatusOK, saved)
+		writeJSONStatus(w, http.StatusOK, saved)
 	}
 }
 

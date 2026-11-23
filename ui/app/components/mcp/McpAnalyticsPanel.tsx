@@ -113,135 +113,97 @@ function McpAnalyticsStats({ data }: { data: McpAnalyticsData }) {
   );
 }
 
-// McpToolUsageTable presents tool aggregation as cards on mobile and a dense
-// table when enough width is available.
-function McpToolUsageTable({ toolUsage }: { toolUsage: NonNullable<McpAnalyticsData["tool_usage"]> }) {
-  const mobileEntries = toolUsage.map((tool) => ({ key: tool.tool_name, name: tool.tool_name, count: tool.count, failed: tool.failed, averageLatency: tool.average_latency, accent: "slate" as const }));
-  return (
-    <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-      <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
-        <Wrench className="w-4 h-4 text-slate-500" />
-        <h3 className="font-semibold text-slate-900">Tool Usage Breakdown</h3>
-      </div>
-      <div className="p-0">
-        {toolUsage.length === 0 ? (
-          <div className="text-center py-12 text-slate-500 text-sm">
-            No tools have been called yet.
-          </div>
-        ) : (
-          <>
-          <McpUsageCards entries={mobileEntries} />
-          <div className="hidden overflow-x-auto md:block">
-            <table className="w-full text-sm text-left">
-              <thead className="bg-slate-50/50 text-slate-500 text-xs uppercase tracking-wider">
-                <tr>
-                  <th className="px-6 py-3 font-medium">Tool Name</th>
-                  <th className="px-6 py-3 font-medium text-right">Calls</th>
-                  <th className="px-6 py-3 font-medium text-right">Failed</th>
-                  <th className="px-6 py-3 font-medium text-right">Avg Latency</th>
-                  <th className="px-6 py-3 font-medium text-right">Success Rate</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 text-slate-700">
-                {toolUsage.map((tool) => {
-                  const successRate = usageSuccessRate(tool.count, tool.failed);
-                  return (
-                    <tr key={tool.tool_name} className="hover:bg-slate-50 transition-colors">
-                      <td className="px-6 py-4 font-mono text-slate-700">{tool.tool_name}</td>
-                      <td className="px-6 py-4 text-right font-medium">{tool.count.toLocaleString()}</td>
-                      <td className="px-6 py-4 text-right">
-                        <span className={tool.failed > 0 ? "text-red-500 font-semibold" : "text-slate-400"}>
-                          {tool.failed.toLocaleString()}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 text-right font-medium tabular-nums text-slate-600">
-                        {formatDuration(tool.average_latency || 0)}
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <span className={tool.failed > 0 ? "text-amber-500" : "text-emerald-500"}>{successRate}%</span>
-                          <div className="w-16 h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                            <div
-                              className={`h-full ${tool.failed > 0 ? 'bg-amber-400' : 'bg-emerald-400'}`}
-                              style={{ width: `${successRate}%` }}
-                            />
-                          </div>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          </>
-        )}
-      </div>
-    </div>
-  );
+interface McpUsageRow {
+  name: string;
+  count: number;
+  failed: number;
+  averageLatency: number;
 }
 
-// McpServiceUsageTable presents service aggregation without page-level
-// horizontal overflow on narrow screens.
-function McpServiceUsageTable({ serviceUsage }: { serviceUsage: NonNullable<McpAnalyticsData["service_usage"]> }) {
-  const mobileEntries = serviceUsage.map((service) => ({ key: service.service_name, name: service.service_name, count: service.count, failed: service.failed, averageLatency: service.average_latency, accent: "emerald" as const }));
+// McpUsageTable renders tool or service usage breakdown as stacked cards on
+// mobile and a dense metrics table when horizontal space is available.
+function McpUsageTable({
+  title,
+  icon,
+  emptyMessage,
+  nameColumnLabel,
+  accent,
+  rows,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  emptyMessage: string;
+  nameColumnLabel: string;
+  accent: "slate" | "emerald";
+  rows: McpUsageRow[];
+}) {
+  const mobileEntries = rows.map((row) => ({
+    key: row.name,
+    name: row.name,
+    count: row.count,
+    failed: row.failed,
+    averageLatency: row.averageLatency,
+    accent,
+  }));
+  // Service names use emerald highlighting while tool names stay neutral slate.
+  const nameClass = accent === "emerald" ? "text-emerald-600" : "text-slate-700";
   return (
     <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
       <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
-        <Activity className="w-4 h-4 text-emerald-500" />
-        <h3 className="font-semibold text-slate-900">Service Usage Breakdown</h3>
+        {icon}
+        <h3 className="font-semibold text-slate-900">{title}</h3>
       </div>
       <div className="p-0">
-        {serviceUsage.length === 0 ? (
+        {rows.length === 0 ? (
           <div className="text-center py-12 text-slate-500 text-sm">
-            No services have been hit yet.
+            {emptyMessage}
           </div>
         ) : (
           <>
-          <McpUsageCards entries={mobileEntries} />
-          <div className="hidden overflow-x-auto md:block">
-            <table className="w-full text-sm text-left">
-              <thead className="bg-slate-50/50 text-slate-500 text-xs uppercase tracking-wider">
-                <tr>
-                  <th className="px-6 py-3 font-medium">Service Name</th>
-                  <th className="px-6 py-3 font-medium text-right">Calls</th>
-                  <th className="px-6 py-3 font-medium text-right">Failed</th>
-                  <th className="px-6 py-3 font-medium text-right">Avg Latency</th>
-                  <th className="px-6 py-3 font-medium text-right">Success Rate</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 text-slate-700">
-                {serviceUsage.map((svc) => {
-                  const successRate = usageSuccessRate(svc.count, svc.failed);
-                  return (
-                    <tr key={svc.service_name} className="hover:bg-slate-50 transition-colors">
-                      <td className="px-6 py-4 font-mono text-emerald-600">{svc.service_name}</td>
-                      <td className="px-6 py-4 text-right font-medium">{svc.count.toLocaleString()}</td>
-                      <td className="px-6 py-4 text-right">
-                        <span className={svc.failed > 0 ? "text-red-500 font-semibold" : "text-slate-400"}>
-                          {svc.failed.toLocaleString()}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 text-right font-medium tabular-nums text-slate-600">
-                        {formatDuration(svc.average_latency || 0)}
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <span className={svc.failed > 0 ? "text-amber-500" : "text-emerald-500"}>{successRate}%</span>
-                          <div className="w-16 h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                            <div
-                              className={`h-full ${svc.failed > 0 ? 'bg-amber-400' : 'bg-emerald-400'}`}
-                              style={{ width: `${successRate}%` }}
-                            />
+            <McpUsageCards entries={mobileEntries} />
+            <div className="hidden overflow-x-auto md:block">
+              <table className="w-full text-sm text-left">
+                <thead className="bg-slate-50/50 text-slate-500 text-xs uppercase tracking-wider">
+                  <tr>
+                    <th className="px-6 py-3 font-medium">{nameColumnLabel}</th>
+                    <th className="px-6 py-3 font-medium text-right">Calls</th>
+                    <th className="px-6 py-3 font-medium text-right">Failed</th>
+                    <th className="px-6 py-3 font-medium text-right">Avg Latency</th>
+                    <th className="px-6 py-3 font-medium text-right">Success Rate</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-slate-700">
+                  {rows.map((row) => {
+                    const successRate = usageSuccessRate(row.count, row.failed);
+                    return (
+                      <tr key={row.name} className="hover:bg-slate-50 transition-colors">
+                        <td className={`px-6 py-4 font-mono ${nameClass}`}>{row.name}</td>
+                        <td className="px-6 py-4 text-right font-medium">{row.count.toLocaleString()}</td>
+                        <td className="px-6 py-4 text-right">
+                          <span className={row.failed > 0 ? "text-red-500 font-semibold" : "text-slate-400"}>
+                            {row.failed.toLocaleString()}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 text-right font-medium tabular-nums text-slate-600">
+                          {formatDuration(row.averageLatency || 0)}
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <div className="flex items-center justify-end gap-2">
+                            <span className={row.failed > 0 ? "text-amber-500" : "text-emerald-500"}>{successRate}%</span>
+                            <div className="w-16 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                              <div
+                                className={`h-full ${row.failed > 0 ? "bg-amber-400" : "bg-emerald-400"}`}
+                                style={{ width: `${successRate}%` }}
+                              />
+                            </div>
                           </div>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </>
         )}
       </div>
@@ -252,18 +214,44 @@ function McpServiceUsageTable({ serviceUsage }: { serviceUsage: NonNullable<McpA
 /** Full analytics body (stats + tool/service usage tables), no header or
  * sessions tab -- callers compose those around it as needed. */
 export function McpAnalyticsPanel({ data }: { data: McpAnalyticsData }) {
-  const toolUsage = data.tool_usage ?? [];
-  const serviceUsage = (data.service_usage ?? []).filter((svc) => {
-    const name = typeof svc?.service_name === "string" ? svc.service_name.trim() : "";
-    return name.length > 0;
-  });
+  const toolRows: McpUsageRow[] = (data.tool_usage ?? []).map((tool) => ({
+    name: tool.tool_name,
+    count: tool.count,
+    failed: tool.failed,
+    averageLatency: tool.average_latency,
+  }));
+  const serviceRows: McpUsageRow[] = (data.service_usage ?? [])
+    .filter((svc) => {
+      const name = typeof svc?.service_name === "string" ? svc.service_name.trim() : "";
+      return name.length > 0;
+    })
+    .map((svc) => ({
+      name: svc.service_name,
+      count: svc.count,
+      failed: svc.failed,
+      averageLatency: svc.average_latency,
+    }));
 
   return (
     <>
       <McpAnalyticsStats data={data} />
-      <McpToolUsageTable toolUsage={toolUsage} />
+      <McpUsageTable
+        title="Tool Usage Breakdown"
+        icon={<Wrench className="w-4 h-4 text-slate-500" />}
+        emptyMessage="No tools have been called yet."
+        nameColumnLabel="Tool Name"
+        accent="slate"
+        rows={toolRows}
+      />
       <div className="mt-6">
-        <McpServiceUsageTable serviceUsage={serviceUsage} />
+        <McpUsageTable
+          title="Service Usage Breakdown"
+          icon={<Activity className="w-4 h-4 text-emerald-500" />}
+          emptyMessage="No services have been hit yet."
+          nameColumnLabel="Service Name"
+          accent="emerald"
+          rows={serviceRows}
+        />
       </div>
     </>
   );

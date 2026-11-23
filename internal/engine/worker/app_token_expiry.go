@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"log/slog"
-	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -18,34 +17,32 @@ type appTokenExpiryStore interface {
 }
 
 type AppTokenExpiryWorker struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	once   sync.Once
+	lifecycle *workerLifecycle
 }
 
+// StartAppTokenExpiryWorker starts periodic expiry sweeps for app execution tokens.
 func StartAppTokenExpiryWorker(ctx context.Context, store appTokenExpiryStore, batchSize int) *AppTokenExpiryWorker {
+	// Skip spawning a background loop when storage or batch size is invalid.
 	if store == nil || batchSize <= 0 {
 		return nil
 	}
-	workerCtx, cancel := context.WithCancel(ctx)
-	worker := &AppTokenExpiryWorker{cancel: cancel, done: make(chan struct{})}
+	workerCtx, lifecycle := newStartedLifecycle(ctx)
+	worker := &AppTokenExpiryWorker{lifecycle: lifecycle}
 	go worker.run(workerCtx, store, batchSize)
 	return worker
 }
 
+// Stop cancels periodic token expiration and waits for the active pass to finish.
 func (worker *AppTokenExpiryWorker) Stop(ctx context.Context) {
+	// Nil workers are valid when background expiration is disabled.
 	if worker == nil {
 		return
 	}
-	worker.once.Do(worker.cancel)
-	select {
-	case <-worker.done:
-	case <-ctx.Done():
-	}
+	worker.lifecycle.stop(ctx)
 }
 
 func (worker *AppTokenExpiryWorker) run(ctx context.Context, store appTokenExpiryStore, batchSize int) {
-	defer close(worker.done)
+	defer close(worker.lifecycle.done)
 	expireAppTokensPass(ctx, store, batchSize)
 	ticker := time.NewTicker(appTokenExpiryInterval)
 	defer ticker.Stop()

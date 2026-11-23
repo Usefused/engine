@@ -502,7 +502,7 @@ func workspaceProfileFields(profile *store.WorkspaceConnectionProfile, bindings 
 	}
 	return map[string]interface{}{
 		"service_id": profile.ServiceID.String(), "service_version_id": profile.ServiceVersionID.String(), "auth_type": profile.AuthType,
-		"registry_profile_id": optionalUUIDGraphQLValue(profile.RegistryProfileID),
+		"registry_profile_id": formatOptionalGraphQLUUID(profile.RegistryProfileID),
 		"profile_revision":    profile.ProfileRevision, "profile_hash": profile.ProfileHash,
 		"provenance": profile.Provenance, "source": profile.Provenance,
 		"has_workspace_override": profile.Layer == "override",
@@ -511,37 +511,21 @@ func workspaceProfileFields(profile *store.WorkspaceConnectionProfile, bindings 
 	}
 }
 
-// optionalUUIDGraphQLValue preserves null for workspace-local profiles because an
-// empty Registry identity must not be serialized as the all-zero UUID.
-func optionalUUIDGraphQLValue(value *uuid.UUID) interface{} {
-	if value == nil {
-		return nil
-	}
-	return value.String()
-}
-
 // workspaceBindingFields keeps nullable source fields explicit for the
 // GraphQL custom object instead of leaking storage implementation details.
 func workspaceBindingFields(binding store.WorkspaceConnectionBinding) map[string]interface{} {
 	return map[string]interface{}{
 		"id": binding.ID.String(), "source_kind": binding.SourceKind,
-		"literal_value": optionalStringValue(binding.LiteralValue), "source_path": optionalStringValue(binding.SourcePath),
+		"literal_value": optionalGraphQLValue(binding.LiteralValue), "source_path": optionalGraphQLValue(binding.SourcePath),
 		"target_location": binding.TargetLocation, "target_name": binding.TargetName,
 		"operation_ids": binding.OperationIDs, "mode": binding.Mode, "provenance": binding.Provenance,
-		"source_profile_revision": optionalIntValue(binding.SourceProfileRevision),
+		"source_profile_revision": optionalGraphQLValue(binding.SourceProfileRevision),
 	}
 }
 
-// optionalStringValue preserves GraphQL null semantics for absent sources.
-func optionalStringValue(value *string) interface{} {
-	if value == nil {
-		return nil
-	}
-	return *value
-}
-
-// optionalIntValue preserves GraphQL null semantics for unversioned rows.
-func optionalIntValue(value *int) interface{} {
+// optionalGraphQLValue dereferences a non-nil pointer for GraphQL resolvers while preserving nil as null.
+func optionalGraphQLValue[T any](value *T) interface{} {
+	// Absent pointers must map to GraphQL null rather than a zero value.
 	if value == nil {
 		return nil
 	}

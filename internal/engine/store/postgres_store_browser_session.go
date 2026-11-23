@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -196,7 +197,7 @@ func finalizeBrowserSessionMutation(
 			jsonb_build_object('session_credential_id', $5::text,
 				'authorization_revision', $6::bigint, 'auth_method', $7::text)
 		FROM fused_workspaces workspace WHERE workspace.singleton_key = 1
-	`, actor.SubjectID, actor.CredentialID, action, accesscontrolTraceID(ctx), credentialID, revision, authMethod)
+	`, actor.SubjectID, actor.CredentialID, action, observability.TraceIDFromContext(ctx), credentialID, revision, authMethod)
 	if err != nil {
 		return 0, fmt.Errorf("audit browser session: %w", err)
 	}

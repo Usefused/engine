@@ -8,7 +8,3 @@ export function track(eventName: string, params?: Record<string, string | number
   if (typeof window === "undefined" || !window.gtag) return;
   window.gtag("event", eventName, params);
 }
-
-export function useAnalytics() {
-  return { track };
-}

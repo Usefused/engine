@@ -54,7 +54,7 @@ func newTestEngineAndRegistry(t *testing.T) (engineURL string, gotPath, gotAPIKe
 			next.ServeHTTP(w, request.WithContext(accesscontrol.ContextWithActor(request.Context(), ownerTestActor(t))))
 		})
 	})
-	registerProxyRoutes(r, proxy, s)
+	registerProxyRoutesWithRuntimeContracts(r, proxy, s, nil)
 
 	engine := httptest.NewServer(r)
 	t.Cleanup(engine.Close)
@@ -173,7 +173,7 @@ func TestExactSDKDownloadRouteWinsBeforeRegistryPrefixMount(t *testing.T) {
 	router.Get("/sdks/{app_id}/download", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-	registerProxyRoutes(router, api.NewRegistryProxy("http://127.0.0.1:0", "registry-license"), &stubStore{accountID: uuid.New()})
+	registerProxyRoutesWithRuntimeContracts(router, api.NewRegistryProxy("http://127.0.0.1:0", "registry-license"), &stubStore{accountID: uuid.New()}, nil)
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/sdks/"+uuid.NewString()+"/download", nil)

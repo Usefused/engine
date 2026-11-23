@@ -12,10 +12,10 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/browserauth"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -131,7 +131,7 @@ func (s *Service) Logout(ctx context.Context, input LogoutInput) error {
 	}
 	result, err := s.store.RevokeCurrentCLICredential(ctx, store.MutationActor{
 		SubjectID: input.Actor.SubjectID, CredentialID: input.Actor.CredentialID,
-		RequestID: input.RequestID, TraceID: traceID(ctx),
+		RequestID: input.RequestID, TraceID: observability.TraceIDFromContext(ctx),
 	})
 	if err != nil {
 		span.SetAttributes(attribute.String("outcome", cliLogoutOutcome(err)))
@@ -147,14 +147,6 @@ func (s *Service) Logout(ctx context.Context, input LogoutInput) error {
 
 func validLogoutActor(actor accesscontrol.Actor) bool {
 	return actor.SubjectID != uuid.Nil && actor.CredentialID != uuid.Nil && actor.CredentialSource == "managed_cli_login"
-}
-
-func traceID(ctx context.Context) string {
-	spanContext := trace.SpanContextFromContext(ctx)
-	if !spanContext.IsValid() {
-		return ""
-	}
-	return spanContext.TraceID().String()
 }
 
 func (s *Service) prepareTransaction(input StartInput) (StartResult, store.CLILoginTransaction, error) {

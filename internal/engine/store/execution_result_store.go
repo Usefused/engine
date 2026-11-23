@@ -285,7 +285,7 @@ func (s *postgresStore) matchExistingRerun(ctx context.Context, record Execution
 		return uuid.Nil, err
 	}
 	// A reused key may return the first ID only when it still describes the same pinned request.
-	if existingVersion != record.AppVersion || !sameRuntimeBucket(existingBucket, record.BucketID) || !bytes.Equal(storedInput, input) {
+	if existingVersion != record.AppVersion || !equalOptionalUUID(existingBucket, record.BucketID) || !bytes.Equal(storedInput, input) {
 		return uuid.Nil, ErrExecutionResultIdempotencyConflict
 	}
 	return existingID, nil

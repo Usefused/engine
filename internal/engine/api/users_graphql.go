@@ -4,15 +4,12 @@ import (
 	"context"
 	"errors"
 
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/graphql/language/ast"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/store"
 )
 
@@ -297,28 +294,27 @@ func revokeUserCredentialGraphQLField(s store.Store) *graphql.Field {
 
 type userMutationResolver func(graphql.ResolveParams, store.UserRepository, store.MutationActor) (interface{}, int64, bool, error)
 
+// userMutationField builds a traced GraphQL mutation for user lifecycle and
+// credential actions, invalidating authorization caches when grants change.
 func userMutationField(resultType graphql.Output, args graphql.FieldConfigArgument, action string, s store.Store, resolve userMutationResolver) *graphql.Field {
-	return &graphql.Field{Type: resultType, Args: args, Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-		ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql."+action)
-		defer span.End()
-		p.Context = ctx
-		repository, err := userRepository(s)
-		if err != nil {
-			return nil, recordUserMutationError(span, err)
-		}
-		actor, err := userMutationActor(ctx)
-		if err != nil {
-			return nil, recordUserMutationError(span, err)
-		}
-		span.SetAttributes(attribute.String("user_action", action), attribute.String("actor_subject_id", actor.SubjectID.String()))
-		payload, revision, changed, err := resolve(p, repository, actor)
-		if err != nil {
-			return nil, userGraphQLError(recordUserMutationError(span, err))
-		}
-		invalidateAuthorizationRevision(ctx, revision, changed, nil)
-		span.SetAttributes(attribute.String("outcome", "success"), attribute.Bool("engine.access.changed", changed))
-		return payload, nil
-	}}
+	return buildTracedGraphQLMutationField(resultType, args, graphQLMutationConfig[store.UserRepository, store.MutationActor]{
+		action:         action,
+		includeAction:  true,
+		loadService:    func() (store.UserRepository, error) { return userRepository(s) },
+		loadActor:      accessMutationActor,
+		actorSubjectID: func(actor store.MutationActor) uuid.UUID { return actor.SubjectID },
+		execute: func(p graphql.ResolveParams, span trace.Span, repository store.UserRepository, actor store.MutationActor) (interface{}, error) {
+			payload, revision, changed, err := resolve(p, repository, actor)
+			// Abort before invalidating cached authorization revisions when the mutation fails.
+			if err != nil {
+				return nil, err
+			}
+			invalidateAuthorizationRevision(p.Context, revision, changed, nil)
+			span.SetAttributes(attribute.Bool("engine.access.changed", changed))
+			return payload, nil
+		},
+		mapResolveError: userGraphQLError,
+	})
 }
 
 func userRepository(s store.Store) (store.UserRepository, error) {
@@ -327,31 +323,6 @@ func userRepository(s store.Store) (store.UserRepository, error) {
 		return nil, errors.New("user management is unavailable")
 	}
 	return repository, nil
-}
-
-func userMutationActor(ctx context.Context) (store.MutationActor, error) {
-	actor, ok := accesscontrol.ActorFromContext(ctx)
-	if !ok {
-		return store.MutationActor{}, accesscontrol.ErrAuthenticationRequired
-	}
-	return store.MutationActor{
-		SubjectID: actor.SubjectID, CredentialID: actor.CredentialID,
-		RequestID: middleware.GetReqID(ctx), TraceID: userMutationTraceID(ctx),
-	}, nil
-}
-
-func userMutationTraceID(ctx context.Context) string {
-	spanContext := trace.SpanContextFromContext(ctx)
-	if !spanContext.IsValid() {
-		return ""
-	}
-	return spanContext.TraceID().String()
-}
-
-func recordUserMutationError(span trace.Span, err error) error {
-	span.RecordError(err)
-	span.SetAttributes(attribute.String("outcome", "failure"))
-	return err
 }
 
 func userListOptions(p graphql.ResolveParams, teamMembers bool) store.UserListOptions {

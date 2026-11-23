@@ -235,7 +235,8 @@ func verifyBucketInWorkspace(ctx context.Context, s store.Store, bucketID uuid.U
 	return err
 }
 
-func writeConnectJSON(w http.ResponseWriter, status int, payload any) {
+// writeJSONStatus writes a JSON response body with the given HTTP status code.
+func writeJSONStatus(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)

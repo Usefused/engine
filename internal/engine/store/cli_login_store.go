@@ -17,7 +17,6 @@ var (
 )
 
 const (
-	CLILoginStatePending  = "pending"
 	CLILoginStateApproved = "approved"
 	CLILoginStateConsumed = "consumed"
 )

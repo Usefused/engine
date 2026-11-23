@@ -219,10 +219,6 @@ func basicAuthSatisfied(auth models.AuthConfig, credentials map[string]any) bool
 	}
 }
 
-func applySelectedAuth(req *http.Request, auths models.AuthConfigs, credentials map[string]any) {
-	_ = applySelectedAuthChecked(req, auths, credentials)
-}
-
 // applySelectedAuthChecked dispatches only validated schemes and propagates credential placement failures.
 func applySelectedAuthChecked(req *http.Request, auths models.AuthConfigs, credentials map[string]any) error {
 	// Validate the complete AND-set before one scheme can overwrite another scheme's credential.

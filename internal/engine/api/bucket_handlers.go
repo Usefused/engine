@@ -84,6 +84,23 @@ func CreateBucketHandler(s store.Store) http.HandlerFunc {
 	}
 }
 
+// requireControlWorkspaceActor verifies an authenticated control-plane actor
+// and workspace binding, writing structured mutation errors on failure.
+func requireControlWorkspaceActor(w http.ResponseWriter, ctx context.Context, action, authRequiredMsg, workspaceFailedMsg string) bool {
+	accountID, err := controlActorAccount(ctx)
+	// Destructive control-plane mutations require an authenticated actor.
+	if err != nil {
+		writeControlAPIMutationError(w, ctx, http.StatusUnauthorized, "authentication_required", authRequiredMsg, "Log in or provide a valid Fused credential.", action, "", "not_committed", "")
+		return false
+	}
+	// Workspace resolution prevents mutations through a foreign identity.
+	if err := verifyWorkspaceActor(ctx, accountID); err != nil {
+		writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "workspace_resolution_failed", workspaceFailedMsg, "Retry and check Engine logs if the problem continues.", action, "", "not_committed", "")
+		return false
+	}
+	return true
+}
+
 // DeleteBucketHandler deletes only the bucket identity authorized by middleware
 // and preserves actionable conflict and not-found diagnostics.
 func DeleteBucketHandler(s store.Store) http.HandlerFunc {
@@ -91,16 +108,8 @@ func DeleteBucketHandler(s store.Store) http.HandlerFunc {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.buckets.delete")
 		defer span.End()
 
-		accountID, err := controlActorAccount(ctx)
-		// Bucket deletion requires an authenticated control-plane actor.
-		if err != nil {
-			writeControlAPIMutationError(w, ctx, http.StatusUnauthorized, "authentication_required", "Authentication is required to delete a bucket.", "Log in or provide a valid Fused credential.", "bucket_delete", "", "not_committed", "")
-			return
-		}
-
-		// Workspace resolution keeps authorization scoped to the actor's workspace.
-		if err := verifyWorkspaceActor(ctx, accountID); err != nil {
-			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "workspace_resolution_failed", "The Engine could not resolve the workspace for bucket deletion.", "Retry and check Engine logs if the problem continues.", "bucket_delete", "", "not_committed", "")
+		// Bucket deletion requires an authenticated workspace-scoped actor.
+		if !requireControlWorkspaceActor(w, ctx, "bucket_delete", "Authentication is required to delete a bucket.", "The Engine could not resolve the workspace for bucket deletion.") {
 			return
 		}
 

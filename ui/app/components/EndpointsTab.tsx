@@ -2,29 +2,10 @@ import { filterOperationMethods, isVisibleOperationMethod, operationMethods } fr
 import { ServiceCatalogHeader, ServiceCatalogOptions } from "~/components/integration-details/ServiceCatalogHeader";
 import { Select } from "./forms/Select.ts";
 import { ChevronDown, ChevronRight, Loader2, Search } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type { IntegrationObject, ServiceGenerationResult } from "~/lib/api";
 import { EndpointRow } from "~/components/EndpointRow";
-
-const ObserverTarget = ({ onIntersect, disabled }: { onIntersect: () => void, disabled: boolean }) => {
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (disabled || !ref.current) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          onIntersect();
-        }
-      },
-      { rootMargin: "100px" }
-    );
-    observer.observe(ref.current);
-    return () => observer.disconnect();
-  }, [onIntersect, disabled]);
-
-  return <div ref={ref} className="h-4 w-full flex justify-center items-center py-2">{!disabled && <Loader2 className="w-4 h-4 animate-spin text-slate-400" />}</div>;
-};
+import { ObserverTarget } from "~/components/ObserverTarget";
 
 interface EndpointsTabProps {
   res: ServiceGenerationResult;

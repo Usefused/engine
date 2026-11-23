@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/entitlement"
 	"github.com/Usefused/engine/internal/engine/mcpskill"
 	"github.com/Usefused/engine/internal/engine/sandbox"
@@ -40,13 +39,13 @@ func MCPConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.mcp_config.plan")
 		defer span.End()
-		actor, ok := accesscontrol.ActorFromContext(ctx)
+		actor, ok := requireConfigActor(w, ctx, span, "plan_admission")
+		// Reject unauthenticated MCP plan requests before parsing the request payload.
 		if !ok {
-			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
 		req, doc, err := decodeAppConfigPlanRequest(r, store.AppKindMCP.String())
+		// Reject malformed MCP config requests before planning.
 		if err != nil {
 			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "plan_admission", "", "not_committed"), ctx)
 			return
@@ -63,14 +62,7 @@ func MCPConfigPlanHandler(configStore store.ConfigRepository, s store.Store, reg
 			return
 		}
 		span.SetAttributes(attribute.String("outcome", "success"), attribute.String("plan_id", result.plan.ID.String()))
-		writeJSON(w, map[string]any{
-			"plan_id": result.plan.ID.String(), "config_key": result.plan.ConfigKey,
-			"owner_type":  planOwnerType(result.plan),
-			"source_hash": result.plan.SourceHash, "base_generation": result.plan.BaseGeneration,
-			"required_permissions": result.plan.RequiredPermissions,
-			"summary":              result.summary, "notifications": result.notifications,
-			"credential_readiness": result.readiness,
-		})
+		writeAppConfigPlanResponse(w, result)
 	}
 }
 
@@ -80,31 +72,17 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.mcp_config.apply")
 		defer span.End()
-		actor, ok := accesscontrol.ActorFromContext(ctx)
+		call, ok := decodeAuthorizedConfigApplyCall(w, r, ctx, span, "")
+		// Reject unauthenticated, malformed, or unauthorized apply requests before execution.
 		if !ok {
-			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, "request_admission", "", "not_committed"), ctx)
 			return
 		}
-		req, planID, err := decodeSDKConfigApplyRequest(r)
-		if err != nil {
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "request_admission", "", "not_committed"), ctx)
-			return
-		}
-		planRevision, ok := AuthorizedPlanRevisionFromContext(ctx)
-		if !ok {
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, "apply_admission", planID.String(), "not_committed"), ctx)
-			return
-		}
-		span.SetAttributes(attribute.String("actor.type", string(actor.Kind)))
-		result, err := executeMCPConfigApply(ctx, configStore, s, registryClient, sdkApplyCall{
-			apiKey: r.Header.Get("X-API-Key"), accountID: actor.AccountID, actor: actor,
-			planID: planID, planRevision: planRevision, sourceHash: req.SourceHash,
-			skipToken: req.SkipToken,
-		})
+		span.SetAttributes(attribute.String("actor.type", string(call.actor.Kind)))
+		result, err := executeMCPConfigApply(ctx, configStore, s, registryClient, call)
+		// Surface execution errors with unknown commit state so callers verify before retrying.
 		if err != nil {
 			span.SetStatus(codes.Error, "mcp config apply failed")
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "apply_execution", planID.String(), "unknown"), ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "apply_execution", call.planID.String(), "unknown"), ctx)
 			return
 		}
 		span.SetAttributes(
@@ -113,10 +91,11 @@ func MCPConfigApplyHandler(configStore store.ConfigRepository, s store.Store, re
 			attribute.String("app.family_id", result.AppFamilyID.String()),
 			attribute.String("app.id", result.RuntimeID.String()),
 		)
+		// Set non-cacheable headers whenever a newly minted execution token is returned.
 		if result.ExecutionToken != "" {
 			setOneTimeSecretResponseHeaders(w)
 		}
-		writeJSON(w, mcpConfigApplyResponse(planID, result, mcpTransportURLsForApp(r, result.AppFamilyID, result.RuntimeID, result.RuntimeID)))
+		writeJSON(w, mcpConfigApplyResponse(call.planID, result, mcpTransportURLsForApp(r, result.AppFamilyID, result.RuntimeID, result.RuntimeID)))
 	}
 }
 

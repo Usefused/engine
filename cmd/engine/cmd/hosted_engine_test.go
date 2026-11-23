@@ -36,7 +36,7 @@ func TestHostedUpgradeAuthorizationAndProxy(t *testing.T) {
 			actor := actorWithGrants(t, workspace, grants...)
 			router := chi.NewRouter()
 			router.Use(controlAuthorizationMiddleware(accesscontrol.SnapshotAuthorizer{}))
-			registerProxyRoutes(router, api.NewRegistryProxy(registry.URL, "server-license"), &stubStore{accountID: actor.AccountID})
+			registerProxyRoutesWithRuntimeContracts(router, api.NewRegistryProxy(registry.URL, "server-license"), &stubStore{accountID: actor.AccountID}, nil)
 			request := requestWithActor(t, "POST", "/account/engine/upgrade", actor)
 			request.Body = http.NoBody
 			request.Header.Set("Authorization", "Bearer personal-credential")

@@ -107,7 +107,7 @@ func StartConnectSessionHandler(s store.Store, verifier ServiceVerifier, masterK
 		}
 		span.SetAttributes(connectAdminAttrs("connect.session.start", call)...)
 		span.SetAttributes(connectSessionStartTelemetry(response)...)
-		writeConnectJSON(w, http.StatusOK, response)
+		writeJSONStatus(w, http.StatusOK, response)
 	}
 }
 
@@ -1750,7 +1750,7 @@ func writeConnectRuntimeError(w http.ResponseWriter, ctx context.Context, err er
 	var httpErr connectRuntimeHTTPError
 	// Reviewed runtime errors retain safe status and message details for callers.
 	if errors.As(err, &httpErr) {
-		remediation := connectRuntimeErrorRemediation(httpErr.status)
+		_, category, remediation := connectRuntimeStatusMetadata(httpErr.status)
 		// Reviewed configuration failures can direct operators to the exact missing startup setting.
 		if strings.TrimSpace(httpErr.remediation) != "" {
 			remediation = httpErr.remediation
@@ -1761,7 +1761,7 @@ func writeConnectRuntimeError(w http.ResponseWriter, ctx context.Context, err er
 		}
 		writeWorkspaceConfigError(w, workspaceConfigHTTPError{
 			status: httpErr.status, code: connectRuntimeErrorCode(httpErr), message: httpErr.message,
-			category: connectRuntimeErrorCategory(httpErr.status), remediation: remediation,
+			category: category, remediation: remediation,
 			phase: phase, commitState: commitState,
 		}, ctx)
 		return
@@ -1832,59 +1832,29 @@ func connectRuntimeVariableErrorCode(status int, message string) string {
 	if strings.HasPrefix(trimmed, "provider returned error:") {
 		return "connect_provider_denied"
 	}
-	return connectRuntimeStatusErrorCode(status)
+	code, _, _ := connectRuntimeStatusMetadata(status)
+	return code
 }
 
-// connectRuntimeStatusErrorCode provides a stable fallback when a future safe
-// diagnostic has not yet gained a more precise reviewed code.
-func connectRuntimeStatusErrorCode(status int) string {
-	// HTTP families provide deterministic fallback codes without depending on mutable prose.
+// connectRuntimeStatusMetadata maps each connect runtime HTTP status family to
+// its fallback error code, dependency category, and safe remediation in one
+// switch so status mappings cannot drift apart.
+func connectRuntimeStatusMetadata(status int) (code, category, remediation string) {
+	// Ownership boundaries follow HTTP status classes: caller, auth, config, dependency, or Engine.
 	switch status {
 	case http.StatusBadRequest:
-		return "invalid_connect_request"
+		return "invalid_connect_request", "", "Correct the request fields or service connection policy and retry."
 	case http.StatusUnauthorized:
-		return "connect_authentication_required"
+		return "connect_authentication_required", "", "Log in or provide a valid Fused credential before retrying."
 	case http.StatusForbidden:
-		return "connect_permission_denied"
+		return "connect_permission_denied", "", "Use an authorized app and bucket binding with the required connect scope."
 	case http.StatusNotFound:
-		return "connect_resource_not_found"
+		return "connect_resource_not_found", "", "Store the complete OAuth/OIDC application credential pair in the selected bucket using fused-cli connect."
 	case http.StatusConflict:
-		return "connect_configuration_conflict"
+		return "connect_configuration_conflict", "", "Reapply the app or service configuration before starting a new connection."
 	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return "connect_dependency_unavailable"
+		return "connect_dependency_unavailable", "dependency", "Retry after the provider or Registry dependency is available."
 	default:
-		return "connect_runtime_failed"
-	}
-}
-
-// connectRuntimeErrorCategory marks upstream failures as dependencies while
-// allowing the shared writer to derive ordinary status categories.
-func connectRuntimeErrorCategory(status int) string {
-	// Gateway statuses represent provider or Registry dependencies, not Engine validation.
-	if status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout {
-		return "dependency"
-	}
-	return ""
-}
-
-// connectRuntimeErrorRemediation gives each status family one safe recovery
-// action without repeating request values or internal failure detail.
-func connectRuntimeErrorRemediation(status int) string {
-	// Recovery follows the HTTP ownership boundary: caller, authorization, configuration, dependency, or Engine.
-	switch status {
-	case http.StatusBadRequest:
-		return "Correct the request fields or service connection policy and retry."
-	case http.StatusUnauthorized:
-		return "Log in or provide a valid Fused credential before retrying."
-	case http.StatusForbidden:
-		return "Use an authorized app and bucket binding with the required connect scope."
-	case http.StatusNotFound:
-		return "Store the complete OAuth/OIDC application credential pair in the selected bucket using fused-cli connect."
-	case http.StatusConflict:
-		return "Reapply the app or service configuration before starting a new connection."
-	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return "Retry after the provider or Registry dependency is available."
-	default:
-		return "Retry and use the request or trace ID to inspect Engine logs if the problem continues."
+		return "connect_runtime_failed", "", "Retry and use the request or trace ID to inspect Engine logs if the problem continues."
 	}
 }

@@ -82,6 +82,61 @@ export async function deleteAppFamilies(familyIds: string[], dependencies: Famil
   return result;
 }
 
+export interface SingleAppFamilyDeletionInput {
+  familyId: string;
+  name: string;
+  kindLabel: string;
+  redirectTo: string;
+  listVersions: (familyId: string) => Promise<AppVersionIdentity[]>;
+  deactivate: (appId: string) => Promise<unknown>;
+  archiveFamily: (familyId: string) => Promise<unknown>;
+  toast: {
+    confirm: (message: string) => Promise<boolean>;
+    success: (message: string) => void;
+    error: (message: string) => void;
+  };
+  navigate: (to: string) => void;
+  setDeleting: (deleting: boolean) => void;
+}
+
+/** Confirms, deactivates, and archives a single app family while presenting consistent toast feedback and navigation. */
+export async function deleteAppFamilyWithFeedback(input: SingleAppFamilyDeletionInput): Promise<void> {
+  input.setDeleting(true);
+  try {
+    const result = await deleteAppFamilies([input.familyId], {
+      listVersions: input.listVersions,
+      confirm: ({ versionCount }) =>
+        input.toast.confirm(
+          // Show exact version cleanup scope when active runtimes must be removed before archiving.
+          versionCount > 0
+            ? `Delete ${input.kindLabel} "${input.name}"? This permanently deactivates all ${versionCount} version(s) and removes its runtime. Its name becomes reusable and its historical identity remains in Archive.`
+            : `Delete ${input.kindLabel} "${input.name}"? Its name becomes reusable and its historical identity remains in Archive.`
+        ),
+      deactivate: input.deactivate,
+      archiveFamily: input.archiveFamily,
+    });
+    // Cancellation preserves the app family and all of its versions.
+    if (result.cancelled) return;
+    // Full archive success notifies the user and returns to the apps catalogue.
+    if (result.deletedFamilies.length === 1) {
+      input.toast.success(`${input.kindLabel} "${input.name}" deleted and moved to Archive.`);
+      input.navigate(input.redirectTo);
+      return;
+    }
+    input.toast.error(
+      `Failed to delete ${input.kindLabel} "${input.name}". Deactivated ${result.deactivatedVersions} version(s); ${result.failedVersions} version deactivation(s) failed.`
+    );
+    // Leave the detail route if any version was already deactivated so the user is not stranded on a removed version URL.
+    if (result.deactivatedVersions > 0) input.navigate(input.redirectTo);
+  } catch (cause) {
+    input.toast.error(
+      `Failed to delete ${input.kindLabel}: ${cause instanceof Error ? cause.message : String(cause)}`
+    );
+  } finally {
+    input.setDeleting(false);
+  }
+}
+
 /** Removes only the reviewed version snapshot through the normal per-version cleanup path. */
 export async function deactivateFamilyVersions(familyIds: string[], dependencies: DeactivationDependencies): Promise<FamilyDeactivationResult> {
   const families = [...new Set(familyIds)];

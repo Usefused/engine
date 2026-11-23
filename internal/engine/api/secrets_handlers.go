@@ -55,10 +55,8 @@ func UpsertSecretHandler(s store.Store, masterKey []byte) http.HandlerFunc {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.secrets.upsert")
 		defer span.End()
 
-		status, message, ok := secretAdminWorkspace(ctx, s, r)
-		// Authentication and workspace failures are already reduced to safe local copy.
-		if !ok {
-			writeControlAPIMutationError(w, ctx, status, secretAdminErrorCode(status), message, secretAdminRemediation(status), "secret_upsert", "", "not_committed", "")
+		// Authentication and workspace checks share the standard secret-admin error contract.
+		if !requireControlWorkspaceActor(w, ctx, "secret_upsert", "Authentication is required to manage secrets.", "The Engine could not resolve the workspace for secret management.") {
 			return
 		}
 
@@ -74,15 +72,9 @@ func UpsertSecretHandler(s store.Store, masterKey []byte) http.HandlerFunc {
 			return
 		}
 
-		bucketID, status, err := resolveSecretBucketID(ctx, s, payload.BucketID)
-		// Bucket resolution distinguishes invalid input from absent defaults.
-		if err != nil {
-			writeControlAPIMutationError(w, ctx, status, "secret_bucket_resolution_failed", err.Error(), "Provide an existing bucket ID or configure a default bucket.", "secret_upsert", "", "not_committed", "")
-			return
-		}
-		// Exact lookup prevents secret writes to unknown buckets.
-		if err := verifyBucketInWorkspace(ctx, s, bucketID); err != nil {
-			writeBucketMutationLookupError(ctx, w, err, "secret_upsert")
+		bucketID, ok := resolveAuthorizedSecretBucket(ctx, w, s, payload.BucketID, "secret_upsert")
+		// Abort before encryption if the target bucket cannot be resolved in this workspace.
+		if !ok {
 			return
 		}
 
@@ -119,10 +111,8 @@ func UpsertSecretsHandler(s store.Store, masterKey []byte) http.HandlerFunc {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.secrets.bulk_upsert")
 		defer span.End()
 
-		status, message, ok := secretAdminWorkspace(ctx, s, r)
-		// Authentication and workspace failures are already reduced to safe local copy.
-		if !ok {
-			writeControlAPIMutationError(w, ctx, status, secretAdminErrorCode(status), message, secretAdminRemediation(status), "secret_bulk_upsert", "", "not_committed", "")
+		// Authentication and workspace checks share the standard secret-admin error contract.
+		if !requireControlWorkspaceActor(w, ctx, "secret_bulk_upsert", "Authentication is required to manage secrets.", "The Engine could not resolve the workspace for secret management.") {
 			return
 		}
 
@@ -132,15 +122,9 @@ func UpsertSecretsHandler(s store.Store, masterKey []byte) http.HandlerFunc {
 			writeControlAPIMutationError(w, ctx, http.StatusBadRequest, "invalid_secret_request", err.Error(), "Check the paired credential fields and retry.", "secret_bulk_upsert", "", "not_committed", "")
 			return
 		}
-		bucketID, status, err := resolveSecretBucketID(ctx, s, payload.BucketID)
-		// Bucket resolution distinguishes invalid input from absent defaults.
-		if err != nil {
-			writeControlAPIMutationError(w, ctx, status, "secret_bucket_resolution_failed", err.Error(), "Provide an existing bucket ID or configure a default bucket.", "secret_bulk_upsert", "", "not_committed", "")
-			return
-		}
-		// Exact lookup prevents secret writes to unknown buckets.
-		if err := verifyBucketInWorkspace(ctx, s, bucketID); err != nil {
-			writeBucketMutationLookupError(ctx, w, err, "secret_bulk_upsert")
+		bucketID, ok := resolveAuthorizedSecretBucket(ctx, w, s, payload.BucketID, "secret_bulk_upsert")
+		// Abort before expanding or encrypting rows if the target bucket is invalid or absent.
+		if !ok {
 			return
 		}
 		secretPayloads, err := expandSecretBulkPayload(payload)
@@ -223,39 +207,21 @@ func expandOAuthApplicationFamily(family CredentialFamilyUpsertPayload) ([]Secre
 	}, nil
 }
 
-// secretAdminWorkspace is shared by single and batch writes so credential
-// handlers do not drift on authorization or workspace-resolution semantics.
-func secretAdminWorkspace(ctx context.Context, s store.Store, r *http.Request) (int, string, bool) {
-	accountID, err := controlActorAccount(ctx)
-	// Anonymous callers cannot mutate workspace credential material.
+// resolveAuthorizedSecretBucket resolves an explicit or default secret bucket
+// ID and confirms its workspace membership, writing structured mutation errors on failure.
+func resolveAuthorizedSecretBucket(ctx context.Context, w http.ResponseWriter, s store.Store, rawBucketID, action string) (uuid.UUID, bool) {
+	bucketID, status, err := resolveSecretBucketID(ctx, s, rawBucketID)
+	// Bucket resolution distinguishes invalid input from absent defaults.
 	if err != nil {
-		return http.StatusUnauthorized, "Authentication is required to manage secrets.", false
+		writeControlAPIMutationError(w, ctx, status, "secret_bucket_resolution_failed", err.Error(), "Provide an existing bucket ID or configure a default bucket.", action, "", "not_committed", "")
+		return uuid.Nil, false
 	}
-	// Workspace resolution is required before any bucket-scoped secret operation.
-	if err := verifyWorkspaceActor(ctx, accountID); err != nil {
-		return http.StatusInternalServerError, "The Engine could not resolve the workspace for secret management.", false
+	// Exact lookup prevents secret mutations against unknown buckets.
+	if err := verifyBucketInWorkspace(ctx, s, bucketID); err != nil {
+		writeBucketMutationLookupError(ctx, w, err, action)
+		return uuid.Nil, false
 	}
-	return http.StatusOK, "", true
-}
-
-// secretAdminErrorCode returns a stable code for the two authorization setup
-// failures emitted by secretAdminWorkspace.
-func secretAdminErrorCode(status int) string {
-	// Only an authentication status represents a caller credential problem.
-	if status == http.StatusUnauthorized {
-		return "authentication_required"
-	}
-	return "workspace_resolution_failed"
-}
-
-// secretAdminRemediation supplies status-appropriate next steps without
-// relying on mutable error text.
-func secretAdminRemediation(status int) string {
-	// Authentication failures are fixed by credentials, not Engine retries.
-	if status == http.StatusUnauthorized {
-		return "Log in or provide a valid Fused credential."
-	}
-	return "Retry and check Engine logs if the problem continues."
+	return bucketID, true
 }
 
 // decodeSecretBulkUpsertPayload rejects unknown fields so mistyped auth
@@ -573,16 +539,8 @@ func DeleteSecretHandler(s store.Store) http.HandlerFunc {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.secrets.delete")
 		defer span.End()
 
-		accountID, err := controlActorAccount(ctx)
-		// Secret deletion requires an authenticated control-plane actor.
-		if err != nil {
-			writeControlAPIMutationError(w, ctx, http.StatusUnauthorized, "authentication_required", "Authentication is required to delete a secret.", "Log in or provide a valid Fused credential.", "secret_delete", "", "not_committed", "")
-			return
-		}
-
-		// Workspace resolution prevents deletion through a foreign identity.
-		if err := verifyWorkspaceActor(ctx, accountID); err != nil {
-			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "workspace_resolution_failed", "The Engine could not resolve the workspace for secret deletion.", "Retry and check Engine logs if the problem continues.", "secret_delete", "", "not_committed", "")
+		// Secret deletion requires an authenticated workspace-scoped actor.
+		if !requireControlWorkspaceActor(w, ctx, "secret_delete", "Authentication is required to delete a secret.", "The Engine could not resolve the workspace for secret deletion.") {
 			return
 		}
 
@@ -601,15 +559,9 @@ func DeleteSecretHandler(s store.Store) http.HandlerFunc {
 			return
 		}
 
-		bucketID, status, err := resolveSecretBucketID(ctx, s, r.URL.Query().Get("bucket_id"))
-		// Omitted bucket IDs may resolve only through the authoritative default.
-		if err != nil {
-			writeControlAPIMutationError(w, ctx, status, "secret_bucket_resolution_failed", err.Error(), "Provide an existing bucket ID or configure a default bucket.", "secret_delete", "", "not_committed", "")
-			return
-		}
-		// Exact lookup prevents deletion from an unknown bucket.
-		if err := verifyBucketInWorkspace(ctx, s, bucketID); err != nil {
-			writeBucketMutationLookupError(ctx, w, err, "secret_delete")
+		bucketID, ok := resolveAuthorizedSecretBucket(ctx, w, s, r.URL.Query().Get("bucket_id"), "secret_delete")
+		// Abort before deleting if the target bucket cannot be verified in this workspace.
+		if !ok {
 			return
 		}
 

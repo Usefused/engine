@@ -379,12 +379,37 @@ func prepareServiceContractWebhookRows(webhooks []fusedobject.Webhook) ([]servic
 	return rows, nil
 }
 
-func replaceServiceContractEndpoints(ctx context.Context, tx pgx.Tx, snapshotID uuid.UUID, rows []serviceContractEndpointRow) error {
-	if _, err := tx.Exec(ctx, `DELETE FROM fused_service_contract_endpoints WHERE snapshot_id = $1`, snapshotID); err != nil {
-		return fmt.Errorf("replace service contract endpoints: delete: %w", err)
+// replaceServiceContractRows clears an existing snapshot child table and inserts
+// replacement rows in bounded JSONB batches inside the caller's transaction.
+func replaceServiceContractRows[T any](
+	ctx context.Context,
+	tx pgx.Tx,
+	snapshotID uuid.UUID,
+	label, deleteSQL, insertSQL string,
+	rows []T,
+) error {
+	// Clear prior child rows before inserting the replacement contract snapshot.
+	if _, err := tx.Exec(ctx, deleteSQL, snapshotID); err != nil {
+		return fmt.Errorf("replace %s: delete: %w", label, err)
 	}
 	return writeServiceContractBatches(rows, func(payload []byte) error {
-		if _, err := tx.Exec(ctx, `
+		// Fail the transaction if any bounded JSONB batch insert fails.
+		if _, err := tx.Exec(ctx, insertSQL, snapshotID, payload); err != nil {
+			return fmt.Errorf("replace %s: insert batch: %w", label, err)
+		}
+		return nil
+	})
+}
+
+// replaceServiceContractEndpoints replaces all endpoint rows for a service contract snapshot.
+func replaceServiceContractEndpoints(ctx context.Context, tx pgx.Tx, snapshotID uuid.UUID, rows []serviceContractEndpointRow) error {
+	return replaceServiceContractRows(
+		ctx,
+		tx,
+		snapshotID,
+		"service contract endpoints",
+		`DELETE FROM fused_service_contract_endpoints WHERE snapshot_id = $1`,
+		`
 			INSERT INTO fused_service_contract_endpoints (
 				snapshot_id, endpoint_id, name, method, path, normalized_path, operation_json
 			)
@@ -393,30 +418,29 @@ func replaceServiceContractEndpoints(ctx context.Context, tx pgx.Tx, snapshotID 
 			FROM jsonb_to_recordset($2::jsonb) AS records(
 				endpoint_id uuid, name text, method text, path text,
 				normalized_path text, operation_json jsonb
-			)`, snapshotID, payload); err != nil {
-			return fmt.Errorf("replace service contract endpoints: insert batch: %w", err)
-		}
-		return nil
-	})
+			)`,
+		rows,
+	)
 }
 
+// replaceServiceContractWebhooks replaces all webhook rows for a service contract snapshot.
 func replaceServiceContractWebhooks(ctx context.Context, tx pgx.Tx, snapshotID uuid.UUID, rows []serviceContractWebhookRow) error {
-	if _, err := tx.Exec(ctx, `DELETE FROM fused_service_contract_webhooks WHERE snapshot_id = $1`, snapshotID); err != nil {
-		return fmt.Errorf("replace service contract webhooks: delete: %w", err)
-	}
-	return writeServiceContractBatches(rows, func(payload []byte) error {
-		if _, err := tx.Exec(ctx, `
+	return replaceServiceContractRows(
+		ctx,
+		tx,
+		snapshotID,
+		"service contract webhooks",
+		`DELETE FROM fused_service_contract_webhooks WHERE snapshot_id = $1`,
+		`
 			INSERT INTO fused_service_contract_webhooks (
 				snapshot_id, webhook_id, name, method, webhook_json
 			)
 			SELECT $1, records.webhook_id, records.name, records.method, records.webhook_json
 			FROM jsonb_to_recordset($2::jsonb) AS records(
 				webhook_id uuid, name text, method text, webhook_json jsonb
-			)`, snapshotID, payload); err != nil {
-			return fmt.Errorf("replace service contract webhooks: insert batch: %w", err)
-		}
-		return nil
-	})
+			)`,
+		rows,
+	)
 }
 
 func writeServiceContractBatches[T any](rows []T, write func([]byte) error) error {
@@ -434,26 +458,42 @@ func writeServiceContractBatches[T any](rows []T, write func([]byte) error) erro
 	return nil
 }
 
-// GetServiceContractMetadata validates one exact local snapshot before its immutable dictionary enters the runtime cache.
-func (s *postgresStore) GetServiceContractMetadata(ctx context.Context, serviceID, serviceVersionID uuid.UUID) (*fusedobject.ServiceMetadata, error) {
+// queryValidatedServiceContractPayload loads a snapshot's execution envelope
+// and JSONB payload, rejecting missing snapshots and incompatible contracts
+// before callers decode the payload.
+func (s *postgresStore) queryValidatedServiceContractPayload(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (fusedobject.ExecutionContractEnvelope, []byte, error) {
 	var envelope fusedobject.ExecutionContractEnvelope
 	var payload []byte
-	err := s.db.QueryRow(ctx, `
+	err := s.db.QueryRow(ctx, query, args...).Scan(&envelope.ContractVersion, &envelope.RequiredCapabilities, &payload)
+	// Missing snapshots are recoverable only through explicit activation, never a mutable Registry fallback.
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fusedobject.ExecutionContractEnvelope{}, nil, ErrServiceContractSnapshotNotFound
+	}
+	// Database errors remain distinct from an authoritative missing snapshot.
+	if err != nil {
+		return fusedobject.ExecutionContractEnvelope{}, nil, err
+	}
+	// Stored capability declarations must validate before decoding executable contract payloads.
+	if err := validatePersistedExecutionContract(envelope); err != nil {
+		return fusedobject.ExecutionContractEnvelope{}, nil, err
+	}
+	return envelope, payload, nil
+}
+
+// GetServiceContractMetadata validates one exact local snapshot before its immutable dictionary enters the runtime cache.
+func (s *postgresStore) GetServiceContractMetadata(ctx context.Context, serviceID, serviceVersionID uuid.UUID) (*fusedobject.ServiceMetadata, error) {
+	envelope, payload, err := s.queryValidatedServiceContractPayload(ctx, `
 		SELECT contract_version, required_capabilities, service_metadata
 		FROM fused_service_contract_snapshots
 		WHERE service_id = $1 AND service_version_id = $2`,
 		serviceID, serviceVersionID,
-	).Scan(&envelope.ContractVersion, &envelope.RequiredCapabilities, &payload)
-	// Missing snapshots are recoverable only through explicit activation, never a mutable Registry fallback.
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrServiceContractSnapshotNotFound
-	}
-	// Database errors remain distinct from an authoritative missing snapshot.
+	)
+	// Propagate snapshot lookup or contract-compatibility errors before unmarshaling.
 	if err != nil {
-		return nil, err
-	}
-	// Stored capability declarations must validate before decoding executable metadata.
-	if err := validatePersistedExecutionContract(envelope); err != nil {
 		return nil, err
 	}
 	var metadata fusedobject.ServiceMetadata
@@ -552,10 +592,9 @@ func collectServiceContractMetadata(rows serviceContractMetadataRows, result map
 	return result, rows.Err()
 }
 
+// GetServiceContractEndpointByName loads one validated operation definition from a local snapshot.
 func (s *postgresStore) GetServiceContractEndpointByName(ctx context.Context, serviceID, serviceVersionID uuid.UUID, endpointName string) (*fusedobject.Endpoint, error) {
-	var envelope fusedobject.ExecutionContractEnvelope
-	var payload []byte
-	err := s.db.QueryRow(ctx, `
+	_, payload, err := s.queryValidatedServiceContractPayload(ctx, `
 		SELECT snapshots.contract_version, snapshots.required_capabilities, endpoints.operation_json
 		FROM fused_service_contract_snapshots snapshots
 		LEFT JOIN fused_service_contract_endpoints endpoints
@@ -564,20 +603,17 @@ func (s *postgresStore) GetServiceContractEndpointByName(ctx context.Context, se
 		WHERE snapshots.service_id = $1
 		  AND snapshots.service_version_id = $2`,
 		serviceID, serviceVersionID, endpointName,
-	).Scan(&envelope.ContractVersion, &envelope.RequiredCapabilities, &payload)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrServiceContractSnapshotNotFound
-	}
+	)
+	// Propagate snapshot lookup or contract-compatibility errors before inspecting the joined endpoint.
 	if err != nil {
 		return nil, err
 	}
-	if err := validatePersistedExecutionContract(envelope); err != nil {
-		return nil, err
-	}
+	// A nil left-joined operation payload distinguishes an unknown endpoint from a missing snapshot.
 	if payload == nil {
 		return nil, ErrServiceContractEndpointNotFound
 	}
 	var endpoint fusedobject.Endpoint
+	// Reject corrupted endpoint JSON before returning it to the execution runtime.
 	if err := json.Unmarshal(payload, &endpoint); err != nil {
 		return nil, fmt.Errorf("decode service contract endpoint: %w", err)
 	}

@@ -92,13 +92,13 @@ func WebhookConfigPlanHandler(configStore store.ConfigRepository, s store.Store,
 			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusForbidden, message: "webhook ingestion not enabled on current plan"}, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
-		actor, ok := accesscontrol.ActorFromContext(ctx)
+		actor, ok := requireConfigActor(w, ctx, span, "plan_admission")
+		// Reject unauthenticated webhook plan requests before parsing the request payload.
 		if !ok {
-			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
 		req, doc, err := decodeWebhookConfigPlanRequest(r)
+		// Reject invalid webhook config documents before planning.
 		if err != nil {
 			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "plan_admission", "", "not_committed"), ctx)
 			return
@@ -140,36 +140,23 @@ func WebhookConfigApplyHandler(configStore store.ConfigRepository, s store.Store
 			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusForbidden, message: "webhook ingestion not enabled on current plan"}, "request_admission", "", "not_committed"), ctx)
 			return
 		}
-		actor, ok := accesscontrol.ActorFromContext(ctx)
+		call, ok := decodeAuthorizedConfigApplyCall(w, r, ctx, span, "")
+		// Reject unauthenticated, malformed, or unauthorized apply requests before execution.
 		if !ok {
-			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, "request_admission", "", "not_committed"), ctx)
 			return
 		}
-		req, planID, err := decodeSDKConfigApplyRequest(r)
-		if err != nil {
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "request_admission", "", "not_committed"), ctx)
-			return
-		}
-		planRevision, ok := AuthorizedPlanRevisionFromContext(ctx)
-		if !ok {
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, "apply_admission", planID.String(), "not_committed"), ctx)
-			return
-		}
-		result, err := executeWebhookConfigApply(ctx, configStore, s, verifier, registryClient, sdkApplyCall{
-			apiKey: r.Header.Get("X-API-Key"), accountID: actor.AccountID, actor: actor,
-			planID: planID, planRevision: planRevision, sourceHash: req.SourceHash,
-		})
+		result, err := executeWebhookConfigApply(ctx, configStore, s, verifier, registryClient, call)
+		// Surface execution errors with unknown commit state so callers verify before retrying.
 		if err != nil {
 			span.SetStatus(codes.Error, "webhook config apply failed")
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "apply_execution", planID.String(), "unknown"), ctx)
+			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "apply_execution", call.planID.String(), "unknown"), ctx)
 			return
 		}
 		span.SetAttributes(
 			attribute.String("outcome", "success"), attribute.String("webhook.name", result.Name),
 			attribute.Int("webhook.registrations", len(result.Applied)),
 		)
-		writeJSON(w, webhookConfigApplyResponse(planID, result))
+		writeJSON(w, webhookConfigApplyResponse(call.planID, result))
 	}
 }
 

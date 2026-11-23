@@ -460,7 +460,7 @@ func (h *runtimeOAuthHandler) token(w http.ResponseWriter, r *http.Request) {
 		writeOAuthTokenError(w, oauthTokenErrorStatus(err), oauthTokenErrorCode(err))
 		return
 	}
-	writeOAuthJSON(w, 200, result)
+	writeJSONStatus(w, 200, result)
 }
 
 // revoke authenticates the registered client and retires only its own dedicated runtime token.
@@ -479,5 +479,5 @@ func (h *runtimeOAuthHandler) revoke(w http.ResponseWriter, r *http.Request) {
 		writeOAuthTokenError(w, oauthTokenErrorStatus(err), oauthTokenErrorCode(err))
 		return
 	}
-	writeOAuthJSON(w, 200, map[string]any{})
+	writeJSONStatus(w, 200, map[string]any{})
 }

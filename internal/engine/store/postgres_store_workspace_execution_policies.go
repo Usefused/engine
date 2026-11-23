@@ -93,13 +93,32 @@ func (s *postgresStore) GetEffectiveWorkspaceExecutionPolicyOverride(ctx context
 	return override, err
 }
 
-func (s *postgresStore) GetEffectiveWorkspaceExecutionPolicyOverrides(ctx context.Context, refs []WorkspaceExecutionPolicyRef) (map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, error) {
+// queryWorkspaceExecutionPolicyOverrides loads workspace execution policy rows
+// for a batch of service/version refs using the caller's join semantics.
+func (s *postgresStore) queryWorkspaceExecutionPolicyOverrides(
+	ctx context.Context,
+	opName, query string,
+	refs []WorkspaceExecutionPolicyRef,
+) (map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, error) {
 	result := make(map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, len(refs))
+	// Avoid issuing an empty unnest query when no refs were requested.
 	if len(refs) == 0 {
 		return result, nil
 	}
 	serviceIDs, versionIDs := workspaceExecutionPolicyRefArrays(refs)
-	rows, err := s.db.Query(ctx, `
+	rows, err := s.db.Query(ctx, query, serviceIDs, versionIDs)
+	// Preserve the caller's method name on SQL query failures.
+	if err != nil {
+		return nil, fmt.Errorf("%s: query: %w", opName, err)
+	}
+	defer rows.Close()
+	return collectWorkspaceExecutionPolicyOverrides(rows, result)
+}
+
+// GetEffectiveWorkspaceExecutionPolicyOverrides resolves each service/version
+// ref to its version-specific override or falls back to the service-level row.
+func (s *postgresStore) GetEffectiveWorkspaceExecutionPolicyOverrides(ctx context.Context, refs []WorkspaceExecutionPolicyRef) (map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, error) {
+	return s.queryWorkspaceExecutionPolicyOverrides(ctx, "GetEffectiveWorkspaceExecutionPolicyOverrides", `
 		SELECT input.service_id, input.service_version_id,
 		       policy.id, policy.service_id, policy.service_version_id,
 		       policy.rate_limit, policy.retry_config, policy.timeout_ms, policy.pagination,
@@ -111,21 +130,12 @@ func (s *postgresStore) GetEffectiveWorkspaceExecutionPolicyOverrides(ctx contex
 			WHERE candidate.service_id = input.service_id
 			  AND (candidate.service_version_id = input.service_version_id OR candidate.service_version_id IS NULL)
 			ORDER BY candidate.service_version_id NULLS LAST LIMIT 1
-		) policy ON TRUE`, serviceIDs, versionIDs)
-	if err != nil {
-		return nil, fmt.Errorf("GetEffectiveWorkspaceExecutionPolicyOverrides: query: %w", err)
-	}
-	defer rows.Close()
-	return collectWorkspaceExecutionPolicyOverrides(rows, result)
+		) policy ON TRUE`, refs)
 }
 
+// GetWorkspaceExecutionPolicyOverrides loads exact service/version execution policy rows without fallback.
 func (s *postgresStore) GetWorkspaceExecutionPolicyOverrides(ctx context.Context, refs []WorkspaceExecutionPolicyRef) (map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, error) {
-	result := make(map[WorkspaceExecutionPolicyRef]*WorkspaceExecutionPolicyOverride, len(refs))
-	if len(refs) == 0 {
-		return result, nil
-	}
-	serviceIDs, versionIDs := workspaceExecutionPolicyRefArrays(refs)
-	rows, err := s.db.Query(ctx, `
+	return s.queryWorkspaceExecutionPolicyOverrides(ctx, "GetWorkspaceExecutionPolicyOverrides", `
 		SELECT input.service_id, input.service_version_id,
 		       policy.id, policy.service_id, policy.service_version_id,
 		       policy.rate_limit, policy.retry_config, policy.timeout_ms, policy.pagination,
@@ -135,12 +145,7 @@ func (s *postgresStore) GetWorkspaceExecutionPolicyOverrides(ctx context.Context
 		JOIN fused_workspace_execution_policies policy
 		  ON policy.service_id = input.service_id
 		 AND policy.service_version_id IS NOT DISTINCT FROM
-		     NULLIF(input.service_version_id, '00000000-0000-0000-0000-000000000000'::uuid)`, serviceIDs, versionIDs)
-	if err != nil {
-		return nil, fmt.Errorf("GetWorkspaceExecutionPolicyOverrides: query: %w", err)
-	}
-	defer rows.Close()
-	return collectWorkspaceExecutionPolicyOverrides(rows, result)
+		     NULLIF(input.service_version_id, '00000000-0000-0000-0000-000000000000'::uuid)`, refs)
 }
 
 func workspaceExecutionPolicyRefArrays(refs []WorkspaceExecutionPolicyRef) ([]uuid.UUID, []uuid.UUID) {

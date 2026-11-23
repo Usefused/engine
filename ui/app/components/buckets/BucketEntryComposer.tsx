@@ -408,6 +408,49 @@ function BucketSecretFields({
   );
 }
 
+type SecretStringField = "username" | "password" | "certificate" | "privateKey" | "clientId" | "clientSecret";
+
+/** Renders a non-secret identifier field paired with a masked secret input for two-part credentials. */
+function PairedSecretFields({
+  secret,
+  setSecret,
+  primaryLabel,
+  primaryPlaceholder,
+  primaryField,
+  secondaryLabel,
+  secondaryPlaceholder,
+  secondaryField,
+}: {
+  secret: typeof emptySecret;
+  setSecret: (updater: (prev: typeof emptySecret) => typeof emptySecret) => void;
+  primaryLabel: string;
+  primaryPlaceholder: string;
+  primaryField: SecretStringField;
+  secondaryLabel: string;
+  secondaryPlaceholder: string;
+  secondaryField: SecretStringField;
+}) {
+  return (
+    <>
+      <ComposerInput
+        label={primaryLabel}
+        value={secret[primaryField]}
+        placeholder={primaryPlaceholder}
+        onChange={(next) => setSecret((prev) => ({ ...prev, [primaryField]: next }))}
+      />
+      <ComposerInput
+        label={secondaryLabel}
+        type="password"
+        data-fused-visible="false"
+        value={secret[secondaryField]}
+        placeholder={secondaryPlaceholder}
+        onChange={(next) => setSecret((prev) => ({ ...prev, [secondaryField]: next }))}
+      />
+    </>
+  );
+}
+
+/** Selects the credential input fields matching the active service auth scheme. */
 function SecretValueFields({
   authOption,
   secret,
@@ -423,16 +466,51 @@ function SecretValueFields({
   // has no auth options): there's no way to know which fields to collect, so
   // render nothing instead of a token box no one can fill in meaningfully.
   if (!authOption) return null;
+  // HTTP basic auth requires separate username and password inputs.
   if (authOption.required_fields.includes("username")) {
-    return <BasicSecretFields secret={secret} setSecret={setSecret} />;
+    return (
+      <PairedSecretFields
+        secret={secret}
+        setSecret={setSecret}
+        primaryLabel="Username"
+        primaryPlaceholder="Username"
+        primaryField="username"
+        secondaryLabel="Password"
+        secondaryPlaceholder="Password"
+        secondaryField="password"
+      />
+    );
   }
+  // mTLS credentials pair a client certificate PEM with its private key PEM.
   if (authOption.required_fields.includes("certificate")) {
-    return <MTLSSecretFields secret={secret} setSecret={setSecret} />;
+    return (
+      <PairedSecretFields
+        secret={secret}
+        setSecret={setSecret}
+        primaryLabel="Certificate"
+        primaryPlaceholder="Client certificate PEM"
+        primaryField="certificate"
+        secondaryLabel="Private key"
+        secondaryPlaceholder="Client private key PEM"
+        secondaryField="privateKey"
+      />
+    );
   }
   // OAuth/OIDC store an application client pair rather than a single opaque
   // token, so they get dedicated Client ID / Client secret inputs.
   if (authOption.required_fields.includes("client_id")) {
-    return <ClientCredentialFields secret={secret} setSecret={setSecret} />;
+    return (
+      <PairedSecretFields
+        secret={secret}
+        setSecret={setSecret}
+        primaryLabel="Client ID"
+        primaryPlaceholder="Client ID"
+        primaryField="clientId"
+        secondaryLabel="Client secret"
+        secondaryPlaceholder="Client secret"
+        secondaryField="clientSecret"
+      />
+    );
   }
   return (
     <ComposerInput
@@ -442,66 +520,6 @@ function SecretValueFields({
       placeholder={tokenPlaceholder(authOption.auth_type)}
       onChange={(next) => setSecret((prev) => ({ ...prev, value: next }))}
     />
-  );
-}
-
-function BasicSecretFields({
-  secret,
-  setSecret,
-}: {
-  secret: typeof emptySecret;
-  setSecret: (
-    updater: (prev: typeof emptySecret) => typeof emptySecret
-  ) => void;
-}) {
-  return (
-    <>
-      <ComposerInput
-        label="Username"
-        value={secret.username}
-        placeholder="Username"
-        onChange={(username) => setSecret((prev) => ({ ...prev, username }))}
-      />
-      <ComposerInput
-        label="Password"
-        type="password" data-fused-visible="false"
-        value={secret.password}
-        placeholder="Password"
-        onChange={(password) => setSecret((prev) => ({ ...prev, password }))}
-      />
-    </>
-  );
-}
-
-function MTLSSecretFields({
-  secret,
-  setSecret,
-}: {
-  secret: typeof emptySecret;
-  setSecret: (
-    updater: (prev: typeof emptySecret) => typeof emptySecret
-  ) => void;
-}) {
-  return (
-    <>
-      <ComposerInput
-        label="Certificate"
-        value={secret.certificate}
-        placeholder="Client certificate PEM"
-        onChange={(certificate) =>
-          setSecret((prev) => ({ ...prev, certificate }))
-        }
-      />
-      <ComposerInput
-        label="Private key"
-        type="password" data-fused-visible="false"
-        value={secret.privateKey}
-        placeholder="Client private key PEM"
-        onChange={(privateKey) =>
-          setSecret((prev) => ({ ...prev, privateKey }))
-        }
-      />
-    </>
   );
 }
 
@@ -558,36 +576,6 @@ function QualifierSelect({
         )}
       </Select>
     </label>
-  );
-}
-
-function ClientCredentialFields({
-  secret,
-  setSecret,
-}: {
-  secret: typeof emptySecret;
-  setSecret: (
-    updater: (prev: typeof emptySecret) => typeof emptySecret
-  ) => void;
-}) {
-  return (
-    <>
-      <ComposerInput
-        label="Client ID"
-        value={secret.clientId}
-        placeholder="Client ID"
-        onChange={(clientId) => setSecret((prev) => ({ ...prev, clientId }))}
-      />
-      <ComposerInput
-        label="Client secret"
-        type="password" data-fused-visible="false"
-        value={secret.clientSecret}
-        placeholder="Client secret"
-        onChange={(clientSecret) =>
-          setSecret((prev) => ({ ...prev, clientSecret }))
-        }
-      />
-    </>
   );
 }
 

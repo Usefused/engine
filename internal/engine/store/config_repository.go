@@ -39,8 +39,6 @@ const (
 	ConfigPlanStatusPending    ConfigPlanStatus = "pending"
 	ConfigPlanStatusApplied    ConfigPlanStatus = "applied"
 	ConfigPlanStatusSuperseded ConfigPlanStatus = "superseded"
-	ConfigPlanStatusStale      ConfigPlanStatus = "stale"
-	ConfigPlanStatusFailed     ConfigPlanStatus = "failed"
 )
 
 type WorkspaceNotificationStatus string
@@ -1424,7 +1422,7 @@ func markConfigPlanApplied(ctx context.Context, tx pgx.Tx, params ApplyConfigPla
 		  AND (config_type NOT IN ('workspace', 'sdk', 'unified_app') OR apply_lease_id = $7)
 		  AND status = 'pending'
 	`, params.PlanID, params.State.ConfigKey, params.State.ConfigType,
-		params.State.SourceHash, params.BaseGeneration, params.ExpectedRevision, nullableApplyLease(params.ApplyLeaseID))
+		params.State.SourceHash, params.BaseGeneration, params.ExpectedRevision, nullableUUID(params.ApplyLeaseID))
 	if err != nil {
 		return fmt.Errorf("ApplyConfigPlan: mark applied: %w", err)
 	}
@@ -1663,13 +1661,6 @@ func (r *postgresConfigRepository) ReleaseConfigPlanApply(ctx context.Context, p
 		return fmt.Errorf("ReleaseConfigPlanApply: %w", err)
 	}
 	return nil
-}
-
-func nullableApplyLease(id uuid.UUID) any {
-	if id == uuid.Nil {
-		return nil
-	}
-	return id
 }
 
 // workspaceNotificationDedupeMatchSQL is CreateWorkspaceNotification's

@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -884,13 +886,9 @@ func (r *storeBackedControlRequirementResolver) bucketNameRequirements(ctx conte
 	return requirements, nil
 }
 
+// mapKeys returns the map's keys in sorted order for deterministic requirement emission.
 func mapKeys[V any](values map[string]V) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
+	return slices.Sorted(maps.Keys(values))
 }
 
 func requestMatchesConfigType(path string, configType store.ConfigType) bool {

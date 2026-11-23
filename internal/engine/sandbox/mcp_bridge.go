@@ -3,12 +3,12 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"net/http"
+	"strings"
+
 	"github.com/Usefused/engine/internal/engine/auth"
 	"github.com/Usefused/engine/internal/engine/bridgehost"
 	"github.com/Usefused/engine/internal/shared/models"
-	"net/http"
-	"strings"
 )
 
 // MCPBridgeAdapter exposes immutable app bindings without admitting arbitrary local destinations.
@@ -47,27 +47,15 @@ func appendBridgeMCPTools(ctx context.Context, result map[string]any, admission 
 	if len(bindings) == 0 {
 		return nil
 	}
-	tools, ok := result["tools"].([]any)
-	// Only the established execute catalogue may be extended.
-	if !ok {
-		return errors.New("invalid MCP catalogue")
+	extraVariants := make([]any, 0, len(bindings))
+	for _, b := range bindings {
+		extraVariants = append(extraVariants, mcpExecuteAliasVariant("bridge:"+b.Alias, b.InputSchema))
 	}
-	for _, raw := range tools {
-		tool, ok := raw.(map[string]any)
-		// Other MCP tools keep their existing schemas.
-		if !ok || tool["name"] != "execute" {
-			continue
-		}
-		variants := []any{tool["inputSchema"]}
-		for _, b := range bindings {
-			variants = append(variants, map[string]any{"type": "object", "properties": map[string]any{"operation": map[string]any{"const": "bridge:" + b.Alias}, "input": b.InputSchema}, "required": []string{"operation", "input"}, "additionalProperties": false})
-		}
-		tool["inputSchema"] = map[string]any{"type": "object", "oneOf": variants}
-		tool["description"] = mcpModernExecuteToolDescription + " Call a selected local Bridge capability using bridge:alias and its typed input."
-		delete(tool, "outputSchema")
-		return nil
-	}
-	return errors.New("MCP execute tool unavailable")
+	return appendMCPExecuteAliasVariants(
+		result,
+		extraVariants,
+		" Call a selected local Bridge capability using bridge:alias and its typed input.",
+	)
 }
 
 // handleBridgeMCPCall dispatches a selected alias once and preserves uncertain command outcomes.

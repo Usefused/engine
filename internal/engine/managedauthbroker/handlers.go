@@ -1,6 +1,7 @@
 package managedauthbroker
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -41,19 +42,24 @@ type enrollRequest struct {
 	Ticket string `json:"ticket"`
 }
 
-// enrollHandler exchanges a single-use Registry proof without exposing internal persistence failures.
-func enrollHandler(service *Service) http.HandlerFunc {
+// handleBrokerTokenRequest validates a bounded JSON bearer request and maps
+// credential rejections versus transient broker storage outages consistently.
+func handleBrokerTokenRequest[Req any](
+	validate func(Req) bool,
+	missingFieldMsg, invalidCredentialMsg string,
+	execute func(context.Context, Req) (TokenResponse, error),
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req enrollRequest
+		var req Req
 		// Reject missing or oversized bearer requests before invoking the service.
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxManagedAuthBrokerBodyBytes)).Decode(&req); err != nil || req.Ticket == "" {
-			writeBrokerError(w, http.StatusBadRequest, "ticket is required")
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxManagedAuthBrokerBodyBytes)).Decode(&req); err != nil || !validate(req) {
+			writeBrokerError(w, http.StatusBadRequest, missingFieldMsg)
 			return
 		}
-		result, err := service.Enroll(r.Context(), req.Ticket)
+		result, err := execute(r.Context(), req)
 		// Only explicit credential rejection warrants authentication recovery on the consumer.
 		if errors.Is(err, ErrInvalidTicket) {
-			writeBrokerError(w, http.StatusUnauthorized, "ticket is invalid, expired, or already used")
+			writeBrokerError(w, http.StatusUnauthorized, invalidCredentialMsg)
 			return
 		}
 		// Transient storage failure must not be confused with consumed credentials.
@@ -63,6 +69,18 @@ func enrollHandler(service *Service) http.HandlerFunc {
 		}
 		writeTokenResponse(w, result)
 	}
+}
+
+// enrollHandler exchanges a single-use Registry proof without exposing internal persistence failures.
+func enrollHandler(service *Service) http.HandlerFunc {
+	return handleBrokerTokenRequest(
+		func(req enrollRequest) bool { return req.Ticket != "" },
+		"ticket is required",
+		"ticket is invalid, expired, or already used",
+		func(ctx context.Context, req enrollRequest) (TokenResponse, error) {
+			return service.Enroll(ctx, req.Ticket)
+		},
+	)
 }
 
 type refreshRequest struct {
@@ -72,26 +90,14 @@ type refreshRequest struct {
 
 // refreshHandler distinguishes an invalid bearer from a retryable broker outage.
 func refreshHandler(service *Service) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req refreshRequest
-		// Reject missing or oversized bearer requests before invoking the service.
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxManagedAuthBrokerBodyBytes)).Decode(&req); err != nil || req.RefreshToken == "" || req.Ticket == "" {
-			writeBrokerError(w, http.StatusBadRequest, "refresh_token and ticket are required")
-			return
-		}
-		result, err := service.Refresh(r.Context(), req.RefreshToken, req.Ticket)
-		// Only explicit credential rejection warrants authentication recovery on the consumer.
-		if errors.Is(err, ErrInvalidTicket) {
-			writeBrokerError(w, http.StatusUnauthorized, "refresh_token is invalid, expired, or already used")
-			return
-		}
-		// Transient storage failure must not be confused with consumed credentials.
-		if err != nil {
-			writeBrokerError(w, http.StatusServiceUnavailable, "managed-auth broker temporarily unavailable")
-			return
-		}
-		writeTokenResponse(w, result)
-	}
+	return handleBrokerTokenRequest(
+		func(req refreshRequest) bool { return req.RefreshToken != "" && req.Ticket != "" },
+		"refresh_token and ticket are required",
+		"refresh_token is invalid, expired, or already used",
+		func(ctx context.Context, req refreshRequest) (TokenResponse, error) {
+			return service.Refresh(ctx, req.RefreshToken, req.Ticket)
+		},
+	)
 }
 
 func writeBrokerJSON(w http.ResponseWriter, status int, v any) {

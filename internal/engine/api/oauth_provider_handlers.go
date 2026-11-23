@@ -559,7 +559,7 @@ func oauthTokenHandler(exchange oauthTokenExchange) http.HandlerFunc {
 			writeOAuthTokenError(w, oauthTokenErrorStatus(err), oauthTokenErrorCode(err))
 			return
 		}
-		writeOAuthJSON(w, http.StatusOK, map[string]any{
+		writeJSONStatus(w, http.StatusOK, map[string]any{
 			"access_token": response.AccessToken, "refresh_token": response.RefreshToken,
 			"token_type": response.TokenType, "expires_in": response.ExpiresIn,
 			"scope": strings.Join(response.Scope, " "),
@@ -662,7 +662,7 @@ func oauthRegistrationHandler(maxBytes int64, register func(*http.Request) (any,
 			writeOAuthTokenError(w, oauthTokenErrorStatus(err), oauthTokenErrorCode(err))
 			return
 		}
-		writeOAuthJSON(w, http.StatusCreated, response)
+		writeJSONStatus(w, http.StatusCreated, response)
 	}
 }
 
@@ -708,7 +708,7 @@ func oauthConnectedAppsListHandler(service OAuthProviderService) http.HandlerFun
 			accesscontrol.WriteAuthorizationError(w, err, r.Context())
 			return
 		}
-		writeOAuthJSON(w, http.StatusOK, map[string]any{"connected_apps": projectOAuthConnectedApps(apps)})
+		writeJSONStatus(w, http.StatusOK, map[string]any{"connected_apps": projectOAuthConnectedApps(apps)})
 	}
 }
 
@@ -768,13 +768,7 @@ func oauthIssuerMetadataHandler(issuer, endpoints string, scopes any, registrati
 		metadata["registration_endpoint"] = registration
 	}
 	// Discovery contains only public configuration and uses the same JSON serializer as token responses.
-	return func(w http.ResponseWriter, r *http.Request) { writeOAuthJSON(w, http.StatusOK, metadata) }
-}
-
-func writeOAuthJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	return func(w http.ResponseWriter, r *http.Request) { writeJSONStatus(w, http.StatusOK, metadata) }
 }
 
 func setOAuthResponseHeaders(w http.ResponseWriter) {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, NotificationServiceRef, WorkspaceNotification } from "~/lib/api";
+import { api, WorkspaceNotification } from "~/lib/api";
 import { isPending, isUnresolved } from "./notificationHelpers";
+import { useNotificationServiceRefs, useNotificationStatusUpdater } from "./useNotificationShared";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
 import { hasWorkspacePermission } from "~/lib/current-actor-access";
 import { canReadWorkspaceNotifications } from "~/lib/activity-access";
@@ -25,33 +26,14 @@ export function useWorkspaceNotifications(enabled = true) {
   // Engine would correctly deny and prevents notification UI from flashing.
   const shouldLoad = enabled && !accessLoading && !accessFailed && canRead;
   const [items, setItems] = useState<WorkspaceNotification[]>([]);
-  const [serviceRefs, setServiceRefs] = useState<Record<string, NotificationServiceRef>>({});
+  const { serviceRefs, loadServiceRefs } = useNotificationServiceRefs();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadServiceRefs = useCallback((loadedItems: WorkspaceNotification[]) => {
-    const ids = Array.from(
-      new Set(loadedItems.map((item) => item.service_id).filter((id): id is string => !!id))
-    );
-    if (ids.length === 0) return;
-    api.workspace
-      .listServiceRefsByIds(ids)
-      .then((refs) => {
-        setServiceRefs((prev) => {
-          const next = { ...prev };
-          for (const ref of refs) next[ref.id] = ref;
-          return next;
-        });
-      })
-      .catch((err) => {
-        // Non-fatal: rows fall back to showing the bare service_id.
-        console.error("Failed to resolve notification service names:", err);
-      });
-  }, []);
-
   const refresh = useCallback(() => {
-		if (!shouldLoad) return Promise.resolve();
-		setLoading(true);
+    // Do not issue workspace notification reads before authorization completes.
+    if (!shouldLoad) return Promise.resolve();
+    setLoading(true);
     setError(null);
     return api.workspace
       .listNotifications()
@@ -68,31 +50,11 @@ export function useWorkspaceNotifications(enabled = true) {
   }, [shouldLoad, loadServiceRefs]);
 
   useEffect(() => {
+    // Load notifications only after read authorization succeeds.
     if (shouldLoad) refresh();
   }, [shouldLoad, refresh]);
 
-  // Optimistic update: apply the new status locally immediately, then
-  // reconcile with the server. If the server rejects it (e.g. someone else
-  // already dismissed it), refresh() re-syncs to the true state.
-  const updateStatus = useCallback(
-    (id: string, status: "acknowledged" | "dismissed") => {
-      // UI actions fail closed while access is unavailable; the Engine remains
-      // authoritative if a caller bypasses this presentation layer.
-      if (!canUpdate) return Promise.reject(new Error("Notification update access is not available"));
-      setItems((prev) =>
-        prev.map((item) => (item.id === id ? { ...item, status } : item))
-      );
-      return api.workspace.updateNotificationStatus(id, status).catch((err) => {
-        console.error(`Failed to mark notification ${status}:`, err);
-        refresh();
-        throw err;
-      });
-    },
-    [canUpdate, refresh]
-  );
-
-  const markRead = useCallback((id: string) => updateStatus(id, "acknowledged"), [updateStatus]);
-  const dismiss = useCallback((id: string) => updateStatus(id, "dismissed"), [updateStatus]);
+  const { markRead, dismiss } = useNotificationStatusUpdater(canUpdate, setItems, refresh, false);
 
   const unresolved = items.filter(isUnresolved);
   const pendingCount = items.filter(isPending).length;

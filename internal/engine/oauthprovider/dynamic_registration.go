@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/go-chi/chi/v5/middleware"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -78,7 +79,7 @@ func (s *Service) registerClient(ctx context.Context, input store.OAuthClientReg
 	}
 	expiresAt := s.now().Add(ephemeralClientTTL)
 	input.ClientID, input.ExpiresAt = clientID, &expiresAt
-	input.Actor = store.MutationActor{RequestID: middleware.GetReqID(ctx), TraceID: traceID(ctx)}
+	input.Actor = store.MutationActor{RequestID: middleware.GetReqID(ctx), TraceID: observability.TraceIDFromContext(ctx)}
 	result, err := s.store.RegisterOAuthClient(ctx, input)
 	// No registration is successful until persistence and its audit commit together.
 	if err != nil {

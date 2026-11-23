@@ -188,42 +188,35 @@ func (s *postgresStore) GetBucketSummary(ctx context.Context, bucketID uuid.UUID
 	return &summary, nil
 }
 
-func (s *postgresStore) GetBucket(ctx context.Context, bucketID uuid.UUID) (*Bucket, error) {
+// getBucket executes a single-row bucket lookup and maps missing rows to ErrBucketNotFound.
+func (s *postgresStore) getBucket(ctx context.Context, whereClause string, arg any) (*Bucket, error) {
 	query := `
 		SELECT id, name, is_default, created_at, updated_at
 		FROM fused_buckets
-		WHERE id = $1
-	`
+		WHERE ` + whereClause
 	var b Bucket
-	err := s.db.QueryRow(ctx, query, bucketID).Scan(
+	err := s.db.QueryRow(ctx, query, arg).Scan(
 		&b.ID, &b.Name, &b.IsDefault, &b.CreatedAt, &b.UpdatedAt,
 	)
+	// Map pgx.ErrNoRows to the domain not-found sentinel expected by handlers.
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrBucketNotFound
 	}
+	// Propagate database or scan failures unchanged.
 	if err != nil {
 		return nil, err
 	}
 	return &b, nil
 }
 
+// GetBucket loads a bucket by its primary UUID.
+func (s *postgresStore) GetBucket(ctx context.Context, bucketID uuid.UUID) (*Bucket, error) {
+	return s.getBucket(ctx, "id = $1", bucketID)
+}
+
+// GetBucketByName loads a bucket by its unique name.
 func (s *postgresStore) GetBucketByName(ctx context.Context, name string) (*Bucket, error) {
-	query := `
-		SELECT id, name, is_default, created_at, updated_at
-		FROM fused_buckets
-		WHERE name = $1
-	`
-	var b Bucket
-	err := s.db.QueryRow(ctx, query, name).Scan(
-		&b.ID, &b.Name, &b.IsDefault, &b.CreatedAt, &b.UpdatedAt,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrBucketNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &b, nil
+	return s.getBucket(ctx, "name = $1", name)
 }
 
 func (s *postgresStore) DeleteBucket(ctx context.Context, name string, authorizedBucketID uuid.UUID) error {
@@ -368,30 +361,14 @@ func (s *postgresStore) GetBucketValues(ctx context.Context, bucketID, serviceID
 	return s.collectBucketValues(ctx, query, bucketID, serviceID, keyNames)
 }
 
+// ListBucketValues returns all non-secret values stored in the specified bucket.
 func (s *postgresStore) ListBucketValues(ctx context.Context, bucketID uuid.UUID) ([]BucketValue, error) {
 	query := `
 		SELECT id, bucket_id, service_id, key_name, location, value, created_at, updated_at
 		FROM fused_bucket_values
 		WHERE bucket_id = $1
 	`
-	rows, err := s.db.Query(ctx, query, bucketID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var values []BucketValue
-	for rows.Next() {
-		var v BucketValue
-		if err := rows.Scan(
-			&v.ID, &v.BucketID, &v.ServiceID, &v.KeyName, &v.Location, &v.Value,
-			&v.CreatedAt, &v.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		values = append(values, v)
-	}
-	return values, rows.Err()
+	return s.collectBucketValues(ctx, query, bucketID)
 }
 
 func (s *postgresStore) ListBucketValuePage(ctx context.Context, bucketID uuid.UUID, limit, offset int) ([]BucketValue, int, error) {

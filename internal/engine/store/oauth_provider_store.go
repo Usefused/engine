@@ -27,10 +27,9 @@ const (
 	OAuthClientConfidential = oauthserver.OAuthClientConfidential
 	OAuthClientPublic       = oauthserver.OAuthClientPublic
 
-	maxOAuthClientNameLength  = 200
-	maxOAuthRedirectURIs      = 10
-	maxOAuthScopeCount        = 64
-	oauthAuthorizationCodeTTL = 60 * time.Second
+	maxOAuthClientNameLength = 200
+	maxOAuthRedirectURIs     = 10
+	maxOAuthScopeCount       = 64
 )
 
 // Shared sentinel identity preserves protocol error translation through wrapped storage failures.

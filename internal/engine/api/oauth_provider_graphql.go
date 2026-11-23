@@ -8,8 +8,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/graphql-go/graphql"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
@@ -69,11 +67,13 @@ var createOAuthClientGraphQLInput = graphql.NewInputObject(graphql.InputObjectCo
 	},
 })
 
+// oauthClientsGraphQLField lists all registered OAuth clients for the workspace.
 func oauthClientsGraphQLField(service OAuthProviderService) *graphql.Field {
 	return &graphql.Field{
 		Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(oauthClientGraphQLType))),
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			clients, err := oauthProviderFromField(service).ListClients(p.Context)
+			clients, err := service.ListClients(p.Context)
+			// Map persistence errors through the sanitized OAuth GraphQL error formatter.
 			if err != nil {
 				return nil, oauthGraphQLError(err)
 			}
@@ -164,31 +164,22 @@ type oauthMutationResolver func(graphql.ResolveParams, OAuthProviderService, acc
 // wrapper without the Teams-specific SSO entitlement gate, which does not
 // apply to OAuth client management.
 func oauthMutationField(resultType graphql.Output, args graphql.FieldConfigArgument, action string, service OAuthProviderService, resolve oauthMutationResolver) *graphql.Field {
-	return &graphql.Field{Type: resultType, Args: args, Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-		ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql."+action)
-		defer span.End()
-		p.Context = ctx
-		s := oauthProviderFromField(service)
-		if s == nil {
-			return nil, recordOAuthMutationError(span, errors.New("OAuth provider management is unavailable"))
-		}
-		actor, err := oauthMutationActor(ctx)
-		if err != nil {
-			return nil, recordOAuthMutationError(span, err)
-		}
-		span.SetAttributes(attribute.String("actor_subject_id", actor.SubjectID.String()))
-		result, err := resolve(p, s, actor)
-		if err != nil {
-			recordOAuthMutationError(span, err)
-			return nil, oauthGraphQLError(err)
-		}
-		span.SetAttributes(attribute.String("outcome", "success"))
-		return result, nil
-	}}
-}
-
-func oauthProviderFromField(service OAuthProviderService) OAuthProviderService {
-	return service
+	return buildTracedGraphQLMutationField(resultType, args, graphQLMutationConfig[OAuthProviderService, accesscontrol.Actor]{
+		action: action,
+		loadService: func() (OAuthProviderService, error) {
+			// Reject OAuth client mutations when the provider service is not wired.
+			if service == nil {
+				return nil, errors.New("OAuth provider management is unavailable")
+			}
+			return service, nil
+		},
+		loadActor:      oauthMutationActor,
+		actorSubjectID: func(actor accesscontrol.Actor) uuid.UUID { return actor.SubjectID },
+		execute: func(p graphql.ResolveParams, _ trace.Span, svc OAuthProviderService, actor accesscontrol.Actor) (interface{}, error) {
+			return resolve(p, svc, actor)
+		},
+		mapResolveError: oauthGraphQLError,
+	})
 }
 
 func oauthMutationActor(ctx context.Context) (accesscontrol.Actor, error) {
@@ -197,12 +188,6 @@ func oauthMutationActor(ctx context.Context) (accesscontrol.Actor, error) {
 		return accesscontrol.Actor{}, accesscontrol.ErrAuthenticationRequired
 	}
 	return actor, nil
-}
-
-func recordOAuthMutationError(span trace.Span, err error) error {
-	span.RecordError(err)
-	span.SetAttributes(attribute.String("outcome", "failure"))
-	return err
 }
 
 func oauthGraphQLError(err error) error {

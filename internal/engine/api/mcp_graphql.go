@@ -814,85 +814,110 @@ func deployMCPServerField(configStore store.ConfigRepository, s store.Store, reg
 	}
 }
 
-func deprecateAppGraphQLField(s store.Store) *graphql.Field {
+// appLifecycleMutationField builds a traced GraphQL boolean mutation that
+// resolves the authenticated actor and target app before running a lifecycle transition.
+func appLifecycleMutationField(
+	s store.Store,
+	args graphql.FieldConfigArgument,
+	spanName, errPrefix, outcome string,
+	prepare func(graphql.ResolveParams) (func(context.Context, accesscontrol.Actor, *store.App) error, error),
+) *graphql.Field {
 	return &graphql.Field{
 		Type: graphql.Boolean,
-		Args: graphql.FieldConfigArgument{
+		Args: args,
+		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			actor, app, err := appLifecycleGraphQLTarget(p, s)
+			// Authentication and target app lookup must succeed before opening a mutation span.
+			if err != nil {
+				return nil, err
+			}
+			apply, err := prepare(p)
+			// Reject malformed mutation arguments before invoking lifecycle state changes.
+			if err != nil {
+				return nil, err
+			}
+			ctx, span := otel.Tracer("engine").Start(p.Context, spanName)
+			defer span.End()
+			span.SetAttributes(attribute.String("actor.type", string(actor.Kind)), attribute.String("app.id", app.AppID.String()))
+			// Record span failure metadata and preserve the operation prefix on transition errors.
+			if err := apply(ctx, actor, app); err != nil {
+				recordAppLifecycleGraphQLError(span, err)
+				return nil, fmt.Errorf("%s: %w", errPrefix, err)
+			}
+			span.SetAttributes(attribute.String("outcome", outcome))
+			return true, nil
+		},
+	}
+}
+
+// deprecateAppGraphQLField marks an app as deprecated with an operator message and optional deactivation date.
+func deprecateAppGraphQLField(s store.Store) *graphql.Field {
+	return appLifecycleMutationField(
+		s,
+		graphql.FieldConfigArgument{
 			"app_id":                  &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
 			"message":                 &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)},
 			"planned_deactivation_at": &graphql.ArgumentConfig{Type: graphql.String},
 		},
-		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			actor, app, err := appLifecycleGraphQLTarget(p, s)
-			if err != nil {
-				return nil, err
-			}
+		"engine.graphql.app.deprecate",
+		"deprecate app",
+		"deprecated",
+		func(p graphql.ResolveParams) (func(context.Context, accesscontrol.Actor, *store.App) error, error) {
 			message := strings.TrimSpace(p.Args["message"].(string))
+			// A deprecation notice must give downstream consumers actionable guidance.
 			if message == "" {
 				return nil, errors.New("message is required")
 			}
 			plannedAt, err := optionalGraphQLTime(p.Args["planned_deactivation_at"])
+			// Reject unparseable deactivation timestamps before mutating app state.
 			if err != nil {
 				return nil, err
 			}
-			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.app.deprecate")
-			defer span.End()
-			span.SetAttributes(attribute.String("actor.type", string(actor.Kind)), attribute.String("app.id", app.AppID.String()))
-			if err := applifecycle.New(s).Deprecate(ctx, app.AppID, message, plannedAt); err != nil {
-				recordAppLifecycleGraphQLError(span, err)
-				return nil, fmt.Errorf("deprecate app: %w", err)
-			}
-			span.SetAttributes(attribute.String("outcome", "deprecated"))
-			return true, nil
+			return func(ctx context.Context, _ accesscontrol.Actor, app *store.App) error {
+				return applifecycle.New(s).Deprecate(ctx, app.AppID, message, plannedAt)
+			}, nil
 		},
-	}
+	)
 }
 
+// undeprecateAppGraphQLField restores a deprecated app back to active status.
 func undeprecateAppGraphQLField(s store.Store) *graphql.Field {
-	return &graphql.Field{
-		Type: graphql.Boolean,
-		Args: graphql.FieldConfigArgument{"app_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)}},
-		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			actor, app, err := appLifecycleGraphQLTarget(p, s)
-			if err != nil {
-				return nil, err
-			}
-			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.app.undeprecate")
-			defer span.End()
-			span.SetAttributes(attribute.String("actor.type", string(actor.Kind)), attribute.String("app.id", app.AppID.String()))
-			if err := applifecycle.New(s).Undeprecate(ctx, app.AppID); err != nil {
-				recordAppLifecycleGraphQLError(span, err)
-				return nil, fmt.Errorf("undeprecate app: %w", err)
-			}
-			span.SetAttributes(attribute.String("outcome", "active"))
-			return true, nil
+	return appLifecycleMutationField(
+		s,
+		graphql.FieldConfigArgument{"app_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)}},
+		"engine.graphql.app.undeprecate",
+		"undeprecate app",
+		"active",
+		func(graphql.ResolveParams) (func(context.Context, accesscontrol.Actor, *store.App) error, error) {
+			return func(ctx context.Context, _ accesscontrol.Actor, app *store.App) error {
+				return applifecycle.New(s).Undeprecate(ctx, app.AppID)
+			}, nil
 		},
-	}
+	)
 }
 
+// deactivateAppGraphQLField deactivates an app and terminates live MCP sessions when applicable.
 func deactivateAppGraphQLField(s store.Store) *graphql.Field {
-	return &graphql.Field{
-		Type: graphql.Boolean,
-		Args: graphql.FieldConfigArgument{"app_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)}},
-		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			actor, app, err := appLifecycleGraphQLTarget(p, s)
-			if err != nil {
-				return nil, err
-			}
-			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.app.deactivate")
-			defer span.End()
-			span.SetAttributes(attribute.String("actor.type", string(actor.Kind)), attribute.String("app.id", app.AppID.String()))
-			if err := applifecycle.New(s).Deactivate(ctx, app.AppID, actor.SubjectID); err != nil {
-				recordAppLifecycleGraphQLError(span, err)
-				return nil, fmt.Errorf("deactivate app: %w", err)
-			}
-			if app.GeneratorVersion == "" {
-				sandbox.TerminateMCPSessionsForApp(app.AppID.String())
-			}
-			span.SetAttributes(attribute.String("outcome", "deactivated"))
-			return true, nil
+	return appLifecycleMutationField(
+		s,
+		graphql.FieldConfigArgument{"app_id": &graphql.ArgumentConfig{Type: graphql.NewNonNull(graphql.String)}},
+		"engine.graphql.app.deactivate",
+		"deactivate app",
+		"deactivated",
+		func(graphql.ResolveParams) (func(context.Context, accesscontrol.Actor, *store.App) error, error) {
+			return func(ctx context.Context, actor accesscontrol.Actor, app *store.App) error {
+				// Persist deactivation before dropping active runtime sessions.
+				if err := applifecycle.New(s).Deactivate(ctx, app.AppID, actor.SubjectID); err != nil {
+					return err
+				}
+				// MCP-only apps (no SDK generator version) terminate live sessions immediately on deactivation.
+				if app.GeneratorVersion == "" {
+					sandbox.TerminateMCPSessionsForApp(app.AppID.String())
+				}
+				return nil
+			}, nil
 		},
-	}
+	)
 }
 
 func recordAppLifecycleGraphQLError(span trace.Span, err error) {

@@ -53,12 +53,15 @@ func TestCleanupExpiredExecutionEventsStopsAfterStoreError(t *testing.T) {
 	}
 }
 
-func TestStartExecutionRetentionWorkerRejectsDisabledConfiguration(t *testing.T) {
+// TestStartDynamicExecutionRetentionWorkerRejectsDisabledConfiguration verifies that invalid dependencies never spawn a worker.
+func TestStartDynamicExecutionRetentionWorkerRejectsDisabledConfiguration(t *testing.T) {
 	store := &retentionStoreStub{}
-	if worker := StartExecutionRetentionWorker(context.Background(), store, 0, 100); worker != nil {
-		t.Fatal("worker started with retention disabled")
+	// A nil retention callback cannot supply plan-driven retention thresholds.
+	if worker := StartDynamicExecutionRetentionWorker(context.Background(), store, nil, 100); worker != nil {
+		t.Fatal("worker started with nil retention callback")
 	}
-	if worker := StartExecutionRetentionWorker(context.Background(), store, 30, 0); worker != nil {
+	// A non-positive batch size cannot make progress and must not spawn a background loop.
+	if worker := StartDynamicExecutionRetentionWorker(context.Background(), store, func() int { return 30 }, 0); worker != nil {
 		t.Fatal("worker started with invalid batch size")
 	}
 }

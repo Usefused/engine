@@ -11,6 +11,7 @@ import (
 	"github.com/Usefused/engine/internal/shared/fusedobject"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 var ErrGenerationContractPinUnavailable = errors.New("generation_contract_pin_unavailable")
@@ -144,47 +145,67 @@ const generationSnapshotJoinSQL = `
 	 AND active.service_version_id = snapshot.service_version_id
 `
 
-// ListGenerationContractBindings reads pins in one set-based query; missing versions never fall back to Registry.
-func (s *postgresStore) ListGenerationContractBindings(ctx context.Context, refs []models.ServiceVersionRef, requireGenerationPin bool) ([]models.SDKContractBinding, error) {
+// queryGenerationContractRows executes a bounded JSONB set query and enforces
+// exact 1:1 resolution between requested inputs and active workspace snapshots.
+func queryGenerationContractRows[In, Out any](
+	ctx context.Context,
+	db storeDatabase,
+	inputs []In,
+	query, errPrefix string,
+	scanRow func(pgx.Rows) (Out, error),
+) ([]Out, error) {
 	// Empty input has no identity to authorize and needs no database work.
-	if len(refs) == 0 {
+	if len(inputs) == 0 {
 		return nil, nil
 	}
-	payload, err := encodeGenerationInputs(refs, len(refs))
+	payload, err := encodeGenerationInputs(inputs, len(inputs))
 	// Bounded encoding must succeed before any selection query runs.
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Query(ctx, `SELECT snapshot.service_id, snapshot.service_version_id, snapshot.version,
-		snapshot.revision, snapshot.source_hash, snapshot.generation_contract_hash, snapshot.contract_hash
-		FROM jsonb_to_recordset($1::jsonb) AS input(service_id uuid, version text)`+generationSnapshotJoinSQL, payload)
+	rows, err := db.Query(ctx, query, payload)
 	// Storage failures remain distinct from an absent authoritative pin.
 	if err != nil {
-		return nil, fmt.Errorf("load generation contract pins: %w", err)
+		return nil, fmt.Errorf("%s: %w", errPrefix, err)
 	}
 	defer rows.Close()
-	bindings := make([]models.SDKContractBinding, 0, len(refs))
+	out := make([]Out, 0, len(inputs))
 	for rows.Next() {
-		var binding models.SDKContractBinding
-		// A partially scanned pin cannot authorize generation.
-		if err := rows.Scan(&binding.ServiceID, &binding.ServiceVersionID, &binding.Version, &binding.Revision, &binding.SourceHash, &binding.GenerationContractHash, &binding.RuntimeContractHash); err != nil {
+		item, err := scanRow(rows)
+		// Abort on the first scan, pin, or decode failure so partial results never propagate.
+		if err != nil {
 			return nil, err
 		}
-		// Old snapshots remain executable but require explicit refresh before generating a new SDK.
-		if err := requireGenerationContractPin(binding.GenerationContractHash, requireGenerationPin); err != nil {
-			return nil, err
-		}
-		bindings = append(bindings, binding)
+		out = append(out, item)
 	}
 	// Interrupted reads must retain their storage error instead of recommending an unrelated snapshot refresh.
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	// Every requested identity must resolve exactly once, including duplicated or ambiguous labels.
-	if len(bindings) != len(refs) {
+	if len(out) != len(inputs) {
 		return nil, ErrGenerationContractPinUnavailable
 	}
-	return bindings, nil
+	return out, nil
+}
+
+// ListGenerationContractBindings reads pins in one set-based query; missing versions never fall back to Registry.
+func (s *postgresStore) ListGenerationContractBindings(ctx context.Context, refs []models.ServiceVersionRef, requireGenerationPin bool) ([]models.SDKContractBinding, error) {
+	query := `SELECT snapshot.service_id, snapshot.service_version_id, snapshot.version,
+		snapshot.revision, snapshot.source_hash, snapshot.generation_contract_hash, snapshot.contract_hash
+		FROM jsonb_to_recordset($1::jsonb) AS input(service_id uuid, version text)` + generationSnapshotJoinSQL
+	return queryGenerationContractRows(ctx, s.db, refs, query, "load generation contract pins", func(rows pgx.Rows) (models.SDKContractBinding, error) {
+		var binding models.SDKContractBinding
+		// A partially scanned pin cannot authorize generation.
+		if err := rows.Scan(&binding.ServiceID, &binding.ServiceVersionID, &binding.Version, &binding.Revision, &binding.SourceHash, &binding.GenerationContractHash, &binding.RuntimeContractHash); err != nil {
+			return models.SDKContractBinding{}, err
+		}
+		// Old snapshots remain executable but require explicit refresh before generating a new SDK.
+		if err := requireGenerationContractPin(binding.GenerationContractHash, requireGenerationPin); err != nil {
+			return models.SDKContractBinding{}, err
+		}
+		return binding, nil
+	})
 }
 
 // requireGenerationContractPin separates Registry code generation from local-only MCP publication without changing snapshot admission.
@@ -207,48 +228,23 @@ func encodeGenerationInputs(value any, count int) ([]byte, error) {
 
 // ListGenerationAuthContracts projects security only for selected operations in a fixed-query batch.
 func (s *postgresStore) ListGenerationAuthContracts(ctx context.Context, selections []GenerationAuthSelection, requireGenerationPin bool) ([]GenerationAuthContract, error) {
-	// Webhook-only and empty documents do not need an auth query.
-	if len(selections) == 0 {
-		return nil, nil
-	}
-	payload, err := encodeGenerationInputs(selections, len(selections))
-	// Malformed or oversized input stops before storage access.
-	if err != nil {
-		return nil, err
-	}
-	rows, err := s.db.Query(ctx, generationAuthContractsSQL, payload)
-	// A failed dependency cannot be treated as an anonymous contract.
-	if err != nil {
-		return nil, fmt.Errorf("load generation auth contracts: %w", err)
-	}
-	defer rows.Close()
-	contracts := make([]GenerationAuthContract, 0, len(selections))
-	for rows.Next() {
+	return queryGenerationContractRows(ctx, s.db, selections, generationAuthContractsSQL, "load generation auth contracts", func(rows pgx.Rows) (GenerationAuthContract, error) {
 		var contract GenerationAuthContract
 		var auth, operations []byte
 		// Scanning is atomic for one minimal contract projection.
 		if err := rows.Scan(&contract.ServiceID, &contract.Version, &contract.ServiceVersionID, &contract.OperationNames, &contract.SelectAll, &contract.GenerationContractHash, &contract.RuntimeContractHash, &auth, &operations); err != nil {
-			return nil, err
+			return GenerationAuthContract{}, err
 		}
 		// Only an explicitly pinned snapshot can supply generation authentication authority.
 		if err := requireGenerationContractPin(contract.GenerationContractHash, requireGenerationPin); err != nil {
-			return nil, err
+			return GenerationAuthContract{}, err
 		}
 		// Both pieces share one decoder so malformed security cannot silently become anonymous.
 		if err := decodeGenerationAuthContract(&contract, auth, operations); err != nil {
-			return nil, err
+			return GenerationAuthContract{}, err
 		}
-		contracts = append(contracts, contract)
-	}
-	// A partial database read is not proof that a generation pin is missing.
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	// Missing snapshots cannot be silently omitted from a multi-service plan.
-	if len(contracts) != len(selections) {
-		return nil, ErrGenerationContractPinUnavailable
-	}
-	return contracts, nil
+		return contract, nil
+	})
 }
 
 // decodeGenerationAuthContract rejects malformed metadata before the shared auth policy resolver sees it.

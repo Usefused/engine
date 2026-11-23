@@ -33,7 +33,7 @@ func TestSelectRequestAuthChargebeeEmptyBasicPassword(t *testing.T) {
 		t.Fatalf("select Chargebee auth: %v", err)
 	}
 	req := &http.Request{Header: make(http.Header)}
-	applySelectedAuth(req, selected, credentials)
+	_ = applySelectedAuthChecked(req, selected, credentials)
 	encoded := strings.TrimPrefix(req.Header.Get("Authorization"), "Basic ")
 	decoded, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil || string(decoded) != "site_api_key:" {
@@ -65,7 +65,7 @@ func TestSelectRequestAuthWiseOAuthAndMTLS(t *testing.T) {
 		t.Fatalf("selected=%#v err=%v", selected, err)
 	}
 	req := &http.Request{Header: make(http.Header)}
-	applySelectedAuth(req, selected, credentials)
+	_ = applySelectedAuthChecked(req, selected, credentials)
 	if got := req.Header.Get("Authorization"); got != "Bearer access-token" {
 		t.Fatalf("Authorization=%q", got)
 	}
@@ -181,7 +181,7 @@ func TestApplySelectedAuthComposesHeaderQueryAndCookie(t *testing.T) {
 		{Name: "cookieKey", Type: "apiKey", Location: "cookie", KeyName: "session"},
 	}
 	req := &http.Request{Header: make(http.Header), URL: &url.URL{RawQuery: "existing=1"}}
-	applySelectedAuth(req, auths, map[string]any{"headerKey": "h", "queryKey": "q", "cookieKey": "c"})
+	_ = applySelectedAuthChecked(req, auths, map[string]any{"headerKey": "h", "queryKey": "q", "cookieKey": "c"})
 	if req.Header.Get("X-API-Key") != "h" || req.URL.Query().Get("api_key") != "q" {
 		t.Fatalf("header=%q query=%q", req.Header.Get("X-API-Key"), req.URL.RawQuery)
 	}

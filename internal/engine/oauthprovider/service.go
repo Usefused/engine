@@ -11,10 +11,10 @@ import (
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/browserauth"
 	"github.com/Usefused/engine/internal/engine/store"
+	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/Usefused/fused-open-core/oauthserver"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -110,7 +110,7 @@ func adaptActor(ctx context.Context, actor accesscontrol.Actor) oauthserver.Acto
 	return oauthserver.Actor[uuid.UUID]{
 		SubjectID: actor.SubjectID, CredentialID: actor.CredentialID,
 		IsBrowserSession: browserauth.IsBrowserSessionActor(actor),
-		RequestID:        middleware.GetReqID(ctx), TraceID: traceID(ctx),
+		RequestID:        middleware.GetReqID(ctx), TraceID: observability.TraceIDFromContext(ctx),
 		// Evaluate grants against each valid resource type, including resource-scoped roles.
 		CanGrant: func(ctx context.Context, name string) (bool, error) {
 			permission := accesscontrol.Permission(name)
@@ -227,14 +227,4 @@ func (s *Service) RevokeConnectedApp(ctx context.Context, actor accesscontrol.Ac
 // StartCleanupWorker lets the shared lifecycle expire Fused's durable OAuth artifacts.
 func (s *Service) StartCleanupWorker(ctx context.Context, interval time.Duration) {
 	s.core.StartCleanupWorker(ctx, interval)
-}
-
-// traceID omits absent traces rather than recording an invalid identifier.
-func traceID(ctx context.Context) string {
-	spanContext := trace.SpanContextFromContext(ctx)
-	// Requests without an active trace have no audit trace identifier.
-	if !spanContext.IsValid() {
-		return ""
-	}
-	return spanContext.TraceID().String()
 }

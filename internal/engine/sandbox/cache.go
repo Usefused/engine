@@ -350,59 +350,67 @@ func selectionVersionIdentity(sel models.SDKSelection) (string, error) {
 	return "", fmt.Errorf("ScopeError: service_version_id required for service %s", sel.ServiceID)
 }
 
+// DisconnectSDK decrements an app's reference count and evicts its cached
+// scope and unreferenced service metadata once no connections remain.
 func (c *LocalObjectCache) DisconnectSDK(appID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Ignore disconnects for scopes that are not currently cached.
 	if _, exists := c.scopes[appID]; !exists {
 		return
 	}
 
 	c.scopeRefCounts[appID]--
+	// Evict the scope entry once the final active consumer disconnects.
 	if c.scopeRefCounts[appID] <= 0 {
-		var selections []models.SDKSelection
-		_ = json.Unmarshal(c.scopes[appID], &selections)
-
-		versions := c.sdkVersions[appID]
-
-		for _, sel := range selections {
-			svcID := sel.ServiceID.String()
-			version := versions[svcID]
-			cacheKey := svcID + ":" + version
-
-			c.objectRefCounts[cacheKey]--
-			if c.objectRefCounts[cacheKey] <= 0 {
-				delete(c.serviceMetadataCache, cacheKey)
-				delete(c.objectRefCounts, cacheKey)
-
-				// Evict associated endpoints
-				prefix := cacheKey + ":"
-				for k := range c.endpointMetadataCache {
-					// naive prefix check
-					if len(k) > len(prefix) && k[:len(prefix)] == prefix {
-						delete(c.endpointMetadataCache, k)
-					}
-				}
-
-				slog.Info("Evicted ServiceMetadata from cache", slog.String("serviceID", svcID), slog.String("version", version))
-			}
-		}
-		delete(c.scopes, appID)
-		delete(c.scopeRefCounts, appID)
-		delete(c.sdkVersions, appID)
-		slog.Info("SDK disconnected (evicted from cache)", slog.String("appID", appID))
-	} else {
-		var selections []models.SDKSelection
-		_ = json.Unmarshal(c.scopes[appID], &selections)
-		versions := c.sdkVersions[appID]
-		for _, sel := range selections {
-			svcID := sel.ServiceID.String()
-			version := versions[svcID]
-			cacheKey := svcID + ":" + version
-			c.objectRefCounts[cacheKey]--
-		}
-		slog.Info("SDK disconnected (decremented refcount)", slog.String("appID", appID))
+		c.evictScopeLocked(appID, "Evicted ServiceMetadata from cache", "SDK disconnected (evicted from cache)")
+		return
 	}
+	var selections []models.SDKSelection
+	_ = json.Unmarshal(c.scopes[appID], &selections)
+	versions := c.sdkVersions[appID]
+	for _, sel := range selections {
+		svcID := sel.ServiceID.String()
+		version := versions[svcID]
+		cacheKey := svcID + ":" + version
+		c.objectRefCounts[cacheKey]--
+	}
+	slog.Info("SDK disconnected (decremented refcount)", slog.String("appID", appID))
+}
+
+// evictScopeLocked decrements object reference counts for every service pinned
+// by appID, purges zero-ref metadata and endpoints, and removes the scope entry.
+// Callers must hold c.mu.
+func (c *LocalObjectCache) evictScopeLocked(appID, serviceEvictMsg, scopeEvictMsg string) {
+	var selections []models.SDKSelection
+	_ = json.Unmarshal(c.scopes[appID], &selections)
+	versions := c.sdkVersions[appID]
+	for _, sel := range selections {
+		svcID := sel.ServiceID.String()
+		version := versions[svcID]
+		cacheKey := svcID + ":" + version
+
+		c.objectRefCounts[cacheKey]--
+		// Purge cached service and endpoint metadata once no active app references this version.
+		if c.objectRefCounts[cacheKey] <= 0 {
+			delete(c.serviceMetadataCache, cacheKey)
+			delete(c.objectRefCounts, cacheKey)
+
+			prefix := cacheKey + ":"
+			for k := range c.endpointMetadataCache {
+				// Evict all endpoints scoped under this service:version prefix.
+				if len(k) > len(prefix) && k[:len(prefix)] == prefix {
+					delete(c.endpointMetadataCache, k)
+				}
+			}
+			slog.Info(serviceEvictMsg, slog.String("serviceID", svcID), slog.String("version", version))
+		}
+	}
+	delete(c.scopes, appID)
+	delete(c.scopeRefCounts, appID)
+	delete(c.sdkVersions, appID)
+	slog.Info(scopeEvictMsg, slog.String("appID", appID))
 }
 
 // GetOrFetchServiceMetadata rechecks deletion authority before exposing a cached execution contract.
@@ -711,45 +719,16 @@ func parseServiceVersionID(version string) (uuid.UUID, bool) {
 	return id, err == nil && id != uuid.Nil
 }
 
+// InvalidateAppRuntime evicts an app's cached scope immediately regardless of refcount.
 func (c *LocalObjectCache) InvalidateAppRuntime(appID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Fast path: if the SDK isn't in our scopes cache, there's nothing to invalidate
+	// Skip eviction if the scope is not present in the local cache.
 	if _, exists := c.scopes[appID]; !exists {
 		return
 	}
-
-	// We must decrement objectRefCounts for all service versions referenced by this SDK's selections.
-	var selections []models.SDKSelection
-	_ = json.Unmarshal(c.scopes[appID], &selections)
-	versions := c.sdkVersions[appID]
-	for _, sel := range selections {
-		svcID := sel.ServiceID.String()
-		version := versions[svcID]
-		cacheKey := svcID + ":" + version
-
-		c.objectRefCounts[cacheKey]--
-		if c.objectRefCounts[cacheKey] <= 0 {
-			delete(c.serviceMetadataCache, cacheKey)
-			delete(c.objectRefCounts, cacheKey)
-
-			// Evict associated endpoints
-			prefix := cacheKey + ":"
-			for k := range c.endpointMetadataCache {
-				if len(k) > len(prefix) && k[:len(prefix)] == prefix {
-					delete(c.endpointMetadataCache, k)
-				}
-			}
-			slog.Info("Evicted ServiceMetadata from cache (SDK scope invalidated)", slog.String("serviceID", svcID), slog.String("version", version))
-		}
-	}
-
-	// Remove the scope completely
-	delete(c.scopes, appID)
-	delete(c.scopeRefCounts, appID)
-	delete(c.sdkVersions, appID)
-	slog.Info("SDK Scope invalidated and evicted from cache", slog.String("appID", appID))
+	c.evictScopeLocked(appID, "Evicted ServiceMetadata from cache (SDK scope invalidated)", "SDK Scope invalidated and evicted from cache")
 }
 
 func (c *LocalObjectCache) Invalidate(serviceID string) {

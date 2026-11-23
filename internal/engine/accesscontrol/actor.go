@@ -10,10 +10,9 @@ import (
 type SubjectKind string
 
 const (
-	SubjectBootstrap      SubjectKind = "bootstrap"
-	SubjectUser           SubjectKind = "user"
-	SubjectServiceAccount SubjectKind = "service_account"
-	SubjectApp            SubjectKind = "app"
+	SubjectBootstrap SubjectKind = "bootstrap"
+	SubjectUser      SubjectKind = "user"
+	SubjectApp       SubjectKind = "app"
 )
 
 type Actor struct {

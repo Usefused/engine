@@ -43,17 +43,17 @@ func browserSessionStatusHandler(service BrowserSessionService) http.HandlerFunc
 		setManagedLoginResponseHeaders(w)
 		credential, source, _ := browserSessionCredential(r, service)
 		if source != browserauth.CredentialSourceCookie {
-			writeManagedLoginJSON(w, http.StatusOK, map[string]any{"authenticated": false})
+			writeJSONStatus(w, http.StatusOK, map[string]any{"authenticated": false})
 			return
 		}
 		actor, err := service.Session(r.Context(), credential)
 		if err != nil {
 			service.Cookies().ClearSession(w)
-			writeManagedLoginJSON(w, http.StatusOK, map[string]any{"authenticated": false})
+			writeJSONStatus(w, http.StatusOK, map[string]any{"authenticated": false})
 			return
 		}
 		service.Cookies().RefreshCSRF(w, credential)
-		writeManagedLoginJSON(w, http.StatusOK, map[string]any{
+		writeJSONStatus(w, http.StatusOK, map[string]any{
 			"authenticated": true, "subject_kind": actor.Kind,
 		})
 	}
@@ -91,7 +91,7 @@ func browserLicenseExchangeHandler(service BrowserSessionService) http.HandlerFu
 			return
 		}
 		service.Cookies().SetSession(w, credential.RawKey, credential.ExpiresAt)
-		writeManagedLoginJSON(w, http.StatusOK, map[string]string{"status": "authenticated"})
+		writeJSONStatus(w, http.StatusOK, map[string]string{"status": "authenticated"})
 	}
 }
 
@@ -125,7 +125,7 @@ func browserSessionLogoutHandler(service BrowserSessionService) http.HandlerFunc
 		// Keep the cookie on transient persistence failures so the browser can
 		// repair CSRF/retry; invalid or revoked sessions are safe to clear.
 		service.Cookies().ClearSession(w)
-		writeManagedLoginJSON(w, http.StatusOK, map[string]string{"logout_url": result.LogoutURL})
+		writeJSONStatus(w, http.StatusOK, map[string]string{"logout_url": result.LogoutURL})
 	}
 }
 

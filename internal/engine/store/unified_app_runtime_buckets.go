@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+
 	"github.com/google/uuid"
 )
 
@@ -26,15 +27,6 @@ func (s *cachedStore) AuthorizeUnifiedAppRuntimeBucket(ctx context.Context, acco
 		return false, errors.New("runtime bucket authorization unavailable")
 	}
 	return repository.AuthorizeUnifiedAppRuntimeBucket(ctx, accountID, appID, tokenID, bucketID)
-}
-
-// sameRuntimeBucket keeps idempotency tied to credential routing as well as the authored input.
-func sameRuntimeBucket(a, b *uuid.UUID) bool {
-	// Absence means static routing, which is distinct from every explicit selection.
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return *a == *b
 }
 
 // The bearer token delegates the owning subject/team's bucket authority only within the reviewed version scope.

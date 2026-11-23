@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/executionevent"
@@ -28,9 +27,7 @@ type executionEventStore interface {
 }
 
 type ExecutionEventWorker struct {
-	cancel                context.CancelFunc
-	done                  chan struct{}
-	once                  sync.Once
+	lifecycle             *workerLifecycle
 	aggregateUsageEnabled func() bool
 }
 
@@ -54,8 +51,8 @@ func StartExecutionEventWorker(ctx context.Context, eventStore executionEventSto
 	if err != nil {
 		return nil, fmt.Errorf("subscribe to execution events: %w", err)
 	}
-	workerCtx, cancel := context.WithCancel(ctx)
-	worker := &ExecutionEventWorker{cancel: cancel, done: make(chan struct{}), aggregateUsageEnabled: aggregateUsageEnabled}
+	workerCtx, lifecycle := newStartedLifecycle(ctx)
+	worker := &ExecutionEventWorker{lifecycle: lifecycle, aggregateUsageEnabled: aggregateUsageEnabled}
 	go worker.run(workerCtx, subscription, eventStore)
 	return worker, nil
 }
@@ -83,20 +80,18 @@ func ensureExecutionConsumer(natsClient *messaging.NATSClient) error {
 	return nil
 }
 
+// Stop cancels event ingestion and drains the active pull loop.
 func (w *ExecutionEventWorker) Stop(ctx context.Context) {
+	// Optional startup wiring may omit the worker without requiring callers to guard nil.
 	if w == nil {
 		return
 	}
-	w.once.Do(w.cancel)
-	select {
-	case <-w.done:
-	case <-ctx.Done():
-	}
+	w.lifecycle.stop(ctx)
 }
 
 // run retries durable stream reads while delegating receipt and usage atomicity to the store.
 func (w *ExecutionEventWorker) run(ctx context.Context, subscription *nats.Subscription, eventStore executionEventStore) {
-	defer close(w.done)
+	defer close(w.lifecycle.done)
 	for ctx.Err() == nil {
 		messages, err := subscription.Fetch(executionEventBatchSize, nats.MaxWait(time.Second))
 		if err == nats.ErrTimeout {

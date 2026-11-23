@@ -590,7 +590,7 @@ func TestRESTProxyHandler_OtherIntegrationsPaths_StillUsePlainForward(t *testing
 	accountID := uuid.New()
 	fwd := &recordingForwarder{}
 	s := &autoRegisterMockStore{accountID: accountID}
-	handler := RESTProxyHandler(fwd, s)
+	handler := RESTProxyHandlerWithRuntimeContracts(fwd, s, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/integrations", bytes.NewBufferString(`{"name":"stripe"}`))
 	req.Header.Set("X-API-Key", "fsk_valid")

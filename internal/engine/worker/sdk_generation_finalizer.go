@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"reflect"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/store"
@@ -53,17 +52,14 @@ type SDKGenerationFinalizer struct {
 	store     SDKGenerationBuildStore
 	client    SDKGenerationClient
 	opts      SDKGenerationFinalizerOptions
-	cancel    context.CancelFunc
-	done      chan struct{}
-	startOnce sync.Once
-	stopOnce  sync.Once
+	lifecycle *workerLifecycle
 }
 
 // NewSDKGenerationFinalizer constructs a non-running worker with normalized
 // bounds so zero-value production options remain safe.
 func NewSDKGenerationFinalizer(buildStore SDKGenerationBuildStore, client SDKGenerationClient, opts SDKGenerationFinalizerOptions) *SDKGenerationFinalizer {
 	return &SDKGenerationFinalizer{
-		store: buildStore, client: client, opts: normalizeSDKGenerationFinalizerOptions(opts), done: make(chan struct{}),
+		store: buildStore, client: client, opts: normalizeSDKGenerationFinalizerOptions(opts), lifecycle: newDeferredLifecycle(),
 	}
 }
 
@@ -91,30 +87,22 @@ func (w *SDKGenerationFinalizer) Start(ctx context.Context) {
 	if w == nil || w.store == nil || w.client == nil {
 		return
 	}
-	w.startOnce.Do(func() {
-		workerCtx, cancel := context.WithCancel(ctx)
-		w.cancel = cancel
-		go w.run(workerCtx)
-	})
+	w.lifecycle.start(ctx, w.run)
 }
 
 // Stop cancels polling and waits for the current bounded replay to finish.
 func (w *SDKGenerationFinalizer) Stop(ctx context.Context) {
-	// An unstarted worker has no goroutine to drain.
-	if w == nil || w.cancel == nil {
+	// An absent worker has no goroutine to drain.
+	if w == nil {
 		return
 	}
-	w.stopOnce.Do(w.cancel)
-	select {
-	case <-w.done:
-	case <-ctx.Done():
-	}
+	w.lifecycle.stop(ctx)
 }
 
 // run owns the startup-first schedule so pending rows are recovered before the
 // first periodic interval elapses.
 func (w *SDKGenerationFinalizer) run(ctx context.Context) {
-	defer close(w.done)
+	defer close(w.lifecycle.done)
 	w.finalize(ctx, "startup")
 	ticker := time.NewTicker(w.opts.Interval)
 	defer ticker.Stop()

@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -212,7 +214,7 @@ func mergeRateLimitSummary(current, next RateLimitExecutionSummary) RateLimitExe
 	for i, unit := range next.Units {
 		units[unit] += next.UnitTotals[i]
 	}
-	next.Units = sortedMapKeys(units)
+	next.Units = slices.Sorted(maps.Keys(units))
 	next.UnitTotals = make([]int64, len(next.Units))
 	for i, unit := range next.Units {
 		next.UnitTotals[i] = units[unit]
@@ -224,15 +226,6 @@ func mergeRateLimitSummary(current, next RateLimitExecutionSummary) RateLimitExe
 	next.ObservedDenials += current.ObservedDenials
 	next.HeaderOutcome = mergeRateLimitHeaderOutcome(current.HeaderOutcome, next.HeaderOutcome)
 	return next
-}
-
-func sortedMapKeys(values map[string]int64) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 func sortedUniqueStrings(values []string) []string {

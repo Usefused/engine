@@ -3106,52 +3106,64 @@ func deprecateVersionAction(serviceID uuid.UUID, version string, deprecation wor
 	}
 }
 
-func attachServiceRemovalImpact(action workspacePlanAction, impactedSDKs []string, summary *workspacePlanSummary) workspacePlanAction {
+// attachRemovalImpact annotates a destructive workspace plan action with
+// impacted SDK warnings and a blocker requiring explicit force_remove approval.
+func attachRemovalImpact(
+	action workspacePlanAction,
+	impactedSDKs []string,
+	summary *workspacePlanSummary,
+	suggestedCommand, targetNoun, warningCode, blockerCode, blockerTarget string,
+) workspacePlanAction {
+	// Skip warning and blocker annotations when no SDK configs reference the removed target.
 	if len(impactedSDKs) == 0 {
 		return action
 	}
 	action.RequiresDecision = true
 	action.ImpactedSDKConfigs = append([]string(nil), impactedSDKs...)
-	action.SuggestedCommand = suggestedServiceDeprecationCommandString(action.ServiceID, "YYYY-MM-DD")
-	action.Recommendation = "SDK configs still use this service. Add a deprecation directive to the workspace config, or set decision=force_remove to accept breaking those SDKs."
+	action.SuggestedCommand = suggestedCommand
+	action.Recommendation = fmt.Sprintf("SDK configs still use this %s. Add a deprecation directive to the workspace config, or set decision=force_remove to accept breaking those SDKs.", targetNoun)
 	summary.Warnings = append(summary.Warnings, workspacePlanWarning{
-		Code:             "sdk_uses_removed_service",
+		Code:             warningCode,
 		ServiceID:        action.ServiceID,
 		Message:          action.Recommendation,
 		SDKs:             action.ImpactedSDKConfigs,
 		SuggestedCommand: action.SuggestedCommand,
 	})
 	summary.Blockers = append(summary.Blockers, workspacePlanBlocker{
-		Code:      "service_used_by_sdk",
+		Code:      blockerCode,
 		ServiceID: action.ServiceID,
 		ActionID:  action.ID,
-		Message:   "Explicit force_remove decision is required before removing a workspace service used by SDK configs.",
+		Message:   fmt.Sprintf("Explicit force_remove decision is required before removing a %s used by SDK configs.", blockerTarget),
 	})
 	return action
 }
 
+// attachServiceRemovalImpact marks a service removal action that breaks existing SDK configs.
+func attachServiceRemovalImpact(action workspacePlanAction, impactedSDKs []string, summary *workspacePlanSummary) workspacePlanAction {
+	return attachRemovalImpact(
+		action,
+		impactedSDKs,
+		summary,
+		suggestedServiceDeprecationCommandString(action.ServiceID, "YYYY-MM-DD"),
+		"service",
+		"sdk_uses_removed_service",
+		"service_used_by_sdk",
+		"workspace service",
+	)
+}
+
+// attachVersionRemovalImpact marks a version removal action that breaks existing SDK configs.
 func attachVersionRemovalImpact(action workspacePlanAction, impactedSDKs []string, summary *workspacePlanSummary) workspacePlanAction {
-	if len(impactedSDKs) == 0 {
-		return action
-	}
-	action.RequiresDecision = true
-	action.ImpactedSDKConfigs = append([]string(nil), impactedSDKs...)
-	action.SuggestedCommand = suggestedVersionDeprecationCommandString(action.ServiceID, action.Version, "YYYY-MM-DD")
-	action.Recommendation = "SDK configs still use this version. Add a deprecation directive to the workspace config, or set decision=force_remove to accept breaking those SDKs."
-	summary.Warnings = append(summary.Warnings, workspacePlanWarning{
-		Code:             "sdk_uses_removed_version",
-		ServiceID:        action.ServiceID,
-		Message:          action.Recommendation,
-		SDKs:             action.ImpactedSDKConfigs,
-		SuggestedCommand: action.SuggestedCommand,
-	})
-	summary.Blockers = append(summary.Blockers, workspacePlanBlocker{
-		Code:      "version_used_by_sdk",
-		ServiceID: action.ServiceID,
-		ActionID:  action.ID,
-		Message:   "Explicit force_remove decision is required before removing a workspace service version used by SDK configs.",
-	})
-	return action
+	return attachRemovalImpact(
+		action,
+		impactedSDKs,
+		summary,
+		suggestedVersionDeprecationCommandString(action.ServiceID, action.Version, "YYYY-MM-DD"),
+		"version",
+		"sdk_uses_removed_version",
+		"version_used_by_sdk",
+		"workspace service version",
+	)
 }
 
 func suggestedServiceDeprecationCommand(serviceID uuid.UUID, effectiveAt string) string {
@@ -4160,72 +4172,133 @@ func previouslyAppliedDeprecations(state *store.ConfigState) map[string]bool {
 	return out
 }
 
-func applyWorkspaceVisibilityActions(
+type workspaceVisibilityScopeSpec struct {
+	publicActionType  workspaceplan.ActionType
+	privateActionType workspaceplan.ActionType
+	unavailableErr    string
+	spanName          string
+	includeVersion    bool
+	applyUpdate       func(context.Context, ServiceVisibilityUpdater, uuid.UUID, workspacePlanAction, bool, string) error
+}
+
+var (
+	serviceVisibilityScopeSpec = workspaceVisibilityScopeSpec{
+		publicActionType:  workspaceplan.ActionSetServicePublic,
+		privateActionType: workspaceplan.ActionSetServicePrivate,
+		unavailableErr:    "workspace service public visibility updates are unavailable",
+		spanName:          "engine.workspace_config.service_visibility_updated",
+		applyUpdate: func(ctx context.Context, updater ServiceVisibilityUpdater, serviceID uuid.UUID, _ workspacePlanAction, isPublic bool, apiKey string) error {
+			return updater.UpdateServicePublic(ctx, serviceID, isPublic, apiKey)
+		},
+	}
+	versionVisibilityScopeSpec = workspaceVisibilityScopeSpec{
+		publicActionType:  workspaceplan.ActionSetServiceVersionPublic,
+		privateActionType: workspaceplan.ActionSetServiceVersionPrivate,
+		unavailableErr:    "workspace service version public visibility updates are unavailable",
+		spanName:          "engine.workspace_config.service_version_visibility_updated",
+		includeVersion:    true,
+		applyUpdate: func(ctx context.Context, updater ServiceVisibilityUpdater, serviceID uuid.UUID, action workspacePlanAction, isPublic bool, apiKey string) error {
+			return updater.UpdateServiceVersionPublic(ctx, serviceID, action.Version, isPublic, apiKey)
+		},
+	}
+)
+
+// applyWorkspaceVisibilityScopeActions applies all approved visibility actions
+// matching spec against Registry using the shared ServiceVisibilityUpdater contract.
+func applyWorkspaceVisibilityScopeActions(
 	ctx context.Context,
 	updater any,
 	call workspaceApplyCall,
 	plan *store.ConfigPlan,
+	spec workspaceVisibilityScopeSpec,
 ) error {
-	actions, err := workspaceVisibilityActions(plan.Actions)
+	actions, err := workspaceVisibilityScopeActions(plan.Actions, spec.publicActionType, spec.privateActionType)
+	// Stop immediately if the persisted plan action list cannot be decoded.
 	if err != nil {
 		return err
 	}
+	// Avoid requiring a Registry updater when the plan contains no matching visibility changes.
 	if len(actions) == 0 {
 		return nil
 	}
 	visibilityUpdater, ok := updater.(ServiceVisibilityUpdater)
+	// Refuse to apply visibility mutations when the configured Registry client lacks support.
 	if !ok {
-		return errors.New("workspace service public visibility updates are unavailable")
+		return errors.New(spec.unavailableErr)
 	}
 	for _, action := range actions {
-		if err := applyWorkspaceVisibilityAction(ctx, visibilityUpdater, call, action); err != nil {
+		// Halt on the first Registry rejection so callers observe the failing mutation.
+		if err := applyWorkspaceVisibilityScopeAction(ctx, visibilityUpdater, call, action, spec); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func workspaceVisibilityActions(raw json.RawMessage) ([]workspacePlanAction, error) {
+// workspaceVisibilityScopeActions filters raw plan actions to the requested public/private pair.
+func workspaceVisibilityScopeActions(raw json.RawMessage, publicActionType, privateActionType workspaceplan.ActionType) ([]workspacePlanAction, error) {
 	var actions []workspacePlanAction
+	// Empty action blobs represent plans with no visibility work.
 	if len(raw) == 0 {
 		return nil, nil
 	}
+	// Corrupted plan payloads must fail before any partial apply occurs.
 	if err := json.Unmarshal(raw, &actions); err != nil {
 		return nil, err
 	}
 	out := make([]workspacePlanAction, 0, len(actions))
 	for _, action := range actions {
-		if action.Type == workspaceplan.ActionSetServicePublic || action.Type == workspaceplan.ActionSetServicePrivate {
+		// Retain only actions belonging to the requested visibility scope.
+		if action.Type == publicActionType || action.Type == privateActionType {
 			out = append(out, action)
 		}
 	}
 	return out, nil
 }
 
-func applyWorkspaceVisibilityAction(
+// applyWorkspaceVisibilityScopeAction parses one visibility action, invokes the
+// scoped Registry mutation, and records an audit span.
+func applyWorkspaceVisibilityScopeAction(
 	ctx context.Context,
 	updater ServiceVisibilityUpdater,
 	call workspaceApplyCall,
 	action workspacePlanAction,
+	spec workspaceVisibilityScopeSpec,
 ) error {
 	serviceID, err := uuid.Parse(action.ServiceID)
+	// Reject malformed service IDs before calling Registry.
 	if err != nil {
 		return err
 	}
-	isPublic := action.Type == workspaceplan.ActionSetServicePublic
+	isPublic := action.Type == spec.publicActionType
+	// Explicit boolean overrides take precedence over the action-type default.
 	if action.Public != nil {
 		isPublic = *action.Public
 	}
-	if err := updater.UpdateServicePublic(ctx, serviceID, isPublic, call.apiKey); err != nil {
+	// Propagate Registry visibility update failures without emitting a success span.
+	if err := spec.applyUpdate(ctx, updater, serviceID, action, isPublic, call.apiKey); err != nil {
 		return err
 	}
-	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.service_visibility_updated")
-	span.SetAttributes(
-		attribute.String("service_id", serviceID.String()),
-		attribute.Bool("public", isPublic),
-	)
+	_, span := otel.Tracer("engine").Start(ctx, spec.spanName)
+	attrs := []attribute.KeyValue{attribute.String("service_id", serviceID.String())}
+	// Record the version attribute only for per-version visibility mutations.
+	if spec.includeVersion {
+		attrs = append(attrs, attribute.String("version", action.Version))
+	}
+	attrs = append(attrs, attribute.Bool("public", isPublic))
+	span.SetAttributes(attrs...)
 	span.End()
 	return nil
+}
+
+// applyWorkspaceVisibilityActions applies all service-level visibility changes in the plan.
+func applyWorkspaceVisibilityActions(
+	ctx context.Context,
+	updater any,
+	call workspaceApplyCall,
+	plan *store.ConfigPlan,
+) error {
+	return applyWorkspaceVisibilityScopeActions(ctx, updater, call, plan, serviceVisibilityScopeSpec)
 }
 
 // applyWorkspaceVersionVisibilityActions is applyWorkspaceVisibilityActions'
@@ -4237,67 +4310,7 @@ func applyWorkspaceVersionVisibilityActions(
 	call workspaceApplyCall,
 	plan *store.ConfigPlan,
 ) error {
-	actions, err := workspaceVersionVisibilityActions(plan.Actions)
-	if err != nil {
-		return err
-	}
-	if len(actions) == 0 {
-		return nil
-	}
-	visibilityUpdater, ok := updater.(ServiceVisibilityUpdater)
-	if !ok {
-		return errors.New("workspace service version public visibility updates are unavailable")
-	}
-	for _, action := range actions {
-		if err := applyWorkspaceVersionVisibilityAction(ctx, visibilityUpdater, call, action); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func workspaceVersionVisibilityActions(raw json.RawMessage) ([]workspacePlanAction, error) {
-	var actions []workspacePlanAction
-	if len(raw) == 0 {
-		return nil, nil
-	}
-	if err := json.Unmarshal(raw, &actions); err != nil {
-		return nil, err
-	}
-	out := make([]workspacePlanAction, 0, len(actions))
-	for _, action := range actions {
-		if action.Type == workspaceplan.ActionSetServiceVersionPublic || action.Type == workspaceplan.ActionSetServiceVersionPrivate {
-			out = append(out, action)
-		}
-	}
-	return out, nil
-}
-
-func applyWorkspaceVersionVisibilityAction(
-	ctx context.Context,
-	updater ServiceVisibilityUpdater,
-	call workspaceApplyCall,
-	action workspacePlanAction,
-) error {
-	serviceID, err := uuid.Parse(action.ServiceID)
-	if err != nil {
-		return err
-	}
-	isPublic := action.Type == workspaceplan.ActionSetServiceVersionPublic
-	if action.Public != nil {
-		isPublic = *action.Public
-	}
-	if err := updater.UpdateServiceVersionPublic(ctx, serviceID, action.Version, isPublic, call.apiKey); err != nil {
-		return err
-	}
-	_, span := otel.Tracer("engine").Start(ctx, "engine.workspace_config.service_version_visibility_updated")
-	span.SetAttributes(
-		attribute.String("service_id", serviceID.String()),
-		attribute.String("version", action.Version),
-		attribute.Bool("public", isPublic),
-	)
-	span.End()
-	return nil
+	return applyWorkspaceVisibilityScopeActions(ctx, updater, call, plan, versionVisibilityScopeSpec)
 }
 
 // applyWorkspaceVersionExecutionPolicyPublishActions is

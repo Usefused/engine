@@ -3,15 +3,14 @@ package fusedobject
 import (
 	"database/sql/driver"
 	"encoding/json"
-	"errors"
 
 	"github.com/Usefused/engine/internal/shared/authrouting"
+	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/Usefused/engine/internal/shared/paginationpolicy"
 	"github.com/Usefused/engine/internal/shared/ratelimitpolicy"
 	"github.com/Usefused/engine/internal/shared/retrypolicy"
 	"github.com/Usefused/engine/internal/shared/schemaref"
 	"github.com/Usefused/engine/internal/shared/serverrouting"
-	"github.com/Usefused/engine/internal/shared/signaturepolicy"
 	"github.com/Usefused/engine/internal/shared/workflowcontract"
 	"github.com/google/uuid"
 )
@@ -374,14 +373,9 @@ const (
 	TokenRequestMediaTypeJSON                TokenRequestMediaType   = "application/json"
 )
 
-type IncomingWebhookConfig struct {
-	AuthType            string                  `json:"auth_type"`
-	AuthLocation        string                  `json:"auth_location,omitempty"`
-	AuthKeyName         string                  `json:"auth_key_name,omitempty"`
-	SignatureHeader     string                  `json:"signature_header,omitempty"`
-	VerificationHeaders []string                `json:"verification_headers,omitempty"`
-	SignaturePolicy     *signaturepolicy.Config `json:"signature_policy,omitempty"`
-}
+// IncomingWebhookConfig aliases models.IncomingWebhookConfig so webhook
+// decoding and plaintext-secret rejection share one canonical implementation.
+type IncomingWebhookConfig = models.IncomingWebhookConfig
 
 type RateLimitConfig = ratelimitpolicy.Config
 
@@ -391,47 +385,29 @@ type DefaultHeaders map[string]string
 
 // --- Helpers for JSON ---
 
-func scanJSONB(value interface{}, target interface{}) error {
-	if value == nil {
-		return nil
-	}
-	b, ok := value.([]byte)
-	if !ok {
-		s, ok := value.(string)
-		if !ok {
-			return errors.New("type assertion to []byte or string failed")
-		}
-		b = []byte(s)
-	}
-	return json.Unmarshal(b, target)
-}
-
 func (r Responses) Value() (driver.Value, error)  { return json.Marshal(r) }
-func (r *Responses) Scan(value interface{}) error { return scanJSONB(value, r) }
+func (r *Responses) Scan(value interface{}) error { return models.ScanJSONB(value, r) }
 
 func (d DefaultHeaders) Value() (driver.Value, error)  { return json.Marshal(d) }
-func (d *DefaultHeaders) Scan(value interface{}) error { return scanJSONB(value, d) }
+func (d *DefaultHeaders) Scan(value interface{}) error { return models.ScanJSONB(value, d) }
 
 func (s Schema) Value() (driver.Value, error)  { return json.Marshal(s) }
-func (s *Schema) Scan(value interface{}) error { return scanJSONB(value, s) }
+func (s *Schema) Scan(value interface{}) error { return models.ScanJSONB(value, s) }
 
 func (r RequestContent) Value() (driver.Value, error)  { return json.Marshal(r) }
-func (r *RequestContent) Scan(value interface{}) error { return scanJSONB(value, r) }
+func (r *RequestContent) Scan(value interface{}) error { return models.ScanJSONB(value, r) }
 
 func (s Servers) Value() (driver.Value, error)  { return json.Marshal(s) }
-func (s *Servers) Scan(value interface{}) error { return scanJSONB(value, s) }
+func (s *Servers) Scan(value interface{}) error { return models.ScanJSONB(value, s) }
 
 func (s AuthConfig) Value() (driver.Value, error)  { return json.Marshal(s) }
-func (s *AuthConfig) Scan(value interface{}) error { return scanJSONB(value, s) }
+func (s *AuthConfig) Scan(value interface{}) error { return models.ScanJSONB(value, s) }
 
 func (s AuthConfigs) Value() (driver.Value, error)  { return json.Marshal(s) }
-func (s *AuthConfigs) Scan(value interface{}) error { return scanJSONB(value, s) }
-
-func (i IncomingWebhookConfig) Value() (driver.Value, error)  { return json.Marshal(i) }
-func (i *IncomingWebhookConfig) Scan(value interface{}) error { return scanJSONB(value, i) }
+func (s *AuthConfigs) Scan(value interface{}) error { return models.ScanJSONB(value, s) }
 
 func (p Parameter) Value() (driver.Value, error)  { return json.Marshal(p) }
-func (p *Parameter) Scan(value interface{}) error { return scanJSONB(value, p) }
+func (p *Parameter) Scan(value interface{}) error { return models.ScanJSONB(value, p) }
 
 func (p Parameters) Value() (driver.Value, error)  { return json.Marshal(p) }
-func (p *Parameters) Scan(value interface{}) error { return scanJSONB(value, p) }
+func (p *Parameters) Scan(value interface{}) error { return models.ScanJSONB(value, p) }

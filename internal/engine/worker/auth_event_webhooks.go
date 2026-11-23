@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/authevent"
@@ -26,9 +25,7 @@ const (
 
 // AuthEventWebhookWorker projects credential-free internal auth transitions into the existing SDK webhook transport.
 type AuthEventWebhookWorker struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	once   sync.Once
+	lifecycle *workerLifecycle
 }
 
 // authEventWebhookMessage keeps broker disposition beside the validated event it represents.
@@ -74,8 +71,8 @@ func StartAuthEventWebhookWorker(ctx context.Context, resolver store.AuthEventAp
 	if err != nil {
 		return nil, fmt.Errorf("subscribe to auth events for webhook projection: %w", err)
 	}
-	workerCtx, cancel := context.WithCancel(ctx)
-	worker := &AuthEventWebhookWorker{cancel: cancel, done: make(chan struct{})}
+	workerCtx, lifecycle := newStartedLifecycle(ctx)
+	worker := &AuthEventWebhookWorker{lifecycle: lifecycle}
 	go worker.run(workerCtx, subscription, resolver, natsClient.JS)
 	return worker, nil
 }
@@ -101,17 +98,12 @@ func (worker *AuthEventWebhookWorker) Stop(ctx context.Context) {
 	if worker == nil {
 		return
 	}
-	worker.once.Do(worker.cancel)
-	// Bounded shutdown returns when either the poller exits or the caller's shared deadline wins.
-	select {
-	case <-worker.done:
-	case <-ctx.Done():
-	}
+	worker.lifecycle.stop(ctx)
 }
 
 // run fetches bounded batches so one set-based identity query covers every delivery attempt.
 func (worker *AuthEventWebhookWorker) run(ctx context.Context, subscription *nats.Subscription, resolver store.AuthEventAppFamilyResolver, js nats.JetStreamContext) {
-	defer close(worker.done)
+	defer close(worker.lifecycle.done)
 	// Cancellation is checked before every bounded fetch so shutdown never begins another polling window.
 	for ctx.Err() == nil {
 		messages, err := subscription.Fetch(authEventWebhookBatchSize, nats.MaxWait(time.Second))

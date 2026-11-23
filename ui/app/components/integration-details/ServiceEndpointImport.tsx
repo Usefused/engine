@@ -2,6 +2,7 @@ import { ImportDiagnostics, ImportRepairMode, importErrorDiagnostics } from "~/c
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { useBeforeUnload, useBlocker } from "@remix-run/react";
 import { api, type Service, type SpecificationImportPlan, type SpecificationImportDiagnostic, type SpecificationImportStatus } from "~/lib/api";
+import { handleDrawerKeyboard } from "~/lib/focus-trap";
 import { webhookApplyNeedsStatus } from "~/lib/webhook-editor-import";
 
 const fieldClass = "w-full rounded-md border border-slate-300 px-3 py-2 text-sm";
@@ -169,14 +170,8 @@ function EndpointImportDiscard({ editor, onClose }: { editor: Editor; onClose: (
 
 /** Keeps keyboard navigation inside the import dialog and routes Escape through its discard safeguards. */
 function importKeyboard(event: KeyboardEvent, panel: HTMLElement | null, close: () => void) {
-  // Escape must respect pending and uncertain writes rather than dismissing the modal directly.
-  if (event.key === "Escape") { event.stopPropagation(); close(); return; }
-  // Ordinary typing remains owned by each input.
-  if (event.key !== "Tab" || !panel) return;
-  const controls = Array.from(panel.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [tabindex="0"]')).filter((node) => node.getClientRects().length > 0);
-  const first = controls[0];
-  const last = controls[controls.length - 1];
-  // Wrapping prevents keyboard access to background service actions while a draft is open.
-  if (event.shiftKey && [first, panel].includes(document.activeElement as HTMLElement)) { event.preventDefault(); last?.focus(); }
-  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  handleDrawerKeyboard(event, panel, close, {
+    selector: 'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
+    includePanelOnShiftTab: true,
+  });
 }

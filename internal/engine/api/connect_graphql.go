@@ -890,14 +890,21 @@ func workspaceWebhooksGraphQLField(s store.Store) *graphql.Field {
 	}
 }
 
-// webhookEventsGraphQLField serves canonical receipts under account, service, and optional exact-registration scope.
-func webhookEventsGraphQLField(s store.Store) *graphql.Field {
+// webhookActivityGraphQLField enforces account authentication, webhook filter
+// validation, and active workspace service checks for webhook history and summary queries.
+func webhookActivityGraphQLField(
+	s store.Store,
+	outputType graphql.Output,
+	paginated bool,
+	spanName string,
+	resolve func(context.Context, trace.Span, mcpGraphQLActor, webhookAnalyticsFilter) (interface{}, error),
+) *graphql.Field {
 	return &graphql.Field{
-		Type: webhookEventPageGraphQLType,
-		Args: webhookAnalyticsArgs(true),
+		Type: outputType,
+		Args: webhookAnalyticsArgs(paginated),
 		// Preserve the existing bounded execution-reporting trace without emitting provider data.
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.webhook_events.list")
+			ctx, span := otel.Tracer("engine").Start(p.Context, spanName)
 			defer span.End()
 			actor, err := actorFromContext(p.Context)
 			// Reporting must bind every query to the authenticated account.
@@ -905,7 +912,7 @@ func webhookEventsGraphQLField(s store.Store) *graphql.Field {
 				return nil, err
 			}
 			filter, err := webhookAnalyticsFilterFromArgs(p)
-			// Invalid filters must not broaden event visibility.
+			// Invalid filters must not broaden event visibility or create service-wide aggregates.
 			if err != nil {
 				return nil, err
 			}
@@ -913,8 +920,21 @@ func webhookEventsGraphQLField(s store.Store) *graphql.Field {
 			if err := requireActiveWorkspaceService(ctx, s, filter.serviceID); err != nil {
 				return nil, err
 			}
+			span.SetAttributes(attribute.String("service_id", filter.serviceID.String()))
+			return resolve(ctx, span, actor, filter)
+		},
+	}
+}
+
+// webhookEventsGraphQLField serves canonical receipts under account, service, and optional exact-registration scope.
+func webhookEventsGraphQLField(s store.Store) *graphql.Field {
+	return webhookActivityGraphQLField(
+		s,
+		webhookEventPageGraphQLType,
+		true,
+		"engine.graphql.webhook_events.list",
+		func(ctx context.Context, span trace.Span, actor mcpGraphQLActor, filter webhookAnalyticsFilter) (interface{}, error) {
 			span.SetAttributes(
-				attribute.String("service_id", filter.serviceID.String()),
 				attribute.Int("limit", filter.limit),
 				attribute.Int("offset", filter.offset),
 			)
@@ -925,33 +945,17 @@ func webhookEventsGraphQLField(s store.Store) *graphql.Field {
 			}
 			return map[string]interface{}{"items": projectGraphQLWebhookEvents(events), "total": int(total)}, nil
 		},
-	}
+	)
 }
 
 // webhookAnalyticsGraphQLField uses the same registration predicates as event history.
 func webhookAnalyticsGraphQLField(s store.Store) *graphql.Field {
-	return &graphql.Field{
-		Type: webhookAnalyticsGraphQLType,
-		Args: webhookAnalyticsArgs(false),
-		// Preserve the existing bounded execution-reporting trace without emitting provider data.
-		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.webhook_analytics.get")
-			defer span.End()
-			actor, err := actorFromContext(p.Context)
-			// Summaries must retain the same authenticated account boundary as history.
-			if err != nil {
-				return nil, err
-			}
-			filter, err := webhookAnalyticsFilterFromArgs(p)
-			// Invalid scope must not become a service-wide aggregate.
-			if err != nil {
-				return nil, err
-			}
-			// Disabled services cannot expose activity through a direct GraphQL request.
-			if err := requireActiveWorkspaceService(ctx, s, filter.serviceID); err != nil {
-				return nil, err
-			}
-			span.SetAttributes(attribute.String("service_id", filter.serviceID.String()))
+	return webhookActivityGraphQLField(
+		s,
+		webhookAnalyticsGraphQLType,
+		false,
+		"engine.graphql.webhook_analytics.get",
+		func(ctx context.Context, _ trace.Span, actor mcpGraphQLActor, filter webhookAnalyticsFilter) (interface{}, error) {
 			analytics, err := readWebhookAnalytics(ctx, s, filter.storeFilter(actor.accountID))
 			// An unavailable aggregate must never be presented as zero received events.
 			if err != nil {
@@ -959,67 +963,117 @@ func webhookAnalyticsGraphQLField(s store.Store) *graphql.Field {
 			}
 			return projectGraphQLWebhookAnalytics(analytics), nil
 		},
-	}
+	)
 }
 
-func engineExecutionEventsGraphQLField(s store.Store) *graphql.Field {
+// serviceExecutionActivityGraphQLField shares filter parsing, active-service gating,
+// and actor lookup between service execution event and analytics GraphQL queries.
+func serviceExecutionActivityGraphQLField(
+	s store.Store,
+	outputType graphql.Output,
+	paginated bool,
+	spanName string,
+	resolve func(context.Context, trace.Span, mcpGraphQLActor, engineExecutionActivityFilter) (interface{}, error),
+) *graphql.Field {
 	return &graphql.Field{
-		Type: engineExecutionEventPageGraphQLType,
-		Args: engineExecutionActivityArgs(true),
+		Type: outputType,
+		Args: engineExecutionActivityArgs(paginated),
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.execution_events.list")
+			ctx, span := otel.Tracer("engine").Start(p.Context, spanName)
 			defer span.End()
 			filter, err := engineExecutionActivityFilterFromArgs(p)
+			// Reject invalid service or time filters before touching workspace state.
 			if err != nil {
 				return nil, err
 			}
+			// Disabled workspace services cannot expose execution activity.
 			if err := requireActiveWorkspaceService(ctx, s, filter.serviceID); err != nil {
 				return nil, err
 			}
+			span.SetAttributes(attribute.String("service_id", filter.serviceID.String()))
+			actor, err := actorFromContext(ctx)
+			// Execution activity queries are always scoped to the authenticated account.
+			if err != nil {
+				return nil, err
+			}
+			return resolve(ctx, span, actor, filter)
+		},
+	}
+}
+
+// engineExecutionEventsGraphQLField serves paginated service-level execution receipts.
+func engineExecutionEventsGraphQLField(s store.Store) *graphql.Field {
+	return serviceExecutionActivityGraphQLField(
+		s,
+		engineExecutionEventPageGraphQLType,
+		true,
+		"engine.graphql.execution_events.list",
+		func(ctx context.Context, span trace.Span, actor mcpGraphQLActor, filter engineExecutionActivityFilter) (interface{}, error) {
 			span.SetAttributes(
-				attribute.String("service_id", filter.serviceID.String()),
 				attribute.String("transport", filter.transport),
 				attribute.String("status", filter.status),
 				attribute.Int("limit", filter.limit),
 				attribute.Int("offset", filter.offset),
 			)
-			actor, err := actorFromContext(ctx)
-			if err != nil {
-				return nil, err
-			}
 			events, total, err := s.ListEngineExecutionEventsByService(ctx, filter.storeFilter(actor.accountID))
+			// Surface store errors instead of silently returning an empty page.
 			if err != nil {
 				return nil, fmt.Errorf("list engine execution events: %w", err)
 			}
 			return map[string]interface{}{"items": projectGraphQLEngineExecutionEvents(events), "total": int(total)}, nil
+		},
+	)
+}
+
+// appExecutionActivityGraphQLField shares actor authentication, app scope resolution,
+// and span setup across app-level execution event and analytics GraphQL queries.
+func appExecutionActivityGraphQLField(
+	s store.Store,
+	outputType graphql.Output,
+	args graphql.FieldConfigArgument,
+	spanName string,
+	resolve func(context.Context, trace.Span, graphql.ResolveParams, mcpGraphQLActor, appExecutionActivityFilter) (interface{}, error),
+) *graphql.Field {
+	return &graphql.Field{
+		Type: outputType,
+		Args: args,
+		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			ctx, span := otel.Tracer("engine").Start(p.Context, spanName)
+			defer span.End()
+			actor, err := actorFromContext(ctx)
+			// App execution reads require an authenticated account context.
+			if err != nil {
+				return nil, err
+			}
+			filter, err := appExecutionActivityFilterFromArgs(ctx, s, actor.accountID, p)
+			// Invalid app selectors must fail before querying storage.
+			if err != nil {
+				return nil, err
+			}
+			span.SetAttributes(
+				attribute.String("app.family_id", filter.appFamilyID.String()),
+				attribute.String("app.id", filter.appID.String()),
+				attribute.String("transport", filter.transport),
+			)
+			return resolve(ctx, span, p, actor, filter)
 		},
 	}
 }
 
 // appExecutionEventsGraphQLField reuses the existing app audit permission boundary for parent and child pages.
 func appExecutionEventsGraphQLField(s store.Store) *graphql.Field {
-	return &graphql.Field{
-		Type: engineExecutionEventPageGraphQLType,
-		Args: appExecutionReceiptArgs(),
-		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.app_execution_events.list")
-			defer span.End()
-			actor, err := actorFromContext(ctx)
-			if err != nil {
-				return nil, err
-			}
-			filter, err := appExecutionActivityFilterFromArgs(ctx, s, actor.accountID, p)
-			if err != nil {
-				return nil, err
-			}
+	return appExecutionActivityGraphQLField(
+		s,
+		engineExecutionEventPageGraphQLType,
+		appExecutionReceiptArgs(),
+		"engine.graphql.app_execution_events.list",
+		func(ctx context.Context, span trace.Span, p graphql.ResolveParams, actor mcpGraphQLActor, filter appExecutionActivityFilter) (interface{}, error) {
 			reader, ok := s.(store.AppExecutionEventReader)
+			// Fail explicitly when the configured store does not implement app event reads.
 			if !ok {
 				return nil, errors.New("app execution activity is unavailable")
 			}
 			span.SetAttributes(
-				attribute.String("app.family_id", filter.appFamilyID.String()),
-				attribute.String("app.id", filter.appID.String()),
-				attribute.String("transport", filter.transport),
 				attribute.String("status", filter.status),
 				attribute.Int("limit", filter.limit),
 				attribute.Int("offset", filter.offset),
@@ -1030,73 +1084,54 @@ func appExecutionEventsGraphQLField(s store.Store) *graphql.Field {
 				return nil, err
 			}
 			events, total, err := reader.ListEngineExecutionEventsByApp(ctx, storeFilter)
+			// Surface store failures rather than returning an empty page.
 			if err != nil {
 				return nil, fmt.Errorf("list app execution events: %w", err)
 			}
 			return map[string]interface{}{"items": projectGraphQLEngineExecutionEvents(events), "total": int(total)}, nil
 		},
-	}
+	)
 }
 
+// appExecutionAnalyticsGraphQLField serves aggregated execution analytics for one app family or version.
 func appExecutionAnalyticsGraphQLField(s store.Store) *graphql.Field {
-	return &graphql.Field{
-		Type: appExecutionAnalyticsGraphQLType,
-		Args: appExecutionActivityArgs(false),
-		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.app_execution_analytics.get")
-			defer span.End()
-			actor, err := actorFromContext(ctx)
-			if err != nil {
-				return nil, err
-			}
-			filter, err := appExecutionActivityFilterFromArgs(ctx, s, actor.accountID, p)
-			if err != nil {
-				return nil, err
-			}
+	return appExecutionActivityGraphQLField(
+		s,
+		appExecutionAnalyticsGraphQLType,
+		appExecutionActivityArgs(false),
+		"engine.graphql.app_execution_analytics.get",
+		func(ctx context.Context, _ trace.Span, _ graphql.ResolveParams, actor mcpGraphQLActor, filter appExecutionActivityFilter) (interface{}, error) {
 			reader, ok := s.(store.AppExecutionAnalyticsReader)
+			// Fail explicitly when the configured store does not implement app analytics reads.
 			if !ok {
 				return nil, errors.New("app execution analytics is unavailable")
 			}
-			span.SetAttributes(
-				attribute.String("app.family_id", filter.appFamilyID.String()),
-				attribute.String("app.id", filter.appID.String()),
-				attribute.String("transport", filter.transport),
-			)
 			analytics, err := reader.GetEngineExecutionAnalyticsByApp(ctx, filter.storeFilter(actor.accountID))
+			// Surface store failures rather than returning zeroed analytics.
 			if err != nil {
 				return nil, fmt.Errorf("get app execution analytics: %w", err)
 			}
 			return projectGraphQLAppExecutionAnalytics(analytics), nil
 		},
-	}
+	)
 }
 
+// engineExecutionAnalyticsGraphQLField serves aggregated service-level execution analytics.
 func engineExecutionAnalyticsGraphQLField(s store.Store) *graphql.Field {
-	return &graphql.Field{
-		Type: engineExecutionAnalyticsGraphQLType,
-		Args: engineExecutionActivityArgs(false),
-		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-			ctx, span := otel.Tracer("engine").Start(p.Context, "engine.graphql.execution_analytics.get")
-			defer span.End()
-			filter, err := engineExecutionActivityFilterFromArgs(p)
-			if err != nil {
-				return nil, err
-			}
-			if err := requireActiveWorkspaceService(ctx, s, filter.serviceID); err != nil {
-				return nil, err
-			}
-			span.SetAttributes(attribute.String("service_id", filter.serviceID.String()))
-			actor, err := actorFromContext(ctx)
-			if err != nil {
-				return nil, err
-			}
+	return serviceExecutionActivityGraphQLField(
+		s,
+		engineExecutionAnalyticsGraphQLType,
+		false,
+		"engine.graphql.execution_analytics.get",
+		func(ctx context.Context, _ trace.Span, actor mcpGraphQLActor, filter engineExecutionActivityFilter) (interface{}, error) {
 			analytics, err := s.GetEngineExecutionAnalyticsByService(ctx, filter.storeFilter(actor.accountID))
+			// Surface store errors instead of presenting zeroed analytics.
 			if err != nil {
 				return nil, fmt.Errorf("get engine execution analytics: %w", err)
 			}
 			return projectGraphQLEngineExecutionAnalytics(analytics), nil
 		},
-	}
+	)
 }
 
 func workspaceExecutionAnalyticsGraphQLField(s store.Store) *graphql.Field {

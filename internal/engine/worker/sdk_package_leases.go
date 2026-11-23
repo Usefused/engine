@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
-	"sync"
 	"time"
 
 	"github.com/Usefused/engine/internal/shared/models"
@@ -42,15 +41,13 @@ type SDKPackageLeaseWorker struct {
 	client    SDKPackageLeaseClient
 	opts      SDKPackageLeaseOptions
 	resumeAt  uuid.UUID
-	cancel    context.CancelFunc
-	done      chan struct{}
-	startOnce sync.Once
-	stopOnce  sync.Once
+	lifecycle *workerLifecycle
 }
 
+// NewSDKPackageLeaseWorker constructs a non-running lease renewal worker with bounded options.
 func NewSDKPackageLeaseWorker(store SDKPackageLeaseStore, client SDKPackageLeaseClient, opts SDKPackageLeaseOptions) *SDKPackageLeaseWorker {
 	return &SDKPackageLeaseWorker{
-		store: store, client: client, opts: normalizeSDKPackageLeaseOptions(opts), done: make(chan struct{}),
+		store: store, client: client, opts: normalizeSDKPackageLeaseOptions(opts), lifecycle: newDeferredLifecycle(),
 	}
 }
 
@@ -72,30 +69,26 @@ func normalizeSDKPackageLeaseOptions(opts SDKPackageLeaseOptions) SDKPackageLeas
 	return opts
 }
 
+// Start launches an immediate lease renewal pass followed by jittered polling.
 func (w *SDKPackageLeaseWorker) Start(ctx context.Context) {
+	// Skip launching if required store or Registry client dependencies are absent.
 	if w == nil || w.store == nil || w.client == nil {
 		return
 	}
-	w.startOnce.Do(func() {
-		workerCtx, cancel := context.WithCancel(ctx)
-		w.cancel = cancel
-		go w.run(workerCtx)
-	})
+	w.lifecycle.start(ctx, w.run)
 }
 
+// Stop cancels lease renewal polling and drains any in-flight renewal call.
 func (w *SDKPackageLeaseWorker) Stop(ctx context.Context) {
-	if w == nil || w.cancel == nil {
+	// Nil workers are valid when lease renewal is disabled.
+	if w == nil {
 		return
 	}
-	w.stopOnce.Do(w.cancel)
-	select {
-	case <-w.done:
-	case <-ctx.Done():
-	}
+	w.lifecycle.stop(ctx)
 }
 
 func (w *SDKPackageLeaseWorker) run(ctx context.Context) {
-	defer close(w.done)
+	defer close(w.lifecycle.done)
 	w.renew(ctx, "startup")
 	timer := time.NewTimer(w.nextInterval())
 	defer timer.Stop()

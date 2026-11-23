@@ -60,54 +60,70 @@ func (s *ConnectService) ClientID(ctx context.Context, serviceID uuid.UUID, auth
 	return app.ClientID, nil
 }
 
-// Exchange redeems a provider authorization code using Fused's registered
-// application, mirroring connectauth.ExchangeAuthorizationCode exactly
-// except that credentials and token policy come exclusively from the operator catalogue.
-// Legacy auth/flow arguments are ignored so older consumers cannot select a credential destination.
-func (s *ConnectService) Exchange(ctx context.Context, serviceID uuid.UUID, authName, redirectURI string, _ fusedobject.AuthConfig, _ fusedobject.OAuth2FlowContract, code, verifier string) (connectauth.TokenResponse, error) {
+// runConnectTokenFlow resolves operator-managed credentials, executes a provider
+// token operation, records webhook proof for the authenticated installation,
+// and strips raw provider payloads before returning to callers.
+func (s *ConnectService) runConnectTokenFlow(
+	ctx context.Context,
+	serviceID uuid.UUID,
+	authName, redirectURI string,
+	callProvider func(fusedobject.AuthConfig, fusedobject.OAuth2FlowContract, connectauth.ClientCredentials) (connectauth.TokenResponse, error),
+	recordProof func(uuid.UUID, connectauth.TokenResponse) error,
+) (connectauth.TokenResponse, error) {
 	app, err := s.providerApp(ctx, serviceID, authName)
 	// Invalid or unavailable operator policy must fail before a credential-bearing network request.
 	if err != nil {
 		return connectauth.TokenResponse{}, err
 	}
-	auth, flow := app.Auth, app.Flow
 	creds := connectauth.ClientCredentials{ClientID: app.ClientID, ClientSecret: app.ClientSecret, RedirectURI: redirectURI}
-	token, err := connectauth.ExchangeAuthorizationCode(ctx, s.httpClient, auth, flow, creds, code, verifier)
-	// Only a successful provider response can establish a remote webhook grant.
+	token, err := callProvider(app.Auth, app.Flow, creds)
+	// Only a successful provider response can establish or rotate a remote webhook proof.
 	if err == nil && s.Proof != nil {
 		installation, ok := ctx.Value(installationContextKey{}).(Installation)
-		// Proof creation requires the authenticated installation resolved by the broker middleware.
+		// Proof mutations require the authenticated installation resolved by the broker middleware.
 		if !ok {
 			return connectauth.TokenResponse{}, webhookrelay.ErrDenied
 		}
-		err = s.Proof.RecordExchange(ctx, installation.ID, serviceID, authName, token.AccessToken, token.RefreshToken, token.RawResponse)
+		err = recordProof(installation.ID, token)
 	}
 	token.RawResponse = nil
 	return token, err
 }
 
+// Exchange redeems a provider authorization code using Fused's registered
+// application, mirroring connectauth.ExchangeAuthorizationCode exactly
+// except that credentials and token policy come exclusively from the operator catalogue.
+// Legacy auth/flow arguments are ignored so older consumers cannot select a credential destination.
+func (s *ConnectService) Exchange(ctx context.Context, serviceID uuid.UUID, authName, redirectURI string, _ fusedobject.AuthConfig, _ fusedobject.OAuth2FlowContract, code, verifier string) (connectauth.TokenResponse, error) {
+	return s.runConnectTokenFlow(
+		ctx,
+		serviceID,
+		authName,
+		redirectURI,
+		func(auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, creds connectauth.ClientCredentials) (connectauth.TokenResponse, error) {
+			return connectauth.ExchangeAuthorizationCode(ctx, s.httpClient, auth, flow, creds, code, verifier)
+		},
+		func(installationID uuid.UUID, token connectauth.TokenResponse) error {
+			return s.Proof.RecordExchange(ctx, installationID, serviceID, authName, token.AccessToken, token.RefreshToken, token.RawResponse)
+		},
+	)
+}
+
 // Refresh mirrors connectauth.RefreshAccessToken the same way Exchange
 // mirrors ExchangeAuthorizationCode.
 func (s *ConnectService) Refresh(ctx context.Context, serviceID uuid.UUID, authName, redirectURI string, _ fusedobject.AuthConfig, _ fusedobject.OAuth2FlowContract, refreshToken string) (connectauth.TokenResponse, error) {
-	app, err := s.providerApp(ctx, serviceID, authName)
-	// Invalid or unavailable operator policy must fail before a credential-bearing network request.
-	if err != nil {
-		return connectauth.TokenResponse{}, err
-	}
-	auth, flow := app.Auth, app.Flow
-	creds := connectauth.ClientCredentials{ClientID: app.ClientID, ClientSecret: app.ClientSecret, RedirectURI: redirectURI}
-	token, err := connectauth.RefreshAccessToken(ctx, s.httpClient, auth, flow, creds, refreshToken)
-	// Refresh moves only the existing installation's proof; it cannot introduce a new provider resource.
-	if err == nil && s.Proof != nil {
-		installation, ok := ctx.Value(installationContextKey{}).(Installation)
-		// An unauthenticated internal caller cannot rotate another receiver's proof.
-		if !ok {
-			return connectauth.TokenResponse{}, webhookrelay.ErrDenied
-		}
-		err = s.Proof.RecordRefresh(ctx, installation.ID, serviceID, authName, refreshToken, token.AccessToken, token.RefreshToken)
-	}
-	token.RawResponse = nil
-	return token, err
+	return s.runConnectTokenFlow(
+		ctx,
+		serviceID,
+		authName,
+		redirectURI,
+		func(auth fusedobject.AuthConfig, flow fusedobject.OAuth2FlowContract, creds connectauth.ClientCredentials) (connectauth.TokenResponse, error) {
+			return connectauth.RefreshAccessToken(ctx, s.httpClient, auth, flow, creds, refreshToken)
+		},
+		func(installationID uuid.UUID, token connectauth.TokenResponse) error {
+			return s.Proof.RecordRefresh(ctx, installationID, serviceID, authName, refreshToken, token.AccessToken, token.RefreshToken)
+		},
+	)
 }
 
 // ProviderAppReader separates trusted registration lookup from caller-supplied OAuth metadata.

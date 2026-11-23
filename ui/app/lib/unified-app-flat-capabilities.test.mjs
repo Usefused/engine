@@ -18,7 +18,7 @@ test("flat capabilities expose direct operations, events and immutable versions"
   /** Keep the select native here; option identity and callback behavior are the contract under test. */
   function resolve(name) {
     // The production select enhancement is independently covered; native events still carry the exact selected ID.
-    if (name === '~/components/forms/Select') return {Select: ({density, ...props}) => createElement('select', props)};
+    if (name === '~/components/forms/Select') return {Select: (selectProps) => { const rest = {...selectProps}; delete rest.density; return createElement('select', rest); }};
     return require(name);
   }
   new Function('require','exports',code)(resolve,exports);

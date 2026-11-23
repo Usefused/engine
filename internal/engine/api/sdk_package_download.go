@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/engine/sandbox"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/models"
 	"github.com/go-chi/chi/v5"
@@ -184,7 +185,7 @@ func safeSDKPackageGenerationError(err error) error {
 	if !errors.As(err, &proxyErr) || proxyErr.status != http.StatusConflict {
 		return err
 	}
-	code := registrySDKGenerationErrorCode(proxyErr.body)
+	code := sandbox.RegistrySDKGenerationErrorCode(proxyErr.body)
 	// Exact allowlisting prevents arbitrary Registry prose or codes from reaching callers.
 	if code == "sdk_generator_version_unavailable" {
 		return workspaceConfigHTTPError{
@@ -194,26 +195,6 @@ func safeSDKPackageGenerationError(err error) error {
 		}
 	}
 	return err
-}
-
-// registrySDKGenerationErrorCode reads only the current nested Registry
-// envelope without accepting legacy shapes or any accompanying text.
-func registrySDKGenerationErrorCode(payload []byte) string {
-	var envelope struct {
-		Error json.RawMessage `json:"error"`
-	}
-	// Malformed or absent error payloads cannot provide a reviewed code.
-	if json.Unmarshal(payload, &envelope) != nil || len(envelope.Error) == 0 {
-		return ""
-	}
-	var nested struct {
-		Code string `json:"code"`
-	}
-	// The shared Registry control-plane envelope is the authoritative shape.
-	if json.Unmarshal(envelope.Error, &nested) == nil && nested.Code != "" {
-		return nested.Code
-	}
-	return ""
 }
 
 func streamSDKPackageResponse(w http.ResponseWriter, response *http.Response) error {

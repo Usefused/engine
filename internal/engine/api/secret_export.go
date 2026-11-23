@@ -68,7 +68,7 @@ func RevealBucketSecretHandler(s store.Store, masterKey []byte) http.HandlerFunc
 			http.Error(w, "secret retrieval unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		writeConnectJSON(w, http.StatusOK, map[string]string{"value": value})
+		writeJSONStatus(w, http.StatusOK, map[string]string{"value": value})
 	}
 }
 

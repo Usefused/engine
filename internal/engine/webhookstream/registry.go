@@ -14,7 +14,8 @@ import (
 type CancellationReason uint32
 
 const (
-	CancellationReasonNone CancellationReason = iota
+	// Reserve zero so an unset CancellationReason is distinguishable from active cancellation causes.
+	_ CancellationReason = iota
 	CancellationReasonUnregistered
 	CancellationReasonTokenInvalidated
 	CancellationReasonAppInvalidated

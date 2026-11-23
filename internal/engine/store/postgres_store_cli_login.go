@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -241,7 +242,7 @@ func auditCLICredential(ctx context.Context, tx pgx.Tx, login lockedCLILogin, cr
 				'client_type', 'cli'
 			)
 		FROM fused_workspaces workspace WHERE workspace.singleton_key = 1
-	`, login.subjectID, login.actorCredentialID, accesscontrolTraceID(ctx),
+	`, login.subjectID, login.actorCredentialID, observability.TraceIDFromContext(ctx),
 		credentialID, revision, login.authMethod)
 	if err != nil {
 		return fmt.Errorf("audit CLI credential: %w", err)

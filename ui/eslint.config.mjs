@@ -12,5 +12,27 @@ export default tseslint.config(
     rules: {
       "complexity": ["error", 10]
     }
+  },
+  {
+    // Node test suites exercise JSDOM browser globals alongside standard Node built-ins.
+    files: ["app/**/*.test.mjs"],
+    languageOptions: {
+      globals: {
+        AbortController: "readonly",
+        AbortSignal: "readonly",
+        DOMException: "readonly",
+        File: "readonly",
+        Response: "readonly",
+        URL: "readonly",
+        URLSearchParams: "readonly",
+        document: "readonly",
+        process: "readonly",
+        sessionStorage: "readonly",
+        setImmediate: "readonly",
+        setTimeout: "readonly",
+        structuredClone: "readonly",
+        window: "readonly",
+      },
+    },
   }
 );

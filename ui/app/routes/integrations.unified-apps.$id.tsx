@@ -11,7 +11,7 @@ import { AppExecutionEndpoint } from "~/components/apps/AppExecutionEndpoint";
 import { AppExecutionTokens } from "~/components/apps/AppExecutionTokens";
 import { Loader2 } from "lucide-react";
 import { api } from "~/lib/api";
-import { deleteAppFamilies } from "~/lib/app-family-deactivation";
+import { deleteAppFamilyWithFeedback } from "~/lib/app-family-deactivation";
 import { appConnectedServiceSelections, type AppConnectedServiceSelection, type AppServiceSummary } from "~/lib/app-connected-services";
 import type { AppSelectionPayload } from "~/lib/app-selection-v3";
 import { useCurrentActorAccess } from "~/components/access/CurrentActorAccess";
@@ -97,37 +97,22 @@ export default function UnifiedAppDetails() {
   }
 
   /** Permanently deactivates every version of this Unified App and archives the family identity. */
+  /** Permanently deactivates all versions of this Unified App and archives its family identity. */
   async function deleteApp() {
     // Family deletion requires a loaded app identity and an active family management grant.
     if (!app || deletingApp || !hasResourcePermission(access, "app.unified_app.manage", "APP", app.app_family_id)) return;
-    setDeletingApp(true);
-    try {
-      const result = await deleteAppFamilies([app.app_family_id], {
-        listVersions: (familyId) => readUnifiedAppVersions(familyId).then((items) => items.map((item) => ({ app_id: item.id }))),
-        confirm: ({ versionCount }) => toast.confirm(
-          // Name the exact deactivated version count when active runtimes must be removed before archiving.
-          versionCount > 0
-            ? `Delete Unified App "${app.name}"? This permanently deactivates all ${versionCount} version(s) and removes its runtime. Its name becomes reusable and its historical identity remains in Archive.`
-            : `Delete Unified App "${app.name}"? Its name becomes reusable and its historical identity remains in Archive.`
-        ),
-        deactivate: api.sdks.deactivate,
-        archiveFamily: api.sdks.archiveFamily,
-      });
-      // Cancellation keeps the Unified App and its versions untouched.
-      if (result.cancelled) return;
-      if (result.deletedFamilies.length === 1) {
-        toast.success(`Unified App "${app.name}" deleted and moved to Archive.`);
-        navigate("/integrations/sdks?type=unified_app");
-        return;
-      }
-      toast.error(`Failed to delete Unified App "${app.name}". Deactivated ${result.deactivatedVersions} version(s); ${result.failedVersions} version deactivation(s) failed.`);
-      // Leave the detail route if any version was already deactivated so the user can retry from the catalogue.
-      if (result.deactivatedVersions > 0) navigate("/integrations/sdks?type=unified_app");
-    } catch (cause) {
-      toast.error(`Failed to delete Unified App: ${cause instanceof Error ? cause.message : String(cause)}`);
-    } finally {
-      setDeletingApp(false);
-    }
+    await deleteAppFamilyWithFeedback({
+      familyId: app.app_family_id,
+      name: app.name,
+      kindLabel: "Unified App",
+      redirectTo: "/integrations/sdks?type=unified_app",
+      listVersions: (familyId) => readUnifiedAppVersions(familyId).then((items) => items.map((item) => ({ app_id: item.id }))),
+      deactivate: api.sdks.deactivate,
+      archiveFamily: api.sdks.archiveFamily,
+      toast,
+      navigate,
+      setDeleting: setDeletingApp,
+    });
   }
 
   /** Switches new traffic only after the user reviews the exact retained version. */

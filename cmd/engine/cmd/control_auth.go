@@ -65,10 +65,6 @@ const (
 	requestClassUnclassified    engineRequestClass = "unclassified"
 )
 
-func controlActorMiddleware(authenticator *accesscontrol.Authenticator) func(http.Handler) http.Handler {
-	return controlActorMiddlewareWithAudit(authenticator, nil)
-}
-
 func controlActorMiddlewareWithAudit(authenticator *accesscontrol.Authenticator, recorder accesscontrol.AuditRecorder, cookieManagers ...*browserauth.CookieManager) func(http.Handler) http.Handler {
 	cookies := firstCookieManager(cookieManagers)
 	return func(next http.Handler) http.Handler {

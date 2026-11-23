@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
+	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"go.opentelemetry.io/otel/trace"
 )
 
 const managedLoginExchangeLease = 30 * time.Second
@@ -323,7 +323,7 @@ func auditManagedLogin(ctx context.Context, tx pgx.Tx, transaction ManagedLoginT
 				'provider', $5::text, 'auth_method', $6::text, 'new_binding', $7::boolean
 			)
 		FROM fused_workspaces workspace WHERE workspace.singleton_key = 1
-	`, credential.UserID, credential.ID, accesscontrolTraceID(ctx), revision,
+	`, credential.UserID, credential.ID, observability.TraceIDFromContext(ctx), revision,
 		transaction.Provider, transaction.AuthMethod, newBinding)
 	if err != nil {
 		return fmt.Errorf("audit managed login: %w", err)
@@ -410,14 +410,6 @@ func optionalManagedLogoutExpiry(value time.Time) any {
 		return nil
 	}
 	return value
-}
-
-func accesscontrolTraceID(ctx context.Context) string {
-	spanContext := trace.SpanContextFromContext(ctx)
-	if !spanContext.IsValid() {
-		return ""
-	}
-	return spanContext.TraceID().String()
 }
 
 var _ ManagedIdentityStore = (*postgresStore)(nil)

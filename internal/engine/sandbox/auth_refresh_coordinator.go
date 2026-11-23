@@ -12,6 +12,7 @@ import (
 	"github.com/Usefused/engine/internal/engine/connectauth"
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/shared/fusedobject"
+	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -448,7 +449,7 @@ func (c *AuthRefreshCoordinator) handleProviderRefreshError(ctx context.Context,
 // markClaimReconnectRequired atomically records the stable consent decision for
 // the lease owner and never rewrites encrypted token fields.
 func (c *AuthRefreshCoordinator) markClaimReconnectRequired(ctx context.Context, claim store.AuthConnectionRefreshClaim, failureCode string, now time.Time) authRefreshAttempt {
-	applied, err := c.refreshStore.MarkAuthConnectionReconnectRequired(ctx, claim.Connection.ID, claim.LeaseToken, failureCode, executionTraceID(ctx), now)
+	applied, err := c.refreshStore.MarkAuthConnectionReconnectRequired(ctx, claim.Connection.ID, claim.LeaseToken, failureCode, observability.TraceIDFromContext(ctx), now)
 	// Failed persistence leaves no authoritative reconnect transition to publish.
 	if err != nil {
 		return authRefreshAttempt{result: transientRefreshResult("reconnect_state_write_failed"), err: err}
@@ -470,7 +471,7 @@ func (c *AuthRefreshCoordinator) markClaimReconnectRequired(ctx context.Context,
 // returning a bounded result to the scheduler.
 func (c *AuthRefreshCoordinator) releaseClaim(ctx context.Context, claim store.AuthConnectionRefreshClaim, outcome AuthRefreshOutcome, failureCode string, retryDelay time.Duration, cause error) authRefreshAttempt {
 	now := c.now().UTC()
-	applied, err := c.refreshStore.ReleaseAuthConnectionRefresh(ctx, claim.Connection.ID, claim.LeaseToken, now.Add(retryDelay), failureCode, executionTraceID(ctx), now)
+	applied, err := c.refreshStore.ReleaseAuthConnectionRefresh(ctx, claim.Connection.ID, claim.LeaseToken, now.Add(retryDelay), failureCode, observability.TraceIDFromContext(ctx), now)
 	// Retry events require the retry boundary and stable failure code to be durable first.
 	if err != nil {
 		return authRefreshAttempt{result: transientRefreshResult("refresh_release_failed"), err: err}

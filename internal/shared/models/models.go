@@ -183,8 +183,6 @@ type EngineUsageReport struct {
 
 const PublicServiceInsightSchemaVersion = 1
 
-var PublicServiceInsightLatencyBounds = [...]int64{5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000}
-
 type PublicServiceInsightReport struct {
 	ReportID             uuid.UUID `json:"report_id"`
 	ServiceID            uuid.UUID `json:"service_id"`
@@ -345,12 +343,6 @@ type ImportWarning struct {
 
 type ImportWarnings []ImportWarning
 
-// ServiceWithSources is used for aggregation queries
-type ServiceWithSources struct {
-	Service `bson:",inline"`
-	Sources []Source `json:"sources"`
-}
-
 // ─── Resource ────────────────────────────────────────────────────────────────
 
 type Resource struct {
@@ -454,29 +446,6 @@ type WebhookAnalytics struct {
 
 // ─── Service Version ──────────────────────────────────────────────────────────
 
-// PublishConfigPayload is the configuration used to publish a service_versions
-// row. It is intentionally a strict subset of ServiceVersion: the repository
-// owns ID/name/public state/timestamps, and the Engine strips secret fields
-// before this payload is built.
-type PublishConfigPayload struct {
-	BaseURL               *string                `json:"base_url,omitempty"`
-	AuthConfigs           AuthConfigs            `json:"auth_configs,omitempty"`
-	RateLimit             *RateLimitConfig       `json:"rate_limit,omitempty"`
-	RetryConfig           *RetryConfig           `json:"retry_config,omitempty"`
-	Pagination            *PaginationConfig      `json:"pagination,omitempty"`
-	EventExtractionPath   *string                `json:"event_extraction_path,omitempty"`
-	IncomingWebhookConfig *IncomingWebhookConfig `json:"incoming_webhook_config,omitempty"`
-	DefaultHeaders        DefaultHeaders         `json:"default_headers,omitempty"`
-	// Servers is the full multi-environment base URL list (e.g. separately
-	// named "Production"/"Staging" entries) an owner can configure.
-	// BaseURL remains the resolved primary URL used by SDK generation.
-	// Without this field, saves silently discard every server after the first.
-	Servers Servers `json:"servers,omitempty"`
-	// SourceSpecVersion mirrors the provider-declared version from the source.
-	SourceSpecVersion *string               `json:"source_spec_version,omitempty"`
-	ConnectConfig     *ServiceConnectConfig `json:"connect_config,omitempty"`
-}
-
 type ServiceVersion struct {
 	ID          uuid.UUID         `json:"id"`
 	ServiceID   uuid.UUID         `json:"service_id"`
@@ -496,8 +465,8 @@ type ServiceVersion struct {
 	ConnectConfig         *ServiceConnectConfig        `json:"connect_config,omitempty"`
 	Catalog               *catalogcontract.Composition `json:"catalog,omitempty"`
 	DefaultHeaders        DefaultHeaders               `json:"default_headers,omitempty"`
-	// Servers mirrors PublishConfigPayload.Servers -- see that field's
-	// comment for why this exists alongside BaseURL instead of replacing it.
+	// Servers holds the full multi-environment base URL list alongside BaseURL,
+	// which remains the resolved primary URL used by SDK generation.
 	Servers  Servers `json:"servers,omitempty"`
 	IsPublic bool    `json:"is_public"`
 	// Status is the published lifecycle: "public" or "deprecated".
@@ -525,12 +494,6 @@ type ResourceInputConfig = connectionprofile.ResourceInputConfig
 type ResourceInputField = connectionprofile.ResourceInputField
 type ConnectionBinding = connectionprofile.Binding
 
-// Published lifecycle values for ServiceVersion.Status.
-const (
-	VersionStatusPublic     = "public"
-	VersionStatusDeprecated = "deprecated"
-)
-
 // ServiceVersionConnectionContract is the bounded Registry response used to
 // validate local workspace profiles against exact pinned service versions.
 type ServiceVersionConnectionContract struct {
@@ -550,15 +513,6 @@ type ServiceVersionResolvedRef struct {
 	ServiceID        uuid.UUID `json:"service_id"`
 	Version          string    `json:"version"`
 	ServiceVersionID uuid.UUID `json:"service_version_id"`
-}
-
-// WorkspaceUsageRef is the minimal identity of a workspace pinned to a
-// service version being touched by a ModifyExisting import -- just enough
-// for a CLI/CI log to name which workspace is affected, not a full
-// fused_workspaces row.
-type WorkspaceUsageRef struct {
-	ID   uuid.UUID `json:"id"`
-	Name string    `json:"name"`
 }
 
 // ComputeNextVersionName returns the next date-based version name for a
@@ -1512,33 +1466,30 @@ type IdempotentExecution struct {
 	ExpiresAt           time.Time  `db:"expires_at"`
 }
 
-// ─── Lead (Waitlist) ──────────────────────────────────────────────────────────
-
-type Lead struct {
-	ID        uuid.UUID `json:"id"`
-	Name      string    `json:"name"`
-	Email     string    `json:"email"`
-	Role      string    `json:"role"`
-	Language  string    `json:"language"`
-	Reason    string    `json:"reason"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
 // --- JSONB Scanners & Valuers ---
 
-func scanJSONB(value interface{}, target interface{}) error {
+// ScanJSONB decodes PostgreSQL JSONB byte or string driver values into target.
+func ScanJSONB(value interface{}, target interface{}) error {
+	// SQL NULL leaves the destination zero value untouched.
 	if value == nil {
 		return nil
 	}
 	b, ok := value.([]byte)
+	// pgx and database/sql drivers may surface JSONB columns as either []byte or string.
 	if !ok {
 		s, ok := value.(string)
+		// Reject unexpected driver types early rather than silently unmarshaling empty input.
 		if !ok {
 			return errors.New("type assertion to []byte or string failed")
 		}
 		b = []byte(s)
 	}
 	return json.Unmarshal(b, target)
+}
+
+// scanJSONB forwards package-internal Scan methods to ScanJSONB.
+func scanJSONB(value interface{}, target interface{}) error {
+	return ScanJSONB(value, target)
 }
 
 type Responses map[string]ResponseContract

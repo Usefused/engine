@@ -22,10 +22,6 @@ func hasPositionalMultipart(content *SelectedRequestRepresentation) bool {
 	return len(content.PrefixEncoding) > 0 || content.ItemEncoding != nil
 }
 
-func buildPositionalMultipartRequestBody(content *SelectedRequestRepresentation, headers map[string]string, bodyParams map[string]any) (io.Reader, error) {
-	return buildPositionalMultipartRequestBodyWithContext(context.Background(), content, headers, bodyParams)
-}
-
 // buildPositionalMultipartRequestBodyWithContext validates every part before
 // starting its producer so contract errors cannot leave a partial wire body.
 func buildPositionalMultipartRequestBodyWithContext(ctx context.Context, content *SelectedRequestRepresentation, headers map[string]string, bodyParams map[string]any) (io.Reader, error) {

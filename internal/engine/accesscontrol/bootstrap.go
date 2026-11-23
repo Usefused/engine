@@ -7,11 +7,11 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/Usefused/engine/internal/shared/observability"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
 )
 
 var ErrInvalidBootstrap = errors.New("invalid access-control bootstrap")
@@ -66,7 +66,7 @@ func BootstrapOwner(ctx context.Context, repository BootstrapRepository, account
 		CredentialPrefix: CredentialPrefix(licenseKey),
 		OwnerEmail:       ownerEmail,
 		Roles:            roles,
-		TraceID:          traceIDFromContext(ctx),
+		TraceID:          observability.TraceIDFromContext(ctx),
 	})
 	if err != nil {
 		span.RecordError(err)
@@ -93,12 +93,4 @@ func CredentialPrefix(credential string) string {
 		return HashControlCredential(credential)[:prefixLength]
 	}
 	return credential[:prefixLength]
-}
-
-func traceIDFromContext(ctx context.Context) string {
-	spanContext := trace.SpanContextFromContext(ctx)
-	if !spanContext.IsValid() {
-		return ""
-	}
-	return spanContext.TraceID().String()
 }

@@ -33,13 +33,9 @@ var RESTProxyMountPaths = []string{
 	"/credits",
 }
 
-// RESTProxyHandler validates the caller's API key the same way
-// GraphQLProxyHandler does, then forwards through the licence-identity proxy.
-// Mounted at each path in RESTProxyMountPaths.
-func RESTProxyHandler(proxy Forwarder, s store.Store) http.HandlerFunc {
-	return RESTProxyHandlerWithRuntimeContracts(proxy, s, nil)
-}
-
+// RESTProxyHandlerWithRuntimeContracts validates the caller's credential and
+// forwards REST requests through the licensed Registry proxy with optional
+// runtime contract verification. Mounted at each path in RESTProxyMountPaths.
 func RESTProxyHandlerWithRuntimeContracts(proxy Forwarder, s store.Store, contractFetcher RuntimeContractFetcher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		accountID, err := controlActorAccount(r.Context())

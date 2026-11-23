@@ -101,16 +101,8 @@ func DeleteBucketValueHandler(s store.Store) http.HandlerFunc {
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.bucketvalues.delete")
 		defer span.End()
 
-		accountID, err := controlActorAccount(ctx)
-		// Bucket-value deletion requires an authenticated control-plane actor.
-		if err != nil {
-			writeControlAPIMutationError(w, ctx, http.StatusUnauthorized, "authentication_required", "Authentication is required to delete a bucket value.", "Log in or provide a valid Fused credential.", "bucket_value_delete", "", "not_committed", "")
-			return
-		}
-
-		// Workspace verification prevents deletion through a foreign identity.
-		if err := verifyWorkspaceActor(ctx, accountID); err != nil {
-			writeControlAPIMutationError(w, ctx, http.StatusInternalServerError, "workspace_resolution_failed", "The Engine could not resolve the workspace for this bucket value.", "Retry and check Engine logs if the problem continues.", "bucket_value_delete", "", "not_committed", "")
+		// Bucket-value deletion requires an authenticated workspace-scoped actor.
+		if !requireControlWorkspaceActor(w, ctx, "bucket_value_delete", "Authentication is required to delete a bucket value.", "The Engine could not resolve the workspace for this bucket value.") {
 			return
 		}
 

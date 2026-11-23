@@ -318,7 +318,7 @@ func consumePolicies(states []ratelimitpolicy.PolicyState, policies []ratelimitp
 			states[index].ConcurrencyHolders[permitID.String()] = ratelimitpolicy.ConcurrencyHolder{Cost: cost, ExpiresAt: permitExpiresAt}
 			continue
 		}
-		*states[index].Tokens -= min64(*states[index].Tokens, policy.Cost)
+		*states[index].Tokens -= min(*states[index].Tokens, policy.Cost)
 	}
 }
 

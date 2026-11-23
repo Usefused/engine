@@ -5,11 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"net/http"
+	"strings"
+
 	"github.com/Usefused/engine/internal/engine/accesscontrol"
 	"github.com/Usefused/engine/internal/engine/oauthprovider"
 	"github.com/Usefused/engine/internal/engine/store"
-	"net/http"
-	"strings"
 )
 
 // deploymentManifestWithin rejects other apps, provider-version changes and additional operations before planning.
@@ -116,5 +117,5 @@ func (h *runtimeOAuthHandler) deploy(w http.ResponseWriter, r *http.Request) {
 		writeOAuthTokenError(w, 403, "deployment_denied")
 		return
 	}
-	writeOAuthJSON(w, 200, oauthprovider.RuntimeTokenResponse{OAuthRuntimeGrant: grant, RuntimeToken: token})
+	writeJSONStatus(w, 200, oauthprovider.RuntimeTokenResponse{OAuthRuntimeGrant: grant, RuntimeToken: token})
 }

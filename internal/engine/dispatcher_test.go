@@ -297,7 +297,7 @@ func TestApplyAuthAcceptsOIDCAlias(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/profile", nil)
 	auths := models.AuthConfigs{{Type: "oidc", Name: "oidc_token"}}
 
-	applySelectedAuth(req, auths, map[string]any{"oidc_token": "id-token"})
+	_ = applySelectedAuthChecked(req, auths, map[string]any{"oidc_token": "id-token"})
 
 	if got := req.Header.Get("Authorization"); got != "Bearer id-token" {
 		t.Fatalf("Authorization = %q, want bearer token", got)
@@ -333,7 +333,7 @@ func TestApplyHTTPBasicAuthRequiresUsernameAndPassword(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "https://api.example.test/profile", nil)
 			selected, _ := selectRequestAuth(auths, requirements, tt.credentials)
-			applySelectedAuth(req, selected, tt.credentials)
+			_ = applySelectedAuthChecked(req, selected, tt.credentials)
 			if gotHeader := req.Header.Get("Authorization") != ""; gotHeader != tt.wantHeader {
 				t.Fatalf("Authorization present = %v, want %v", gotHeader, tt.wantHeader)
 			}
@@ -576,12 +576,28 @@ func TestRequestContentTelemetryUsesBoundedValues(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			serialization, mediaFamily := requestContentTelemetry(tt.operation)
+			content, _, _ := SelectRequestContent(tt.operation.RequestContent)
+			serialization, mediaFamily := requestContentTelemetryForSelection(tt.operation, content)
 			if serialization != tt.serialization || mediaFamily != tt.mediaFamily {
-				t.Fatalf("requestContentTelemetry() = (%q, %q), want (%q, %q)", serialization, mediaFamily, tt.serialization, tt.mediaFamily)
+				t.Fatalf("requestContentTelemetryForSelection() = (%q, %q), want (%q, %q)", serialization, mediaFamily, tt.serialization, tt.mediaFamily)
 			}
 		})
 	}
+}
+
+// prepareRequestParts wraps prepareRequestPartsWithContext with a background context for unit tests.
+func prepareRequestParts(srv *models.Service, obj *models.IntegrationObject, params map[string]any, bucketValues []store.BucketValue) (string, map[string]string, io.Reader, error) {
+	return prepareRequestPartsWithContext(context.Background(), srv, obj, params, bucketValues)
+}
+
+// buildRESTRequestBody wraps buildRESTRequestBodyWithContext with a background context for unit tests.
+func buildRESTRequestBody(content *models.RequestContent, headerParams map[string]string, bodyParams map[string]any) (io.Reader, error) {
+	return buildRESTRequestBodyWithContext(context.Background(), content, headerParams, bodyParams)
+}
+
+// buildMultipartRequestBody wraps buildMultipartRequestBodyWithContext with a background context for unit tests.
+func buildMultipartRequestBody(content *SelectedRequestRepresentation, headers map[string]string, bodyParams map[string]any) (io.Reader, error) {
+	return buildMultipartRequestBodyWithContext(context.Background(), content, headers, bodyParams)
 }
 
 // TestDispatcherExecuteStream_NoRetryWithoutConfig is the strict half of the

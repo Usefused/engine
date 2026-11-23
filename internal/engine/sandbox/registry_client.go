@@ -321,56 +321,72 @@ type ConnectionProfileRevision struct {
 
 type ConnectionProfileContract = models.ServiceVersionConnectionContract
 
-// FetchConnectionProfileContracts loads validation facts for all requested
-// pinned versions in one GraphQL round trip.
-func (c *HTTPRegistryClient) FetchConnectionProfileContracts(ctx context.Context, versionIDs []uuid.UUID, apiKey string) ([]ConnectionProfileContract, error) {
-	if len(versionIDs) == 0 {
-		return nil, nil
-	}
-	ids := make([]string, 0, len(versionIDs))
-	for _, id := range versionIDs {
-		ids = append(ids, id.String())
-	}
-	req, err := c.newGraphQLRequest(ctx, graphqlQuery{
-		Query: `query ConnectionProfileContracts($ids: [String!]!) {
-			connectionProfileContracts(service_version_ids: $ids)
-		}`,
-		Variables: map[string]interface{}{"ids": ids},
-	})
+// doBearerGraphQL executes a Registry GraphQL query authenticated with an
+// optional bearer/API-key token and decodes its typed data payload.
+func doBearerGraphQL[T any](ctx context.Context, c *HTTPRegistryClient, opErrPrefix string, query graphqlQuery, apiKey string) (T, error) {
+	var zero T
+	req, err := c.newGraphQLRequest(ctx, query)
+	// Invalid request construction must fail before issuing any Registry call.
 	if err != nil {
-		return nil, err
+		return zero, err
 	}
+	// Forward caller credentials in both headers expected by Registry auth middleware.
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 		req.Header.Set("X-API-Key", apiKey)
 	}
 	resp, err := c.do(req)
+	// Surface transport failures with the caller's operation context.
 	if err != nil {
-		return nil, fmt.Errorf("fetch connection profile contracts: %w", err)
+		return zero, fmt.Errorf("%s: %w", opErrPrefix, err)
 	}
 	defer resp.Body.Close()
+	// Reject HTTP error responses before attempting to decode a GraphQL envelope.
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("registry returned status %d", resp.StatusCode)
+		return zero, fmt.Errorf("registry returned status %d", resp.StatusCode)
 	}
 	var result struct {
-		Data struct {
-			Contracts []ConnectionProfileContract `json:"connectionProfileContracts"`
-		} `json:"data"`
+		Data   T `json:"data"`
 		Errors []struct {
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
+	// Malformed JSON payloads cannot produce trustworthy contract or profile data.
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return zero, err
+	}
+	// Treat any GraphQL error entry as a failed lookup rather than returning partial data.
+	if len(result.Errors) > 0 {
+		return zero, errors.New(result.Errors[0].Message)
+	}
+	return result.Data, nil
+}
+
+// FetchConnectionProfileContracts loads validation facts for all requested
+// pinned versions in one GraphQL round trip.
+func (c *HTTPRegistryClient) FetchConnectionProfileContracts(ctx context.Context, versionIDs []uuid.UUID, apiKey string) ([]ConnectionProfileContract, error) {
+	// Skip the Registry round trip when no service versions require validation facts.
+	if len(versionIDs) == 0 {
+		return nil, nil
+	}
+	data, err := doBearerGraphQL[struct {
+		Contracts []ConnectionProfileContract `json:"connectionProfileContracts"`
+	}](ctx, c, "fetch connection profile contracts", graphqlQuery{
+		Query: `query ConnectionProfileContracts($ids: [String!]!) {
+			connectionProfileContracts(service_version_ids: $ids)
+		}`,
+		Variables: map[string]interface{}{"ids": uuidStrings(versionIDs)},
+	}, apiKey)
+	// Propagate request, status, or GraphQL errors without returning partial contracts.
+	if err != nil {
 		return nil, err
 	}
-	if len(result.Errors) > 0 {
-		return nil, errors.New(result.Errors[0].Message)
-	}
-	return result.Data.Contracts, nil
+	return data.Contracts, nil
 }
 
 // FetchEligibleConnectionProfiles resolves exact Registry publication streams in one bounded request.
 func (c *HTTPRegistryClient) FetchEligibleConnectionProfiles(ctx context.Context, refs []ConnectionProfileRef, apiKey string) ([]ConnectionProfileRevision, error) {
+	// Skip the Registry round trip when no connection profile references were requested.
 	if len(refs) == 0 {
 		return nil, nil
 	}
@@ -379,44 +395,21 @@ func (c *HTTPRegistryClient) FetchEligibleConnectionProfiles(ctx context.Context
 		// Sending the empty name explicitly preserves Registry's legacy unnamed stream instead of broadening the lookup to every same-family scheme.
 		variables = append(variables, map[string]interface{}{"service_version_id": ref.ServiceVersionID.String(), "auth_type": ref.AuthType, "auth_name": ref.AuthName})
 	}
-	req, err := c.newGraphQLRequest(ctx, graphqlQuery{
+	data, err := doBearerGraphQL[struct {
+		Profiles []ConnectionProfileRevision `json:"eligibleConnectionProfiles"`
+	}](ctx, c, "fetch eligible connection profiles", graphqlQuery{
 		Query: `query EligibleConnectionProfiles($refs: [ConnectionProfileRefInput!]!) {
 			eligibleConnectionProfiles(refs: $refs) {
 				profile_id service_id service_version_id name auth_type auth_name revision profile_hash config provenance
 			}
 		}`,
 		Variables: map[string]interface{}{"refs": variables},
-	})
+	}, apiKey)
+	// Propagate request, status, or GraphQL errors without returning partial profiles.
 	if err != nil {
 		return nil, err
 	}
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-		req.Header.Set("X-API-Key", apiKey)
-	}
-	resp, err := c.do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch eligible connection profiles: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("registry returned status %d", resp.StatusCode)
-	}
-	var result struct {
-		Data struct {
-			Profiles []ConnectionProfileRevision `json:"eligibleConnectionProfiles"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	if len(result.Errors) > 0 {
-		return nil, errors.New(result.Errors[0].Message)
-	}
-	return result.Data.Profiles, nil
+	return data.Profiles, nil
 }
 
 type serviceVersionRevisionBatchResponse struct {
@@ -631,203 +624,153 @@ func (c *HTTPRegistryClient) FetchServiceVisibility(ctx context.Context, service
 		`,
 		Variables: map[string]interface{}{"serviceIds": uuidStrings(serviceIDs)},
 	}
-	b, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("FetchServiceVisibility: marshal query: %w", err)
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(b))
-	if err != nil {
-		return nil, fmt.Errorf("FetchServiceVisibility: create request: %w", err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.do(request)
-	if err != nil {
-		return nil, fmt.Errorf("FetchServiceVisibility: request failed: %w", err)
-	}
-	defer response.Body.Close()
-	visibilities, err := decodeServiceVisibility(response)
+	data, err := doAPIKeyGraphQL[struct {
+		ServicesByIDs []ServiceVisibility `json:"servicesByIds"`
+	}](ctx, c, "FetchServiceVisibility", reqBody, apiKey, true)
+	// Surface Registry transport or GraphQL failures without populating partial visibility rows.
 	if err != nil {
 		return nil, err
 	}
-	for _, vis := range visibilities {
+	for _, vis := range data.ServicesByIDs {
 		out[vis.ServiceID] = vis
 	}
 	return out, nil
 }
 
-func decodeServiceVisibility(response *http.Response) ([]ServiceVisibility, error) {
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		return nil, fmt.Errorf("FetchServiceVisibility: registry returned %d: %s", response.StatusCode, string(body))
-	}
-	var decoded struct {
-		Data struct {
-			ServicesByIDs []ServiceVisibility `json:"servicesByIds"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
-		return nil, fmt.Errorf("FetchServiceVisibility: decode response: %w", err)
-	}
-	if len(decoded.Errors) > 0 {
-		return nil, fmt.Errorf("FetchServiceVisibility: graphql error: %s", decoded.Errors[0].Message)
-	}
-	return decoded.Data.ServicesByIDs, nil
-}
-
-func (c *HTTPRegistryClient) UpdateServicePublic(ctx context.Context, serviceID uuid.UUID, isPublic bool, apiKey string) error {
-	reqBody := graphqlQuery{
-		Query: `
-			mutation UpdateServicePublic($serviceId: String!, $isPublic: Boolean!) {
-				updateServicePublic(serviceId: $serviceId, isPublic: $isPublic)
-			}
-		`,
-		Variables: map[string]interface{}{"serviceId": serviceID.String(), "isPublic": isPublic},
-	}
+// doAPIKeyGraphQL executes a Registry GraphQL operation authenticated via
+// X-API-Key and decodes its typed data payload with consistent error prefixes.
+func doAPIKeyGraphQL[T any](ctx context.Context, c *HTTPRegistryClient, opName string, reqBody graphqlQuery, apiKey string, requireStatusOK bool) (T, error) {
+	var zero T
 	body, err := json.Marshal(reqBody)
+	// Query serialization must succeed before sending any request to Registry.
 	if err != nil {
-		return fmt.Errorf("UpdateServicePublic: marshal query: %w", err)
+		return zero, fmt.Errorf("%s: marshal query: %w", opName, err)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	// Reject invalid endpoint or context errors before invoking the HTTP client.
 	if err != nil {
-		return fmt.Errorf("UpdateServicePublic: create request: %w", err)
+		return zero, fmt.Errorf("%s: create request: %w", opName, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-API-Key", apiKey)
 	response, err := c.do(request)
+	// Propagate transport errors tagged with the Registry operation name.
 	if err != nil {
-		return fmt.Errorf("UpdateServicePublic: request failed: %w", err)
+		return zero, fmt.Errorf("%s: request failed: %w", opName, err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode >= http.StatusBadRequest {
+	return decodeAPIKeyGraphQLResponse[T](response, opName, requireStatusOK)
+}
+
+// decodeAPIKeyGraphQLResponse validates the HTTP status and GraphQL envelope
+// for an X-API-Key Registry call and returns its typed data payload.
+func decodeAPIKeyGraphQLResponse[T any](response *http.Response, opName string, requireStatusOK bool) (T, error) {
+	var zero T
+	// Reads require 200 OK while mutations accept any 2xx/3xx non-error status.
+	statusFailed := response.StatusCode >= http.StatusBadRequest
+	if requireStatusOK {
+		statusFailed = response.StatusCode != http.StatusOK
+	}
+	// Preserve Registry's HTTP error body for caller diagnostics before JSON decoding.
+	if statusFailed {
 		body, _ := io.ReadAll(response.Body)
-		return fmt.Errorf("UpdateServicePublic: registry returned %d: %s", response.StatusCode, string(body))
+		return zero, fmt.Errorf("%s: registry returned %d: %s", opName, response.StatusCode, string(body))
 	}
 	var decoded struct {
-		Data struct {
-			UpdateServicePublic bool `json:"updateServicePublic"`
-		} `json:"data"`
+		Data   T `json:"data"`
 		Errors []struct {
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
+	// Fail fast on malformed or truncated Registry JSON responses.
 	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
-		return fmt.Errorf("UpdateServicePublic: decode response: %w", err)
+		return zero, fmt.Errorf("%s: decode response: %w", opName, err)
 	}
+	// GraphQL errors indicate the operation did not cleanly succeed even on HTTP 200.
 	if len(decoded.Errors) > 0 {
-		return fmt.Errorf("UpdateServicePublic: graphql error: %s", decoded.Errors[0].Message)
+		return zero, fmt.Errorf("%s: graphql error: %s", opName, decoded.Errors[0].Message)
 	}
-	if !decoded.Data.UpdateServicePublic {
-		return fmt.Errorf("UpdateServicePublic: registry did not update service")
+	return decoded.Data, nil
+}
+
+// updateVisibilityGraphQL executes a boolean Registry visibility mutation and
+// fails if Registry reports that the target was not updated.
+func (c *HTTPRegistryClient) updateVisibilityGraphQL(ctx context.Context, opName, query string, variables map[string]interface{}, fieldName, notUpdatedMsg, apiKey string) error {
+	data, err := doAPIKeyGraphQL[map[string]bool](ctx, c, opName, graphqlQuery{
+		Query:     query,
+		Variables: variables,
+	}, apiKey, false)
+	// Propagate HTTP or GraphQL errors before inspecting the boolean mutation flag.
+	if err != nil {
+		return err
+	}
+	// Registry returns false when the visibility change could not be applied.
+	if !data[fieldName] {
+		return fmt.Errorf("%s: %s", opName, notUpdatedMsg)
 	}
 	return nil
+}
+
+// putExecutionPolicy marshals and PUTs a projected execution policy document to
+// the specified Registry API path.
+func (c *HTTPRegistryClient) putExecutionPolicy(ctx context.Context, opName, path string, policy any, apiKey string) error {
+	body, err := json.Marshal(policy)
+	// Reject unserializable policy projections before creating an HTTP request.
+	if err != nil {
+		return fmt.Errorf("%s: marshal body: %w", opName, err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, c.registryBaseURL()+path, bytes.NewReader(body))
+	// Reject invalid URLs or cancelled contexts before issuing the PUT.
+	if err != nil {
+		return fmt.Errorf("%s: create request: %w", opName, err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-API-Key", apiKey)
+	response, err := c.do(request)
+	// Surface transport failures with the operation name for callers.
+	if err != nil {
+		return fmt.Errorf("%s: request failed: %w", opName, err)
+	}
+	defer response.Body.Close()
+	// Propagate Registry rejection responses with status and body details.
+	if response.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(response.Body)
+		return fmt.Errorf("%s: registry returned %d: %s", opName, response.StatusCode, string(body))
+	}
+	return nil
+}
+
+// UpdateServicePublic toggles service-level public visibility in Registry.
+func (c *HTTPRegistryClient) UpdateServicePublic(ctx context.Context, serviceID uuid.UUID, isPublic bool, apiKey string) error {
+	return c.updateVisibilityGraphQL(ctx, "UpdateServicePublic", `
+			mutation UpdateServicePublic($serviceId: String!, $isPublic: Boolean!) {
+				updateServicePublic(serviceId: $serviceId, isPublic: $isPublic)
+			}
+		`, map[string]interface{}{"serviceId": serviceID.String(), "isPublic": isPublic}, "updateServicePublic", "registry did not update service", apiKey)
 }
 
 // PublishServiceExecutionPolicy publishes service-level execution policy
 // through the Registry API. Its caller owns the strict Registry projection so
 // this transport remains unaware of workspace-only policy controls.
 func (c *HTTPRegistryClient) PublishServiceExecutionPolicy(ctx context.Context, serviceID uuid.UUID, policy any, apiKey string) error {
-	body, err := json.Marshal(policy)
-	if err != nil {
-		return fmt.Errorf("PublishServiceExecutionPolicy: marshal body: %w", err)
-	}
-	url := c.registryBaseURL() + "/integrations/" + serviceID.String() + "/execution-policy"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("PublishServiceExecutionPolicy: create request: %w", err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.do(request)
-	if err != nil {
-		return fmt.Errorf("PublishServiceExecutionPolicy: request failed: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode >= http.StatusBadRequest {
-		body, _ := io.ReadAll(response.Body)
-		return fmt.Errorf("PublishServiceExecutionPolicy: registry returned %d: %s", response.StatusCode, string(body))
-	}
-	return nil
+	return c.putExecutionPolicy(ctx, "PublishServiceExecutionPolicy", "/integrations/"+serviceID.String()+"/execution-policy", policy, apiKey)
 }
 
 // UpdateServiceVersionPublic calls the Registry's updateServiceVersionPublic
 // mutation to set is_public on one specific version, independent of the
 // service-level visibility set by UpdateServicePublic.
 func (c *HTTPRegistryClient) UpdateServiceVersionPublic(ctx context.Context, serviceID uuid.UUID, version string, isPublic bool, apiKey string) error {
-	reqBody := graphqlQuery{
-		Query: `
+	return c.updateVisibilityGraphQL(ctx, "UpdateServiceVersionPublic", `
 			mutation UpdateServiceVersionPublic($serviceId: String!, $version: String!, $isPublic: Boolean!) {
 				updateServiceVersionPublic(serviceId: $serviceId, version: $version, isPublic: $isPublic)
 			}
-		`,
-		Variables: map[string]interface{}{"serviceId": serviceID.String(), "version": version, "isPublic": isPublic},
-	}
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return fmt.Errorf("UpdateServiceVersionPublic: marshal query: %w", err)
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("UpdateServiceVersionPublic: create request: %w", err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.do(request)
-	if err != nil {
-		return fmt.Errorf("UpdateServiceVersionPublic: request failed: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode >= http.StatusBadRequest {
-		body, _ := io.ReadAll(response.Body)
-		return fmt.Errorf("UpdateServiceVersionPublic: registry returned %d: %s", response.StatusCode, string(body))
-	}
-	var decoded struct {
-		Data struct {
-			UpdateServiceVersionPublic bool `json:"updateServiceVersionPublic"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
-		return fmt.Errorf("UpdateServiceVersionPublic: decode response: %w", err)
-	}
-	if len(decoded.Errors) > 0 {
-		return fmt.Errorf("UpdateServiceVersionPublic: graphql error: %s", decoded.Errors[0].Message)
-	}
-	if !decoded.Data.UpdateServiceVersionPublic {
-		return fmt.Errorf("UpdateServiceVersionPublic: registry did not update version")
-	}
-	return nil
+		`, map[string]interface{}{"serviceId": serviceID.String(), "version": version, "isPublic": isPublic}, "updateServiceVersionPublic", "registry did not update version", apiKey)
 }
 
 // PublishServiceVersionExecutionPolicy publishes execution policy scoped to
 // just one provider version through the Registry API.
 func (c *HTTPRegistryClient) PublishServiceVersionExecutionPolicy(ctx context.Context, serviceID uuid.UUID, version string, policy any, apiKey string) error {
-	body, err := json.Marshal(policy)
-	if err != nil {
-		return fmt.Errorf("PublishServiceVersionExecutionPolicy: marshal body: %w", err)
-	}
-	url := c.registryBaseURL() + "/integrations/" + serviceID.String() + "/versions/" + version + "/execution-policy"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("PublishServiceVersionExecutionPolicy: create request: %w", err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.do(request)
-	if err != nil {
-		return fmt.Errorf("PublishServiceVersionExecutionPolicy: request failed: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode >= http.StatusBadRequest {
-		body, _ := io.ReadAll(response.Body)
-		return fmt.Errorf("PublishServiceVersionExecutionPolicy: registry returned %d: %s", response.StatusCode, string(body))
-	}
-	return nil
+	return c.putExecutionPolicy(ctx, "PublishServiceVersionExecutionPolicy", "/integrations/"+serviceID.String()+"/versions/"+version+"/execution-policy", policy, apiKey)
 }
 
 // PublishConnectionProfile calls the Registry's setConnectionProfile mutation
@@ -838,7 +781,9 @@ func (c *HTTPRegistryClient) PublishServiceVersionExecutionPolicy(ctx context.Co
 // workspace.yaml apply path (connection_profiles[*].public: true) reaches the
 // same Registry mutation instead of a separate one.
 func (c *HTTPRegistryClient) PublishConnectionProfile(ctx context.Context, serviceID, serviceVersionID uuid.UUID, name string, profile connectionprofile.Profile, apiKey string) (*ConnectionProfileRevision, error) {
-	reqBody := graphqlQuery{
+	data, err := doAPIKeyGraphQL[struct {
+		Profile *ConnectionProfileRevision `json:"setConnectionProfile"`
+	}](ctx, c, "PublishConnectionProfile", graphqlQuery{
 		Query: `
 			mutation SetConnectionProfile($serviceId: String!, $serviceVersionId: String!, $name: String!, $config: JSON!) {
 				setConnectionProfile(service_id: $serviceId, service_version_id: $serviceVersionId, name: $name, config: $config) {
@@ -850,44 +795,16 @@ func (c *HTTPRegistryClient) PublishConnectionProfile(ctx context.Context, servi
 			"serviceId": serviceID.String(), "serviceVersionId": serviceVersionID.String(),
 			"name": name, "config": profile,
 		},
-	}
-	body, err := json.Marshal(reqBody)
+	}, apiKey, false)
+	// Propagate Registry HTTP or GraphQL errors before checking the returned profile.
 	if err != nil {
-		return nil, fmt.Errorf("PublishConnectionProfile: marshal query: %w", err)
+		return nil, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("PublishConnectionProfile: create request: %w", err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.do(request)
-	if err != nil {
-		return nil, fmt.Errorf("PublishConnectionProfile: request failed: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode >= http.StatusBadRequest {
-		body, _ := io.ReadAll(response.Body)
-		return nil, fmt.Errorf("PublishConnectionProfile: registry returned %d: %s", response.StatusCode, string(body))
-	}
-	var decoded struct {
-		Data struct {
-			Profile *ConnectionProfileRevision `json:"setConnectionProfile"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
-		return nil, fmt.Errorf("PublishConnectionProfile: decode response: %w", err)
-	}
-	if len(decoded.Errors) > 0 {
-		return nil, fmt.Errorf("PublishConnectionProfile: graphql error: %s", decoded.Errors[0].Message)
-	}
-	if decoded.Data.Profile == nil {
+	// A nil profile indicates Registry accepted the call without publishing a revision.
+	if data.Profile == nil {
 		return nil, fmt.Errorf("PublishConnectionProfile: registry did not return a profile revision")
 	}
-	return decoded.Data.Profile, nil
+	return data.Profile, nil
 }
 
 // ResolveServiceIDsBySlugs resolves a workspace/SDK config's service map
@@ -1123,29 +1040,81 @@ func NewHTTPRegistryClient(endpoint, licenseKey string) *HTTPRegistryClient {
 // Registry's revision endpoint admits at most 50 service/version references per request.
 const serviceVersionRevisionBatchSize = 50
 
-// FetchServiceVersionRevisions resolves arbitrarily sized selections through bounded
-// requests, preserving Registry rows and returning no partial result on failure.
-func (c *HTTPRegistryClient) FetchServiceVersionRevisions(ctx context.Context, refs []ServiceVersionRef, apiKey string) ([]ServiceVersionRevision, error) {
-	var revisions []ServiceVersionRevision
-	for start := 0; start < len(refs); start += serviceVersionRevisionBatchSize {
-		// Stop before starting another batch when the original planning request expires.
+// fetchRegistryBatches executes bounded Registry reads in source order,
+// stopping immediately on cancellation or error so callers never observe partial snapshots.
+func fetchRegistryBatches[In, Out any](ctx context.Context, items []In, batchSize int, fetchBatch func([]In) ([]Out, error)) ([]Out, error) {
+	// Skip all Registry requests when the caller passes an empty selection.
+	if len(items) == 0 {
+		return nil, nil
+	}
+	out := make([]Out, 0, len(items))
+	for start := 0; start < len(items); start += batchSize {
+		// Stop before issuing another dependency call if the parent context expired.
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		end := min(start+serviceVersionRevisionBatchSize, len(refs))
-		batch, err := c.fetchServiceVersionRevisionBatch(ctx, refs[start:end], apiKey)
+		end := min(start+batchSize, len(items))
+		batch, err := fetchBatch(items[start:end])
+		// Abort all-or-nothing when any batch fails so callers never use incomplete data.
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, batch...)
+	}
+	return out, nil
+}
+
+// postRegistryJSON sends a JSON POST request authenticated via X-API-Key and
+// decodes an HTTP 200 JSON payload.
+func postRegistryJSON[T any](ctx context.Context, c *HTTPRegistryClient, path string, payload any, apiKey string) (T, error) {
+	var zero T
+	body, err := json.Marshal(payload)
+	// Serialization must succeed before any Registry request can be sent.
+	if err != nil {
+		return zero, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.registryBaseURL()+path, bytes.NewReader(body))
+	// Invalid endpoint configuration cannot be treated as an empty batch.
+	if err != nil {
+		return zero, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-API-Key", apiKey)
+	response, err := c.do(request)
+	// Transport failures invalidate the entire resolution, including earlier batches.
+	if err != nil {
+		return zero, err
+	}
+	defer response.Body.Close()
+	// Keep Registry validation and visibility errors intact for the caller.
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		return zero, fmt.Errorf("Registry returned %d: %s", response.StatusCode, string(body))
+	}
+	var decoded T
+	// A truncated response must never become a usable partial snapshot.
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		return zero, err
+	}
+	return decoded, nil
+}
+
+// FetchServiceVersionRevisions resolves arbitrarily sized selections through bounded
+// requests, preserving Registry rows and returning no partial result on failure.
+func (c *HTTPRegistryClient) FetchServiceVersionRevisions(ctx context.Context, refs []ServiceVersionRef, apiKey string) ([]ServiceVersionRevision, error) {
+	return fetchRegistryBatches(ctx, refs, serviceVersionRevisionBatchSize, func(chunk []ServiceVersionRef) ([]ServiceVersionRevision, error) {
+		batch, err := c.fetchServiceVersionRevisionBatch(ctx, chunk, apiKey)
 		// Earlier successful reads are unusable when any later dependency fails.
 		if err != nil {
 			return nil, err
 		}
 		// Validate returned identities before combining rows; absence remains visible
 		// to callers, which already reject unresolved versions with domain-specific errors.
-		if err := validateServiceVersionRevisionBatch(refs[start:end], batch); err != nil {
+		if err := validateServiceVersionRevisionBatch(chunk, batch); err != nil {
 			return nil, err
 		}
-		revisions = append(revisions, batch...)
-	}
-	return revisions, nil
+		return batch, nil
+	})
 }
 
 // validateServiceVersionRevisionBatch permits Registry visibility omissions but rejects
@@ -1168,33 +1137,9 @@ func validateServiceVersionRevisionBatch(refs []ServiceVersionRef, revisions []S
 
 // fetchServiceVersionRevisionBatch closes each bounded response before the next request begins.
 func (c *HTTPRegistryClient) fetchServiceVersionRevisionBatch(ctx context.Context, refs []ServiceVersionRef, apiKey string) ([]ServiceVersionRevision, error) {
-	body, err := json.Marshal(map[string][]ServiceVersionRef{"versions": refs})
-	// Serialization must succeed before any Registry request can be sent.
+	decoded, err := postRegistryJSON[serviceVersionRevisionBatchResponse](ctx, c, "/integrations/versions/revisions", map[string][]ServiceVersionRef{"versions": refs}, apiKey)
+	// Propagate request or decoding failures without returning partial versions.
 	if err != nil {
-		return nil, err
-	}
-	requestURL := c.registryBaseURL() + "/integrations/versions/revisions"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(body))
-	// Invalid endpoint configuration cannot be treated as an empty batch.
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.do(request)
-	// Transport failures invalidate the entire resolution, including earlier batches.
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	// Keep Registry validation and visibility errors intact for the planning caller.
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		return nil, fmt.Errorf("Registry returned %d: %s", response.StatusCode, string(body))
-	}
-	var decoded serviceVersionRevisionBatchResponse
-	// A truncated response must never become a usable partial snapshot.
-	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
 		return nil, err
 	}
 	return decoded.Versions, nil
@@ -1205,31 +1150,16 @@ const registryServiceVersionBatchSize = 100
 
 // FetchServiceVersionAuthConfigs resolves arbitrarily large workspaces through bounded Registry requests.
 func (c *HTTPRegistryClient) FetchServiceVersionAuthConfigs(ctx context.Context, refs []ServiceVersionRef, apiKey string) ([]ServiceVersionAuthConfigs, error) {
-	// An empty workspace needs no Registry round trip and has no auth options to project.
-	if len(refs) == 0 {
-		return nil, nil
-	}
-	configs := make([]ServiceVersionAuthConfigs, 0, len(refs))
-	// Preserve source order while every dependency request stays within Registry's shared service-version bound.
-	for start := 0; start < len(refs); start += registryServiceVersionBatchSize {
-		// Cancellation stops the next dependency call and discards any earlier partial result.
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		end := min(start+registryServiceVersionBatchSize, len(refs))
-		batch, err := c.fetchServiceVersionAuthConfigBatch(ctx, refs[start:end], apiKey)
-		// Auth options must be all-or-nothing so the frontend never shows an incomplete credential contract.
-		if err != nil {
-			return nil, err
-		}
-		configs = append(configs, batch...)
-	}
-	return configs, nil
+	return fetchRegistryBatches(ctx, refs, registryServiceVersionBatchSize, func(chunk []ServiceVersionRef) ([]ServiceVersionAuthConfigs, error) {
+		return c.fetchServiceVersionAuthConfigBatch(ctx, chunk, apiKey)
+	})
 }
 
 // fetchServiceVersionAuthConfigBatch performs one request within Registry's documented resolver bound.
 func (c *HTTPRegistryClient) fetchServiceVersionAuthConfigBatch(ctx context.Context, refs []ServiceVersionRef, apiKey string) ([]ServiceVersionAuthConfigs, error) {
-	reqBody := graphqlQuery{
+	data, err := doAPIKeyGraphQL[struct {
+		Versions []ServiceVersionAuthConfigs `json:"serviceVersionAuthConfigs"`
+	}](ctx, c, "FetchServiceVersionAuthConfigs", graphqlQuery{
 		Query: `query ServiceVersionAuthConfigs($refs: [ServiceVersionRefInput!]!) {
 			serviceVersionAuthConfigs(refs: $refs) {
 				service_id version service_version_id
@@ -1237,41 +1167,12 @@ func (c *HTTPRegistryClient) fetchServiceVersionAuthConfigBatch(ctx context.Cont
 			}
 		}`,
 		Variables: map[string]interface{}{"refs": refs},
-	}
-	body, err := json.Marshal(reqBody)
+	}, apiKey, true)
+	// Auth options must be all-or-nothing so the frontend never shows an incomplete credential contract.
 	if err != nil {
-		return nil, fmt.Errorf("FetchServiceVersionAuthConfigs: marshal query: %w", err)
+		return nil, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("FetchServiceVersionAuthConfigs: create request: %w", err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.do(request)
-	if err != nil {
-		return nil, fmt.Errorf("FetchServiceVersionAuthConfigs: request failed: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		return nil, fmt.Errorf("FetchServiceVersionAuthConfigs: registry returned %d: %s", response.StatusCode, string(body))
-	}
-	var decoded struct {
-		Data struct {
-			Versions []ServiceVersionAuthConfigs `json:"serviceVersionAuthConfigs"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
-		return nil, fmt.Errorf("FetchServiceVersionAuthConfigs: decode response: %w", err)
-	}
-	if len(decoded.Errors) > 0 {
-		return nil, fmt.Errorf("FetchServiceVersionAuthConfigs: graphql error: %s", decoded.Errors[0].Message)
-	}
-	return decoded.Data.Versions, nil
+	return data.Versions, nil
 }
 
 type ServiceVersionResolvedRef struct {
@@ -1284,32 +1185,15 @@ type serviceVersionResolveBatchResponse struct {
 	Resolved []ServiceVersionResolvedRef `json:"resolved"`
 }
 
+// FetchServiceVersionIDs resolves pinned service/version pairs to Registry service_version_ids.
 func (c *HTTPRegistryClient) FetchServiceVersionIDs(ctx context.Context, refs []ServiceVersionRef, apiKey string) ([]ServiceVersionResolvedRef, error) {
+	// Skip the Registry round trip when no references were supplied.
 	if len(refs) == 0 {
 		return nil, nil
 	}
-	body, err := json.Marshal(map[string][]ServiceVersionRef{"versions": refs})
+	decoded, err := postRegistryJSON[serviceVersionResolveBatchResponse](ctx, c, "/integrations/versions/resolve", map[string][]ServiceVersionRef{"versions": refs}, apiKey)
+	// Propagate request or decoding errors directly to callers.
 	if err != nil {
-		return nil, err
-	}
-	requestURL := c.registryBaseURL() + "/integrations/versions/resolve"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.do(request)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		return nil, fmt.Errorf("Registry returned %d: %s", response.StatusCode, string(body))
-	}
-	var decoded serviceVersionResolveBatchResponse
-	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
 		return nil, err
 	}
 	return decoded.Resolved, nil
@@ -1320,10 +1204,13 @@ func (c *HTTPRegistryClient) FetchServiceVersionIDs(ctx context.Context, refs []
 // visible public provider version; Engine only attaches the exact version
 // identity it receives, avoiding one service(id:) call per service.
 func (c *HTTPRegistryClient) FetchLatestServiceVersions(ctx context.Context, serviceIDs []uuid.UUID, apiKey string) ([]ServiceVersionResolvedRef, error) {
+	// Skip the Registry round trip when no service IDs need latest-version resolution.
 	if len(serviceIDs) == 0 {
 		return nil, nil
 	}
-	reqBody := graphqlQuery{
+	data, err := doAPIKeyGraphQL[struct {
+		LatestServiceVersions []ServiceVersionResolvedRef `json:"latestServiceVersions"`
+	}](ctx, c, "FetchLatestServiceVersions", graphqlQuery{
 		Query: `
 			query LatestServiceVersions($serviceIds: [String!]!) {
 				latestServiceVersions(serviceIds: $serviceIds) {
@@ -1334,23 +1221,12 @@ func (c *HTTPRegistryClient) FetchLatestServiceVersions(ctx context.Context, ser
 			}
 		`,
 		Variables: map[string]interface{}{"serviceIds": uuidStrings(serviceIDs)},
-	}
-	body, err := json.Marshal(reqBody)
+	}, apiKey, true)
+	// Propagate transport or GraphQL errors directly to planning callers.
 	if err != nil {
-		return nil, fmt.Errorf("FetchLatestServiceVersions: marshal query: %w", err)
+		return nil, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("FetchLatestServiceVersions: create request: %w", err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-API-Key", apiKey)
-	response, err := c.do(request)
-	if err != nil {
-		return nil, fmt.Errorf("FetchLatestServiceVersions: request failed: %w", err)
-	}
-	defer response.Body.Close()
-	return decodeLatestServiceVersions(response)
+	return data.LatestServiceVersions, nil
 }
 
 func uuidStrings(ids []uuid.UUID) []string {
@@ -1359,28 +1235,6 @@ func uuidStrings(ids []uuid.UUID) []string {
 		out = append(out, id.String())
 	}
 	return out
-}
-
-func decodeLatestServiceVersions(response *http.Response) ([]ServiceVersionResolvedRef, error) {
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		return nil, fmt.Errorf("FetchLatestServiceVersions: registry returned %d: %s", response.StatusCode, string(body))
-	}
-	var decoded struct {
-		Data struct {
-			LatestServiceVersions []ServiceVersionResolvedRef `json:"latestServiceVersions"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
-		return nil, fmt.Errorf("FetchLatestServiceVersions: decode response: %w", err)
-	}
-	if len(decoded.Errors) > 0 {
-		return nil, fmt.Errorf("FetchLatestServiceVersions: graphql error: %s", decoded.Errors[0].Message)
-	}
-	return decoded.Data.LatestServiceVersions, nil
 }
 
 // DeprecateServiceVersion marks a single named version of a service as
@@ -1704,41 +1558,29 @@ func (c *HTTPRegistryClient) FetchEndpointsByNames(ctx context.Context, serviceI
 	return v.([]fusedobject.Endpoint), nil
 }
 
+// fetchEndpointsByNames loads a subset of service endpoints by name from Registry.
 func (c *HTTPRegistryClient) fetchEndpointsByNames(ctx context.Context, serviceID uuid.UUID, serviceVersionID uuid.UUID, endpointNames []string) ([]fusedobject.Endpoint, error) {
 	req, err := c.buildEndpointsByNamesRequest(ctx, serviceID.String(), serviceVersionID, endpointNames)
+	// Abort if request construction fails before issuing a Registry call.
 	if err != nil {
 		return nil, err
 	}
 
 	resp, err := c.do(req)
+	// Preserve transport error wrapping expected by Registry client callers.
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("registry returned status %d: %s", resp.StatusCode, string(body))
+	data, err := decodeLicensedGraphQLResponse[struct {
+		EndpointsByNames []fusedobject.Endpoint `json:"endpointsByNames"`
+	}](resp)
+	// Propagate HTTP, decode, or GraphQL errors without returning partial endpoint sets.
+	if err != nil {
+		return nil, err
 	}
-
-	var gr struct {
-		Data struct {
-			EndpointsByNames []fusedobject.Endpoint `json:"endpointsByNames"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if len(gr.Errors) > 0 {
-		return nil, fmt.Errorf("graphql error: %s", gr.Errors[0].Message)
-	}
-
-	return gr.Data.EndpointsByNames, nil
+	return data.EndpointsByNames, nil
 }
 
 // FetchServiceOperations returns every endpoint on serviceID/serviceVersionID,
@@ -1755,6 +1597,7 @@ func (c *HTTPRegistryClient) FetchServiceOperations(ctx context.Context, service
 	return v.([]fusedobject.Endpoint), nil
 }
 
+// fetchServiceOperations fetches all operations for one service version from Registry.
 func (c *HTTPRegistryClient) fetchServiceOperations(ctx context.Context, serviceID uuid.UUID, serviceVersionID uuid.UUID) ([]fusedobject.Endpoint, error) {
 	query := `
 		query GetServiceOperations($serviceId: String!, $version: String!) {
@@ -1796,39 +1639,26 @@ func (c *HTTPRegistryClient) fetchServiceOperations(ctx context.Context, service
 		},
 	}
 	req, err := c.newGraphQLRequest(ctx, reqBody)
+	// Abort if GraphQL request construction fails.
 	if err != nil {
 		return nil, err
 	}
 
 	resp, err := c.do(req)
+	// Preserve transport error wrapping for singleflight callers.
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("registry returned status %d: %s", resp.StatusCode, string(body))
+	data, err := decodeLicensedGraphQLResponse[struct {
+		ServiceOperations []fusedobject.Endpoint `json:"serviceOperations"`
+	}](resp)
+	// Propagate HTTP, decode, or GraphQL errors without caching partial operations.
+	if err != nil {
+		return nil, err
 	}
-
-	var gr struct {
-		Data struct {
-			ServiceOperations []fusedobject.Endpoint `json:"serviceOperations"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if len(gr.Errors) > 0 {
-		return nil, fmt.Errorf("graphql error: %s", gr.Errors[0].Message)
-	}
-
-	return gr.Data.ServiceOperations, nil
+	return data.ServiceOperations, nil
 }
 
 func (c *HTTPRegistryClient) Handshake(ctx context.Context) (string, string, error) {
@@ -2167,14 +1997,14 @@ func (c *HTTPRegistryClient) GenerateSDK(ctx context.Context, generation models.
 func classifySDKGenerationHTTPError(statusCode int, body io.Reader) error {
 	payload, _ := io.ReadAll(io.LimitReader(body, 16<<10))
 	// Only HTTP 409 carrying the canonical nested Registry error envelope may classify as a retired generator version.
-	if statusCode == http.StatusConflict && registrySDKGenerationErrorCode(payload) == models.ErrSDKGeneratorVersionUnavailable.Error() {
+	if statusCode == http.StatusConflict && RegistrySDKGenerationErrorCode(payload) == models.ErrSDKGeneratorVersionUnavailable.Error() {
 		return fmt.Errorf("Registry SDK generation returned status %d: %w", statusCode, models.ErrSDKGeneratorVersionUnavailable)
 	}
 	return fmt.Errorf("Registry SDK generation returned status %d", statusCode)
 }
 
-// registrySDKGenerationErrorCode decodes only the reviewed nested {"error":{"code":...}} Registry control-plane envelope.
-func registrySDKGenerationErrorCode(payload []byte) string {
+// RegistrySDKGenerationErrorCode decodes only the reviewed nested {"error":{"code":...}} Registry control-plane envelope.
+func RegistrySDKGenerationErrorCode(payload []byte) string {
 	var envelope struct {
 		Error json.RawMessage `json:"error"`
 	}
@@ -2562,6 +2392,7 @@ func parseCatalogueResponse(body io.Reader) ([]CatalogueService, error) {
 	return services, nil
 }
 
+// FetchDriftSnapshots loads pending drift snapshots for a single service from Registry.
 func (c *HTTPRegistryClient) FetchDriftSnapshots(ctx context.Context, serviceID uuid.UUID, apiKey string) ([]models.DriftSnapshot, error) {
 	query := `
 		query GetDriftSnapshots($serviceId: String!) {
@@ -2580,57 +2411,32 @@ func (c *HTTPRegistryClient) FetchDriftSnapshots(ctx context.Context, serviceID 
 			}
 		}
 	`
-	reqBody := graphqlQuery{
+	req, err := c.buildLicensedGraphQLRequest(ctx, graphqlQuery{
 		Query: query,
 		Variables: map[string]interface{}{
 			"serviceId": serviceID.String(),
 		},
-	}
-	b, err := json.Marshal(reqBody)
+	}, apiKey)
+	// Abort if query marshaling or request construction fails.
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal query: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(b))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("X-API-Key", apiKey)
-	} else if c.licenseKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.licenseKey)
-		req.Header.Set("X-API-Key", c.licenseKey)
+		return nil, err
 	}
 
 	resp, err := c.do(req)
+	// Surface transport failures with the existing Registry client error prefix.
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("registry returned status %d: %s", resp.StatusCode, string(body))
+	data, err := decodeLicensedGraphQLResponse[struct {
+		DriftSnapshots []models.DriftSnapshot `json:"driftSnapshots"`
+	}](resp)
+	// Propagate HTTP, decode, or GraphQL failures directly.
+	if err != nil {
+		return nil, err
 	}
-
-	var gr struct {
-		Data struct {
-			DriftSnapshots []models.DriftSnapshot `json:"driftSnapshots"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if len(gr.Errors) > 0 {
-		return nil, fmt.Errorf("graphql error: %s", gr.Errors[0].Message)
-	}
-
-	return gr.Data.DriftSnapshots, nil
+	return data.DriftSnapshots, nil
 }
 
 // FetchDriftSnapshotsForServices calls the batched driftSnapshotsForServices
@@ -2673,25 +2479,29 @@ func (c *HTTPRegistryClient) buildDriftSnapshotsForServicesRequest(ctx context.C
 			}
 		}
 	`
-	ids := make([]string, len(serviceIDs))
-	for i, id := range serviceIDs {
-		ids[i] = id.String()
-	}
-	reqBody := graphqlQuery{
+	return c.buildLicensedGraphQLRequest(ctx, graphqlQuery{
 		Query: query,
 		Variables: map[string]interface{}{
-			"serviceIds": ids,
+			"serviceIds": uuidStrings(serviceIDs),
 		},
-	}
+	}, apiKey)
+}
+
+// buildLicensedGraphQLRequest creates a GraphQL POST request authenticated with
+// either the caller's API key or the client's fallback license key.
+func (c *HTTPRegistryClient) buildLicensedGraphQLRequest(ctx context.Context, reqBody graphqlQuery, apiKey string) (*http.Request, error) {
 	b, err := json.Marshal(reqBody)
+	// Query marshaling must succeed before building the HTTP request.
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal query: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(b))
+	// Reject invalid endpoint or cancelled context errors early.
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// Prefer per-request API key; fall back to the configured license key when anonymous.
 	if apiKey != "" {
 		req.Header.Set("X-API-Key", apiKey)
 	} else if c.licenseKey != "" {
@@ -2701,30 +2511,46 @@ func (c *HTTPRegistryClient) buildDriftSnapshotsForServicesRequest(ctx context.C
 	return req, nil
 }
 
-func decodeDriftSnapshotsForServices(resp *http.Response) ([]models.DriftSnapshot, error) {
+// decodeLicensedGraphQLResponse validates an HTTP/GraphQL response for drift
+// and changelog queries and returns the typed data block.
+func decodeLicensedGraphQLResponse[T any](resp *http.Response) (T, error) {
+	var zero T
+	// Reject HTTP 4xx/5xx responses with their raw body before JSON decoding.
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("registry returned status %d: %s", resp.StatusCode, string(body))
+		return zero, fmt.Errorf("registry returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var gr struct {
-		Data struct {
-			DriftSnapshotsForServices []models.DriftSnapshot `json:"driftSnapshotsForServices"`
-		} `json:"data"`
+		Data   T `json:"data"`
 		Errors []struct {
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
 
+	// Surface invalid JSON payloads instead of returning zero-valued data.
 	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+		return zero, fmt.Errorf("failed to decode response: %w", err)
 	}
 
+	// Treat any GraphQL error entry as a failed query.
 	if len(gr.Errors) > 0 {
-		return nil, fmt.Errorf("graphql error: %s", gr.Errors[0].Message)
+		return zero, fmt.Errorf("graphql error: %s", gr.Errors[0].Message)
 	}
 
-	return gr.Data.DriftSnapshotsForServices, nil
+	return gr.Data, nil
+}
+
+// decodeDriftSnapshotsForServices decodes the driftSnapshotsForServices GraphQL response.
+func decodeDriftSnapshotsForServices(resp *http.Response) ([]models.DriftSnapshot, error) {
+	data, err := decodeLicensedGraphQLResponse[struct {
+		DriftSnapshotsForServices []models.DriftSnapshot `json:"driftSnapshotsForServices"`
+	}](resp)
+	// Propagate HTTP, decode, or GraphQL failures directly.
+	if err != nil {
+		return nil, err
+	}
+	return data.DriftSnapshotsForServices, nil
 }
 
 // FetchServiceChangelogSince calls serviceChangelogSince, transport-wise an
@@ -2745,6 +2571,7 @@ func (c *HTTPRegistryClient) FetchServiceChangelogSince(ctx context.Context, ser
 	return decodeServiceChangelogSince(resp)
 }
 
+// buildServiceChangelogSinceRequest builds the GraphQL request for serviceChangelogSince.
 func (c *HTTPRegistryClient) buildServiceChangelogSinceRequest(ctx context.Context, serviceID uuid.UUID, since time.Time, apiKey string) (*http.Request, error) {
 	// serviceId is declared String! here, not ID! because the Registry API
 	// contract exposes this field argument as String. This schema never
@@ -2768,7 +2595,7 @@ func (c *HTTPRegistryClient) buildServiceChangelogSinceRequest(ctx context.Conte
 			}
 		}
 	`
-	reqBody := graphqlQuery{
+	return c.buildLicensedGraphQLRequest(ctx, graphqlQuery{
 		Query: query,
 		Variables: map[string]interface{}{
 			"serviceId": serviceID.String(),
@@ -2776,23 +2603,7 @@ func (c *HTTPRegistryClient) buildServiceChangelogSinceRequest(ctx context.Conte
 			// time.Parse(time.RFC3339, ...) parsing of this arg.
 			"since": since.UTC().Format(time.RFC3339),
 		},
-	}
-	b, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal query: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(b))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("X-API-Key", apiKey)
-	} else if c.licenseKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.licenseKey)
-		req.Header.Set("X-API-Key", c.licenseKey)
-	}
-	return req, nil
+	}, apiKey)
 }
 
 // serviceChangelogEntryWire is the wire shape serviceChangelogSince returns:
@@ -2813,27 +2624,21 @@ type serviceChangelogEntryWire struct {
 	CreatedAt     string          `json:"created_at"`
 }
 
+// decodeServiceChangelogSince decodes and parses serviceChangelogSince wire entries.
 func decodeServiceChangelogSince(resp *http.Response) ([]models.ServiceChangelogEntry, error) {
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("registry returned status %d: %s", resp.StatusCode, string(body))
+	data, err := decodeLicensedGraphQLResponse[struct {
+		ServiceChangelogSince []serviceChangelogEntryWire `json:"serviceChangelogSince"`
+	}](resp)
+	// Propagate HTTP, decode, or GraphQL failures before converting wire entries.
+	if err != nil {
+		return nil, err
 	}
-
 	var gr struct {
 		Data struct {
-			ServiceChangelogSince []serviceChangelogEntryWire `json:"serviceChangelogSince"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
+			ServiceChangelogSince []serviceChangelogEntryWire
+		}
 	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-	if len(gr.Errors) > 0 {
-		return nil, fmt.Errorf("graphql error: %s", gr.Errors[0].Message)
-	}
+	gr.Data.ServiceChangelogSince = data.ServiceChangelogSince
 
 	entries := make([]models.ServiceChangelogEntry, 0, len(gr.Data.ServiceChangelogSince))
 	for _, wire := range gr.Data.ServiceChangelogSince {

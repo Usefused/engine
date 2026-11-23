@@ -45,25 +45,51 @@ func appendAttachedMCPTools(ctx context.Context, result map[string]any, admissio
 	if len(bindings) == 0 {
 		return nil
 	}
+	extraVariants := make([]any, 0, len(bindings))
+	for _, binding := range bindings {
+		// Each alias binds its own authored input; no arbitrary target can be supplied by a model.
+		if !validMCPToolInputSchema(binding.InputSchema) {
+			return errors.New("invalid Unified App input schema")
+		}
+		extraVariants = append(extraVariants, mcpExecuteAliasVariant("unified_app:"+binding.Alias, binding.InputSchema))
+	}
+	return appendMCPExecuteAliasVariants(
+		result,
+		extraVariants,
+		" Call an attached Unified App using its unified_app:alias operation and typed input.",
+	)
+}
+
+// mcpExecuteAliasVariant constructs a closed JSON Schema variant binding one
+// exact operation alias to its declared input contract.
+func mcpExecuteAliasVariant(operation string, inputSchema any) map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"properties":           map[string]any{"operation": map[string]any{"const": operation}, "input": inputSchema},
+		"required":             []string{"operation", "input"},
+		"additionalProperties": false,
+	}
+}
+
+// appendMCPExecuteAliasVariants appends extra oneOf schema variants onto the
+// established MCP execute tool without altering sibling tools in the catalogue.
+func appendMCPExecuteAliasVariants(result map[string]any, extraVariants []any, descriptionSuffix string) error {
 	tools, ok := result["tools"].([]any)
+	// Only the established execute catalogue may be extended.
 	if !ok {
 		return errors.New("invalid MCP catalogue")
 	}
 	for _, raw := range tools {
 		tool, ok := raw.(map[string]any)
+		// Non-execute MCP tools keep their existing schemas unchanged.
 		if !ok || tool["name"] != "execute" {
 			continue
 		}
-		variants := []any{tool["inputSchema"]}
-		for _, binding := range bindings {
-			// Each alias binds its own authored input; no arbitrary target can be supplied by a model.
-			if !validMCPToolInputSchema(binding.InputSchema) {
-				return errors.New("invalid Unified App input schema")
-			}
-			variants = append(variants, map[string]any{"type": "object", "properties": map[string]any{"operation": map[string]any{"const": "unified_app:" + binding.Alias}, "input": binding.InputSchema}, "required": []string{"operation", "input"}, "additionalProperties": false})
-		}
+		variants := make([]any, 0, 1+len(extraVariants))
+		variants = append(variants, tool["inputSchema"])
+		variants = append(variants, extraVariants...)
 		tool["inputSchema"] = map[string]any{"type": "object", "oneOf": variants}
-		tool["description"] = mcpModernExecuteToolDescription + " Call an attached Unified App using its unified_app:alias operation and typed input."
+		tool["description"] = mcpModernExecuteToolDescription + descriptionSuffix
 		delete(tool, "outputSchema")
 		return nil
 	}

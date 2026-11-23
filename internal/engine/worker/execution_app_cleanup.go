@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"log/slog"
-	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -26,9 +25,7 @@ type unifiedAppCleanupStore interface {
 
 // UnifiedAppCleanupWorker finalizes abandoned work and removes expired result and replay rows.
 type UnifiedAppCleanupWorker struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	once   sync.Once
+	lifecycle *workerLifecycle
 }
 
 // StartUnifiedAppCleanupWorker starts bounded cleanup against Engine-owned result storage.
@@ -37,27 +34,24 @@ func StartUnifiedAppCleanupWorker(ctx context.Context, repository unifiedAppClea
 	if repository == nil {
 		return nil
 	}
-	workerCtx, cancel := context.WithCancel(ctx)
-	worker := &UnifiedAppCleanupWorker{cancel: cancel, done: make(chan struct{})}
+	workerCtx, lifecycle := newStartedLifecycle(ctx)
+	worker := &UnifiedAppCleanupWorker{lifecycle: lifecycle}
 	go worker.run(workerCtx, repository)
 	return worker
 }
 
 // Stop waits for the bounded active cleanup pass or its caller's shutdown deadline.
 func (worker *UnifiedAppCleanupWorker) Stop(ctx context.Context) {
+	// Nil workers are valid when cleanup storage is omitted.
 	if worker == nil {
 		return
 	}
-	worker.once.Do(worker.cancel)
-	select {
-	case <-worker.done:
-	case <-ctx.Done():
-	}
+	worker.lifecycle.stop(ctx)
 }
 
 // run makes one startup pass, then periodically revisits abandoned and expired rows.
 func (worker *UnifiedAppCleanupWorker) run(ctx context.Context, repository unifiedAppCleanupStore) {
-	defer close(worker.done)
+	defer close(worker.lifecycle.done)
 	cleanupUnifiedAppPass(ctx, repository, time.Now().UTC())
 	ticker := time.NewTicker(unifiedAppCleanupInterval)
 	defer ticker.Stop()

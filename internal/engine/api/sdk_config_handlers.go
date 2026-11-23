@@ -343,9 +343,71 @@ func UnifiedAppConfigPlanHandler(configStore store.ConfigRepository, s store.Sto
 	return appConfigPlanHandler(store.ConfigTypeUnifiedApp, configStore, s, registryClient)
 }
 
+// requireConfigActor resolves the authenticated actor for config plan/apply
+// endpoints, writing a standardized 401 admission error when absent.
+func requireConfigActor(w http.ResponseWriter, ctx context.Context, span trace.Span, stage string) (accesscontrol.Actor, bool) {
+	actor, ok := accesscontrol.ActorFromContext(ctx)
+	// Config plan and apply routes require an authenticated workspace actor.
+	if !ok {
+		span.SetAttributes(attribute.String("outcome", "unauthorized"))
+		writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, stage, "", "not_committed"), ctx)
+		return accesscontrol.Actor{}, false
+	}
+	return actor, true
+}
+
+// writeAppConfigPlanResponse encodes the shared SDK/Unified App/MCP plan response payload.
+func writeAppConfigPlanResponse(w http.ResponseWriter, result sdkPlanResult) {
+	writeJSON(w, map[string]any{
+		"plan_id":              result.plan.ID.String(),
+		"owner_type":           planOwnerType(result.plan),
+		"config_key":           result.plan.ConfigKey,
+		"source_hash":          result.plan.SourceHash,
+		"base_generation":      result.plan.BaseGeneration,
+		"required_permissions": result.plan.RequiredPermissions,
+		"summary":              result.summary,
+		"notifications":        result.notifications,
+		"credential_readiness": result.readiness,
+	})
+}
+
+// decodeAuthorizedConfigApplyCall enforces actor authentication, strict apply
+// body decoding, and middleware-authorized plan revision checks across SDK, MCP,
+// and webhook config apply handlers.
+func decodeAuthorizedConfigApplyCall(w http.ResponseWriter, r *http.Request, ctx context.Context, span trace.Span, kind store.ConfigType) (sdkApplyCall, bool) {
+	actor, ok := requireConfigActor(w, ctx, span, "request_admission")
+	// Reject unauthenticated apply requests before parsing body or revision state.
+	if !ok {
+		return sdkApplyCall{}, false
+	}
+	req, planID, err := decodeSDKConfigApplyRequest(r)
+	// Reject malformed plan_id or source_hash payloads before checking authorization state.
+	if err != nil {
+		writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "request_admission", "", "not_committed"), ctx)
+		return sdkApplyCall{}, false
+	}
+	planRevision, ok := AuthorizedPlanRevisionFromContext(ctx)
+	// Refuse apply when middleware did not bind an authoritative reviewed plan revision.
+	if !ok {
+		writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, "apply_admission", planID.String(), "not_committed"), ctx)
+		return sdkApplyCall{}, false
+	}
+	return sdkApplyCall{
+		kind:         kind,
+		apiKey:       r.Header.Get("X-API-Key"),
+		accountID:    actor.AccountID,
+		actor:        actor,
+		planID:       planID,
+		planRevision: planRevision,
+		sourceHash:   req.SourceHash,
+		skipToken:    req.SkipToken,
+	}, true
+}
+
 // appConfigPlanHandler shares immutable planning without collapsing SDK and Unified App identities.
 func appConfigPlanHandler(kind store.ConfigType, configStore store.ConfigRepository, s store.Store, registryClient sandbox.RegistryClient, defaultEngineURLs ...string) http.HandlerFunc {
 	defaultEngineURL := ""
+	// Optional default engine URL overrides local endpoint projection when provided.
 	if len(defaultEngineURLs) > 0 {
 		defaultEngineURL = strings.TrimSpace(defaultEngineURLs[0])
 	}
@@ -353,13 +415,13 @@ func appConfigPlanHandler(kind store.ConfigType, configStore store.ConfigReposit
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine."+string(kind)+"_config.plan")
 		defer span.End()
 
-		actor, ok := accesscontrol.ActorFromContext(ctx)
+		actor, ok := requireConfigActor(w, ctx, span, "plan_admission")
+		// Abort before decoding config documents for unauthenticated callers.
 		if !ok {
-			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, "plan_admission", "", "not_committed"), ctx)
 			return
 		}
 		req, doc, err := decodeSDKOrUnifiedAppConfigPlanRequest(r, kind)
+		// Reject invalid request envelopes or config documents before planning.
 		if err != nil {
 			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "plan_admission", "", "not_committed"), ctx)
 			return
@@ -380,17 +442,7 @@ func appConfigPlanHandler(kind store.ConfigType, configStore store.ConfigReposit
 		}
 
 		span.SetAttributes(attribute.String("plan_id", result.plan.ID.String()), attribute.String("outcome", "success"))
-		writeJSON(w, map[string]any{
-			"plan_id":              result.plan.ID.String(),
-			"owner_type":           planOwnerType(result.plan),
-			"config_key":           result.plan.ConfigKey,
-			"source_hash":          result.plan.SourceHash,
-			"base_generation":      result.plan.BaseGeneration,
-			"required_permissions": result.plan.RequiredPermissions,
-			"summary":              result.summary,
-			"notifications":        result.notifications,
-			"credential_readiness": result.readiness,
-		})
+		writeAppConfigPlanResponse(w, result)
 	}
 }
 
@@ -414,36 +466,17 @@ func appConfigApplyHandler(kind store.ConfigType, configStore store.ConfigReposi
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine."+string(kind)+"_config.apply")
 		defer span.End()
 
-		actor, ok := accesscontrol.ActorFromContext(ctx)
+		call, ok := decodeAuthorizedConfigApplyCall(w, r, ctx, span, kind)
+		// Reject unauthenticated, malformed, or unauthorized apply requests before execution.
 		if !ok {
-			span.SetAttributes(attribute.String("outcome", "unauthorized"))
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusUnauthorized, message: "invalid API key or workspace not found"}, "request_admission", "", "not_committed"), ctx)
 			return
 		}
-		req, planID, err := decodeSDKConfigApplyRequest(r)
-		if err != nil {
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusBadRequest, message: err.Error()}, "request_admission", "", "not_committed"), ctx)
-			return
-		}
-		planRevision, ok := AuthorizedPlanRevisionFromContext(ctx)
-		if !ok {
-			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(workspaceConfigHTTPError{status: http.StatusForbidden, message: "authorized plan revision unavailable"}, "apply_admission", planID.String(), "not_committed"), ctx)
-			return
-		}
+		planID := call.planID
 		span.SetAttributes(
 			attribute.String("plan_id", planID.String()),
-			attribute.String("actor.type", string(actor.Kind)),
+			attribute.String("actor.type", string(call.actor.Kind)),
 		)
-		result, err := executeSDKConfigApply(ctx, configStore, s, proxy, registryClient, sdkApplyCall{
-			kind:         kind,
-			apiKey:       r.Header.Get("X-API-Key"),
-			accountID:    actor.AccountID,
-			actor:        actor,
-			planID:       planID,
-			planRevision: planRevision,
-			sourceHash:   req.SourceHash,
-			skipToken:    req.SkipToken,
-		})
+		result, err := executeSDKConfigApply(ctx, configStore, s, proxy, registryClient, call)
 		if err != nil {
 			writeSDKConfigError(w, withWorkspaceConfigErrorMetadata(err, "apply_execution", planID.String(), "unknown"), ctx)
 			return
@@ -1163,7 +1196,7 @@ func createSDKConfigPlan(
 		return sdkPlanResult{}, err
 	}
 	// Planning must prove the same ownership that apply will enforce again.
-	if err := preflightConfigOwnership(ctx, s, call.actor, owner, optionalAppID(authorizationID), requiredPermissions); err != nil {
+	if err := preflightConfigOwnership(ctx, s, call.actor, owner, optionalActorID(authorizationID), requiredPermissions); err != nil {
 		return sdkPlanResult{}, err
 	}
 	plan, err := configStore.CreateConfigPlan(ctx, store.CreateConfigPlanParams{
@@ -1407,13 +1440,6 @@ func resolvedAppIDForPlan(ctx context.Context, s store.Store, accountID uuid.UUI
 	// Registry no longer restores SDK/MCP definitions after a database reset.
 	trace.SpanFromContext(ctx).SetAttributes(attribute.String("app.identity_source", "new"))
 	return uuid.Nil, nil
-}
-
-func optionalAppID(id uuid.UUID) *uuid.UUID {
-	if id == uuid.Nil {
-		return nil
-	}
-	return &id
 }
 
 // resolveAppPlanOwnerAndBucket resolves plan owner authorization plus every
@@ -2563,9 +2589,9 @@ func registryDriftInboxItem(snapshot models.DriftSnapshot) workspaceNotification
 		Type:                registryDriftType(snapshot),
 		Severity:            driftSeverity(snapshot.Diff),
 		Status:              snapshot.Status,
-		ServiceID:           nonZeroUUIDString(snapshot.ServiceID),
+		ServiceID:           optionalUUIDString(snapshot.ServiceID),
 		Message:             registryDriftMessage(snapshot),
-		IntegrationObjectID: nonZeroUUIDString(snapshot.IntegrationObjectID),
+		IntegrationObjectID: optionalUUIDString(snapshot.IntegrationObjectID),
 		WebhookObjectID:     pointerUUIDString(snapshot.WebhookObjectID),
 		Diff:                snapshot.Diff,
 	}
@@ -2605,13 +2631,6 @@ func driftObjectID(snapshot models.DriftSnapshot) string {
 		return snapshot.WebhookObjectID.String()
 	}
 	return snapshot.IntegrationObjectID.String()
-}
-
-func nonZeroUUIDString(id uuid.UUID) string {
-	if id == uuid.Nil {
-		return ""
-	}
-	return id.String()
 }
 
 func pointerUUIDString(id *uuid.UUID) string {
@@ -4767,8 +4786,8 @@ func sameReturnedSelectionPolicy(planned, returned models.SDKSelection) bool {
 		return false
 	}
 	return sameReturnedAuthPolicy(planned, returned) &&
-		sameRequiredAuth(planned.RequiredAuth, returned.RequiredAuth) &&
-		sameStrings(planned.ConnectScopes, returned.ConnectScopes) && sameInjections(planned.Injections, returned.Injections)
+		sameJSONValue(planned.RequiredAuth, returned.RequiredAuth) &&
+		sameStrings(planned.ConnectScopes, returned.ConnectScopes) && sameJSONValue(planned.Injections, returned.Injections)
 }
 
 // sameReturnedAuthPolicy compares the immutable target and credential-source routing fields as one policy unit.
@@ -4780,7 +4799,8 @@ func sameReturnedAuthPolicy(planned, returned models.SDKSelection) bool {
 		planned.CredentialSourceAuthName == returned.CredentialSourceAuthName
 }
 
-func sameRequiredAuth(expected, actual []models.SDKRequiredAuth) bool {
+// sameJSONValue compares two structured slices via JSON serialization to verify plan-vs-response equality.
+func sameJSONValue[T any](expected, actual T) bool {
 	want, _ := json.Marshal(expected)
 	got, _ := json.Marshal(actual)
 	return bytes.Equal(want, got)
@@ -4798,12 +4818,6 @@ func sameStrings(expected, actual []string) bool {
 		delete(want, value)
 	}
 	return len(want) == 0
-}
-
-func sameInjections(expected, actual []models.SDKInjectionConfig) bool {
-	want, _ := json.Marshal(expected)
-	got, _ := json.Marshal(actual)
-	return bytes.Equal(want, got)
 }
 
 func endpointSelectionMismatch(planned, returned models.SDKSelection) error {

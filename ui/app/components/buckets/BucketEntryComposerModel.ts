@@ -112,10 +112,6 @@ export function serializeBucketSecretPayload(form: BucketSecretEntryForm): Bucke
   };
 }
 
-export function secretHasTwoFields(credentialType: string): boolean {
-  return credentialType === "basic" || credentialType === "mtls" || credentialType === "oauth" || credentialType === "oidc";
-}
-
 // Distinguishes the oauth/oidc credential_family write path from the
 // row-oriented paired path Basic/mTLS still use, even though both render as
 // a two-field form.

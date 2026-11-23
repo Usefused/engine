@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/Usefused/engine/internal/shared/messaging"
@@ -27,9 +26,7 @@ type providerRateLimitProjectionStore interface {
 }
 
 type ProviderRateLimitProjectionWorker struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	once   sync.Once
+	lifecycle *workerLifecycle
 }
 
 func StartProviderRateLimitProjectionWorker(ctx context.Context, projectionStore providerRateLimitProjectionStore, natsClient *messaging.NATSClient) (*ProviderRateLimitProjectionWorker, error) {
@@ -46,8 +43,8 @@ func StartProviderRateLimitProjectionWorker(ctx context.Context, projectionStore
 	if err != nil {
 		return nil, fmt.Errorf("subscribe to provider rate-limit state: %w", err)
 	}
-	workerCtx, cancel := context.WithCancel(ctx)
-	worker := &ProviderRateLimitProjectionWorker{cancel: cancel, done: make(chan struct{})}
+	workerCtx, lifecycle := newStartedLifecycle(ctx)
+	worker := &ProviderRateLimitProjectionWorker{lifecycle: lifecycle}
 	go worker.run(workerCtx, subscription, projectionStore)
 	return worker, nil
 }
@@ -63,19 +60,17 @@ func ensureProviderRateLimitConsumer(client *messaging.NATSClient) error {
 	return nil
 }
 
+// Stop cancels provider rate-limit projection and waits for the pull loop to exit.
 func (w *ProviderRateLimitProjectionWorker) Stop(ctx context.Context) {
+	// Optional startup wiring may leave this worker nil.
 	if w == nil {
 		return
 	}
-	w.once.Do(w.cancel)
-	select {
-	case <-w.done:
-	case <-ctx.Done():
-	}
+	w.lifecycle.stop(ctx)
 }
 
 func (w *ProviderRateLimitProjectionWorker) run(ctx context.Context, subscription *nats.Subscription, projectionStore providerRateLimitProjectionStore) {
-	defer close(w.done)
+	defer close(w.lifecycle.done)
 	for ctx.Err() == nil {
 		messages, err := subscription.Fetch(providerRateLimitBatchSize, nats.MaxWait(time.Second))
 		if errors.Is(err, nats.ErrTimeout) {

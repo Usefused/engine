@@ -113,7 +113,8 @@ func workspaceShareMutationGraphQLField(s store.Store, action string, resourceTy
 			if err != nil {
 				return nil, err
 			}
-			actor, err := teamMutationActor(ctx)
+			actor, err := accessMutationActor(ctx)
+			// Workspace share mutations require an authenticated actor context.
 			if err != nil {
 				return nil, workspaceShareGraphQLError(err)
 			}

@@ -70,20 +70,13 @@ func applyObservedCost(state *ratelimitpolicy.PolicyState, observation ratelimit
 		if state.Tokens == nil {
 			return false
 		}
-		*state.Tokens -= min64(*state.Tokens, delta)
+		*state.Tokens -= min(*state.Tokens, delta)
 	case "rolling_window":
 		consumeRolling(state, ratelimitpolicy.ResolvedPolicy{Cost: delta, RollingDurationMs: observation.DurationMs}, now)
 	default:
 		return false
 	}
 	return true
-}
-
-func min64(left, right int64) int64 {
-	if left < right {
-		return left
-	}
-	return right
 }
 
 func applyFixedWindowObservation(state *ratelimitpolicy.PolicyState, observation ratelimitpolicy.ResponseObservation) bool {

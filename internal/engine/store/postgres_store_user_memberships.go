@@ -10,36 +10,75 @@ import (
 	"go.opentelemetry.io/otel"
 )
 
-func (s *postgresStore) AddTeamMember(ctx context.Context, input TeamMemberMutation) (MembershipMutationResult, error) {
-	ctx, span := otel.Tracer("engine").Start(ctx, "engine.access.team_member.add")
+// addTeamMemberInTx executes the shared authorization lock, team ownership check,
+// archived-user guard, membership upsert, and audit finalization for adding a member.
+func (s *postgresStore) addTeamMemberInTx(
+	ctx context.Context,
+	spanName string,
+	teamID uuid.UUID,
+	role MembershipRole,
+	actor MutationActor,
+	validate func() (func(context.Context, pgx.Tx) (User, bool, error), error),
+) (MembershipMutationResult, error) {
+	ctx, span := otel.Tracer("engine").Start(ctx, spanName)
 	defer span.End()
-	if err := validateTeamMemberMutation(input); err != nil {
+	resolveUser, err := validate()
+	// Reject invalid member inputs before opening a write transaction.
+	if err != nil {
 		return MembershipMutationResult{}, recordTeamSpanError(span, err)
 	}
-	tx, err := s.beginAccessMutation(ctx, input.Actor)
+	tx, err := s.beginAccessMutation(ctx, actor)
+	// Abort if the audited access-control transaction cannot be started.
 	if err != nil {
 		return MembershipMutationResult{}, recordTeamSpanError(span, err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Serialize concurrent authorization writes before inspecting team ownership.
 	if _, err := lockAuthorizationState(ctx, tx); err != nil {
 		return MembershipMutationResult{}, recordTeamSpanError(span, err)
 	}
-	team, err := loadOwnerAuthorizedMembershipTeam(ctx, tx, input.TeamID, input.Actor.SubjectID, true)
+	team, err := loadOwnerAuthorizedMembershipTeam(ctx, tx, teamID, actor.SubjectID, true)
+	// Only authorized team owners may grant membership.
 	if err != nil {
 		return MembershipMutationResult{}, recordTeamSpanError(span, err)
 	}
-	user, err := loadUserForMutation(ctx, tx, input.UserID)
+	user, createdUser, err := resolveUser(ctx, tx)
+	// Stop if the target user cannot be loaded or invited within this transaction.
 	if err != nil {
 		return MembershipMutationResult{}, recordTeamSpanError(span, err)
 	}
+	// Archived users cannot be added to teams until restored.
 	if user.Status == UserStatusArchived {
 		return MembershipMutationResult{}, ErrUserArchived
 	}
-	membership, changed, err := upsertTeamMembership(ctx, tx, team, user.ID, input.Role, input.Actor.SubjectID)
+	membership, membershipChanged, err := upsertTeamMembership(ctx, tx, team, user.ID, role, actor.SubjectID)
+	// Abort before bumping the authorization revision if the membership write fails.
 	if err != nil {
 		return MembershipMutationResult{}, recordTeamSpanError(span, err)
 	}
-	return finalizeMembershipMutation(ctx, tx, membershipMutationState{input: input, user: user, membership: membership, changed: changed, action: "team.member.add"})
+	state := membershipMutationState{
+		input:       TeamMemberMutation{TeamID: teamID, UserID: user.ID, Role: role, Actor: actor},
+		user:        user,
+		membership:  membership,
+		changed:     membershipChanged || createdUser,
+		createdUser: createdUser,
+		action:      "team.member.add",
+	}
+	return finalizeMembershipMutation(ctx, tx, state)
+}
+
+// AddTeamMember adds an existing user to a team with the requested role.
+func (s *postgresStore) AddTeamMember(ctx context.Context, input TeamMemberMutation) (MembershipMutationResult, error) {
+	return s.addTeamMemberInTx(ctx, "engine.access.team_member.add", input.TeamID, input.Role, input.Actor, func() (func(context.Context, pgx.Tx) (User, bool, error), error) {
+		// Validate team/user IDs, role, and actor before entering the transaction.
+		if err := validateTeamMemberMutation(input); err != nil {
+			return nil, err
+		}
+		return func(ctx context.Context, tx pgx.Tx) (User, bool, error) {
+			user, err := loadUserForMutation(ctx, tx, input.UserID)
+			return user, false, err
+		}, nil
+	})
 }
 
 func validateTeamMemberMutation(input TeamMemberMutation) error {
@@ -52,41 +91,18 @@ func validateTeamMemberMutation(input TeamMemberMutation) error {
 	return validateMutationActor(input.Actor)
 }
 
+// AddTeamMemberByEmail invites or loads a user by email and adds them to a team.
 func (s *postgresStore) AddTeamMemberByEmail(ctx context.Context, input AddTeamMemberByEmailInput) (MembershipMutationResult, error) {
-	ctx, span := otel.Tracer("engine").Start(ctx, "engine.access.team_member.add_by_email")
-	defer span.End()
-	normalized, display, displayName, err := validateAddTeamMemberByEmail(input)
-	if err != nil {
-		return MembershipMutationResult{}, recordTeamSpanError(span, err)
-	}
-	tx, err := s.beginAccessMutation(ctx, input.Actor)
-	if err != nil {
-		return MembershipMutationResult{}, recordTeamSpanError(span, err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := lockAuthorizationState(ctx, tx); err != nil {
-		return MembershipMutationResult{}, recordTeamSpanError(span, err)
-	}
-	team, err := loadOwnerAuthorizedMembershipTeam(ctx, tx, input.TeamID, input.Actor.SubjectID, true)
-	if err != nil {
-		return MembershipMutationResult{}, recordTeamSpanError(span, err)
-	}
-	user, createdUser, err := loadOrCreateInvitedUser(ctx, tx, normalized, display, displayName)
-	if err != nil {
-		return MembershipMutationResult{}, recordTeamSpanError(span, err)
-	}
-	if user.Status == UserStatusArchived {
-		return MembershipMutationResult{}, ErrUserArchived
-	}
-	membership, membershipChanged, err := upsertTeamMembership(ctx, tx, team, user.ID, input.Role, input.Actor.SubjectID)
-	if err != nil {
-		return MembershipMutationResult{}, recordTeamSpanError(span, err)
-	}
-	state := membershipMutationState{
-		input: TeamMemberMutation{TeamID: input.TeamID, UserID: user.ID, Role: input.Role, Actor: input.Actor},
-		user:  user, membership: membership, changed: membershipChanged || createdUser, createdUser: createdUser, action: "team.member.add",
-	}
-	return finalizeMembershipMutation(ctx, tx, state)
+	return s.addTeamMemberInTx(ctx, "engine.access.team_member.add_by_email", input.TeamID, input.Role, input.Actor, func() (func(context.Context, pgx.Tx) (User, bool, error), error) {
+		normalized, display, displayName, err := validateAddTeamMemberByEmail(input)
+		// Validate email normalization, display name, role, and actor before entering the transaction.
+		if err != nil {
+			return nil, err
+		}
+		return func(ctx context.Context, tx pgx.Tx) (User, bool, error) {
+			return loadOrCreateInvitedUser(ctx, tx, normalized, display, displayName)
+		}, nil
+	})
 }
 
 func validateAddTeamMemberByEmail(input AddTeamMemberByEmailInput) (string, string, string, error) {

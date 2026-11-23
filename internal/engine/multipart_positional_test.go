@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"mime"
@@ -81,7 +82,7 @@ func TestPositionalFormDataRejectsInvalidOrMismatchedName(t *testing.T) {
 			}
 			content := positionalTestContent("multipart/form-data", test.payload, "string", "", encoding)
 			headers := map[string]string{}
-			body, err := buildPositionalMultipartRequestBody(content, headers, map[string]any{test.payload: []any{"value"}})
+			body, err := buildPositionalMultipartRequestBodyWithContext(context.Background(), content, headers, map[string]any{test.payload: []any{"value"}})
 			if err == nil {
 				_, err = io.ReadAll(body)
 				_ = body.(io.Closer).Close()
@@ -146,7 +147,7 @@ func readSinglePositionalPart(t *testing.T, content *SelectedRequestRepresentati
 func readPositionalParts(t *testing.T, content *SelectedRequestRepresentation, values []any) []capturedPart {
 	t.Helper()
 	headers := map[string]string{}
-	body, err := buildPositionalMultipartRequestBody(content, headers, map[string]any{content.PayloadParameter: values})
+	body, err := buildPositionalMultipartRequestBodyWithContext(context.Background(), content, headers, map[string]any{content.PayloadParameter: values})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +212,7 @@ func (r *positionalBlockingReadCloser) Close() error {
 func TestPositionalMultipartCloseOwnsNestedReader(t *testing.T) {
 	source := &positionalBlockingReadCloser{closed: make(chan struct{})}
 	content := positionalTestContent("multipart/mixed", "items", "string", "binary", models.RequestEncoding{})
-	body, err := buildPositionalMultipartRequestBody(content, map[string]string{}, map[string]any{"items": []any{source}})
+	body, err := buildPositionalMultipartRequestBodyWithContext(context.Background(), content, map[string]string{}, map[string]any{"items": []any{source}})
 	if err != nil {
 		t.Fatal(err)
 	}

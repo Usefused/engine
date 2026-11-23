@@ -543,6 +543,7 @@ test("recovery drawer renders read-only source and blocks accidental discard aft
     "@remix-run/react": { useBlocker: (value) => { blocked = value; return { state: "unblocked" }; }, useBeforeUnload: (callback) => { beforeUnload = callback; } },
     // No assistant is mounted in this isolated recovery renderer.
     "~/components/agent/FusedAgentContext": { useFusedAgent: () => null },
+    "~/lib/focus-trap": { handleDrawerKeyboard() {} },
     "./useWebhookEditor": { useWebhookEditor: () => editor },
     "./WebhookEventEditor": { WebhookEventEditor: () => null },
     "./WebhookSettingsEditor": { WebhookSettingsEditor: () => null },

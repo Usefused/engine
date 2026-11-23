@@ -129,9 +129,9 @@ func upsertAuthConnectionRow(ctx context.Context, querier authConnectionRowQueri
 			updated_at = NOW()
 		RETURNING ` + authConnectionColumns
 	return scanAuthConnection(querier.QueryRow(ctx, query,
-		conn.BucketID, conn.ServiceID, conn.ServiceVersionID, conn.EndUserRef, uuidOrNil(conn.CreatedByAppID),
+		conn.BucketID, conn.ServiceID, conn.ServiceVersionID, conn.EndUserRef, nullableUUID(conn.CreatedByAppID),
 		conn.AuthType, conn.AuthName, conn.CredentialSourceServiceID, conn.CredentialSourceAuthType, conn.CredentialSourceAuthName, conn.ManagedAuth,
-		conn.EncryptedDEK, conn.EncryptedAccessToken, emptyStringOrNil(conn.EncryptedRefreshToken), emptyStringOrNil(conn.EncryptedIDToken),
+		conn.EncryptedDEK, conn.EncryptedAccessToken, nullableAuditText(conn.EncryptedRefreshToken), nullableAuditText(conn.EncryptedIDToken),
 		defaultString(conn.TokenType, "Bearer"), nonNilStrings(conn.Scopes), defaultString(conn.ScopeSource, "none"), conn.Issuer, conn.Subject,
 		jsonObjectBytes(conn.IdentityClaims), conn.ExpiresAt, conn.RefreshTokenExpiresAt, defaultString(conn.RefreshState, "ok"),
 		conn.LastFailureCode, conn.LastFailureAt, conn.LastFailureTraceID,
@@ -359,7 +359,7 @@ func (s *postgresStore) CompleteAuthConnectionRefresh(ctx context.Context, id, l
 		RETURNING ` + authConnectionColumns
 	connection, err := scanAuthConnection(s.db.QueryRow(ctx, query,
 		id, leaseToken, refreshed.EncryptedDEK, refreshed.EncryptedAccessToken,
-		emptyStringOrNil(refreshed.EncryptedRefreshToken), emptyStringOrNil(refreshed.EncryptedIDToken),
+		nullableAuditText(refreshed.EncryptedRefreshToken), nullableAuditText(refreshed.EncryptedIDToken),
 		defaultString(refreshed.TokenType, "Bearer"), nonNilStrings(refreshed.Scopes),
 		defaultString(refreshed.ScopeSource, "none"), refreshed.Issuer, refreshed.Subject,
 		jsonObjectBytes(refreshed.IdentityClaims), refreshed.ExpiresAt, refreshed.RefreshTokenExpiresAt, refreshedAt,
@@ -460,7 +460,7 @@ func insertConnectSession(ctx context.Context, db connectQueryRower, session Con
 		session.ID, session.BucketID, session.ServiceID, session.ServiceVersionID, session.AuthType, session.AuthName,
 		session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName, session.ManagedAuth, session.EndUserRef,
 		session.StateHash, session.NonceHash, session.EncryptedDEK, session.EncryptedPKCEVerifier, session.RedirectURI,
-		uuidOrNil(session.CreatedByAppID), session.ReturnURL, jsonObjectBytes(session.ResourceInputJSON), session.RequestedScopes, session.ExpiresAt,
+		nullableUUID(session.CreatedByAppID), session.ReturnURL, jsonObjectBytes(session.ResourceInputJSON), session.RequestedScopes, session.ExpiresAt,
 	))
 }
 
@@ -509,7 +509,7 @@ func (s *postgresStore) CreateConnectInputSession(ctx context.Context, session C
 	return scanConnectInputSession(s.db.QueryRow(ctx, query,
 		session.ID, session.BucketID, session.ServiceID, session.AuthType, session.AuthName,
 		session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName, session.ManagedAuth, session.ContractHash,
-		session.EndUserRef, session.TokenHash, uuidOrNil(session.CreatedByAppID),
+		session.EndUserRef, session.TokenHash, nullableUUID(session.CreatedByAppID),
 		session.ReturnURL, jsonObjectBytes(session.ResourceInputJSON), session.RequestedScopes, session.ExpiresAt,
 	))
 }
@@ -565,7 +565,7 @@ func (s *postgresStore) CompleteConnectInputSession(ctx context.Context, tokenHa
 		  AND id = $16`,
 		tokenHash, usedAt, session.BucketID, session.ServiceID, session.AuthType,
 		session.AuthName, session.CredentialSourceServiceID, session.CredentialSourceAuthType, session.CredentialSourceAuthName, session.ManagedAuth,
-		session.EndUserRef, uuidOrNil(session.CreatedByAppID),
+		session.EndUserRef, nullableUUID(session.CreatedByAppID),
 		session.ReturnURL, session.RequestedScopes, contractHash, session.ID,
 	)
 	if err != nil {
@@ -844,25 +844,11 @@ func looksEncryptedValue(value string) bool {
 	return len(decoded) > 28
 }
 
-func uuidOrNil(id uuid.UUID) any {
-	if id == uuid.Nil {
-		return nil
-	}
-	return id
-}
-
 func nullableUUIDPtr(id *uuid.UUID) any {
 	if id == nil {
 		return nil
 	}
 	return *id
-}
-
-func emptyStringOrNil(value string) any {
-	if value == "" {
-		return nil
-	}
-	return value
 }
 
 func jsonObjectBytes(value []byte) []byte {

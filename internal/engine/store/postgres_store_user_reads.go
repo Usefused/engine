@@ -46,30 +46,29 @@ func loadHydratedUser(ctx context.Context, querier userRowsQuerier, userID uuid.
 	return users[0], nil
 }
 
+// ListUsers returns a filtered, paginated slice of users alongside the matching total count.
 func (s *postgresStore) ListUsers(ctx context.Context, options UserListOptions) ([]User, int, error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.access.user.list")
 	defer span.End()
 	statuses, err := validateUserListOptions(&options)
+	// Reject invalid pagination, search length, or statuses before querying PostgreSQL.
 	if err != nil {
 		return nil, 0, recordTeamSpanError(span, err)
 	}
-	batch := &pgx.Batch{}
-	batch.Queue(userCountSQL, statuses, options.Search)
-	batch.Queue(userListQuery(options.IncludeChildren), statuses, options.Search, options.Limit, options.Offset)
-	results := s.db.SendBatch(ctx, batch)
-	defer results.Close()
-	var total int
-	if err := results.QueryRow().Scan(&total); err != nil {
-		return nil, 0, recordTeamSpanError(span, fmt.Errorf("count users: %w", err))
-	}
-	rows, err := results.Query()
+	users, total, err := queryCountedAccessBatch(
+		ctx,
+		s.db,
+		span,
+		userCountSQL,
+		[]any{statuses, options.Search},
+		userListQuery(options.IncludeChildren),
+		[]any{statuses, options.Search, options.Limit, options.Offset},
+		"users",
+		scanUsers,
+	)
+	// Propagate recorded batch failures without emitting a misleading count attribute.
 	if err != nil {
-		return nil, 0, recordTeamSpanError(span, fmt.Errorf("list users: %w", err))
-	}
-	users, err := scanUsers(rows)
-	rows.Close()
-	if err != nil {
-		return nil, 0, recordTeamSpanError(span, err)
+		return nil, 0, err
 	}
 	span.SetAttributes(attribute.Int("engine.user.count", len(users)))
 	return users, total, nil
@@ -82,52 +81,43 @@ func userListQuery(includeChildren bool) string {
 	return userListSummarySQL
 }
 
+// validateUserListOptions normalizes and validates pagination, search, and status filters for user listing.
 func validateUserListOptions(options *UserListOptions) ([]string, error) {
-	if options.Limit == 0 {
-		options.Limit = 50
-	}
-	if options.Limit < 1 || options.Limit > 200 || options.Offset < 0 || len(options.Search) > 254 {
-		return nil, fmt.Errorf("%w: invalid user list options", ErrInvalidUser)
-	}
-	statuses := make([]string, len(options.Statuses))
-	for index, status := range options.Statuses {
-		if err := validateUserStatus(status); err != nil {
-			return nil, err
-		}
-		statuses[index] = string(status)
-	}
-	return statuses, nil
+	return validateListOptions(
+		&options.Limit,
+		options.Offset,
+		options.Search,
+		254,
+		options.Statuses,
+		validateUserStatus,
+		fmt.Errorf("%w: invalid user list options", ErrInvalidUser),
+	)
 }
 
+// ListTeamMembers returns a filtered, paginated slice of members for a team alongside the total count.
 func (s *postgresStore) ListTeamMembers(ctx context.Context, teamID uuid.UUID, options UserListOptions) ([]TeamMember, int, error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.access.team_members.list")
 	defer span.End()
+	// Reject nil team IDs as not found before querying storage.
 	if teamID == uuid.Nil {
 		return nil, 0, ErrTeamNotFound
 	}
 	statuses, err := validateUserListOptions(&options)
+	// Reject invalid pagination, search length, or statuses before querying PostgreSQL.
 	if err != nil {
 		return nil, 0, recordTeamSpanError(span, err)
 	}
-	batch := &pgx.Batch{}
-	batch.Queue(teamMemberCountSQL, teamID, statuses, options.Search)
-	batch.Queue(teamMemberListSQL, teamID, statuses, options.Search, options.Limit, options.Offset)
-	results := s.db.SendBatch(ctx, batch)
-	defer results.Close()
-	var total int
-	if err := results.QueryRow().Scan(&total); err != nil {
-		return nil, 0, recordTeamSpanError(span, fmt.Errorf("count team members: %w", err))
-	}
-	rows, err := results.Query()
-	if err != nil {
-		return nil, 0, recordTeamSpanError(span, fmt.Errorf("list team members: %w", err))
-	}
-	members, err := scanTeamMembers(rows)
-	rows.Close()
-	if err != nil {
-		return nil, 0, recordTeamSpanError(span, err)
-	}
-	return members, total, nil
+	return queryCountedAccessBatch(
+		ctx,
+		s.db,
+		span,
+		teamMemberCountSQL,
+		[]any{teamID, statuses, options.Search},
+		teamMemberListSQL,
+		[]any{teamID, statuses, options.Search, options.Limit, options.Offset},
+		"team members",
+		scanTeamMembers,
+	)
 }
 
 func (s *postgresStore) ListUserControlCredentials(ctx context.Context, userID uuid.UUID) ([]ControlCredential, error) {

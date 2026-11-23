@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useFusedAgent } from "~/components/agent/FusedAgentContext";
+import { handleDrawerKeyboard } from "~/lib/focus-trap";
 import { Check, ChevronDown, ChevronUp, ChevronRight, Code2, Copy } from "lucide-react";
 
 /** Shares the endpoint inspector identity strip with workflow and MCP definitions. */
@@ -187,16 +188,10 @@ export function OperationDetailsPanel({ label, onClose, header, children }: { la
 
 /** Trap only modal inspector navigation; never invoke the selected operation. */
 function operationDetailsKeyboard(event: KeyboardEvent<HTMLElement>, panel: HTMLElement | null, close: () => void, modal: boolean) {
-  // Dismissal returns to the invoking row through the panel lifecycle.
-  if (event.key === "Escape") { event.stopPropagation(); close(); return; }
-  // An open assistant and ordinary keys retain normal browser navigation.
-  if (!modal || event.key !== "Tab" || !panel) return;
-  // Editable Try forms share this inspector, so native fields participate in the same focus boundary.
-  const controls = Array.from(panel.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), a[href], summary, [tabindex="0"]')).filter(/** Collapsed contract controls cannot receive focus. */ element => element.getClientRects().length > 0);
-  const first = controls[0], last = controls[controls.length - 1];
-  // Wrap only at the visible edges of the modal inspector.
-  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  handleDrawerKeyboard(event, panel, close, {
+    selector: 'button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), a[href], summary, [tabindex="0"]',
+    trapFocus: modal,
+  });
 }
 
 /** Apply one content rhythm to service, webhook, and Bridge inspectors. */

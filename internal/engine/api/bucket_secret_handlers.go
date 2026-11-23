@@ -35,10 +35,8 @@ func UpsertBucketSecretHandler(s store.Store, masterKey []byte) http.HandlerFunc
 		ctx, span := otel.Tracer("engine").Start(r.Context(), "engine.api.bucket_secrets.upsert")
 		defer span.End()
 
-		status, message, ok := secretAdminWorkspace(ctx, s, r)
 		// Generic secrets use the same authenticated workspace boundary as provider credentials.
-		if !ok {
-			writeControlAPIMutationError(w, ctx, status, secretAdminErrorCode(status), message, secretAdminRemediation(status), "bucket_secret_upsert", "", "not_committed", "")
+		if !requireControlWorkspaceActor(w, ctx, "bucket_secret_upsert", "Authentication is required to manage secrets.", "The Engine could not resolve the workspace for secret management.") {
 			return
 		}
 

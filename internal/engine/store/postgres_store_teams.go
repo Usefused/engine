@@ -111,50 +111,112 @@ func (s *postgresStore) GetTeamBySlug(ctx context.Context, slug string) (Team, e
 	return team, nil
 }
 
+// queryCountedAccessBatch executes a paired count + page SQL batch under the
+// caller's span and records any query or scan failure on that span.
+func queryCountedAccessBatch[T any](
+	ctx context.Context,
+	db storeDatabase,
+	span trace.Span,
+	countSQL string,
+	countArgs []any,
+	listSQL string,
+	listArgs []any,
+	entityPlural string,
+	scan func(pgx.Rows) ([]T, error),
+) ([]T, int, error) {
+	batch := &pgx.Batch{}
+	batch.Queue(countSQL, countArgs...)
+	batch.Queue(listSQL, listArgs...)
+	results := db.SendBatch(ctx, batch)
+	defer results.Close()
+	var total int
+	// Fail the entire page read if the authoritative total count cannot be loaded.
+	if err := results.QueryRow().Scan(&total); err != nil {
+		return nil, 0, recordTeamSpanError(span, fmt.Errorf("count %s: %w", entityPlural, err))
+	}
+	rows, err := results.Query()
+	// Abort if the page query fails after the count query succeeded.
+	if err != nil {
+		return nil, 0, recordTeamSpanError(span, fmt.Errorf("list %s: %w", entityPlural, err))
+	}
+	items, err := scan(rows)
+	rows.Close()
+	// Record row decoding failures on the span without returning partial pages.
+	if err != nil {
+		return nil, 0, recordTeamSpanError(span, err)
+	}
+	return items, total, nil
+}
+
+// ListTeams returns a filtered, paginated slice of teams alongside the matching total count.
 func (s *postgresStore) ListTeams(ctx context.Context, options TeamListOptions) ([]Team, int, error) {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.access.team.list")
 	defer span.End()
 	statuses, err := validateTeamListOptions(&options)
+	// Reject invalid pagination, search length, or statuses before querying PostgreSQL.
 	if err != nil {
 		return nil, 0, recordTeamSpanError(span, err)
 	}
-	batch := &pgx.Batch{}
-	batch.Queue(teamCountSQL, statuses, options.Search)
-	batch.Queue(teamListSQL, statuses, options.Search, options.Limit, options.Offset)
-	results := s.db.SendBatch(ctx, batch)
-	defer results.Close()
-	var total int
-	if err := results.QueryRow().Scan(&total); err != nil {
-		return nil, 0, recordTeamSpanError(span, fmt.Errorf("count teams: %w", err))
-	}
-	rows, err := results.Query()
+	teams, total, err := queryCountedAccessBatch(
+		ctx,
+		s.db,
+		span,
+		teamCountSQL,
+		[]any{statuses, options.Search},
+		teamListSQL,
+		[]any{statuses, options.Search, options.Limit, options.Offset},
+		"teams",
+		scanTeams,
+	)
+	// Propagate recorded batch failures without emitting a misleading count attribute.
 	if err != nil {
-		return nil, 0, recordTeamSpanError(span, fmt.Errorf("list teams: %w", err))
-	}
-	teams, err := scanTeams(rows)
-	rows.Close()
-	if err != nil {
-		return nil, 0, recordTeamSpanError(span, err)
+		return nil, 0, err
 	}
 	span.SetAttributes(attribute.Int("engine.team.count", len(teams)))
 	return teams, total, nil
 }
 
-func validateTeamListOptions(options *TeamListOptions) ([]string, error) {
-	if options.Limit == 0 {
-		options.Limit = 50
+// validateListOptions normalizes pagination defaults and validates bounds and
+// typed status filters across user and team list queries.
+func validateListOptions[S ~string](
+	limit *int,
+	offset int,
+	search string,
+	maxSearchLen int,
+	statuses []S,
+	validateStatus func(S) error,
+	invalidErr error,
+) ([]string, error) {
+	// Default unspecified page sizes to 50 rows for bounded list queries.
+	if *limit == 0 {
+		*limit = 50
 	}
-	if options.Limit < 1 || options.Limit > 200 || options.Offset < 0 || len(options.Search) > 100 {
-		return nil, fmt.Errorf("%w: invalid team list pagination or search", ErrInvalidTeam)
+	// Enforce upper page size, non-negative offset, and bounded search input.
+	if *limit < 1 || *limit > 200 || offset < 0 || len(search) > maxSearchLen {
+		return nil, invalidErr
 	}
-	statuses := make([]string, len(options.Statuses))
-	for index, status := range options.Statuses {
-		if err := validateTeamStatus(status); err != nil {
+	out := make([]string, len(statuses))
+	for index, status := range statuses {
+		// Reject unknown status filters before executing SQL queries.
+		if err := validateStatus(status); err != nil {
 			return nil, err
 		}
-		statuses[index] = string(status)
+		out[index] = string(status)
 	}
-	return statuses, nil
+	return out, nil
+}
+
+// validateTeamListOptions normalizes and validates pagination, search, and status filters for team listing.
+func validateTeamListOptions(options *TeamListOptions) ([]string, error) {
+	return validateListOptions(
+		&options.Limit,
+		options.Offset,
+		options.Search,
+		100,
+		options.Statuses,
+		validateTeamStatus,
+		fmt.Errorf("%w: invalid team list pagination or search", ErrInvalidTeam),
+	)
 }
 
 func (s *postgresStore) UpdateTeam(ctx context.Context, teamID uuid.UUID, patch TeamPatch) (TeamMutationResult, error) {

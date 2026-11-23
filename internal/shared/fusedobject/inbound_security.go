@@ -1,25 +1,10 @@
 package fusedobject
 
-// InboundSecurityScheme retains documentary OpenAPI definitions separately from
-// outbound credentials and executable webhook verification policies.
-type InboundSecurityScheme struct {
-	Type              string                      `json:"type"`
-	Description       string                      `json:"description,omitempty"`
-	Name              string                      `json:"name,omitempty"`
-	In                string                      `json:"in,omitempty"`
-	Scheme            string                      `json:"scheme,omitempty"`
-	BearerFormat      string                      `json:"bearerFormat,omitempty"`
-	Flows             map[string]InboundOAuthFlow `json:"flows,omitempty"`
-	OpenIDConnectURL  string                      `json:"openIdConnectUrl,omitempty"`
-	OAuth2MetadataURL string                      `json:"oauth2MetadataUrl,omitempty"`
-	Deprecated        *bool                       `json:"deprecated,omitempty"`
-}
+import "github.com/Usefused/engine/internal/shared/models"
 
-// InboundOAuthFlow describes source scopes without authorizing token acquisition.
-type InboundOAuthFlow struct {
-	AuthorizationURL       string            `json:"authorizationUrl,omitempty"`
-	DeviceAuthorizationURL string            `json:"deviceAuthorizationUrl,omitempty"`
-	TokenURL               string            `json:"tokenUrl,omitempty"`
-	RefreshURL             string            `json:"refreshUrl,omitempty"`
-	Scopes                 map[string]string `json:"scopes"`
-}
+// InboundSecurityScheme aliases the canonical models definition so documentary
+// OpenAPI security schemes stay identical across snapshot and runtime layers.
+type InboundSecurityScheme = models.InboundSecurityScheme
+
+// InboundOAuthFlow aliases the canonical models scope declaration type.
+type InboundOAuthFlow = models.InboundOAuthFlow
