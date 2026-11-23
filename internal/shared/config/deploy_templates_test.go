@@ -84,21 +84,48 @@ func TestOneClickDeployTemplates(t *testing.T) {
 		t.Fatalf("unexpected cloudflare migrations: %+v", wrangler.Migrations)
 	}
 
-	var cfPkg map[string]any
-	// Cloudflare template package.json must parse cleanly for Workers Builds.
+	var cfPkg struct {
+		Cloudflare struct {
+			Bindings map[string]struct {
+				Description string `json:"description"`
+			} `json:"bindings"`
+		} `json:"cloudflare"`
+	}
+	// Cloudflare template package.json must parse cleanly and document required bindings for the Deploy UI.
 	if err := json.Unmarshal([]byte(readDeployFile(t, "deploy/cloudflare/package.json")), &cfPkg); err != nil {
 		t.Fatalf("parse deploy/cloudflare/package.json: %v", err)
 	}
+	cfDevVarsExample := readDeployFile(t, "deploy/cloudflare/.dev.vars.example")
+	for _, secretName := range []string{"FUSED_DATABASE_URL", "FUSED_LICENSE_KEY", "FUSED_ENCRYPTION_KEY"} {
+		// Each required Engine secret must appear in .dev.vars.example so Cloudflare prompts for it during one-click deploy.
+		if !strings.Contains(cfDevVarsExample, secretName+"=") {
+			t.Fatalf("deploy/cloudflare/.dev.vars.example must declare %s=", secretName)
+		}
+		// Each prompted secret must have a user-facing description in package.json cloudflare.bindings.
+		if strings.TrimSpace(cfPkg.Cloudflare.Bindings[secretName].Description) == "" {
+			t.Fatalf("deploy/cloudflare/package.json missing cloudflare.bindings.%s.description", secretName)
+		}
+	}
 
 	var vercelCfg struct {
-		Fluid bool `json:"fluid"`
+		Framework string `json:"framework"`
+		Fluid     bool   `json:"fluid"`
 	}
-	// Vercel config must remain valid JSON with Fluid Compute enabled.
+	// Vercel config must remain valid JSON with container framework and Fluid Compute enabled.
 	if err := json.Unmarshal([]byte(readDeployFile(t, "deploy/vercel/vercel.json")), &vercelCfg); err != nil {
 		t.Fatalf("parse deploy/vercel/vercel.json: %v", err)
 	}
-	if !vercelCfg.Fluid {
-		t.Fatal("expected deploy/vercel/vercel.json to enable fluid compute")
+	// Explicit container framework prevents auto-detection from missing Dockerfile.vercel, and fluid enables Containers.
+	if vercelCfg.Framework != "container" || !vercelCfg.Fluid {
+		t.Fatalf("expected deploy/vercel/vercel.json to enable container framework and fluid compute, got %+v", vercelCfg)
+	}
+	// Vercel Deploy links must target the deploy/vercel subdirectory so cloning does not fork the entire repository.
+	for _, linkDoc := range []string{"README.md", "docs/one-click-deploy.md", "deploy/vercel/README.md"} {
+		docContent := readDeployFile(t, linkDoc)
+		// Guard against regressing back to cloning the full engine repo with root-directory.
+		if !strings.Contains(docContent, "engine%2Ftree%2Fmain%2Fdeploy%2Fvercel") || strings.Contains(docContent, "root-directory=deploy%2Fvercel") {
+			t.Fatalf("%s must link Vercel deploy button to deploy/vercel subdirectory", linkDoc)
+		}
 	}
 
 	// Validate Coolify Compose stack structure and magic variable contract.

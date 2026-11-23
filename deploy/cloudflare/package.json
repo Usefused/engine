@@ -2,6 +2,22 @@
   "name": "fused-engine-cloudflare",
   "private": true,
   "type": "module",
+  "cloudflare": {
+    "bindings": {
+      "FUSED_DATABASE_URL": {
+        "description": "PostgreSQL 16+ connection string reachable from Cloudflare Containers (for example Neon or Supabase)."
+      },
+      "FUSED_LICENSE_KEY": {
+        "description": "Fused Engine license key from https://usefused.com/signup (choose License key only)."
+      },
+      "FUSED_ENCRYPTION_KEY": {
+        "description": "Persistent 32-byte base64 master encryption key generated once with: openssl rand -base64 32"
+      },
+      "FUSED_ENGINE_ENVIRONMENT": {
+        "description": "Environment label echoed on /health and telemetry (defaults to production)."
+      }
+    }
+  },
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",

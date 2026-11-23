@@ -10,7 +10,7 @@ Deploy the published `ghcr.io/usefused/engine` OCI image directly to **Cloudflar
 | **Coolify** | [![Deploy on Coolify](../.github/readme/deploy-coolify.svg)](../deploy/coolify/README.md) | Bundled (`postgres:16-alpine`) | Yes | Optional TCP proxy | Yes (persistent Docker host) |
 | **Hostlier** | [![Deploy on Hostlier](../.github/readme/deploy-hostlier.svg)](../deploy/hostlier/README.md) | Provisioned (Managed Postgres or `postgres:16-alpine` sidecar) | Yes | Native HTTP/2 gRPC | Yes (persistent `/app/data` volume) |
 | **Cloudflare Containers** | [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button?paid=true)](https://deploy.workers.cloudflare.com/?url=https://github.com/Usefused/engine/tree/main/deploy/cloudflare&paid=true) | External (PostgreSQL 16+) | Yes | No | Pauses when container sleeps |
-| **Vercel Containers** | [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FUsefused%2Fengine&root-directory=deploy%2Fvercel&project-name=fused-engine&env=FUSED_DATABASE_URL,FUSED_LICENSE_KEY,FUSED_ENCRYPTION_KEY&envDescription=PostgreSQL%2016%2B%20DSN%2C%20Fused%20license%20key%2C%20and%2032-byte%20base64%20encryption%20key%20(openssl%20rand%20-base64%2032)&envLink=https%3A%2F%2Fgithub.com%2FUsefused%2Fengine%2Fblob%2Fmain%2Fdocs%2Fengine-configuration.md) | External / Marketplace Postgres 16+ | Yes | No | Scales to zero when idle |
+| **Vercel Containers** | [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FUsefused%2Fengine%2Ftree%2Fmain%2Fdeploy%2Fvercel&project-name=fused-engine&repository-name=fused-engine&env=FUSED_DATABASE_URL,FUSED_LICENSE_KEY,FUSED_ENCRYPTION_KEY&envDescription=PostgreSQL%2016%2B%20DSN%2C%20Fused%20license%20key%2C%20and%2032-byte%20base64%20encryption%20key%20(openssl%20rand%20-base64%2032)&envLink=https%3A%2F%2Fgithub.com%2FUsefused%2Fengine%2Fblob%2Fmain%2Fdocs%2Fengine-configuration.md) | External / Marketplace Postgres 16+ | Yes | No | Scales to zero when idle |
 | **Pxxl (`pxxl.app`)** | [![Deploy on Pxxl](../.github/readme/deploy-pxxl.svg)](../deploy/pxxl/README.md) | Pxxl Postgres or External 16+ | Yes | No | Yes (Web Service container) |
 
 ## Required Secrets (All Platforms)
@@ -34,6 +34,6 @@ PaaS platforms such as Railway, Vercel, and Pxxl inject a standard `PORT` enviro
 - [Railway (with Managed PostgreSQL)](../deploy/railway/README.md) (`deploy/railway/`)
 - [Coolify Docker Compose](../deploy/coolify/README.md) (`deploy/coolify/`)
 - [Hostlier v2 Manifests](../deploy/hostlier/README.md) (`deploy/hostlier/`)
-- [Cloudflare Containers](../deploy/cloudflare/README.md) (`deploy/cloudflare/`)
-- [Vercel Containers](../deploy/vercel/README.md) (`deploy/vercel/`)
+- [Cloudflare Containers](../deploy/cloudflare/README.md) (`deploy/cloudflare/` — Worker + Durable Object proxy; Git required for one-click, or `wrangler deploy` without Git)
+- [Vercel Containers](../deploy/vercel/README.md) (`deploy/vercel/` — Fluid Compute Container Function; Git required for one-click, or `vercel deploy` without Git)
 - [Pxxl Web Service](../deploy/pxxl/README.md) (`deploy/pxxl/`)
