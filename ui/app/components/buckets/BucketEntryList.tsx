@@ -7,6 +7,7 @@ import { bucketEntryActions } from "~/lib/bucket-entry-actions";
 import { BucketPagination } from "~/components/buckets/BucketPagination";
 import { StoredSecretKeys } from "~/components/buckets/StoredSecretKeys";
 import { BucketEntryMenu } from "~/components/buckets/BucketEntryMenu";
+import { bucketSecretEditTarget } from "~/components/buckets/BucketEntryComposerModel";
 
 type BucketEntryListProps = {
   loading: boolean;
@@ -17,6 +18,8 @@ type BucketEntryListProps = {
   total: number;
   page: number;
   pageSize: number;
+  onEditSecret?: (item: SecretMeta) => void;
+  onEditValue?: (item: BucketValue) => void;
   onRemoveSecret: (item: SecretMeta) => void;
   onRemoveValue: (item: BucketValue) => void;
   onPageChange: (page: number) => void;
@@ -33,6 +36,7 @@ type EntryRowModel = {
   authScheme?: string;
   value: string;
   storedSecret?: SecretMeta;
+  onEdit?: () => void;
   onRemove: () => void;
 };
 
@@ -46,6 +50,8 @@ export function BucketEntryList({
   total,
   page,
   pageSize,
+  onEditSecret,
+  onEditValue,
   onRemoveSecret,
   onRemoveValue,
   onPageChange,
@@ -64,6 +70,8 @@ export function BucketEntryList({
     secrets,
     values,
     services,
+    onEditSecret,
+    onEditValue,
     onRemoveSecret,
     onRemoveValue
   );
@@ -100,31 +108,36 @@ export function BucketEntryList({
   );
 }
 
-/** Keeps presentation metadata separate from the original removal targets. */
+/** Keeps presentation metadata separate from the original update and removal targets. */
 function bucketEntries(
   kind: BucketEntryListProps["kind"],
   secrets: SecretMeta[],
   values: BucketValue[],
   services: ActivatedService[],
+  onEditSecret: ((item: SecretMeta) => void) | undefined,
+  onEditValue: ((item: BucketValue) => void) | undefined,
   onRemoveSecret: (item: SecretMeta) => void,
   onRemoveValue: (item: BucketValue) => void
 ): EntryRowModel[] {
   // Only credential rows need service and auth-scheme identity.
   if (kind === "secrets")
-    return secrets.map((item) => secretEntry(item, services, onRemoveSecret));
-  return values.map((item) => valueEntry(item, onRemoveValue));
+    return secrets.map((item) => secretEntry(item, services, onEditSecret, onRemoveSecret));
+  return values.map((item) => valueEntry(item, onEditValue, onRemoveValue));
 }
 
 /** Preserves the stored key metadata separately from the credential's friendly type label and masked value. */
 function secretEntry(
   item: SecretMeta,
   services: ActivatedService[],
+  onEdit: ((item: SecretMeta) => void) | undefined,
   onRemove: (item: SecretMeta) => void
 ): EntryRowModel {
   const expiry = formatExpiry(item.expires_at);
   const identity = bucketSecretIdentity(item, services);
   // Expiry supplements the service slug without crowding the separate auth-scheme tag.
   const detail = [identity.detail, expiry !== "Never" ? `expires ${expiry}` : ""].filter(Boolean).join(" · ");
+  // Only offer inline update when the secret's service/auth metadata can be matched to an upsert target.
+  const canEdit = Boolean(onEdit && bucketSecretEditTarget(item, services));
   return {
     id: `secret-${item.service_id}-${
       item.key_names?.join("-") || item.key_name
@@ -135,13 +148,16 @@ function secretEntry(
     authScheme: identity.authScheme,
     value: "********",
     storedSecret: item,
+    onEdit: canEdit ? () => onEdit!(item) : undefined,
     onRemove: () => onRemove(item),
   };
 }
 
 
+/** Maps a non-secret bucket value to its row presentation and edit/removal handlers. */
 function valueEntry(
   item: BucketValue,
+  onEdit: ((item: BucketValue) => void) | undefined,
   onRemove: (item: BucketValue) => void
 ): EntryRowModel {
   return {
@@ -150,6 +166,7 @@ function valueEntry(
     name: item.key_name,
     detail: item.location,
     value: item.value || "-",
+    onEdit: onEdit ? () => onEdit(item) : undefined,
     onRemove: () => onRemove(item),
   };
 }
@@ -199,7 +216,7 @@ function EntryRow({ entry, canRemove, canReveal, onSecretPolicyChanged }: { entr
           </button>
         )}
         {/* Opening options must never perform the destructive route action. */}
-        {actions.canRemove && <BucketEntryMenu name={entry.name} onRemove={entry.onRemove} />}
+        {actions.canRemove && <BucketEntryMenu name={entry.name} onEdit={entry.onEdit} onRemove={entry.onRemove} />}
       </div>
     </div>
   );

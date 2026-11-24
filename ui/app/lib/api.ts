@@ -1744,8 +1744,8 @@ export const api = {
     getServicesPage: (limit: number, offset: number, names?: string[], q?: string, hasWebhooks?: boolean) =>
       api
         .mcpGraphql<{ workspaceServicePage: { total: number; page: number; limit: number; data: ActivatedService[] } }>(
-          `query WorkspaceServicePage($limit: Int, $offset: Int, $names: [String], $q: String${hasWebhooks ? ", $hasWebhooks: Boolean" : ""}) {
-            workspaceServicePage(limit: $limit, offset: $offset, names: $names, q: $q${hasWebhooks ? ", has_webhooks: $hasWebhooks" : ""}) {
+          `query WorkspaceServicePage($limit: Int, $offset: Int, $names: [String], $q: String, $hasWebhooks: Boolean) {
+            workspaceServicePage(limit: $limit, offset: $offset, names: $names, q: $q, has_webhooks: $hasWebhooks) {
               total page limit data {
                 id
                 service_id
@@ -1770,6 +1770,7 @@ export const api = {
               }
             }
           }`,
+          // Only attach the webhook filter variable when explicitly requested so default calls remain unfiltered.
           hasWebhooks ? { limit, offset, names, q, hasWebhooks } : { limit, offset, names, q }
         )
         .then(({ workspaceServicePage }) => workspaceServicePage),

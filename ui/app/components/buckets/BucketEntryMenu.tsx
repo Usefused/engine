@@ -1,19 +1,21 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { MoreVertical, Trash2 } from "lucide-react";
+import { MoreVertical, Pencil, Trash2 } from "lucide-react";
 
-/** Separates opening row options from requesting a confirmed removal. */
-export function BucketEntryMenu({ name, onRemove }: { name: string; onRemove: () => void }) {
+/** Separates opening row options from requesting an update or a confirmed removal. */
+export function BucketEntryMenu({ name, onEdit, onRemove }: { name: string; onEdit?: () => void; onRemove: () => void }) {
   const [open, setOpen] = useState(false);
   const menuId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const editRef = useRef<HTMLButtonElement>(null);
   const removeRef = useRef<HTMLButtonElement>(null);
 
-  // Scope dismissal listeners to an open menu; neither dismissal path requests removal.
+  // Scope dismissal listeners to an open menu; neither dismissal path requests mutation.
   useEffect(() => {
     // Closed menus must not capture keyboard or pointer events elsewhere in the drawer.
     if (!open) return;
-    removeRef.current?.focus();
+    // Focus the first available menu action for keyboard navigation.
+    (onEdit ? editRef.current : removeRef.current)?.focus();
     // Clicking outside abandons the menu without changing the entry.
     function dismissOutside(event: PointerEvent) {
       // Pointer activity within the menu belongs to its selected control.
@@ -35,11 +37,17 @@ export function BucketEntryMenu({ name, onRemove }: { name: string; onRemove: ()
       document.removeEventListener("pointerdown", dismissOutside);
       document.removeEventListener("keydown", dismissOnEscape);
     };
-  }, [open]);
+  }, [open, onEdit]);
 
   // The options trigger changes disclosure state only and cannot request deletion.
   function toggleMenu() {
     setOpen(!open);
+  }
+
+  // Requesting an edit closes the menu first and delegates pre-filling to the panel composer.
+  function requestEdit() {
+    setOpen(false);
+    onEdit?.();
   }
 
   // Requesting removal closes the menu first; the route owns explicit confirmation.
@@ -64,9 +72,15 @@ export function BucketEntryMenu({ name, onRemove }: { name: string; onRemove: ()
       >
         <MoreVertical className="h-4 w-4" />
       </button>
-      {/* The destructive command is available only after an explicit menu opening. */}
+      {/* Row mutations are available only after an explicit menu opening. */}
       {open && (
         <div id={menuId} role="menu" aria-label={`Options for ${name}`} className="absolute right-0 top-full z-30 mt-1 w-40 rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+          {onEdit && (
+            <button ref={editRef} type="button" role="menuitem" onClick={requestEdit} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-slate-950 hover:bg-slate-50 focus:bg-slate-50">
+              <Pencil className="h-4 w-4" />
+              Update…
+            </button>
+          )}
           <button ref={removeRef} type="button" role="menuitem" onClick={requestRemoval} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-slate-950 hover:bg-slate-50 focus:bg-slate-50">
             <Trash2 className="h-4 w-4" />
             Remove…

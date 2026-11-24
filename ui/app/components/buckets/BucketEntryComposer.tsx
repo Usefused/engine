@@ -13,7 +13,9 @@ import {
   type ValueFormPayload,
 } from "~/lib/buckets";
 import {
+  type BucketEntryEditTarget,
   type BucketSecretEntryForm,
+  editTargetInitialDraft,
   secretIsCredentialFamily,
   serializeBucketSecretPayload,
   serializeCredentialFamilyPayload,
@@ -27,6 +29,7 @@ import {
 
 type BucketEntryComposerProps = {
   kind: BucketEntryKind | null;
+  editTarget?: BucketEntryEditTarget | null;
   saving: boolean;
   services: ActivatedService[];
   onCancel: () => void;
@@ -64,9 +67,52 @@ const emptyBucketSecret: BucketSecretEntryForm = {
   expiresAt: "",
 };
 
+/** Resolves the active service id and matching auth option for the current composer draft. */
+function resolveComposerSelection(
+  kind: BucketEntryKind,
+  services: ActivatedService[],
+  secret: SecretEntryForm,
+  value: ValueEntryForm
+) {
+  // Secret and env-value drafts store their service selection in separate form states.
+  const serviceId = kind === "secret" ? secret.serviceId : value.serviceId;
+  const selectedService = services.find((service) => service.service_id === serviceId);
+  // Only service-bound credentials expose authentication scheme options.
+  const authOptions = kind === "secret" ? serviceAuthOptions(selectedService) : [];
+  const selectedAuthOption = authOptions.find((option) => option.id === secret.credentialType);
+  return { serviceId, authOptions, selectedAuthOption };
+}
+
+/** Syncs composer drafts when the composer closes or opens an existing entry for editing. */
+function syncComposerDraft(
+  effectiveKind: BucketEntryKind | null,
+  editTarget: BucketEntryEditTarget | null,
+  setSecret: Dispatch<SetStateAction<SecretEntryForm>>,
+  setValue: Dispatch<SetStateAction<ValueEntryForm>>,
+  setBucketSecret: Dispatch<SetStateAction<BucketSecretEntryForm>>,
+  setServiceSearch: Dispatch<SetStateAction<string>>,
+  setError: Dispatch<SetStateAction<string>>
+) {
+  // Closing both add and edit flows clears any unsaved draft state.
+  if (!effectiveKind) {
+    resetForms(setSecret, setValue, setBucketSecret, setServiceSearch, setError);
+    return;
+  }
+  // Opening an existing row pre-fills its immutable identity and editable settings while keeping secrets write-only.
+  if (editTarget) {
+    const initial = editTargetInitialDraft(editTarget);
+    setSecret(initial.secret ?? emptySecret);
+    setValue(initial.value ?? emptyValue);
+    setBucketSecret(initial.bucketSecret ?? emptyBucketSecret);
+    setServiceSearch("");
+    setError("");
+  }
+}
+
 /** Keeps credential fields responsive and places explicit save/cancel actions below the form. */
 export function BucketEntryComposer({
   kind,
+  editTarget = null,
   saving,
   services,
   onCancel,
@@ -81,46 +127,48 @@ export function BucketEntryComposer({
   const [bucketSecret, setBucketSecret] = useState(emptyBucketSecret);
   const [serviceSearch, setServiceSearch] = useState("");
   const [error, setError] = useState("");
+  // Active edit targets determine the form kind even when the add dropdown is closed.
+  const effectiveKind = editTarget?.kind ?? kind;
+  const isEditing = editTarget !== null;
 
   useEffect(() => {
-    if (!kind)
-      resetForms(
-        setSecret,
-        setValue,
-        setBucketSecret,
-        setServiceSearch,
-        setError
-      );
-  }, [kind]);
+    syncComposerDraft(
+      effectiveKind,
+      editTarget,
+      setSecret,
+      setValue,
+      setBucketSecret,
+      setServiceSearch,
+      setError
+    );
+  }, [effectiveKind, editTarget]);
 
   useEffect(() => {
-    if (kind)
+    // Only fresh add flows auto-select a default service; edits preserve their target service.
+    if (effectiveKind && !editTarget)
       applyDefaultService(
-        kind,
+        effectiveKind,
         services,
         setSecret,
         setValue,
         setServiceSearch
       );
-  }, [kind, services]);
+  }, [effectiveKind, editTarget, services]);
 
-  if (!kind) return null;
+  // Render nothing while neither an add flow nor an in-place edit is open.
+  if (!effectiveKind) return null;
 
-  const selectedService = services.find(
-    (service) =>
-      service.service_id ===
-      (kind === "secret" ? secret.serviceId : value.serviceId)
-  );
-  const authOptions =
-    kind === "secret" ? serviceAuthOptions(selectedService) : [];
-  const selectedAuthOption = authOptions.find(
-    (option) => option.id === secret.credentialType
+  const { serviceId, authOptions, selectedAuthOption } = resolveComposerSelection(
+    effectiveKind,
+    services,
+    secret,
+    value
   );
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const validationError = validateEntry(
-      kind,
+      effectiveKind,
       secret,
       value,
       bucketSecret,
@@ -132,7 +180,7 @@ export function BucketEntryComposer({
     }
     try {
       await saveEntry(
-        kind,
+        effectiveKind,
         secret,
         value,
         bucketSecret,
@@ -152,34 +200,44 @@ export function BucketEntryComposer({
 
   return (
     <form onSubmit={submit} className="@container border-b border-slate-100 px-6 py-4">
+      {/* Identify in-place updates clearly so users know the existing entry will be overwritten. */}
+      {isEditing && (
+        <p className="mb-3 text-xs font-medium text-slate-600">
+          Updating existing {composerKindLabel(effectiveKind)} — saving replaces the stored value.
+        </p>
+      )}
       {/* Use the form width, not the browser width: one column on phones and at most two in a wide drawer. */}
       <div
         className="grid grid-cols-1 items-end gap-4 @min-[30rem]:grid-cols-2"
       >
-        {kind !== "bucket_secret" && (
-          <ComposerServiceSelect
-            services={services}
-            search={serviceSearch}
-            value={kind === "secret" ? secret.serviceId : value.serviceId}
-            onSearchChange={setServiceSearch}
-            onChange={(next) => {
-              setError("");
-              updateServiceID(kind, next, services, setSecret, setValue);
-            }}
-          />
-        )}
-        {kind !== "bucket_secret" && (
-          <QualifierSelect
-            kind={kind}
-            authOptions={authOptions}
-            secret={secret}
-            value={value}
-            setSecret={setSecret}
-            setValue={setValue}
-          />
+        {/* Generic bucket secrets are service-independent and omit service and qualifier selectors. */}
+        {effectiveKind !== "bucket_secret" && (
+          <>
+            <ComposerServiceSelect
+              services={services}
+              search={serviceSearch}
+              value={serviceId}
+              disabled={isEditing}
+              onSearchChange={setServiceSearch}
+              onChange={(next) => {
+                setError("");
+                updateServiceID(effectiveKind, next, services, setSecret, setValue);
+              }}
+            />
+            <QualifierSelect
+              kind={effectiveKind}
+              authOptions={authOptions}
+              secret={secret}
+              value={value}
+              disabled={isEditing && effectiveKind === "secret"}
+              setSecret={setSecret}
+              setValue={setValue}
+            />
+          </>
         )}
         <EntryValueFields
-          kind={kind}
+          kind={effectiveKind}
+          lockIdentity={isEditing}
           authOption={selectedAuthOption}
           secret={secret}
           value={value}
@@ -188,24 +246,26 @@ export function BucketEntryComposer({
           setValue={setValue}
           setBucketSecret={setBucketSecret}
         />
-        <BucketSecretOptions kind={kind} authType={selectedAuthOption?.auth_type} secret={secret} bucketSecret={bucketSecret} setSecret={setSecret} setBucketSecret={setBucketSecret} saving={saving} />
+        <BucketSecretOptions kind={effectiveKind} authType={selectedAuthOption?.auth_type} secret={secret} bucketSecret={bucketSecret} setSecret={setSecret} setBucketSecret={setBucketSecret} saving={saving} />
       </div>
       {/* Validation stays adjacent to the actions so a failed save explains how to proceed. */}
       {error && (
         <p role="alert" className="mt-3 text-xs font-medium text-red-600">{error}</p>
       )}
-      <BucketEntryActions kind={kind} saving={saving} hasServices={services.length > 0} onCancel={onCancel} />
+      <BucketEntryActions kind={effectiveKind} isEditing={isEditing} saving={saving} hasServices={services.length > 0} onCancel={onCancel} />
     </form>
   );
 }
 
 /** Keeps labeled actions below every field, independent of the responsive field grid. */
-function BucketEntryActions({ kind, saving, hasServices, onCancel }: {
+function BucketEntryActions({ kind, isEditing, saving, hasServices, onCancel }: {
   kind: BucketEntryKind;
+  isEditing: boolean;
   saving: boolean;
   hasServices: boolean;
   onCancel: () => void;
 }) {
+  const actionVerb = isEditing ? "Update" : "Save";
   return <>
       {/* A separate action row stays below all fields at every drawer width. */}
       <div className="mt-4 flex flex-wrap items-center justify-end gap-2 border-t border-slate-100 pt-4">
@@ -223,11 +283,11 @@ function BucketEntryActions({ kind, saving, hasServices, onCancel }: {
           // Service-scoped entries require an available service; generic secrets do not.
           disabled={saving || (kind !== "bucket_secret" && !hasServices)}
           className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-40"
-          aria-label={`Save ${composerKindLabel(kind)}`}
+          aria-label={`${actionVerb} ${composerKindLabel(kind)}`}
         >
           <Check className="h-4 w-4" aria-hidden="true" />
           {/* Pending feedback prevents repeated submissions while retaining the action's purpose. */}
-          {saving ? "Saving…" : `Save ${composerKindLabel(kind)}`}
+          {saving ? "Saving…" : `${actionVerb} ${composerKindLabel(kind)}`}
         </button>
       </div>
   </>;
@@ -281,15 +341,32 @@ function ComposerServiceSelect({
   services,
   search,
   value,
+  disabled = false,
   onSearchChange,
   onChange,
 }: {
   services: ActivatedService[];
   search: string;
   value: string;
+  disabled?: boolean;
   onSearchChange: (search: string) => void;
   onChange: (value: string) => void;
 }) {
+  // Lock the service field during in-place edits so updates overwrite the exact selected entry.
+  if (disabled) {
+    const current = services.find((service) => service.service_id === value);
+    return (
+      <label className="min-w-0">
+        <span className="mb-1 block text-xs font-medium text-slate-500">Service</span>
+        <input
+          type="text"
+          disabled
+          value={current ? serviceLabel(current) : value}
+          className="h-[38px] w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-500"
+        />
+      </label>
+    );
+  }
   return (
     <div className="min-w-0">
       <BucketServiceSelect
@@ -314,8 +391,10 @@ function ComposerServiceSelect({
   );
 }
 
+/** Selects the value fields for the active entry kind while locking key identity during in-place edits. */
 function EntryValueFields({
   kind,
+  lockIdentity = false,
   authOption,
   secret,
   value,
@@ -325,6 +404,7 @@ function EntryValueFields({
   setBucketSecret,
 }: {
   kind: BucketEntryKind;
+  lockIdentity?: boolean;
   authOption?: ServiceAuthOption;
   secret: typeof emptySecret;
   value: typeof emptyValue;
@@ -351,6 +431,7 @@ function EntryValueFields({
   if (kind === "bucket_secret") {
     return (
       <BucketSecretFields
+        lockName={lockIdentity}
         bucketSecret={bucketSecret}
         setBucketSecret={setBucketSecret}
       />
@@ -360,6 +441,7 @@ function EntryValueFields({
     <>
       <ComposerInput
         label="Name"
+        disabled={lockIdentity}
         value={value.keyName}
         placeholder="Variable name"
         onChange={(keyName) => setValue((prev) => ({ ...prev, keyName }))}
@@ -376,10 +458,13 @@ function EntryValueFields({
   );
 }
 
+/** Renders the name and write-only value inputs for a generic bucket secret. */
 function BucketSecretFields({
+  lockName = false,
   bucketSecret,
   setBucketSecret,
 }: {
+  lockName?: boolean;
   bucketSecret: typeof emptyBucketSecret;
   setBucketSecret: (
     updater: (prev: typeof emptyBucketSecret) => typeof emptyBucketSecret
@@ -389,6 +474,7 @@ function BucketSecretFields({
     <>
       <ComposerInput
         label="Name"
+        disabled={lockName}
         value={bucketSecret.keyName}
         placeholder="Secret name"
         onChange={(keyName) =>
@@ -529,6 +615,7 @@ function QualifierSelect({
   authOptions,
   secret,
   value,
+  disabled = false,
   setSecret,
   setValue,
 }: {
@@ -536,6 +623,7 @@ function QualifierSelect({
   authOptions: ServiceAuthOption[];
   secret: typeof emptySecret;
   value: typeof emptyValue;
+  disabled?: boolean;
   setSecret: (
     updater: (prev: typeof emptySecret) => typeof emptySecret
   ) => void;
@@ -548,11 +636,11 @@ function QualifierSelect({
       </span>
       <Select
         value={kind === "secret" ? secret.credentialType : value.location}
-        disabled={kind === "secret" && authOptions.length === 0}
+        disabled={disabled || (kind === "secret" && authOptions.length === 0)}
         onChange={(event) =>
           updateQualifier(kind, event.target.value, setSecret, setValue)
         }
-        className="h-[38px] w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+        className="h-[38px] w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:bg-slate-50 disabled:text-slate-500"
       >
         {kind === "secret" ? (
           <>
@@ -585,26 +673,29 @@ function ComposerInput({
   value,
   placeholder,
   onChange,
+  disabled = false,
   type = "text",
 }: {
   label: string;
   value: string;
   placeholder: string;
   onChange: (value: string) => void;
+  disabled?: boolean;
   type?: string;
 }) {
   return (
     <label className="min-w-0">
       <span className="mb-1 block text-xs font-medium text-slate-500">
-        <FieldLabel required>{label}</FieldLabel>
+        <FieldLabel required={!disabled}>{label}</FieldLabel>
       </span>
       <input
         type={type}
         required
+        disabled={disabled}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
-        className="h-[38px] w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+        className="h-[38px] w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:bg-slate-50 disabled:text-slate-500"
       />
     </label>
   );

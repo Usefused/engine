@@ -16,6 +16,7 @@ import { BucketAddDropdown } from "~/components/buckets/BucketAddDropdown";
 import { BucketConnectedUsersTable } from "~/components/buckets/BucketConnectedUsersTable";
 import { FocusedBucketSecret } from "~/components/buckets/FocusedBucketSecret";
 import { BucketEntryComposer } from "~/components/buckets/BucketEntryComposer";
+import { bucketSecretEditTarget, type BucketEntryEditTarget } from "~/components/buckets/BucketEntryComposerModel";
 import { BucketEntryList } from "~/components/buckets/BucketEntryList";
 import { BucketOverview } from "~/components/buckets/BucketOverview";
 import {
@@ -112,6 +113,7 @@ function BucketDetailsContent(props: SelectedBucketDetailsProps) {
   const [params] = useSearchParams();
   const { section, onSectionChange } = props;
   const [focusRequest, setFocusRequest] = useState(0);
+  const [editTarget, setEditTarget] = useState<BucketEntryEditTarget | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const focusedSecret = params.get("secret");
@@ -126,18 +128,44 @@ function BucketDetailsContent(props: SelectedBucketDetailsProps) {
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
   }, [section, focusedSecret]);
 
-  // Repeated Add clicks also reveal the existing draft without discarding its values.
+  // Repeated Add or Update clicks reveal the composer at the top and move focus to the first editable field.
   useEffect(() => {
-    if (!props.entryKind || section !== "credentials") return;
+    if ((!props.entryKind && !editTarget) || section !== "credentials") return;
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
     composerRef.current?.querySelector<HTMLElement>("[data-bucket-entry-composer] :is(input, select, button):not([disabled])")?.focus({ preventScroll: true });
-  }, [props.entryKind, focusRequest]);
+  }, [props.entryKind, editTarget, focusRequest]);
 
-  /** Routes every creation action to its visible editor while retaining route-owned save state. */
+  /** Routes every creation action to its visible editor while clearing any active in-place edit target. */
   function addEntry(kind: BucketEntryKind) {
+    setEditTarget(null);
     onSectionChange("credentials");
     setFocusRequest(/** Give repeated clicks a new focus request even when the kind is unchanged. */ (request) => request + 1);
     props.onAddEntry(kind);
+  }
+
+  /** Opens an existing secret in the shared composer so saving overwrites it via the existing upsert API. */
+  function editSecret(item: SecretMeta) {
+    const target = bucketSecretEditTarget(item, props.services);
+    // Ignore orphaned service secrets whose auth metadata is unavailable.
+    if (!target) return;
+    props.onCancelEntry();
+    setEditTarget(target);
+    onSectionChange("credentials");
+    setFocusRequest((request) => request + 1);
+  }
+
+  /** Opens an existing environment value in the shared composer so saving overwrites it via upsertBucketValue. */
+  function editValue(item: BucketValue) {
+    props.onCancelEntry();
+    setEditTarget({ kind: "value", value: item });
+    onSectionChange("credentials");
+    setFocusRequest((request) => request + 1);
+  }
+
+  /** Dismisses either an add draft or an in-place edit draft cleanly. */
+  function cancelComposer() {
+    setEditTarget(null);
+    props.onCancelEntry();
   }
 
   return (
@@ -151,7 +179,7 @@ function BucketDetailsContent(props: SelectedBucketDetailsProps) {
           <div className="px-6"><ConnectReturnStatus result={params.get("fused_connect")} /></div>
           {/* Hiding preserves unsaved credentials while users inspect related apps or services. */}
           <div role="tabpanel" id="bucket-panel-credentials" aria-labelledby="bucket-section-credentials" hidden={section !== "credentials"}>
-            <div ref={composerRef}><BucketCredentialsContent {...props} /></div>
+            <div ref={composerRef}><BucketCredentialsContent {...props} editTarget={editTarget} onEditSecret={editSecret} onEditValue={editValue} onCancelEntry={cancelComposer} /></div>
           </div>
           {/* Usage lists keep their existing read permissions and never displace the editor. */}
           {section !== "credentials" && <div role="tabpanel" id={`bucket-panel-${section}`} aria-labelledby={`bucket-section-${section}`}>
@@ -218,7 +246,11 @@ function BucketSectionTabs({ section, onChange, permissions }: {
 }
 
 /** Keeps credential creation ahead of lists and retains the existing secret, value, and user controls. */
-function BucketCredentialsContent(props: SelectedBucketDetailsProps) {
+function BucketCredentialsContent(props: SelectedBucketDetailsProps & {
+  editTarget: BucketEntryEditTarget | null;
+  onEditSecret: (item: SecretMeta) => void;
+  onEditValue: (item: BucketValue) => void;
+}) {
   const [params, setParams] = useSearchParams();
   /** Dismisses only the focused-secret link while retaining the selected bucket and credential tab. */
   function closeFocusedSecret() {
@@ -230,6 +262,7 @@ function BucketCredentialsContent(props: SelectedBucketDetailsProps) {
         {/* Entry writes remain gated by the existing credential/value management grants. */}
         {(props.permissions.manageCredentials || props.permissions.manageValues) && <div data-bucket-entry-composer><BucketEntryComposer
           kind={props.entryKind}
+          editTarget={props.editTarget}
           saving={props.saving}
           services={props.services}
           onCancel={props.onCancelEntry}
@@ -312,7 +345,10 @@ function BucketTabs({
 }
 
 /** Renders the selected detail section or an explicit access notice. */
-function BucketTabPanel(props: BucketDetailsPanelProps) {
+function BucketTabPanel(props: BucketDetailsPanelProps & {
+  onEditSecret?: (item: SecretMeta) => void;
+  onEditValue?: (item: BucketValue) => void;
+}) {
   if (!canReadActiveTab(props.activeTab, props.permissions)) {
     return <p className="px-6 py-10 text-sm text-slate-500">You do not have access to this credential section.</p>;
   }
@@ -349,6 +385,8 @@ function BucketTabPanel(props: BucketDetailsPanelProps) {
       }
       page={props.activeTab === "secrets" ? props.secretPage : props.valuePage}
       pageSize={props.pageSize}
+      onEditSecret={props.permissions.manageCredentials ? props.onEditSecret : undefined}
+      onEditValue={props.permissions.manageValues ? props.onEditValue : undefined}
       onRemoveSecret={props.onRemoveSecret}
       canReveal={props.permissions.revealCredentials}
       onSecretPolicyChanged={/** Reload only metadata after a policy change. */ () => props.bucket && props.onRefresh(props.bucket.id)}
