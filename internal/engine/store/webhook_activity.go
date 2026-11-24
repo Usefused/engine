@@ -46,10 +46,10 @@ func webhookActivityWhere(filter WebhookActivityFilter) (string, []any) {
 			where += fmt.Sprintf(" AND %s $%d", predicate.sql, len(args))
 		}
 	}
-	// Rejections are failures too; retain a separate selection for verification troubleshooting.
+	// Keep delivery failures separate from verification rejections so the Failures and Rejected tabs show distinct sets.
 	switch filter.Status {
 	case "failed":
-		where += " AND (status = 'failed' OR delivery_status IN ('failed', 'rejected', 'nacked'))"
+		where += " AND COALESCE(delivery_status, '') != 'rejected' AND (status = 'failed' OR delivery_status IN ('failed', 'nacked'))"
 	case "rejected":
 		where += " AND delivery_status = 'rejected'"
 	case "success":

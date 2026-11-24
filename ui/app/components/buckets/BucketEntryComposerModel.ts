@@ -1,3 +1,4 @@
+import type { ActivatedService, BucketValue, SecretMeta } from "../../lib/api";
 import type { ServiceAuthOption } from "../../lib/service-auth";
 import type {
   BucketSecretFormPayload,
@@ -5,6 +6,11 @@ import type {
 } from "../../lib/buckets";
 
 type BucketEntryKind = "secret" | "value" | "bucket_secret";
+
+export type BucketEntryEditTarget =
+  | { kind: "bucket_secret"; secret: SecretMeta }
+  | { kind: "secret"; secret: SecretMeta; authOptionId: string }
+  | { kind: "value"; value: BucketValue };
 
 export type SecretFormPayload = {
   exportable?: boolean;
@@ -186,4 +192,73 @@ function tokenLabel(credentialType: string): string {
 
 function serializedExpiry(form: SecretEntryForm): string | undefined {
   return form.expiresAt ? new Date(form.expiresAt).toISOString() : undefined;
+}
+
+/** Formats an ISO timestamp for datetime-local inputs without inventing a date when missing or invalid. */
+export function formatDateTimeLocalInput(iso?: string | null): string {
+  // Blank expiry means the secret never expires.
+  if (!iso) return "";
+  const date = new Date(iso);
+  // Ignore unparseable timestamps rather than producing NaN input values.
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** Resolves whether an existing bucket secret row can be updated in place through the existing upsert APIs. */
+export function bucketSecretEditTarget(secret: SecretMeta, services: ActivatedService[]): BucketEntryEditTarget | null {
+  // Generic bucket secrets are service-independent and always editable by key name.
+  if (secret.credential_type === "bucket_secret") {
+    return { kind: "bucket_secret", secret };
+  }
+  const service = services.find((item) => item.service_id === secret.service_id);
+  const option = service?.auth_options?.find((item) => item.key_name === secret.key_name || item.key_prefix === secret.key_name);
+  // Service auth updates require the matching auth scheme metadata so the upsert targets the exact stored keys.
+  if (!service || !option) return null;
+  return { kind: "secret", secret, authOptionId: option.id };
+}
+
+/** Builds pre-filled composer drafts for in-place updates while keeping stored secret material write-only. */
+export function editTargetInitialDraft(target: BucketEntryEditTarget): {
+  secret?: SecretEntryForm;
+  value?: ValueEntryForm;
+  bucketSecret?: BucketSecretEntryForm;
+} {
+  // Generic bucket secrets strip the internal "secret:" storage prefix so upsertBucketSecret targets the exact same key.
+  if (target.kind === "bucket_secret") {
+    return {
+      bucketSecret: {
+        keyName: target.secret.key_name.replace(/^secret:/, ""),
+        value: "",
+        exportable: target.secret.exportable === true,
+        expiresAt: formatDateTimeLocalInput(target.secret.expires_at),
+      },
+    };
+  }
+  // Service auth updates lock the existing service/scheme and retain policy/expiry while leaving secret inputs blank.
+  if (target.kind === "secret") {
+    return {
+      secret: {
+        serviceId: target.secret.service_id,
+        credentialType: target.authOptionId,
+        value: "",
+        username: "",
+        password: "",
+        certificate: "",
+        privateKey: "",
+        clientId: "",
+        clientSecret: "",
+        exportable: target.secret.exportable === true,
+        expiresAt: formatDateTimeLocalInput(target.secret.expires_at),
+      },
+    };
+  }
+  return {
+    value: {
+      serviceId: target.value.service_id,
+      keyName: target.value.key_name,
+      location: target.value.location || "header",
+      value: target.value.value,
+    },
+  };
 }

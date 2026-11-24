@@ -236,7 +236,7 @@ func ingestResolvedWebhook(w http.ResponseWriter, r *http.Request, span trace.Sp
 	ctx = withWebhookDiagnosticCapture(ctx, r, rawBody)
 	r = r.WithContext(ctx)
 
-	authOutcome := validateWebhookAuth(ctx, w, r, rawBody, config)
+	authOutcome := validateWebhookAuth(ctx, w, r, rawBody, body, config)
 	// Rejections already publish their receipt; challenges must not create message evidence.
 	if webhookAuthStopsIngress(span, authOutcome) {
 		return
@@ -382,26 +382,30 @@ const (
 	webhookAuthRejected webhookAuthOutcome = "rejected"
 )
 
-func validateWebhookAuth(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte, config *webhookConfig) webhookAuthOutcome {
+// validateWebhookAuth verifies signature/auth headers against rawBody and records allowlist-checked event metadata on rejection.
+func validateWebhookAuth(ctx context.Context, w http.ResponseWriter, r *http.Request, rawBody, parsedBody []byte, config *webhookConfig) webhookAuthOutcome {
 	ctx, span := otel.Tracer("engine").Start(ctx, "engine.webhook.verify")
 	defer span.End()
+	// Structured signature policies handle their own verification, challenge responses, and rejection codes.
 	if config.SignaturePolicy != nil {
-		return validateSignaturePolicy(ctx, span, w, r, body, config)
+		return validateSignaturePolicy(ctx, span, w, r, rawBody, parsedBody, config)
 	}
 
 	var signingSecret string
+	// Resolve the bound secret only when this registration enforces authentication.
 	if config.AuthType != "" && config.AuthType != "none" {
 		secret, err := globalSecretResolver.GetWebhookSecret(ctx, uuid.MustParse(config.AccountID), config.SecretBucketID, config.SecretRef)
+		// Fail closed if the signing secret cannot be loaded; never accept an unverified payload.
 		if err != nil {
 			span.SetStatus(codes.Error, "failed to resolve webhook secret")
-			publishRejection(ctx, config, "UNKNOWN", "internal config error", len(body))
+			publishRejection(ctx, config, extractRejectedEventName(ctx, r, parsedBody, config), "internal config error", len(rawBody))
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return webhookAuthRejected
 		}
 		signingSecret = secret
 	}
 
-	result := webhookverify.Verify(r, body, webhookverify.Config{
+	result := webhookverify.Verify(r, rawBody, webhookverify.Config{
 		AuthType:            config.AuthType,
 		AuthLocation:        config.AuthLocation,
 		AuthKeyName:         config.AuthKeyName,
@@ -413,6 +417,7 @@ func validateWebhookAuth(ctx context.Context, w http.ResponseWriter, r *http.Req
 	observability.WebhookVerify.Add(ctx, 1)
 	span.SetAttributes(attribute.String("webhook.verification.result", result.Code))
 
+	// Verified requests proceed to normal event extraction and broker publication.
 	if result.OK {
 		span.SetStatus(codes.Ok, "verified")
 		return webhookAuthAccepted
@@ -421,17 +426,16 @@ func validateWebhookAuth(ctx context.Context, w http.ResponseWriter, r *http.Req
 	// Keep telemetry dimensions bounded; the human-readable reason can include
 	// configured header names and belongs only in the scoped rejection response.
 	span.SetStatus(codes.Error, "verification rejected")
-	// Durable analytics accepts only the bounded verifier code. The response may
-	// name a configured header for an operator, but that value is not safe as a
-	// metric/event dimension and must not outlive this request.
-	publishRejection(ctx, config, "", result.Code, len(body))
+	// Durable analytics accepts only the bounded verifier code and allowlisted catalog event names.
+	publishRejection(ctx, config, extractRejectedEventName(ctx, r, parsedBody, config), result.Code, len(rawBody))
 	writeError(w, http.StatusUnauthorized, result.Reason)
 	return webhookAuthRejected
 }
 
-func validateSignaturePolicy(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, body []byte, config *webhookConfig) webhookAuthOutcome {
+// validateSignaturePolicy runs structured signature verification against rawBody while classifying rejections only against known catalog events.
+func validateSignaturePolicy(ctx context.Context, span trace.Span, w http.ResponseWriter, r *http.Request, rawBody, parsedBody []byte, config *webhookConfig) webhookAuthOutcome {
 	result := webhookverify.VerifyPolicy(ctx, config.SignaturePolicy, webhookverify.PolicyInput{
-		Request: r, RawBody: body, CallbackURL: config.CallbackURL,
+		Request: r, RawBody: rawBody, CallbackURL: config.CallbackURL,
 		Resolve: func(resolveCtx context.Context, ref string) (string, error) {
 			// The reviewed recipe may select the key but never a different bucket
 			// binding than the immutable registration resolved at apply time.
@@ -443,12 +447,14 @@ func validateSignaturePolicy(ctx context.Context, span trace.Span, w http.Respon
 	})
 	observability.WebhookVerify.Add(ctx, 1)
 	span.SetAttributes(attribute.String("webhook.verification.result", result.Code))
+	// Rejected requests record an allowlist-matched event name (or UNKNOWN) and never reach the broker.
 	if !result.OK {
 		span.SetStatus(codes.Error, "verification rejected")
-		publishRejection(ctx, config, "", result.Code, len(body))
+		publishRejection(ctx, config, extractRejectedEventName(ctx, r, parsedBody, config), result.Code, len(rawBody))
 		writeError(w, http.StatusUnauthorized, result.Reason)
 		return webhookAuthRejected
 	}
+	// Ordinary verified payloads continue through ingress; challenge probes return directly to the provider.
 	if result.Code != webhookverify.CodeChallengeResponded {
 		span.SetStatus(codes.Ok, "verified")
 		return webhookAuthAccepted
@@ -458,6 +464,39 @@ func validateSignaturePolicy(ctx context.Context, span trace.Span, w http.Respon
 	_, _ = w.Write(result.ChallengeBody)
 	span.SetStatus(codes.Ok, "challenge responded")
 	return webhookAuthHandled
+}
+
+const maxRejectedEventNameBytes = 256
+
+// extractRejectedEventName extracts a candidate event name from an unverified request and keeps it only if it matches the service version's contract catalog.
+func extractRejectedEventName(ctx context.Context, r *http.Request, body []byte, config *webhookConfig) string {
+	// Missing registration metadata or store wiring must fail closed to UNKNOWN.
+	if config == nil || globalWebhookConfigStore == nil {
+		return "UNKNOWN"
+	}
+	checker, ok := globalWebhookConfigStore.(store.WebhookEventCatalogChecker)
+	// Stores without catalog allowlist lookup cannot validate untrusted event names.
+	if !ok {
+		return "UNKNOWN"
+	}
+	serviceID, err := uuid.Parse(config.ServiceID)
+	// Catalog lookups require exact service and service-version identity.
+	if err != nil || serviceID == uuid.Nil || config.ServiceVersionID == uuid.Nil {
+		return "UNKNOWN"
+	}
+	candidate := extractEventName(r, body, config)
+	// Skip blank, sentinel, or oversized unverified strings before hitting PostgreSQL.
+	if candidate == "" || candidate == "UNKNOWN" || len(candidate) > maxRejectedEventNameBytes {
+		return "UNKNOWN"
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	allowed, err := checker.HasServiceContractWebhookEvent(lookupCtx, serviceID, config.ServiceVersionID, candidate)
+	// Only pre-declared catalog event names may enter canonical receipts; lookup failures fail closed.
+	if err != nil || !allowed {
+		return "UNKNOWN"
+	}
+	return candidate
 }
 
 // extractEventName resolves ordered fallback groups while preserving strict `+` composite semantics inside each group.

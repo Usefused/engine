@@ -112,7 +112,7 @@ function CreateSecretDialog({ onClose, onCreated }: { onClose: () => void; onCre
           {/* New sets require workspace management rather than only scoped secret write access. */}
           {hasWorkspacePermission(access, "bucket.manage") && <CreateCredentialButton disabled={busy} onClick={() => setCreateBucket(true)} />}
         </div>
-        <Select id={`${id}-bucket`} required disabled={busy} className={fieldClass} value={bucketId} onChange={(event) => setBucketId(event.target.value)}><option value="">Choose a bucket</option>{buckets.map((bucket) => <option key={bucket.id} value={bucket.id}>{bucket.name}</option>)}</Select>
+        <Select searchable searchPlaceholder="Search buckets…" id={`${id}-bucket`} required disabled={busy} className={fieldClass} value={bucketId} onChange={(event) => setBucketId(event.target.value)}><option value="">Choose a bucket</option>{buckets.map((bucket) => <option key={bucket.id} value={bucket.id}>{bucket.name}</option>)}</Select>
         {/* Empty results distinguish a lack of write access from a failed request. */}
         {buckets.length === 0 && <p className="text-sm text-slate-500">No buckets are available for storing secrets.</p>}
       </div>}

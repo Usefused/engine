@@ -10,10 +10,10 @@ export const WEBHOOK_REGISTRATIONS_QUERY = `query WorkspaceWebhookPage($limit: I
   }
 }`;
 
-/** Reads authorized services completely while keeping accidental request loops bounded. */
+/** Reads authorized services that declare webhook events using Engine's server-side has_webhooks filter. */
 export async function webhookServices(): Promise<ActivatedService[]> {
   return readAllBoundedPages(async (limit, offset) => {
-    const page = await api.workspace.getServicesPage(limit, offset);
+    const page = await api.workspace.getServicesPage(limit, offset, undefined, undefined, true);
     return { items: page.data, total: page.total };
   }, 100, 100);
 }

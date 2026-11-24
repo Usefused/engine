@@ -766,13 +766,20 @@ func TestWebhookConfigApplyResponse_ListsEveryRegistration(t *testing.T) {
 	resp := webhookConfigApplyResponse(planID, webhookConfigApplyResult{
 		ConfigKey: "webhook:team-x", Name: "team-x",
 		Applied: []appliedWorkspaceWebhook{
-			{ServiceKey: "github", Slug: "slug-a"},
+			{ServiceKey: "github", Slug: "slug-a", CallbackURL: "https://eng.usefused.com/webhook/slug-a"},
 			{ServiceKey: "jira", Slug: "slug-b"},
 		},
 	})
 	registrations, ok := resp["registrations"].([]map[string]any)
 	if !ok || len(registrations) != 2 {
 		t.Fatalf("expected two registrations in response, got %#v", resp["registrations"])
+	}
+	// Resolved public callback URLs are projected when configured, while absent ones remain omitted.
+	if registrations[0]["callback_url"] != "https://eng.usefused.com/webhook/slug-a" {
+		t.Fatalf("expected callback_url on first registration, got %#v", registrations[0])
+	}
+	if _, exists := registrations[1]["callback_url"]; exists {
+		t.Fatalf("expected omitted callback_url when empty, got %#v", registrations[1])
 	}
 	if resp["name"] != "team-x" {
 		t.Fatalf("expected name in response, got %#v", resp["name"])

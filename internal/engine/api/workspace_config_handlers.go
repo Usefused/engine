@@ -3206,9 +3206,10 @@ func unmanagedWorkspaceServices(
 // directly as the URL's cosmetic "-{serviceSlug}" suffix rather than fetching
 // a separate canonical slug from the Registry.
 type appliedWorkspaceWebhook struct {
-	ServiceKey string
-	Label      string
-	Slug       string
+	ServiceKey  string
+	Label       string
+	Slug        string
+	CallbackURL string
 }
 
 // prepareWorkspaceConfigApply resolves every write input and proves the auth

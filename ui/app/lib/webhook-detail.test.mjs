@@ -55,6 +55,10 @@ test("rejected events do not duplicate UNKNOWN and paging retains the selected e
   assert.deepEqual(detail.webhookEventNameOptions(["UNKNOWN", "", "invoice.paid", "invoice.paid"], "UNKNOWN"), ["invoice.paid"]);
   assert.deepEqual(detail.webhookEventNameOptions([], "invoice.paid"), ["invoice.paid"]);
   assert.deepEqual(detail.webhookEventNameOptions(["UNKNOWN"], ""), []);
+  assert.equal(detail.formatWebhookEventName("UNKNOWN", "rejected"), "Unverified event");
+  assert.equal(detail.formatWebhookEventName("UNKNOWN", "verified"), "Unclassified event");
+  assert.equal(detail.formatWebhookEventName("", "verified"), "Unnamed event");
+  assert.equal(detail.formatWebhookEventName("invoice.paid", "verified"), "invoice.paid");
 });
 
 // SQL receives exact scope, outcome, and pagination; no mixed-registration page is filtered in the browser.

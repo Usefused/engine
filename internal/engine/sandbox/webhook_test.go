@@ -37,8 +37,40 @@ func hmacBodySig(secret, body string) string {
 // Postgres-backed store, letting tests seed a slug's resolved config directly
 // instead of standing up a live DB or NATS connection.
 type stubWebhookConfigStore struct {
-	mu      sync.RWMutex
-	byLabel map[string]*store.WorkspaceWebhook
+	mu           sync.RWMutex
+	byLabel      map[string]*store.WorkspaceWebhook
+	knownEvents  map[string]map[string]bool
+	catalogErr   error
+	catalogCalls int
+}
+
+// HasServiceContractWebhookEvent implements store.WebhookEventCatalogChecker for in-memory ingress tests.
+func (s *stubWebhookConfigStore) HasServiceContractWebhookEvent(_ context.Context, serviceID, serviceVersionID uuid.UUID, eventName string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.catalogCalls++
+	// Propagate injected lookup errors so tests can verify fail-closed fallback to UNKNOWN.
+	if s.catalogErr != nil {
+		return false, s.catalogErr
+	}
+	key := serviceID.String() + ":" + serviceVersionID.String()
+	return s.knownEvents[key][eventName], nil
+}
+
+// setKnownEvents seeds the allowlisted catalog event names for a seeded slug's service version.
+func (s *stubWebhookConfigStore) setKnownEvents(serviceID, serviceVersionID uuid.UUID, events ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Lazily initialize the per-service-version event map for tests that configure allowlists.
+	if s.knownEvents == nil {
+		s.knownEvents = make(map[string]map[string]bool)
+	}
+	key := serviceID.String() + ":" + serviceVersionID.String()
+	allowed := make(map[string]bool, len(events))
+	for _, name := range events {
+		allowed[name] = true
+	}
+	s.knownEvents[key] = allowed
 }
 
 func (s *stubWebhookConfigStore) GetWorkspaceWebhookBySlug(_ context.Context, slug string) (*store.WorkspaceWebhook, error) {
@@ -97,14 +129,21 @@ func init() {
 	globalSecretResolver = testSecretResolver
 }
 
+// seedConfig registers a synthetic webhook route in the in-memory ingress store for tests.
 func seedConfig(slug string, cfg *webhookConfig, signingSecret string) {
 	accID := uuid.New()
 	svcID := uuid.New()
+	svcVerID := cfg.ServiceVersionID
+	// Populate a synthetic service version ID when callers omit one so catalog lookups have a valid key.
+	if svcVerID == uuid.Nil {
+		svcVerID = uuid.New()
+	}
 	const secretRef = "${bucket.default.secret.test-label}"
 	secretBucketID := uuid.New()
 	ww := &store.WorkspaceWebhook{
 		AccountID:           accID,
 		ServiceID:           svcID,
+		ServiceVersionID:    svcVerID,
 		Label:               "test-label",
 		EventExtractionPath: cfg.EventExtractionPath,
 		AuthType:            cfg.AuthType,

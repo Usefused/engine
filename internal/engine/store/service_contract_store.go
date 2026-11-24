@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/Usefused/engine/internal/shared/fusedobject"
@@ -808,6 +809,90 @@ func (s *postgresStore) listServiceContractEndpoints(ctx context.Context, query 
 		out = append(out, endpoint)
 	}
 	return out, rows.Err()
+}
+
+// WebhookEventCatalogChecker verifies whether a candidate event name is declared on a service version's contract snapshot.
+type WebhookEventCatalogChecker interface {
+	HasServiceContractWebhookEvent(ctx context.Context, serviceID, serviceVersionID uuid.UUID, eventName string) (bool, error)
+}
+
+// HasServiceContractWebhookEvent checks whether eventName exists in the service version's contract webhook catalog.
+func (s *postgresStore) HasServiceContractWebhookEvent(ctx context.Context, serviceID, serviceVersionID uuid.UUID, eventName string) (bool, error) {
+	// Reject incomplete scope or blank candidate names before querying PostgreSQL.
+	if serviceID == uuid.Nil || serviceVersionID == uuid.Nil || strings.TrimSpace(eventName) == "" {
+		return false, nil
+	}
+	var exists bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM fused_service_contract_snapshots snapshot
+			JOIN fused_service_contract_webhooks webhook ON webhook.snapshot_id = snapshot.id
+			WHERE snapshot.service_id = $1
+			  AND snapshot.service_version_id = $2
+			  AND webhook.name = $3
+		)`,
+		serviceID, serviceVersionID, eventName,
+	).Scan(&exists)
+	// Propagate storage errors so callers fail closed instead of accepting unverified names.
+	if err != nil {
+		return false, fmt.Errorf("HasServiceContractWebhookEvent: %w", err)
+	}
+	return exists, nil
+}
+
+// HasServiceContractWebhookEvent delegates catalog membership checks to the backing store without caching unverified lookups.
+func (s *cachedStore) HasServiceContractWebhookEvent(ctx context.Context, serviceID, serviceVersionID uuid.UUID, eventName string) (bool, error) {
+	checker, ok := s.Store.(WebhookEventCatalogChecker)
+	// Stores without contract catalog lookup must fail closed to UNKNOWN.
+	if !ok {
+		return false, nil
+	}
+	return checker.HasServiceContractWebhookEvent(ctx, serviceID, serviceVersionID, eventName)
+}
+
+// ServiceContractWebhookAvailabilityChecker reports whether a service version's contract snapshot exists and declares any webhook events.
+type ServiceContractWebhookAvailabilityChecker interface {
+	ServiceContractWebhookAvailability(ctx context.Context, serviceID, serviceVersionID uuid.UUID) (snapshotPresent bool, hasWebhooks bool, err error)
+}
+
+// ServiceContractWebhookAvailability checks whether the service version has a persisted contract snapshot and at least one declared webhook event.
+func (s *postgresStore) ServiceContractWebhookAvailability(ctx context.Context, serviceID, serviceVersionID uuid.UUID) (bool, bool, error) {
+	// Missing service or version identity cannot match a persisted contract snapshot.
+	if serviceID == uuid.Nil || serviceVersionID == uuid.Nil {
+		return false, false, nil
+	}
+	var snapshotPresent, hasWebhooks bool
+	err := s.db.QueryRow(ctx, `
+		SELECT
+			EXISTS (
+				SELECT 1
+				FROM fused_service_contract_snapshots
+				WHERE service_id = $1 AND service_version_id = $2
+			),
+			EXISTS (
+				SELECT 1
+				FROM fused_service_contract_snapshots snapshot
+				JOIN fused_service_contract_webhooks webhook ON webhook.snapshot_id = snapshot.id
+				WHERE snapshot.service_id = $1 AND snapshot.service_version_id = $2
+			)`,
+		serviceID, serviceVersionID,
+	).Scan(&snapshotPresent, &hasWebhooks)
+	// Surface storage failures explicitly so webhook planning does not silently bypass validation.
+	if err != nil {
+		return false, false, fmt.Errorf("ServiceContractWebhookAvailability: %w", err)
+	}
+	return snapshotPresent, hasWebhooks, nil
+}
+
+// ServiceContractWebhookAvailability delegates contract webhook availability lookups to the backing store.
+func (s *cachedStore) ServiceContractWebhookAvailability(ctx context.Context, serviceID, serviceVersionID uuid.UUID) (bool, bool, error) {
+	checker, ok := s.Store.(ServiceContractWebhookAvailabilityChecker)
+	// Legacy test adapters without contract snapshot storage report no snapshot present.
+	if !ok {
+		return false, false, nil
+	}
+	return checker.ServiceContractWebhookAvailability(ctx, serviceID, serviceVersionID)
 }
 
 func serviceContractHash(snapshot ServiceContractSnapshot) (string, error) {

@@ -66,8 +66,8 @@ function RegistrationMetrics({ analytics }: { analytics: RegistrationAnalytics |
 function DeliveryOutcomes({ analytics, onEvents }: { analytics: RegistrationAnalytics; onEvents: (status: WebhookEventStatus) => void }) {
   const rows: Array<{ label: string; count: number; status: WebhookEventStatus }> = [
     { label: "All received events", count: analytics.total_ingested, status: "" },
+    { label: "Failed deliveries", count: analytics.total_failed, status: "failed" },
     { label: "Rejected events", count: analytics.total_rejected, status: "rejected" },
-    { label: "Failed or rejected events", count: analytics.total_failed + analytics.total_rejected, status: "failed" },
   ];
   return <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
     <div className="border-b border-slate-100 px-5 py-4"><h2 className="font-semibold text-slate-900">Delivery outcomes</h2><p className="mt-0.5 text-xs text-slate-500">Receipts for this receiving URL in the selected period.</p></div>

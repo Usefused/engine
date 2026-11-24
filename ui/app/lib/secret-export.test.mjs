@@ -52,6 +52,8 @@ test('secret dialog reveals on demand and clears plaintext on blur and dismissal
     await act(async () => button('Reveal secret').click());
     assert.equal(reads, 1);
     assert.equal(document.querySelector('textarea').value, 'synthetic-secret');
+    assert.equal(document.querySelector('textarea').readOnly, true);
+    assert.match(document.body.textContent, /Read-only/);
     assert.ok(document.querySelector('textarea').closest('[data-fused-visible="false"]'));
     await act(async () => window.dispatchEvent(new window.Event('blur')));
     assert.equal(document.querySelector('textarea'), null);

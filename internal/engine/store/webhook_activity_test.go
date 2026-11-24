@@ -26,6 +26,20 @@ func webhookActivityReceipt(base models.EngineExecutionEvent, registration uuid.
 	return base
 }
 
+// TestWebhookActivityWhereStatusSeparation verifies the SQL predicate keeps delivery failures distinct from verification rejections without requiring PostgreSQL.
+func TestWebhookActivityWhereStatusSeparation(t *testing.T) {
+	base := WebhookActivityFilter{AccountID: uuid.New(), ServiceID: uuid.New()}
+	failedWhere, _ := webhookActivityWhere(WebhookActivityFilter{AccountID: base.AccountID, ServiceID: base.ServiceID, Status: "failed"})
+	rejectedWhere, _ := webhookActivityWhere(WebhookActivityFilter{AccountID: base.AccountID, ServiceID: base.ServiceID, Status: "rejected"})
+	successWhere, _ := webhookActivityWhere(WebhookActivityFilter{AccountID: base.AccountID, ServiceID: base.ServiceID, Status: "success"})
+	// Failures must exclude rejected webhooks so the Failures and Rejected tabs do not display identical rows.
+	require.Contains(t, failedWhere, "COALESCE(delivery_status, '') != 'rejected'")
+	require.Contains(t, failedWhere, "delivery_status IN ('failed', 'nacked')")
+	require.NotContains(t, failedWhere, "'rejected', 'nacked'")
+	require.Contains(t, rejectedWhere, "delivery_status = 'rejected'")
+	require.Contains(t, successWhere, "delivery_status NOT IN ('failed', 'rejected', 'nacked')")
+}
+
 // TestWebhookRegistrationSQLIsolation verifies account, service, registration, dates, totals, and page filters against PostgreSQL.
 func TestWebhookRegistrationSQLIsolation(t *testing.T) {
 	fixture := newExecutionActivityFixture(t)
@@ -89,11 +103,15 @@ func TestWebhookRegistrationSQLIsolation(t *testing.T) {
 	filter.Status = "failed"
 	failures, total, err := reader.ListWebhookActivity(fixture.ctx, filter)
 	require.NoError(t, err)
-	require.EqualValues(t, 2, total)
-	require.Len(t, failures, 2)
+	// Failures must include only delivery failures and exclude verification rejections shown in the Rejected tab.
+	require.EqualValues(t, 1, total)
+	require.Len(t, failures, 1)
+	require.Equal(t, "failed", failures[0].DeliveryStatus)
 	filtered, err := reader.GetWebhookActivityAnalytics(fixture.ctx, filter)
 	require.NoError(t, err)
-	require.EqualValues(t, 2, filtered.TotalIngested)
+	require.EqualValues(t, 1, filtered.TotalIngested)
+	require.EqualValues(t, 1, filtered.TotalFailed)
+	require.Zero(t, filtered.TotalRejected)
 	filter.Status = "rejected"
 	rejected, total, err := reader.ListWebhookActivity(fixture.ctx, filter)
 	require.NoError(t, err)

@@ -10,7 +10,7 @@ export interface WebhookRegistration {
 }
 export interface WebhookListing extends WebhookRegistration { service_id: string; service_name: string; service_ref?: string }
 export type WebhookCatalogueItem = Omit<WebhookListing, "callback_url" | "signing_secret">;
-export interface WebhookDraft { name: string; service: string; secret: string; baseURL: string }
+export interface WebhookDraft { name: string; service: string; secret: string }
 
 /** Uses the service's canonical identity without inventing a provider when Registry metadata is absent. */
 export function webhookServiceTag(service: { service_name: string; service_slug?: string; registry_slug?: string; canonical_ref?: string | null; provider?: { handle: string } | null }): string {
@@ -26,17 +26,13 @@ export function webhookServiceTag(service: { service_name: string; service_slug?
 
 /** Builds the same named desired configuration accepted by the CLI webhook plan endpoint. */
 export function webhookConfiguration(draft: WebhookDraft): Record<string, unknown> {
-  const name = draft.name.trim(), service = draft.service.trim(), base = draft.baseURL.trim(), secret = draft.secret.trim();
+  const name = draft.name.trim(), service = draft.service.trim(), secret = draft.secret.trim();
   // Blank identities must not accidentally target an existing default registration.
   if (!name || !service) throw new Error("Enter a webhook name and choose a service.");
-  let parsed: URL;
-  // Invalid addresses need a user-facing correction before provider registration is planned.
-  try { parsed = new URL(base); } catch { throw new Error("Enter the public URL of your Fused workspace."); }
-  // Provider delivery requires an explicit safe base; do not infer it from the UI's development proxy.
-  if ((parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname))) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("Use an HTTPS Fused URL without credentials, query parameters, or a fragment.");
   // Only references may enter desired configuration; never accept the provider's raw signing secret here.
   if (secret && !/^\$\{bucket\.[^{}]+\.secret\.[^{}]+\}$/.test(secret) && !/^\$\{bucket\.secret\.[^{}]+\}$/.test(secret)) throw new Error("Choose a secret reference from the Bucket page, such as ${bucket.default.secret.signing_key}.");
-  return { apiVersion: "fused/v1", kind: "webhook", name, callback_base_url: base.replace(/\/$/, ""), services: { [service]: secret ? { secret } : {} } };
+  // Omit callback_base_url so Engine always derives the receiving URL from its configured public URL.
+  return { apiVersion: "fused/v1", kind: "webhook", name, services: { [service]: secret ? { secret } : {} } };
 }
 
 /** Only direct, fully qualified destinations are offered as provider-ready URLs. */

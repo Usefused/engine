@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/Usefused/engine/internal/engine/store"
 	"github.com/Usefused/engine/internal/engine/webhookrelay"
@@ -107,8 +108,17 @@ func matchWebhookSourceBuckets(resolved map[string]webhookResolvedService, names
 	return result, nil
 }
 
+// resolveWebhookCallbackBaseURL prefers an explicit config override and otherwise falls back to Engine's configured public URL.
+func resolveWebhookCallbackBaseURL(ctx context.Context, doc webhookConfigDocument) string {
+	// Respect an explicit document override (for example a dedicated remote broker origin) when supplied.
+	if explicit := strings.TrimSpace(doc.CallbackBaseURL); explicit != "" {
+		return explicit
+	}
+	return strings.TrimSpace(enginePublicURL(ctx))
+}
+
 // prepareRelayAwareWebhookRegistration uses one ordinary registration with an explicit transport role.
-func prepareRelayAwareWebhookRegistration(r webhookResolvedService, doc webhookConfigDocument, binding webhookSecretBinding, shape webhookAuthShape, configKey string) (store.WorkspaceWebhook, error) {
+func prepareRelayAwareWebhookRegistration(ctx context.Context, r webhookResolvedService, doc webhookConfigDocument, binding webhookSecretBinding, shape webhookAuthShape, configKey string) (store.WorkspaceWebhook, error) {
 	// Remote receivers do not create a provider-auth bypass at the public webhook endpoint.
 	if r.Relay != nil && r.Relay.Source != nil {
 		row, err := prepareWorkspaceWebhookRegistration(r.ServiceID, r.ServiceVersionID, doc.Name, "", nil, fusedobject.IncomingWebhookConfig{}, "", configKey, "")
@@ -120,8 +130,9 @@ func prepareRelayAwareWebhookRegistration(r webhookResolvedService, doc webhookC
 	if r.Relay != nil && r.Relay.Publish != nil && (webhookrelay.ValidateExportVerification(shape.Auth.SignaturePolicy) != nil || binding.BucketID == uuid.Nil) {
 		return store.WorkspaceWebhook{}, webhookrelay.ErrDenied
 	}
+	callbackBaseURL := resolveWebhookCallbackBaseURL(ctx, doc)
 	// Shared policy validation keeps signature references pinned to this registration's local bucket.
-	if err := validateSignaturePolicyBinding(shape.Auth.SignaturePolicy, binding.Reference, doc.CallbackBaseURL); err != nil {
+	if err := validateSignaturePolicyBinding(shape.Auth.SignaturePolicy, binding.Reference, callbackBaseURL); err != nil {
 		return store.WorkspaceWebhook{}, err
 	}
 	var bucketID *uuid.UUID
@@ -130,7 +141,7 @@ func prepareRelayAwareWebhookRegistration(r webhookResolvedService, doc webhookC
 		id := binding.BucketID
 		bucketID = &id
 	}
-	row, err := prepareWorkspaceWebhookRegistration(r.ServiceID, r.ServiceVersionID, doc.Name, binding.Reference, bucketID, shape.Auth, shape.EventExtractionPath, configKey, doc.CallbackBaseURL)
+	row, err := prepareWorkspaceWebhookRegistration(r.ServiceID, r.ServiceVersionID, doc.Name, binding.Reference, bucketID, shape.Auth, shape.EventExtractionPath, configKey, callbackBaseURL)
 	row.RelayConfig, _ = json.Marshal(r.Relay)
 	return row, err
 }

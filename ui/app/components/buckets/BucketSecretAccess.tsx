@@ -26,6 +26,7 @@ function SecretAccessDialog({ secret, canManage, canReveal, onChanged, onClose }
   const request = useRef<AbortController | null>(null);
   const alive = useRef(true);
   const [value, setValue] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const [exportable, setExportable] = useState(secret.exportable === true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -35,7 +36,7 @@ function SecretAccessDialog({ secret, canManage, canReveal, onChanged, onClose }
     alive.current = true;
     dialog.current?.showModal();
     /** Leaving the window must not let a late response restore a hidden value. */
-    const hide = () => { request.current?.abort(); setValue(null); };
+    const hide = () => { request.current?.abort(); setValue(null); setCopied(false); };
     window.addEventListener("blur", hide);
     // Close and permission-driven remounts release pending requests and listener ownership.
     return () => { alive.current = false; request.current?.abort(); window.removeEventListener("blur", hide); };
@@ -44,10 +45,22 @@ function SecretAccessDialog({ secret, canManage, canReveal, onChanged, onClose }
   // Auto-hide bounds accidental on-screen exposure while requiring another audited request to reveal again.
   useEffect(() => {
     // No timer is needed before the user retrieves a value.
-    if (value === null) return;
-    const timer = window.setTimeout(/** Clear without retaining a recoverable client cache. */ () => setValue(null), 30_000);
+    if (value === null) { setCopied(false); return; }
+    const timer = window.setTimeout(/** Clear without retaining a recoverable client cache. */ () => { setValue(null); setCopied(false); }, 30_000);
     return /** Unmount or a subsequent hide releases this timer. */ () => window.clearTimeout(timer);
   }, [value]);
+
+  /** Copies the currently revealed read-only value without persisting it in client state. */
+  async function copyRevealed() {
+    // Ignore copy attempts once the transient value has been hidden or clipboard access is unavailable.
+    if (value === null || typeof navigator === "undefined" || !navigator.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      if (alive.current) setCopied(true);
+    } catch {
+      // Clipboard denials stay silent so the user can still select directly from the read-only field.
+    }
+  }
 
   /** Fetches only after an explicit reveal action and suppresses stale or cancelled responses. */
   async function reveal() {
@@ -98,6 +111,32 @@ function SecretAccessDialog({ secret, canManage, canReveal, onChanged, onClose }
     </div>
     {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
     {/* Plaintext is never placed in metadata, browser storage, telemetry, or the assistant context. */}
-    {value !== null && <div data-fused-visible="false"><textarea aria-label="Revealed secret" readOnly value={value} spellCheck={false} autoComplete="off" className="w-full resize-y rounded border p-2 font-mono text-xs" /><button type="button" onClick={/** Hiding drops the value instead of retaining a toggle cache. */ () => setValue(null)} className="text-xs text-slate-600">Hide now · automatically hidden after 30 seconds</button></div>}
+    {value !== null && (
+      <div data-fused-visible="false" className="mt-3 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-medium text-slate-700">Secret value</span>
+            <span className="rounded bg-slate-200/80 px-1.5 py-0.5 text-[11px] font-medium text-slate-700">Read-only</span>
+          </div>
+          <button type="button" onClick={copyRevealed} className="rounded border border-slate-200 bg-white px-2 py-0.5 text-xs font-medium text-slate-700 hover:bg-slate-100">
+            {copied ? "Copied" : "Copy"}
+          </button>
+        </div>
+        <textarea
+          aria-label="Revealed secret (read-only)"
+          aria-readonly="true"
+          readOnly
+          rows={Math.min(6, Math.max(2, value.split("\n").length))}
+          value={value}
+          spellCheck={false}
+          autoComplete="off"
+          className="w-full cursor-default resize-none select-all rounded-md border border-dashed border-slate-300 bg-slate-100/80 p-2 font-mono text-xs text-slate-700 focus:outline-none"
+        />
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+          <span>View only — secrets cannot be edited here.</span>
+          <button type="button" onClick={/** Hiding drops the value instead of retaining a toggle cache. */ () => setValue(null)} className="font-medium text-slate-700 underline-offset-2 hover:underline">Hide now · auto-hides in 30s</button>
+        </div>
+      </div>
+    )}
   </dialog>;
 }

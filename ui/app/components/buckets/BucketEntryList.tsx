@@ -30,6 +30,7 @@ type EntryRowModel = {
   kind: "secret" | "value";
   name: string;
   detail: string;
+  authScheme?: string;
   value: string;
   storedSecret?: SecretMeta;
   onRemove: () => void;
@@ -122,17 +123,16 @@ function secretEntry(
 ): EntryRowModel {
   const expiry = formatExpiry(item.expires_at);
   const identity = bucketSecretIdentity(item, services);
+  // Expiry supplements the service slug without crowding the separate auth-scheme tag.
+  const detail = [identity.detail, expiry !== "Never" ? `expires ${expiry}` : ""].filter(Boolean).join(" · ");
   return {
     id: `secret-${item.service_id}-${
       item.key_names?.join("-") || item.key_name
     }`,
     kind: "secret",
     name: identity.name,
-    // Expiry supplements the identity; it must not replace the service or scheme label.
-    detail:
-      expiry === "Never"
-        ? identity.detail
-        : `${identity.detail} · expires ${expiry}`,
+    detail,
+    authScheme: identity.authScheme,
     value: "********",
     storedSecret: item,
     onRemove: () => onRemove(item),
@@ -168,7 +168,17 @@ function EntryRow({ entry, canRemove, canReveal, onSecretPolicyChanged }: { entr
           <p title={entry.name} className="break-words text-sm font-medium text-slate-800">
             {entry.name}
           </p>
-          <p className="break-words text-xs text-slate-500">{entry.detail}</p>
+          {/* Keep the service/expiry subtitle beside a distinct auth-scheme tag instead of inline prose. */}
+          {(entry.detail || entry.authScheme) && (
+            <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+              {entry.detail && <span className="break-words">{entry.detail}</span>}
+              {entry.authScheme && (
+                <span className="inline-flex items-center rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[11px] font-medium text-slate-600">
+                  {entry.authScheme}
+                </span>
+              )}
+            </div>
+          )}
           {/* Only secret rows need separate storage metadata; environment rows already use their key as the title. */}
           {entry.storedSecret && <StoredSecretKeys secret={entry.storedSecret} />}
         </div>

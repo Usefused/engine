@@ -3,6 +3,7 @@ import { useState } from "react";
 import { RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
 import { WebhookEventDetailsDrawer } from "~/components/webhooks/WebhookEventDetailsDrawer";
 import { type WebhookEventEntry, type WebhookAnalyticsSummary } from "~/lib/api";
+import { formatWebhookEventName } from "~/lib/webhook-detail";
 
 // Switch columns based on the available panel width, including when the workspace sidebar is open.
 const receiptColumns = "@2xl:grid-cols-[minmax(0,2fr)_minmax(0,1.25fr)_minmax(0,1fr)_minmax(0,1fr)_1rem] @2xl:gap-x-4";
@@ -36,16 +37,16 @@ function WebhookReceiptRow({ event, service, onSelect }: { event: WebhookEventEn
     <li className="min-w-0">
       <button type="button" aria-haspopup="dialog" onClick={() => onSelect(event.id)} className={`relative grid w-full min-w-0 cursor-pointer grid-cols-[minmax(0,1fr)_1rem] items-center gap-x-3 gap-y-1 px-4 py-3.5 text-left transition-colors hover:bg-slate-50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-blue-500 ${receiptColumns}`}>
         <span className="col-start-1 row-start-1 min-w-0 text-sm font-semibold text-slate-900 [overflow-wrap:anywhere]">
-          {/* Failed verification can leave an event without a recognized name. */}
-          {event.event_name || "Unnamed event"}
+          {/* Failed verification leaves event_name as UNKNOWN because unverified payloads cannot be trusted. */}
+          {formatWebhookEventName(event.event_name, event.verification_status)}
         </span>
         <span className="col-start-1 row-start-2 min-w-0 text-sm text-slate-600 [overflow-wrap:anywhere] @2xl:col-start-2 @2xl:row-start-1">
           <span className="sr-only">Service </span>{receiptServiceName(event, service) || "Unknown service"}
         </span>
         <span className="col-start-1 row-start-3 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 @2xl:col-start-3 @2xl:row-start-1">
           <span className={`rounded-md px-2 py-0.5 text-xs font-medium [overflow-wrap:anywhere] ${deliveryColor(status)}`}><span className="sr-only">Delivery </span>{status || "Not recorded"}</span>
-          {/* Verification can be absent on historical receipts and remains available in the inspector. */}
-          {event.verification_status && <span className="text-xs text-slate-500 [overflow-wrap:anywhere]"><span className="sr-only">Verification </span>{event.verification_status}</span>}
+          {/* Avoid repeating the same label (such as "rejected rejected") when delivery and verification statuses match. */}
+          {event.verification_status && event.verification_status !== status && <span className="text-xs text-slate-500 [overflow-wrap:anywhere]"><span className="sr-only">Verification </span>{event.verification_status}</span>}
         </span>
         <time dateTime={event.created_at} className="col-start-1 row-start-4 text-xs leading-5 text-slate-500 @2xl:col-start-4 @2xl:row-start-1">
           <span className="sr-only">Received </span>{received}
@@ -116,7 +117,7 @@ export function WebhookLogsCard({
             {webhookNameOptions.map(name => (
               <option key={name} value={name}>{name}</option>
             ))}
-            <option value="UNKNOWN">UNKNOWN</option>
+            <option value="UNKNOWN">Unverified / Unknown</option>
           </Select>
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <input

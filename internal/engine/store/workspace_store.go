@@ -359,14 +359,37 @@ func (s *postgresStore) ListWorkspaceServicesPage(ctx context.Context, names []s
 	return services, total, rows.Err()
 }
 
+// WorkspaceServiceWebhookFilterStore extends workspace service paging with server-side webhook-event filtering.
+type WorkspaceServiceWebhookFilterStore interface {
+	ListAuthorizedWorkspaceServicesPageWithFilter(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string, search string, hasWebhooks bool, limit, offset int) ([]WorkspaceService, int, error)
+}
+
 // ListAuthorizedWorkspaceServicesPage preserves exact reference filters for existing API and CLI callers.
 func (s *postgresStore) ListAuthorizedWorkspaceServicesPage(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string, limit, offset int) ([]WorkspaceService, int, error) {
-	return s.searchAuthorizedWorkspaceServicesPage(ctx, scope, names, "", limit, offset)
+	return s.searchAuthorizedWorkspaceServicesPage(ctx, scope, names, "", false, limit, offset)
 }
 
 // SearchAuthorizedWorkspaceServicesPage applies free-text search before counting and paging authorized rows.
 func (s *postgresStore) SearchAuthorizedWorkspaceServicesPage(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string, search string, limit, offset int) ([]WorkspaceService, int, error) {
-	return s.searchAuthorizedWorkspaceServicesPage(ctx, scope, names, search, limit, offset)
+	return s.searchAuthorizedWorkspaceServicesPage(ctx, scope, names, search, false, limit, offset)
+}
+
+// ListAuthorizedWorkspaceServicesPageWithFilter applies authorization, search, and optional webhook availability before counting and paging.
+func (s *postgresStore) ListAuthorizedWorkspaceServicesPageWithFilter(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string, search string, hasWebhooks bool, limit, offset int) ([]WorkspaceService, int, error) {
+	return s.searchAuthorizedWorkspaceServicesPage(ctx, scope, names, search, hasWebhooks, limit, offset)
+}
+
+// ListAuthorizedWorkspaceServicesPageWithFilter delegates webhook-filtered workspace service paging to the backing store.
+func (s *cachedStore) ListAuthorizedWorkspaceServicesPageWithFilter(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string, search string, hasWebhooks bool, limit, offset int) ([]WorkspaceService, int, error) {
+	filterStore, ok := s.Store.(WorkspaceServiceWebhookFilterStore)
+	// Fall back to unfiltered search only when webhook filtering was not requested.
+	if !ok {
+		if hasWebhooks {
+			return nil, 0, fmt.Errorf("webhook service filtering is unavailable")
+		}
+		return s.Store.SearchAuthorizedWorkspaceServicesPage(ctx, scope, names, search, limit, offset)
+	}
+	return filterStore.ListAuthorizedWorkspaceServicesPageWithFilter(ctx, scope, names, search, hasWebhooks, limit, offset)
 }
 
 // Literal substring matching treats percent and underscore as user text, not SQL wildcard operators.
@@ -374,17 +397,33 @@ const workspaceServiceSearchSQL = ` AND ($4 = ''
 	OR strpos(lower(COALESCE(s.service_name, '')), lower($4)) > 0
 	OR strpos(lower(COALESCE(s.service_slug, '')), lower($4)) > 0)`
 
-// searchAuthorizedWorkspaceServicesPage shares authorization and search predicates between count and page queries.
-func (s *postgresStore) searchAuthorizedWorkspaceServicesPage(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string, search string, limit, offset int) ([]WorkspaceService, int, error) {
+// Restrict to workspace services whose active (non-deprecated) contract snapshot declares at least one webhook event.
+const workspaceServiceHasWebhooksSQL = ` AND (
+	NOT $5::boolean
+	OR EXISTS (
+		SELECT 1
+		FROM fused_workspace_service_versions active_version
+		JOIN fused_service_contract_snapshots snapshot
+		  ON snapshot.service_id = active_version.service_id
+		 AND snapshot.service_version_id = active_version.service_version_id
+		JOIN fused_service_contract_webhooks webhook
+		  ON webhook.snapshot_id = snapshot.id
+		WHERE active_version.service_id = s.service_id
+		  AND active_version.status <> 'deprecated'
+	)
+)`
+
+// searchAuthorizedWorkspaceServicesPage shares authorization, search, and webhook availability predicates between count and page queries.
+func (s *postgresStore) searchAuthorizedWorkspaceServicesPage(ctx context.Context, scope accesscontrol.AuthorizedScope, names []string, search string, hasWebhooks bool, limit, offset int) ([]WorkspaceService, int, error) {
 	// An empty grant scope must never reveal matching names or counts.
 	if !scope.All && len(scope.IDs) == 0 {
 		return nil, 0, nil
 	}
 	search = strings.TrimSpace(search)
-	where := authorizedWorkspaceServicesWhereSQL + workspaceServiceSearchSQL
+	where := authorizedWorkspaceServicesWhereSQL + workspaceServiceSearchSQL + workspaceServiceHasWebhooksSQL
 	var total int
 	// Database failures must not become an authoritative empty search result.
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_workspace_services s `+where, scope.All, scope.IDs, names, search).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM fused_workspace_services s `+where, scope.All, scope.IDs, names, search, hasWebhooks).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("ListAuthorizedWorkspaceServicesPage count: %w", err)
 	}
 	// Skip projection work when no authorized services match.
@@ -394,7 +433,7 @@ func (s *postgresStore) searchAuthorizedWorkspaceServicesPage(ctx context.Contex
 	query := `WITH paged_services AS (
 		SELECT id, service_id, service_slug, service_name, added_by, created_at
 		FROM fused_workspace_services s ` + where + `
-		ORDER BY created_at DESC LIMIT $5 OFFSET $6
+		ORDER BY created_at DESC LIMIT $6 OFFSET $7
 	)
 	SELECT s.id, s.service_id, COALESCE(s.service_slug, ''),
 	       COALESCE(latest.version, ''),
@@ -408,7 +447,7 @@ func (s *postgresStore) searchAuthorizedWorkspaceServicesPage(ctx context.Contex
 		ORDER BY enabled_at DESC, id DESC LIMIT 1
 	) latest ON true
 	ORDER BY s.created_at DESC`
-	rows, err := s.db.Query(ctx, query, scope.All, scope.IDs, names, search, limit, offset)
+	rows, err := s.db.Query(ctx, query, scope.All, scope.IDs, names, search, hasWebhooks, limit, offset)
 	// Preserve query failures for the caller.
 	if err != nil {
 		return nil, 0, fmt.Errorf("ListAuthorizedWorkspaceServicesPage query: %w", err)

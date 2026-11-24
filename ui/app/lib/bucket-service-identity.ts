@@ -20,7 +20,7 @@ export function bucketSecretIdentity(secret: SecretMeta, services: ActivatedServ
   const credential = credentialLabel(secret.credential_type);
   // Bucket-wide variables have no provider service or auth scheme to resolve.
   if (secret.credential_type === "bucket_secret") {
-    return { name: credential, detail: secret.key_name };
+    return { name: credential, detail: secret.key_name, authScheme: "" };
   }
   const service = bucketServiceIdentity(secret, services);
   const workspace = services.find((item) => item.service_id === secret.service_id);
@@ -29,7 +29,7 @@ export function bucketSecretIdentity(secret: SecretMeta, services: ActivatedServ
   const scheme = option?.label && option.label !== secret.key_name
     ? `${option.label} (${secret.key_name})`
     : secret.key_name;
-  return { name: `${service.name} · ${credential}`, detail: [service.detail, `Auth scheme: ${scheme}`].filter(Boolean).join(" · ") };
+  return { name: `${service.name} · ${credential}`, detail: service.detail, authScheme: scheme || "" };
 }
 
 /** Names application credential pairs distinctly from single tokens and bucket-wide variables. */

@@ -8,6 +8,7 @@ import { JSDOM } from "jsdom";
 import ts from "typescript";
 import * as workspaceDialogHost from "./workspace-dialog-host.ts";
 import * as formatHelpers from "./format.ts";
+import * as webhookDetailHelpers from "./webhook-detail.ts";
 
 const require = createRequire(import.meta.url);
 const drawerSource = readFileSync(new URL("../components/webhooks/WebhookEventDetailsDrawer.tsx", import.meta.url), "utf8");
@@ -25,6 +26,7 @@ function loadDrawer() {
     if (name === "~/components/OperationDetailsParts") return { OperationDisclosure: ({ label, children }) => React.createElement("section", null, label, children) };
     if (name === "~/lib/workspace-dialog-host") return workspaceDialogHost;
     if (name === "~/lib/format") return formatHelpers;
+    if (name === "~/lib/webhook-detail") return webhookDetailHelpers;
     return require(name);
   }
   new Function("require", "exports", code)(resolve, exports);
@@ -82,10 +84,12 @@ test("webhook details drawer portals into workspace host and displays consumers 
     assert.match(dialogHost.textContent, /Consumed atNot consumed/);
     assert.match(dialogHost.textContent, /No one has consumed this webhook yet\./);
 
-    // Rejected receipt explains why no consumer received it.
+    // Rejected UNKNOWN receipt explains why no consumer received it and avoids raw UNKNOWN copy.
     await act(async () => {
-      root.render(React.createElement(Drawer, { event: baseEvent({ status: "rejected", delivery_status: "rejected", verification_status: "rejected" }), serviceName: "@martins-joseph/stripe", onClose: () => {} }));
+      root.render(React.createElement(Drawer, { event: baseEvent({ event_name: "UNKNOWN", status: "rejected", delivery_status: "rejected", verification_status: "rejected" }), serviceName: "@martins-joseph/stripe", onClose: () => {} }));
     });
+    assert.match(dialogHost.textContent, /Unverified event/);
+    assert.doesNotMatch(dialogHost.textContent, /UNKNOWN/);
     assert.match(dialogHost.textContent, /Not consumed — this webhook was rejected during verification\./);
 
     // Single SDK consumer displays transport badge, display name, version, receiver, and timestamp.

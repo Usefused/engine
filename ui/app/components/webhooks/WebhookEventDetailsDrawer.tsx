@@ -7,6 +7,7 @@ import { WebhookMessageDiagnostics } from "./WebhookMessageDiagnostics";
 import { OperationDisclosure } from "~/components/OperationDetailsParts";
 import { workspaceDialogHost } from "~/lib/workspace-dialog-host";
 import { formatDuration } from "~/lib/format";
+import { formatWebhookEventName } from "~/lib/webhook-detail";
 
 /** Shows the recorded service, consumption history, and receipt outcomes while keeping correlation and private messages behind disclosures. */
 export function WebhookEventDetailsDrawer({ event, serviceName, onClose }: { event: WebhookEventEntry; serviceName?: string; onClose: () => void }) {
@@ -14,6 +15,7 @@ export function WebhookEventDetailsDrawer({ event, serviceName, onClose }: { eve
   const titleRef = useRef<HTMLHeadingElement>(null);
   const consumptions = event.consumptions ?? [];
   const deliveryStatus = event.delivery_status || event.status;
+  const displayEventName = formatWebhookEventName(event.event_name, event.verification_status);
 
   // Restore focus to the invoking receipt row on dismissal without scrolling the underlying workspace.
   useLayoutEffect(() => {
@@ -43,7 +45,7 @@ export function WebhookEventDetailsDrawer({ event, serviceName, onClose }: { eve
     {/* An open assistant remains an accessible sibling of this workspace-scoped drawer. */}
     <aside data-fused-detail-sidebar role="dialog" aria-modal={!agent?.isOpen} aria-labelledby="webhook-receipt-title" className="receipt-drawer-enter fixed inset-y-0 right-0 z-50 flex h-dvh max-h-dvh w-full max-w-full flex-col overflow-hidden border-l border-slate-200 bg-white shadow-2xl md:w-[calc(100%-4rem)] md:max-w-[940px] xl:max-w-[1080px]">
       <div className="z-10 flex shrink-0 items-center justify-between gap-4 border-b border-slate-100 bg-white/90 px-4 py-4 backdrop-blur sm:px-6">
-        <div className="min-w-0"><h2 ref={titleRef} tabIndex={-1} id="webhook-receipt-title" className="text-lg font-semibold text-slate-900 outline-none">Webhook receipt details</h2><p className="mt-0.5 truncate text-xs text-slate-500">{event.event_name || "Unnamed event"}</p></div>
+        <div className="min-w-0"><h2 ref={titleRef} tabIndex={-1} id="webhook-receipt-title" className="text-lg font-semibold text-slate-900 outline-none">Webhook receipt details</h2><p className="mt-0.5 truncate text-xs text-slate-500">{displayEventName}</p></div>
         <button type="button" onClick={onClose} aria-label="Close webhook receipt details" className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"><X className="h-5 w-5" /></button>
       </div>
       {/* Confine drawer scrolling inside the viewport-bounded shell so wheel gestures never shift the outer page. */}
@@ -68,7 +70,7 @@ function WebhookSummaryCard({ event, serviceName, deliveryStatus, consumptions }
   return (
     <section className="rounded-lg border border-slate-200 bg-white px-3 py-5 sm:px-5">
       <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-        <WebhookDetail label="Event" value={event.event_name} />
+        <WebhookDetail label="Event" value={formatWebhookEventName(event.event_name, event.verification_status)} />
         <WebhookDetail label="Execution status" value={event.execution_status} />
         <WebhookDetail label="Verification" value={event.verification_status} />
         <WebhookDetail label="Delivery" value={deliveryStatus} />

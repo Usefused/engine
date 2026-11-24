@@ -1741,11 +1741,11 @@ export const api = {
 
     // getServicesPage pages the same exact-version membership projection.
     // Search is separate from exact names so partial text does not alter reference resolution.
-    getServicesPage: (limit: number, offset: number, names?: string[], q?: string) =>
+    getServicesPage: (limit: number, offset: number, names?: string[], q?: string, hasWebhooks?: boolean) =>
       api
         .mcpGraphql<{ workspaceServicePage: { total: number; page: number; limit: number; data: ActivatedService[] } }>(
-          `query WorkspaceServicePage($limit: Int, $offset: Int, $names: [String], $q: String) {
-            workspaceServicePage(limit: $limit, offset: $offset, names: $names, q: $q) {
+          `query WorkspaceServicePage($limit: Int, $offset: Int, $names: [String], $q: String${hasWebhooks ? ", $hasWebhooks: Boolean" : ""}) {
+            workspaceServicePage(limit: $limit, offset: $offset, names: $names, q: $q${hasWebhooks ? ", has_webhooks: $hasWebhooks" : ""}) {
               total page limit data {
                 id
                 service_id
@@ -1770,7 +1770,7 @@ export const api = {
               }
             }
           }`,
-          { limit, offset, names, q }
+          hasWebhooks ? { limit, offset, names, q, hasWebhooks } : { limit, offset, names, q }
         )
         .then(({ workspaceServicePage }) => workspaceServicePage),
 

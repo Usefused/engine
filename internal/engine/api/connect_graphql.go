@@ -798,10 +798,11 @@ func workspaceServicePageGraphQLField(s store.Store, verifier ServiceVerifier) *
 	return &graphql.Field{
 		Type: workspaceServicePageGraphQLType,
 		Args: graphql.FieldConfigArgument{
-			"q":      &graphql.ArgumentConfig{Type: graphql.String},
-			"names":  &graphql.ArgumentConfig{Type: graphql.NewList(graphql.String)},
-			"limit":  &graphql.ArgumentConfig{Type: graphql.Int},
-			"offset": &graphql.ArgumentConfig{Type: graphql.Int},
+			"q":            &graphql.ArgumentConfig{Type: graphql.String},
+			"names":        &graphql.ArgumentConfig{Type: graphql.NewList(graphql.String)},
+			"has_webhooks": &graphql.ArgumentConfig{Type: graphql.Boolean},
+			"limit":        &graphql.ArgumentConfig{Type: graphql.Int},
+			"offset":       &graphql.ArgumentConfig{Type: graphql.Int},
 		},
 		// Resolve projects only the authorized page after applying the requested filters.
 		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
@@ -824,11 +825,23 @@ func workspaceServicePageGraphQLField(s store.Store, verifier ServiceVerifier) *
 			var services []store.WorkspaceService
 			var total int
 			search, _ := p.Args["q"].(string)
-			// Free-text discovery must not change the exact-reference contract of the legacy names argument.
-			if strings.TrimSpace(search) != "" {
-				services, total, err = s.SearchAuthorizedWorkspaceServicesPage(ctx, authorized, graphQLStringListArg(p, "names"), search, limit, offset)
-			} else {
-				services, total, err = s.ListAuthorizedWorkspaceServicesPage(ctx, authorized, graphQLStringListArg(p, "names"), limit, offset)
+			hasWebhooks, _ := p.Args["has_webhooks"].(bool)
+			usedSQLWebhookFilter := false
+			// Apply webhook-event filtering in SQL before counting and paging whenever the backing store supports it.
+			if hasWebhooks {
+				if filterStore, ok := s.(store.WorkspaceServiceWebhookFilterStore); ok {
+					services, total, err = filterStore.ListAuthorizedWorkspaceServicesPageWithFilter(ctx, authorized, graphQLStringListArg(p, "names"), search, true, limit, offset)
+					usedSQLWebhookFilter = true
+				}
+			}
+			// Preserve existing search/list dispatch when has_webhooks is false or the store lacks the optional SQL filter.
+			if !usedSQLWebhookFilter {
+				// Free-text discovery must not change the exact-reference contract of the legacy names argument.
+				if strings.TrimSpace(search) != "" {
+					services, total, err = s.SearchAuthorizedWorkspaceServicesPage(ctx, authorized, graphQLStringListArg(p, "names"), search, limit, offset)
+				} else {
+					services, total, err = s.ListAuthorizedWorkspaceServicesPage(ctx, authorized, graphQLStringListArg(p, "names"), limit, offset)
+				}
 			}
 			// Do not present incomplete or unauthorized data as a valid result.
 			if err != nil {
@@ -841,6 +854,20 @@ func workspaceServicePageGraphQLField(s store.Store, verifier ServiceVerifier) *
 				return nil, fmt.Errorf("list workspace service versions: %w", err)
 			}
 			metadata := fetchServiceCardMetadataForListing(ctx, verifier, apiKeyFromGraphQLContext(p.Context), serviceIDs)
+			// Legacy mock stores without SQL contract snapshots still respect has_webhooks using Registry metadata counts.
+			if hasWebhooks && !usedSQLWebhookFilter {
+				filtered := make([]store.WorkspaceService, 0, len(services))
+				for _, service := range services {
+					meta, ok := metadata[service.ServiceID]
+					// Exclude services confirmed to have zero webhook events; retain entries only when webhooks are declared.
+					if ok && meta.WebhookCount <= 0 {
+						continue
+					}
+					filtered = append(filtered, service)
+				}
+				services = filtered
+				total = len(filtered)
+			}
 			authOptions, err := fetchWorkspaceServiceAuthOptions(ctx, verifier, apiKeyFromGraphQLContext(p.Context), services)
 			// Do not present incomplete or unauthorized data as a valid result.
 			if err != nil {

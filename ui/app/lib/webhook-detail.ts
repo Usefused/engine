@@ -30,6 +30,17 @@ export function webhookEventNameOptions(eventNames: string[], selected: string):
   return Array.from(new Set([selected, ...eventNames])).filter((name) => Boolean(name) && name !== "UNKNOWN");
 }
 
+/** Formats canonical event names so unverified or unclassified receipts explain why no provider event name was recorded. */
+export function formatWebhookEventName(eventName: string, verificationStatus?: string): string {
+  // Missing event names fall back cleanly without inventing a provider event type.
+  if (!eventName) return "Unnamed event";
+  // Verification rejections intentionally withhold untrusted payload classification and store UNKNOWN.
+  if (eventName === "UNKNOWN") {
+    return verificationStatus === "rejected" ? "Unverified event" : "Unclassified event";
+  }
+  return eventName;
+}
+
 /** Shared date conversion keeps summaries and history on the same inclusive UTC calendar bounds. */
 export function webhookDateBound(value: string, end = false): string | null {
   // An omitted date leaves the historical range unrestricted instead of substituting today's date.

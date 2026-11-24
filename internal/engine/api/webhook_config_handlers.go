@@ -160,10 +160,16 @@ func WebhookConfigApplyHandler(configStore store.ConfigRepository, s store.Store
 	}
 }
 
+// webhookConfigApplyResponse formats the reconciled webhook registrations, including Engine's resolved callback URL when available.
 func webhookConfigApplyResponse(planID uuid.UUID, result webhookConfigApplyResult) map[string]any {
 	registrations := make([]map[string]any, 0, len(result.Applied))
 	for _, applied := range result.Applied {
-		registrations = append(registrations, map[string]any{"service": applied.ServiceKey, "slug": applied.Slug})
+		entry := map[string]any{"service": applied.ServiceKey, "slug": applied.Slug}
+		// Include Engine's resolved public callback URL so CLI callers do not reconstruct it from local transport URLs.
+		if applied.CallbackURL != "" {
+			entry["callback_url"] = applied.CallbackURL
+		}
+		registrations = append(registrations, entry)
 	}
 	return map[string]any{
 		"status": "applied", "plan_id": planID.String(), "config_key": result.ConfigKey,
@@ -254,6 +260,10 @@ func createWebhookConfigPlan(ctx context.Context, configStore store.ConfigReposi
 	call.request.OwnerSubjectID, call.request.OwnerTeamID = owner.subjectID, owner.teamID
 	resolved, err := resolveWebhookServices(ctx, s, registryClient, call.apiKey, call.document)
 	if err != nil {
+		return nil, nil, err
+	}
+	// Reject services whose contract snapshot declares zero webhook events for both CLI and UI callers.
+	if err := ensureWebhookServicesHaveEvents(ctx, s, resolved); err != nil {
 		return nil, nil, err
 	}
 	if err := ensureWebhookNameAvailable(ctx, s, call.request.ConfigKey, call.document.Name, resolved); err != nil {
@@ -373,7 +383,7 @@ func prepareWebhookRegistrations(ctx context.Context, s store.Store, verifier Se
 		keepServiceIDs = append(keepServiceIDs, r.ServiceID)
 		shape := authShapes[name]
 		binding := secretBindings[name]
-		registration, err := prepareRelayAwareWebhookRegistration(r, doc, binding, shape, configKey)
+		registration, err := prepareRelayAwareWebhookRegistration(ctx, r, doc, binding, shape, configKey)
 		// A failed registration cannot leave an incomplete reconciliation batch.
 		if err != nil {
 			return nil, nil, err
@@ -383,16 +393,20 @@ func prepareWebhookRegistrations(ctx context.Context, s store.Store, verifier Se
 	return registrations, keepServiceIDs, nil
 }
 
+// validateSignaturePolicyBinding verifies the registration's secret reference and required callback URL against the signature policy.
 func validateSignaturePolicyBinding(policy *signaturepolicy.Config, secretRef, callbackBaseURL string) error {
+	// Registrations without a structured signature policy impose no extra binding requirements.
 	if policy == nil {
 		return nil
 	}
 	for _, rule := range policy.Rules {
+		// Signature rules referencing a secret must stay bound to the registration's immutable secret reference.
 		if ref := verificationSecretRef(rule.Verification); ref != "" && ref != secretRef {
 			return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "webhook signature policy secret_ref must match the registration secret"}
 		}
+		// Exact-callback-URL recipes require either Engine's configured public URL or an explicit callback_base_url override.
 		if recipeUsesCallbackURL(rule.Verification.Signature) && strings.TrimSpace(callbackBaseURL) == "" {
-			return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "callback_base_url is required by the webhook signature policy"}
+			return workspaceConfigHTTPError{status: http.StatusBadRequest, message: "configure engine.public_url (FUSED_ENGINE_PUBLIC_URL) or callback_base_url for this webhook signature policy"}
 		}
 	}
 	return nil
@@ -659,7 +673,8 @@ func commitWebhookConfigApply(ctx context.Context, configStore store.ConfigRepos
 	applied := make([]appliedWorkspaceWebhook, 0, len(result.Registrations))
 	for i, saved := range result.Registrations {
 		emitWebhookAppliedSpan(ctx, saved)
-		applied = append(applied, appliedWorkspaceWebhook{ServiceKey: names[i], Label: name, Slug: saved.Slug})
+		callbackURL, _ := webhookDiscoveryDestination(ctx, saved)
+		applied = append(applied, appliedWorkspaceWebhook{ServiceKey: names[i], Label: name, Slug: saved.Slug, CallbackURL: callbackURL})
 	}
 	return webhookConfigApplyResult{ConfigKey: plan.ConfigKey, Name: name, Applied: applied}, nil
 }
@@ -788,6 +803,28 @@ func workspaceWebhookServicesByKey(activations []store.WorkspaceService, keys []
 		}
 	}
 	return resolved
+}
+
+// ensureWebhookServicesHaveEvents prevents creating webhook registrations for services whose active contract declares no webhook events.
+func ensureWebhookServicesHaveEvents(ctx context.Context, s store.Store, resolved map[string]webhookResolvedService) error {
+	checker, ok := s.(store.ServiceContractWebhookAvailabilityChecker)
+	// Test fixtures without contract snapshot persistence skip this check.
+	if !ok {
+		return nil
+	}
+	for _, name := range sortedWebhookServiceNames(resolved) {
+		svc := resolved[name]
+		snapshotPresent, hasWebhooks, err := checker.ServiceContractWebhookAvailability(ctx, svc.ServiceID, svc.ServiceVersionID)
+		// Database failures must abort planning rather than silently skipping validation.
+		if err != nil {
+			return workspaceConfigHTTPError{status: http.StatusInternalServerError, message: "failed to verify service webhook events"}
+		}
+		// Only block when an active contract snapshot exists and explicitly declares zero webhook events.
+		if snapshotPresent && !hasWebhooks {
+			return workspaceConfigHTTPError{status: http.StatusBadRequest, message: fmt.Sprintf("service %s has no webhook events", name)}
+		}
+	}
+	return nil
 }
 
 // ensureWebhookNameAvailable is the (service, name) uniqueness check

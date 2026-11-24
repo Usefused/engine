@@ -23,7 +23,7 @@ function adapter(api) {
   new Function("require", "exports", "crypto", code)(require, exports, webcrypto);
   return exports;
 }
-const draft = { name: "stripe-events", service: "stripe", secret: "${bucket.default.secret.signing}", baseURL: "https://engine.example" };
+const draft = { name: "stripe-events", service: "stripe", secret: "${bucket.default.secret.signing}" };
 
 // Canonical service tags must remain accurate across Registry-backed and older cached service metadata.
 test("service tags preserve provider identity and are searchable", () => {
@@ -69,13 +69,29 @@ test("only direct HTTP destinations are copyable", () => {
   }
 });
 
-// Provider routing and secret references must be explicit, with the Engine retaining final validation authority.
-test("configuration rejects raw signing secrets and unsafe destinations", () => {
+// Provider routing always relies on Engine's configured public URL while secret references stay strictly validated.
+test("configuration omits callback_base_url and rejects raw signing secrets", () => {
+  const defaultConfig = contract.webhookConfiguration(draft);
+  assert.equal("callback_base_url" in defaultConfig, false);
   assert.throws(() => contract.webhookConfiguration({...draft,secret:"raw-signing-secret"}),/reference/);
-  for (const baseURL of ["", "http://public.example", "https://user:secret@engine.example", "https://engine.example?token=x"]) {
-    assert.throws(() => contract.webhookConfiguration({...draft,baseURL}));
-  }
   assert.equal(contract.webhookConfiguration({...draft,secret:""}).services.stripe.secret,undefined);
+});
+
+// Webhook creation delegates webhook-event filtering to Engine's workspaceServicePage(has_webhooks: true) resolver.
+test("webhookServices requests backend has_webhooks filtering", async () => {
+  const calls = [];
+  const services = [{ service_id: "stripe", service_name: "Stripe", webhook_count: 12 }];
+  const client = adapter({
+    workspace: {
+      getServicesPage: async (limit, offset, names, q, hasWebhooks) => {
+        calls.push({ limit, offset, names, q, hasWebhooks });
+        return { data: services, total: services.length };
+      },
+    },
+  });
+  const loaded = await client.webhookServices();
+  assert.deepEqual(loaded, services);
+  assert.deepEqual(calls, [{ limit: 100, offset: 0, names: undefined, q: undefined, hasWebhooks: true }]);
 });
 
 // One page must issue one direct summary query even when the total spans many pages.
