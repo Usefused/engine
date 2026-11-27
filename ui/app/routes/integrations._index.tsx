@@ -20,6 +20,7 @@ import IntegrationsPendingTab from "~/components/IntegrationsPendingTab";
 import { DefineServiceDrawer } from "~/components/DefineServiceDrawer";
 import { useToast } from "~/components/Toast";
 import { isImportVersionRequired } from "~/lib/authorization-error";
+import { hasWorkspacePermission, loadCurrentActorAccess } from "~/lib/current-actor-access";
 import {
   closeDiscoverySessionQuery,
   discoveryNavigationFromQuery,
@@ -27,7 +28,14 @@ import {
 } from "~/lib/discovery-navigation";
 
 type ImportSource = { url?: string; content?: string };
-type ImportIdentity = { repair_mode?: "safe" | "report_only"; name: string; slug?: string; version?: string };
+type ImportIdentity = {
+  repair_mode?: "safe" | "report_only";
+  name: string;
+  slug?: string;
+  version?: string;
+  is_public?: boolean;
+  registry_target?: "local" | "cloud";
+};
 type ServicesView = "workspace" | "pending";
 type CatalogPage = {
   data: Service[];
@@ -433,8 +441,21 @@ export default function IntegrationsIndex() {
   const [repairMode, setRepairMode] = useState<"safe" | "report_only">("safe");
   const [repairDiagnostics, setRepairDiagnostics] = useState<SpecificationImportDiagnostic[]>([]);
   const [startError, setStartError] = useState("");
+  const [canPublishToCloud, setCanPublishToCloud] = useState(false);
+  const [publishToCloud, setPublishToCloud] = useState(false);
 
   const [importPlan, setImportPlan] = useState<SpecificationImportPlan | null>(null);
+
+  // Load workspace Cloud publish permission once for authenticated actors so the drawer can offer explicit Cloud opt-in.
+  useEffect(() => {
+    if (!isAuth) {
+      setCanPublishToCloud(false);
+      return;
+    }
+    loadCurrentActorAccess()
+      .then((access) => setCanPublishToCloud(hasWorkspacePermission(access, "catalogue.cloud.publish")))
+      .catch(() => setCanPublishToCloud(false));
+  }, [isAuth]);
 
   // openUIDiscoverySession records resumable UI work in the URL and strips any prior CLI authority marker.
   function openUIDiscoverySession(sessionID: string) {
@@ -633,12 +654,16 @@ export default function IntegrationsIndex() {
 
   // The immutable plan retains the policy reviewed with this source.
   async function handleSpecificationImport(source: ImportSource) {
+    // Route to Fused Cloud Registry with public visibility only when explicitly selected by an authorized actor.
+    const cloudOptIn = canPublishToCloud && publishToCloud;
     if (!importPlan) {
       const plan = await createSpecificationPlan(source, {
         repair_mode: repairMode,
         name: newName.trim(),
         slug: newSlug.trim() || undefined,
         version: newVersion.trim() || undefined,
+        is_public: cloudOptIn ? true : undefined,
+        registry_target: cloudOptIn ? "cloud" : undefined,
       }, setRequireVersion);
       // The Registry parser is authoritative for declared source versions;
       // reflecting its result avoids presenting a fallback and parsed version
@@ -651,9 +676,11 @@ export default function IntegrationsIndex() {
     const applied = await api.integrations.applyImport(importPlan.plan_id, importPlan.review_hash);
     setShowNewPanel(false);
     setImportPlan(null);
+    setPublishToCloud(false);
     navigate(`/integrations/${applied.service_id}`);
   }
 
+  // handleChangeImportSource resets the planned source receipt and inferred version when switching inputs.
   function handleChangeImportSource() {
     // A resolved version belongs to the planned source, so retaining it while
     // editing another source could silently apply stale metadata on retry.
@@ -665,10 +692,14 @@ export default function IntegrationsIndex() {
 
   // handleDocsImport gives a documentation URL the deterministic spec-first path before bounded crawling.
   async function handleDocsImport(source: ImportSource) {
+    // Forward Cloud visibility and routing intent only when explicitly selected by an authorized actor.
+    const cloudOptIn = canPublishToCloud && publishToCloud;
     const res = await api.integrations.startDiscovery({
       name: newName.trim(),
       slug: newSlug.trim(),
       version: newVersion.trim(),
+      is_public: cloudOptIn ? true : undefined,
+      registry_target: cloudOptIn ? "cloud" : undefined,
       source_url: source.url || "",
       source_mode: "auto",
       requested_workers: 0,
@@ -681,6 +712,7 @@ export default function IntegrationsIndex() {
     setNewVersion("");
     setNewUrl("");
     setNewContent("");
+    setPublishToCloud(false);
     setImportPlan(null);
   }
 
@@ -776,12 +808,14 @@ export default function IntegrationsIndex() {
             setNewUrl("");
             setNewContent("");
             setFileName("");
+            setPublishToCloud(false);
             setStartError("");
           },
           repairMode, setRepairMode, repairDiagnostics, importPlan, newName, setNewName, isSlugManuallyEdited, setIsSlugManuallyEdited, newSlug, setNewSlug,
           requireVersion, setRequireVersion, importMethod, setImportMethod, newVersion, setNewVersion, sourceType,
           setSourceType, newUrl, setNewUrl, newContent, setNewContent, fileName, setFileName, starting, startError,
           setStartError, handleStart, handleChangeImportSource,
+          canPublishToCloud, publishToCloud, setPublishToCloud,
         }}
       />
       <ExtractionSessionPanel

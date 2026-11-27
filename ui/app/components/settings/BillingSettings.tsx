@@ -170,9 +170,15 @@ function PlanImpact({ state, selected }: { state: BillingState | null; selected:
   ["max_unified_app_concurrency", "Concurrent requests per app worker"], ["max_sandbox_concurrency", "Concurrent provider calls"],
   ["unified_app_always_on_enabled", "Always-on workers"], ["webhook_ingestion_enabled", "Webhook ingestion"],
   ["public_service_insights_enabled", "Public service insights"], ["sso_enabled", "SSO / team management"],
-  ["execution_retention_days", "Execution history (days)"],
+  ["local_registry_enabled", "Local Registry"], ["execution_retention_days", "Execution history (days)"],
  ];
  const changes = fields.filter(([key]) => current.entitlements![key] !== target.entitlements![key]);
+ // Self-hosted tiers share unrestricted capacity, so explain that instead of rendering an empty diff table.
+ if (changes.length === 0) {
+  // Hosted plans with identical limits need no impact box.
+  if (state?.hosted_engine) return null;
+  return <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600"><p className="font-semibold text-slate-900">{target.name}: self-hosted limits</p><p className="mt-1">Self-hosted Engines already have unrestricted capacity on this plan. Upgrading increases Fused Cloud hosted capacity; contact sales for Enterprise SSO and Local Registry.</p></div>;
+ }
  return <div className="rounded-xl border border-slate-200 p-4 text-sm"><p className="font-semibold text-slate-900">{target.name}: what changes</p>
   <table className="mt-3 w-full text-left"><thead><tr className="text-slate-500"><th className="pb-2 font-medium">Resource or setting</th><th className="pb-2 font-medium">Current</th><th className="pb-2 font-medium">New</th></tr></thead><tbody>
    {/* Display all changed contract fields, including runtime policy rather than app counts alone. */}

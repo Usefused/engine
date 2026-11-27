@@ -63,6 +63,9 @@ const (
 	PermissionCatalogueRead             Permission = "catalogue.read"
 	PermissionCatalogueImport           Permission = "catalogue.import"
 	PermissionCatalogueManage           Permission = "catalogue.manage"
+	// Cloud Registry permissions gate fallback reads and --cloud spec publication when a Local Registry is configured.
+	PermissionCatalogueCloudRead        Permission = "catalogue.cloud.read"
+	PermissionCatalogueCloudPublish     Permission = "catalogue.cloud.publish"
 	PermissionAccountRead               Permission = "account.read"
 	PermissionAccountManage             Permission = "account.manage"
 	PermissionBillingRead               Permission = "billing.read"
@@ -119,6 +122,8 @@ var (
 		PermissionCatalogueRead,
 		PermissionCatalogueImport,
 		PermissionCatalogueManage,
+		PermissionCatalogueCloudRead,
+		PermissionCatalogueCloudPublish,
 		PermissionAccountRead,
 		PermissionAccountManage,
 		PermissionBillingRead,

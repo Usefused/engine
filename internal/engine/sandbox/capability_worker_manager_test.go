@@ -404,15 +404,15 @@ func waitCapabilityLoading(t *testing.T, ctx context.Context, manager *Capabilit
 	}
 }
 
-// TestCapabilityWorkerHigherPlanConcurrency bounds each plan by the configured worker while retaining old-bundle defaults.
+// TestCapabilityWorkerHigherPlanConcurrency bounds finite plans by worker capacity, grants full capacity on -1, and keeps nil at 4.
 func TestCapabilityWorkerHigherPlanConcurrency(t *testing.T) {
 	for _, test := range []struct {
 		plan           *int
 		capacity, want int
 	}{
-		{intPointer(16), 32, 16}, {intPointer(64), 32, 32}, {intPointer(0), 32, 0}, {nil, 32, 4}, {intPointer(-1), 32, 4},
+		{intPointer(16), 32, 16}, {intPointer(64), 32, 32}, {intPointer(0), 32, 0}, {nil, 32, 4}, {intPointer(-1), 32, 32},
 	} {
-		// Plan changes may increase or reduce occupancy without requiring a new worker process.
+		// Negative plan ceilings (-1) defer to local worker capacity while nil preserves legacy 4-slot bundles.
 		if got := effectiveCapabilityWorkerConcurrency(test.plan, test.capacity); got != test.want {
 			t.Fatalf("capacity=%d got=%d want=%d", test.capacity, got, test.want)
 		}

@@ -19,9 +19,9 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 			public_service_insights_enabled,
 			heartbeat_interval_seconds, heartbeat_stale_after_seconds, refreshed_at, updated_at,
 			max_buckets, max_api_families, max_sdk_families, max_mcp_families, max_unified_app_families, max_unified_app_concurrency, max_services, max_sandbox_concurrency,
-			drift_monitoring_enabled, unified_app_always_on_enabled, webhook_ingestion_enabled, sso_enabled, execution_retention_days
+			drift_monitoring_enabled, unified_app_always_on_enabled, webhook_ingestion_enabled, sso_enabled, local_registry_enabled, execution_retention_days
 		)
-		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 		ON CONFLICT (singleton_key) DO UPDATE SET
 			entitlement_revision = EXCLUDED.entitlement_revision,
 			plan = EXCLUDED.plan,
@@ -44,6 +44,7 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 			unified_app_always_on_enabled = EXCLUDED.unified_app_always_on_enabled,
 			webhook_ingestion_enabled = EXCLUDED.webhook_ingestion_enabled,
 			sso_enabled = EXCLUDED.sso_enabled,
+			local_registry_enabled = EXCLUDED.local_registry_enabled,
 			execution_retention_days = EXCLUDED.execution_retention_days
 	`
 	_, err := s.db.Exec(ctx, query,
@@ -67,6 +68,7 @@ func (s *postgresStore) SaveRuntimeEntitlement(ctx context.Context, entitlement 
 		entitlement.UnifiedAppAlwaysOnEnabled,
 		entitlement.WebhookIngestionEnabled,
 		entitlement.SSOEnabled,
+		entitlement.LocalRegistryEnabled,
 		entitlement.ExecutionRetentionDays,
 	)
 	return err
@@ -79,7 +81,7 @@ func (s *postgresStore) GetRuntimeEntitlement(ctx context.Context) (models.Runti
 			public_service_insights_enabled,
 			heartbeat_interval_seconds, heartbeat_stale_after_seconds, refreshed_at,
 			max_buckets, max_api_families, max_sdk_families, max_mcp_families, max_unified_app_families, max_unified_app_concurrency, max_services, max_sandbox_concurrency,
-			drift_monitoring_enabled, unified_app_always_on_enabled, webhook_ingestion_enabled, sso_enabled, execution_retention_days
+			drift_monitoring_enabled, unified_app_always_on_enabled, webhook_ingestion_enabled, sso_enabled, local_registry_enabled, execution_retention_days
 		FROM fused_runtime_entitlements
 		WHERE singleton_key = 1
 	`
@@ -105,8 +107,10 @@ func (s *postgresStore) GetRuntimeEntitlement(ctx context.Context) (models.Runti
 		&entitlement.UnifiedAppAlwaysOnEnabled,
 		&entitlement.WebhookIngestionEnabled,
 		&entitlement.SSOEnabled,
+		&entitlement.LocalRegistryEnabled,
 		&entitlement.ExecutionRetentionDays,
 	)
+	// Missing singleton rows fall back to commercial defaults while preserving database transport errors.
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return models.DefaultRuntimeEntitlement(), nil

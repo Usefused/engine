@@ -59,11 +59,14 @@ func (c *HTTPRegistryClient) FetchRuntimeContracts(ctx context.Context, versions
 	return c.fetchRuntimeContracts(ctx, versions, apiKey, true)
 }
 
-// fetchRuntimeContracts keeps runtime admission identical while selecting whether Registry must archive SDK inputs.
+// fetchRuntimeContracts keeps runtime admission identical while routing Hybrid versions to their owning Registry.
 func (c *HTTPRegistryClient) fetchRuntimeContracts(ctx context.Context, versions []store.WorkspaceServiceVersion, apiKey string, retainGeneration bool) ([]store.ServiceContractSnapshot, error) {
 	// Empty selections perform no network or Registry work.
 	if len(versions) == 0 {
 		return nil, nil
+	}
+	if c.HasLocalRegistry() {
+		return c.fetchHybridRuntimeContracts(ctx, versions, apiKey, retainGeneration)
 	}
 	// Runtime contracts can be substantially larger than ordinary Registry
 	// responses, so this workflow owns a bounded budget instead of inheriting

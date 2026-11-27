@@ -63,6 +63,8 @@ var builtInRoles = []RoleDefinition{
 			PermissionCatalogueRead,
 			PermissionCatalogueImport,
 			PermissionCatalogueManage,
+			PermissionCatalogueCloudRead,
+			PermissionCatalogueCloudPublish,
 			PermissionAccountRead,
 			PermissionBillingRead,
 			PermissionNotificationUpdate,

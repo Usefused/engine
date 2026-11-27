@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -34,7 +35,25 @@ func NewPostgresStore(db *pgxpool.Pool, options ...PostgresStoreOption) Store {
 	return result
 }
 
+// LoadEngineInstallationID reads or pins the durable Engine installation UUID, honoring FUSED_INSTALLATION_ID on Fused Cloud pods.
 func (s *postgresStore) LoadEngineInstallationID(ctx context.Context) (uuid.UUID, error) {
+	// Fused Cloud pods inject FUSED_INSTALLATION_ID so Registry recognizes the hosted deployment reliably across restarts.
+	if raw := strings.TrimSpace(os.Getenv("FUSED_INSTALLATION_ID")); raw != "" {
+		pinned, err := uuid.Parse(raw)
+		// Reject malformed or nil environment overrides instead of falling back silently.
+		if err != nil || pinned == uuid.Nil {
+			return uuid.Nil, fmt.Errorf("invalid FUSED_INSTALLATION_ID: must be a non-zero UUID")
+		}
+		_, err = s.db.Exec(ctx, `
+			INSERT INTO fused_engine_installation (singleton_key, installation_id)
+			VALUES (1, $1)
+			ON CONFLICT (singleton_key) DO UPDATE SET installation_id = EXCLUDED.installation_id
+		`, pinned)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("pin Engine installation identity: %w", err)
+		}
+		return pinned, nil
+	}
 	var installationID uuid.UUID
 	err := s.db.QueryRow(ctx, `
 		SELECT installation_id

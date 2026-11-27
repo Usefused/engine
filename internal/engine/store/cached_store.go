@@ -58,6 +58,26 @@ func (s *cachedStore) LoadEngineInstallationID(ctx context.Context) (uuid.UUID, 
 	return repository.LoadEngineInstallationID(ctx)
 }
 
+// SetWorkspaceServiceRegistrySource delegates service provenance persistence to the underlying SQL store.
+func (s *cachedStore) SetWorkspaceServiceRegistrySource(ctx context.Context, serviceID uuid.UUID, source string) error {
+	repository, ok := s.Store.(WorkspaceServiceRegistryStore)
+	// Transitional test doubles without provenance storage safely skip persistence.
+	if !ok {
+		return nil
+	}
+	return repository.SetWorkspaceServiceRegistrySource(ctx, serviceID, source)
+}
+
+// GetWorkspaceServiceRegistrySources delegates batched service provenance lookups to the underlying SQL store.
+func (s *cachedStore) GetWorkspaceServiceRegistrySources(ctx context.Context, serviceIDs []uuid.UUID) (map[uuid.UUID]string, error) {
+	repository, ok := s.Store.(WorkspaceServiceRegistryStore)
+	// Return an empty map when a test double does not implement provenance tracking.
+	if !ok {
+		return map[uuid.UUID]string{}, nil
+	}
+	return repository.GetWorkspaceServiceRegistrySources(ctx, serviceIDs)
+}
+
 func (s *cachedStore) LoadDefaultBucketID(ctx context.Context) (uuid.UUID, error) {
 	loader, ok := s.Store.(interface {
 		LoadDefaultBucketID(context.Context) (uuid.UUID, error)
@@ -695,6 +715,16 @@ func (s *cachedStore) ListServiceContractOperations(ctx context.Context, service
 		return nil, err
 	}
 	return delegate.ListServiceContractOperations(ctx, serviceID, serviceVersionID)
+}
+
+// BuildInlineSDKServiceContracts delegates inline snapshot export to the backing PostgreSQL store.
+func (s *cachedStore) BuildInlineSDKServiceContracts(ctx context.Context, refs []ServiceContractMetadataRef) ([]models.InlineSDKServiceContract, error) {
+	delegate, ok := s.Store.(InlineSDKContractStore)
+	// Stores without snapshot export fail closed rather than omitting Cloud-pinned services from a mixed SDK.
+	if !ok {
+		return nil, errors.New("inline SDK contract store is unavailable")
+	}
+	return delegate.BuildInlineSDKServiceContracts(ctx, refs)
 }
 
 // workspaceConnectSyncStore unwraps effective profile export from the delegate.

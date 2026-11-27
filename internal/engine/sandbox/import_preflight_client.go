@@ -113,9 +113,11 @@ type importPreflightResponse struct {
 	Contract     json.RawMessage `json:"contract"`
 }
 
-// PreflightImport asks Registry to replay the reviewed plan without mutation,
-// verifies its proof, and runs the ordinary Engine runtime admission pipeline.
+// PreflightImport asks the target Registry (Local by default in Hybrid mode, or Cloud on explicit opt-in) to validate the plan.
 func (c *HTTPRegistryClient) PreflightImport(ctx context.Context, applyBody []byte) (*ImportContractPreflight, error) {
+	if c.HasLocalRegistry() {
+		return c.preflightHybridImport(ctx, applyBody)
+	}
 	// The public apply shape is intentionally tiny; accepting more would create
 	// a second unbounded source-ingestion route through Engine.
 	if len(applyBody) == 0 || len(applyBody) > MaxImportPreflightRequestBytes {

@@ -56,7 +56,7 @@ fused-cli whoami
 <details>
 <summary><strong>File configuration and Docker deployments</strong></summary>
 
-**Configuration file.** Copy [engine.yaml](engine.yaml), replace its placeholders, and remove the local `registry_endpoint` to use the Fused Cloud Registry. Start Engine with `fused-engine start --config /path/to/engine.yaml`. Existing environment variables take precedence over YAML defaults. See the [configuration reference](docs/engine-configuration.md).
+**Configuration file.** Copy [engine.yaml](engine.yaml), replace its placeholders, and remove the local `cloud_registry_endpoint` override to use the default Fused Cloud Registry (set `registry_endpoint` only when connecting to an Enterprise Local Registry). Start Engine with `fused-engine start --config /path/to/engine.yaml`. Existing environment variables take precedence over YAML defaults. See the [configuration reference](docs/engine-configuration.md).
 
 **Docker and hosted setup.** Follow the [deployment guide](https://usefused.com/docs/deploy-an-engine). For Unified Apps in Docker, extract the [bundled worker files](deploy/unified-app-workers/README.md) before launch. Both image variants include the seccomp profile, its license, and a Compose example at `/app/deploy/unified-app-workers`. Release archives include the same files. Apply the profile with Docker’s `--security-opt`, set `FUSED_UNIFIED_APP_WORKER_REQUIRED=true`, and verify that `/health` reports `unified_app_worker_ready: true`.
 

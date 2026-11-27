@@ -20,9 +20,9 @@ func TestPermissionCatalogueContainsUniqueValidNames(t *testing.T) {
 		}
 		seen[permission] = struct{}{}
 	}
-	// Private webhook messages add a distinct grant without widening ordinary receipt permissions.
-	if len(permissions) != 52 {
-		t.Fatalf("permission catalogue contains %d entries, want 52", len(permissions))
+	// Private webhook messages and Cloud Registry fallback/publish add distinct grants without widening ordinary catalogue read.
+	if len(permissions) != 54 {
+		t.Fatalf("permission catalogue contains %d entries, want 54", len(permissions))
 	}
 }
 

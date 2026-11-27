@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -48,13 +49,20 @@ type CreditBundle struct {
 
 const DefaultInitialCreditBalance = 10_000_000.0
 
+// DefaultCloudRegistryEndpoint is Fused's static Cloud Registry GraphQL URL used for license handshakes, heartbeats, and permitted Cloud fallback.
+const DefaultCloudRegistryEndpoint = "https://registry.usefused.com/graphql"
+
 var GlobalEncryptionKey []byte
 
 type EngineConfig struct {
-	AI                           AgentConfig               `yaml:"ai"`
-	UnifiedApps                  UnifiedAppAdmissionConfig `yaml:"unified_apps"`
-	RegistryEndpoint             string                    `yaml:"registry_endpoint"`
-	PublicURL                    string                    `yaml:"public_url"`
+	AI                    AgentConfig               `yaml:"ai"`
+	UnifiedApps           UnifiedAppAdmissionConfig `yaml:"unified_apps"`
+	// RegistryEndpoint optionally configures an Enterprise Local Registry URL (via engine.registry_endpoint or FUSED_REGISTRY_ENDPOINT).
+	// When empty, Engine talks solely to Fused Cloud Registry.
+	RegistryEndpoint      string                    `yaml:"registry_endpoint"`
+	// CloudRegistryEndpoint holds Fused's static Cloud Registry URL (overridable only via FUSED_CLOUD_REGISTRY_ENDPOINT for dev/staging/provisioner).
+	CloudRegistryEndpoint string                    `yaml:"cloud_registry_endpoint"`
+	PublicURL             string                    `yaml:"public_url"`
 	PublicGRPCURL                string                    `yaml:"public_grpc_url"`
 	AccountID                    string                    `yaml:"account_id"`
 	LicenseKey                   string                    `yaml:"license_key"`
@@ -234,13 +242,50 @@ func defaultConfig() *Config {
 		Engine: EngineConfig{
 			AI:                           AgentConfig{Enabled: true},
 			UnifiedApps:                  DefaultUnifiedAppAdmissionConfig(),
-			RegistryEndpoint:             "https://registry.usefused.com/graphql",
+			CloudRegistryEndpoint:        DefaultCloudRegistryEndpoint,
 			ExecutionRetentionDays:       30,
 			ExecutionResultRetentionDays: 7,
 			ExecutionCleanupBatch:        1000,
 			ConnectedAuthRefreshWorkers:  DefaultConnectedAuthRefreshWorkers,
 		},
 	}
+}
+
+// EffectiveCloudRegistryEndpoint returns the configured Cloud Registry URL or Fused's static production Cloud default.
+func (e EngineConfig) EffectiveCloudRegistryEndpoint() string {
+	// Always fall back to Fused's static Cloud Registry URL when no dev/staging override is set.
+	if trimmed := strings.TrimSpace(e.CloudRegistryEndpoint); trimmed != "" {
+		return trimmed
+	}
+	return DefaultCloudRegistryEndpoint
+}
+
+// normalizeRegistryEndpointBase strips trailing slashes and a trailing /graphql suffix so equivalent Registry URLs match.
+func normalizeRegistryEndpointBase(endpoint string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(endpoint), "/")
+	// Strip a trailing /graphql segment case-insensitively so bare and GraphQL URLs compare identically.
+	if len(trimmed) >= len("/graphql") && strings.EqualFold(trimmed[len(trimmed)-len("/graphql"):], "/graphql") {
+		trimmed = strings.TrimRight(trimmed[:len(trimmed)-len("/graphql")], "/")
+	}
+	return strings.ToLower(trimmed)
+}
+
+// EffectiveLocalRegistryEndpoint returns the configured Enterprise Local Registry URL, or "" when unset
+// or still set to Fused Cloud Registry (preserving zero-downtime upgrades for existing deployed Engines).
+func (e EngineConfig) EffectiveLocalRegistryEndpoint() string {
+	trimmed := strings.TrimSpace(e.RegistryEndpoint)
+	// Empty means standard Cloud-only mode without an Enterprise Local Registry.
+	if trimmed == "" {
+		return ""
+	}
+	normalized := normalizeRegistryEndpointBase(trimmed)
+	// Ignore legacy FUSED_REGISTRY_ENDPOINT values pointing at Fused Cloud Registry so existing
+	// hosted and self-hosted deployments upgrade cleanly without entering Enterprise Local mode.
+	if normalized == normalizeRegistryEndpointBase(DefaultCloudRegistryEndpoint) ||
+		normalized == normalizeRegistryEndpointBase(e.EffectiveCloudRegistryEndpoint()) {
+		return ""
+	}
+	return trimmed
 }
 
 // loadYAML expands scalar environment references before decoding into the defaulted configuration.
@@ -286,8 +331,13 @@ func applyEnvironment(cfg *Config) error {
 	if envKey := os.Getenv("FUSED_ENCRYPTION_KEY"); envKey != "" {
 		cfg.EncryptionKey = envKey
 	}
+	// FUSED_REGISTRY_ENDPOINT configures an Enterprise Local Registry when set.
 	if envRegistryEndpoint := os.Getenv("FUSED_REGISTRY_ENDPOINT"); envRegistryEndpoint != "" {
 		cfg.Engine.RegistryEndpoint = envRegistryEndpoint
+	}
+	// FUSED_CLOUD_REGISTRY_ENDPOINT is an internal dev/staging/provisioner override for Fused's static Cloud Registry URL.
+	if envCloudRegistry := os.Getenv("FUSED_CLOUD_REGISTRY_ENDPOINT"); envCloudRegistry != "" {
+		cfg.Engine.CloudRegistryEndpoint = envCloudRegistry
 	}
 	if publicURL := os.Getenv("FUSED_ENGINE_PUBLIC_URL"); publicURL != "" {
 		cfg.Engine.PublicURL = publicURL

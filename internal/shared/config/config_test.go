@@ -219,3 +219,80 @@ func TestLoadEnginePublicEndpoints(t *testing.T) {
 		t.Fatalf("environment public endpoints = %q/%q", configured.Engine.PublicURL, configured.Engine.PublicGRPCURL)
 	}
 }
+
+// TestLoadEngineRegistryEndpoints verifies that registry_endpoint targets an optional
+// Enterprise Local Registry while Fused Cloud Registry stays static unless explicitly overridden.
+func TestLoadEngineRegistryEndpoints(t *testing.T) {
+	t.Setenv("FUSED_REGISTRY_ENDPOINT", "")
+	t.Setenv("FUSED_CLOUD_REGISTRY_ENDPOINT", "")
+
+	defaults, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
+	// Missing YAML must keep Local Registry disabled and preserve Fused's static Cloud Registry URL.
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	if defaults.Engine.RegistryEndpoint != "" {
+		t.Fatalf("default local registry endpoint = %q, want empty", defaults.Engine.RegistryEndpoint)
+	}
+	if defaults.Engine.EffectiveCloudRegistryEndpoint() != DefaultCloudRegistryEndpoint {
+		t.Fatalf("default cloud registry endpoint = %q, want %q", defaults.Engine.EffectiveCloudRegistryEndpoint(), DefaultCloudRegistryEndpoint)
+	}
+
+	path := filepath.Join(t.TempDir(), "engine.yaml")
+	yamlContent := "engine:\n  registry_endpoint: https://local-registry.internal:8080\n  cloud_registry_endpoint: http://127.0.0.1:8090/graphql\n"
+	// YAML write failure indicates a broken test workspace rather than config validation behavior.
+	if err := os.WriteFile(path, []byte(yamlContent), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	fromYAML, err := Load(path)
+	// YAML settings should populate the Local Registry URL and optional dev/staging Cloud override.
+	if err != nil {
+		t.Fatalf("Load YAML endpoints: %v", err)
+	}
+	if fromYAML.Engine.RegistryEndpoint != "https://local-registry.internal:8080" {
+		t.Fatalf("YAML local registry endpoint = %q", fromYAML.Engine.RegistryEndpoint)
+	}
+	if fromYAML.Engine.EffectiveCloudRegistryEndpoint() != "http://127.0.0.1:8090/graphql" {
+		t.Fatalf("YAML cloud registry endpoint = %q", fromYAML.Engine.EffectiveCloudRegistryEndpoint())
+	}
+
+	t.Setenv("FUSED_REGISTRY_ENDPOINT", "https://env-local-registry.internal:8443")
+	t.Setenv("FUSED_CLOUD_REGISTRY_ENDPOINT", "https://staging-registry.usefused.com/graphql")
+	fromEnv, err := Load(path)
+	// Process environment overrides must take precedence over YAML values for both registry endpoints.
+	if err != nil {
+		t.Fatalf("Load env endpoints: %v", err)
+	}
+	if fromEnv.Engine.RegistryEndpoint != "https://env-local-registry.internal:8443" {
+		t.Fatalf("env local registry endpoint = %q", fromEnv.Engine.RegistryEndpoint)
+	}
+	if fromEnv.Engine.EffectiveCloudRegistryEndpoint() != "https://staging-registry.usefused.com/graphql" {
+		t.Fatalf("env cloud registry endpoint = %q", fromEnv.Engine.EffectiveCloudRegistryEndpoint())
+	}
+}
+
+// TestEffectiveLocalRegistryEndpointIgnoresLegacyCloudURL ensures existing deployed Engines
+// carrying FUSED_REGISTRY_ENDPOINT=https://registry.usefused.com/graphql stay in Cloud-only mode.
+func TestEffectiveLocalRegistryEndpointIgnoresLegacyCloudURL(t *testing.T) {
+	tests := []struct {
+		name  string
+		cfg   EngineConfig
+		want  string
+	}{
+		{name: "empty", cfg: EngineConfig{}, want: ""},
+		{name: "legacy default cloud graphql url", cfg: EngineConfig{RegistryEndpoint: "https://registry.usefused.com/graphql"}, want: ""},
+		{name: "legacy default cloud bare url", cfg: EngineConfig{RegistryEndpoint: "https://registry.usefused.com/"}, want: ""},
+		{name: "legacy default cloud uppercase url", cfg: EngineConfig{RegistryEndpoint: "HTTPS://REGISTRY.USEFUSED.COM/GraphQL/"}, want: ""},
+		{name: "matches custom cloud override", cfg: EngineConfig{RegistryEndpoint: "http://127.0.0.1:8090", CloudRegistryEndpoint: "http://127.0.0.1:8090/graphql"}, want: ""},
+		{name: "distinct local registry url", cfg: EngineConfig{RegistryEndpoint: "https://local-registry.internal:8080"}, want: "https://local-registry.internal:8080"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Verify each legacy or custom endpoint resolves to the expected Local Registry target.
+			if got := tc.cfg.EffectiveLocalRegistryEndpoint(); got != tc.want {
+				t.Fatalf("EffectiveLocalRegistryEndpoint() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

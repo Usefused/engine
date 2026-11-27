@@ -14,6 +14,26 @@ import {
   type APIErrorPayload,
 } from "./authorization-error";
 
+// Track Cloud-targeted import plans and discovery sessions so apply/status/session follow-ups replay X-Fused-Registry-Target: cloud.
+const cloudTargetedPlanIDs = new Set<string>();
+const cloudTargetedSessionIDs = new Set<string>();
+
+// cloudTargetHeaders returns the explicit Cloud Registry routing header only when Cloud targeting applies.
+function cloudTargetHeaders(useCloud: boolean): Record<string, string> | undefined {
+  // Leave headers undefined for default Registry calls so existing request options remain unchanged.
+  return useCloud ? { "X-Fused-Registry-Target": "cloud" } : undefined;
+}
+
+// recordCloudDiscoverySnapshot remembers a Cloud-targeted session and any embedded import plan ID it produces.
+function recordCloudDiscoverySnapshot(snapshot: DiscoverySnapshot): DiscoverySnapshot {
+  // Record the session ID so subsequent polls, actions, and review summaries stay on Fused Cloud Registry.
+  if (snapshot.session_id) cloudTargetedSessionIDs.add(snapshot.session_id);
+  const payload = snapshot.payload as { plan?: { plan_id?: string } } | undefined;
+  // Record any generated plan ID so applyImport replays the Cloud target automatically.
+  if (payload?.plan?.plan_id) cloudTargetedPlanIDs.add(payload.plan.plan_id);
+  return snapshot;
+}
+
 // When served as an embedded SPA from the engine, BACKEND_URL is set to ""
 // (explicitly empty) in root.tsx so all API calls are relative to the engine's
 // own origin. BASE is kept for external callers that reference it directly,
@@ -568,6 +588,8 @@ export interface DiscoveryStartRequest {
   target_type?: "endpoints" | "webhooks";
   destination_version?: string;
   expected_target?: SpecificationImportTarget;
+  is_public?: boolean;
+  registry_target?: "local" | "cloud";
   name: string;
   slug: string;
   version?: string;
@@ -862,6 +884,7 @@ export interface ActivatedService {
   webhook_count?: number;
   provider?: { name: string; handle: string } | null;
   canonical_ref?: string | null;
+  registry_source?: "local" | "cloud" | null;
   is_owner?: boolean | null;
   is_public?: boolean | null;
   enabled_versions?: Array<{
@@ -1543,6 +1566,8 @@ export const api = {
       name: string;
       slug?: string;
       version?: string;
+      is_public?: boolean;
+      registry_target?: "local" | "cloud";
       source_url?: string;
       source_content?: string;
       target_type?: "endpoints" | "webhooks";
@@ -1550,7 +1575,12 @@ export const api = {
       expected_target?: SpecificationImportTarget;
       include_webhook_draft?: boolean;
     }) => {
-      const plan = await req<SpecificationImportPlan>("/integrations/import/plan", { method: "POST", body: JSON.stringify(input) });
+      const { registry_target, ...bodyInput } = input;
+      // Attach explicit Cloud target header only when the caller opted into publishing to Fused Cloud Registry.
+      const headers = cloudTargetHeaders(registry_target === "cloud");
+      const plan = await req<SpecificationImportPlan>("/integrations/import/plan", { method: "POST", headers, body: JSON.stringify(bodyInput) });
+      // Remember Cloud-targeted plan IDs so applyImport and importStatus replay the Cloud target header.
+      if (registry_target === "cloud" && plan.plan_id) cloudTargetedPlanIDs.add(plan.plan_id);
       // An older server must explicitly acknowledge report-only before the UI offers Apply.
       if (input.repair_mode === "report_only" && plan.repair_mode !== "report_only") throw new Error("The Registry did not acknowledge report-only mode. Upgrade the Registry and review again.");
       return plan;
@@ -1560,33 +1590,53 @@ export const api = {
     applyImport: (planId: string, reviewHash: string) =>
       req<SpecificationImportApplyResult>("/integrations/import/apply", {
         method: "POST",
+        headers: cloudTargetHeaders(cloudTargetedPlanIDs.has(planId)),
         body: JSON.stringify({ plan_id: planId, review_hash: reviewHash }),
       }),
 
     // An interrupted apply is resolved from its durable ledger before offering a retry.
     importStatus: (operationID: string) =>
-      req<SpecificationImportStatus>(`/integrations/import/operations/${encodeURIComponent(operationID)}`),
+      req<SpecificationImportStatus>(`/integrations/import/operations/${encodeURIComponent(operationID)}`, {
+        headers: cloudTargetHeaders(cloudTargetedPlanIDs.has(operationID)),
+      }),
 
     // startDiscovery creates the authoritative revision-one session snapshot.
-    startDiscovery: (input: DiscoveryStartRequest) =>
-      req<DiscoverySnapshot>("/integrations/start", {
+    startDiscovery: (input: DiscoveryStartRequest) => {
+      const { registry_target, ...bodyInput } = input;
+      return req<DiscoverySnapshot>("/integrations/start", {
         method: "POST",
-        body: JSON.stringify(input),
-      }),
+        headers: cloudTargetHeaders(registry_target === "cloud"),
+        body: JSON.stringify(bodyInput),
+      }).then((snapshot) =>
+        // Remember Cloud-targeted discovery sessions so subsequent session polls, actions, and apply replay Cloud routing.
+        registry_target === "cloud" ? recordCloudDiscoverySnapshot(snapshot) : snapshot
+      );
+    },
 
     // actOnDiscovery submits one strict, optimistic-concurrency-bound session decision.
-    actOnDiscovery: (sessionId: string, input: DiscoveryActionRequest) =>
-      req<DiscoverySnapshot>(`/integrations/session/${sessionId}/actions`, {
+    actOnDiscovery: async (sessionId: string, input: DiscoveryActionRequest) => {
+      const useCloud = cloudTargetedSessionIDs.has(sessionId);
+      const snapshot = await req<DiscoverySnapshot>(`/integrations/session/${sessionId}/actions`, {
         method: "POST",
+        headers: cloudTargetHeaders(useCloud),
         body: JSON.stringify(input),
-      }),
+      });
+      // Capture any plan ID emitted when a Cloud-targeted discovery session reaches review.
+      return useCloud ? recordCloudDiscoverySnapshot(snapshot) : snapshot;
+    },
 
     // getActiveDiscoverySessions lists only resumable version-one snapshots.
     getActiveDiscoverySessions: () => req<DiscoverySnapshot[]>("/integrations/sessions/active"),
 
     // getDiscoverySession reloads the authoritative snapshot after reconnects and conflicts.
-    getDiscoverySession: (sessionId: string) =>
-      req<DiscoverySnapshot>(`/integrations/session/${sessionId}`),
+    getDiscoverySession: async (sessionId: string) => {
+      const useCloud = cloudTargetedSessionIDs.has(sessionId);
+      const snapshot = await req<DiscoverySnapshot>(`/integrations/session/${sessionId}`, {
+        headers: cloudTargetHeaders(useCloud),
+      });
+      // Keep Cloud plan IDs synchronized when reloading a Cloud-targeted session snapshot.
+      return useCloud ? recordCloudDiscoverySnapshot(snapshot) : snapshot;
+    },
 
     // getDiscoveryReviewSummary reads only the bounded structure bound to the exact public draft receipt.
     getDiscoveryReviewSummary: (sessionId: string, receipt: DiscoveryContractReceipt) => {
@@ -1595,7 +1645,9 @@ export const api = {
         draft_revision: String(receipt.draft_revision),
         review_hash: receipt.review_hash,
       });
-      return req<DiscoveryReviewSummary>(`/integrations/session/${encodeURIComponent(sessionId)}/review-summary?${query.toString()}`);
+      return req<DiscoveryReviewSummary>(`/integrations/session/${encodeURIComponent(sessionId)}/review-summary?${query.toString()}`, {
+        headers: cloudTargetHeaders(cloudTargetedSessionIDs.has(sessionId)),
+      });
     },
 
     updateDriftWatch: (id: string, watch: boolean) =>
@@ -1728,6 +1780,7 @@ export const api = {
               webhook_count
               provider { name handle }
               canonical_ref
+              registry_source
               is_owner
               is_public
               added_by
@@ -1761,6 +1814,7 @@ export const api = {
                 webhook_count
                 provider { name handle }
                 canonical_ref
+                registry_source
                 is_owner
                 is_public
                 added_by
@@ -2497,6 +2551,7 @@ export const api = {
 
 export type BillingState = {
   available: boolean;
+  hosted_engine?: boolean;
   plan: string;
   status: string;
   access_until: string | null;

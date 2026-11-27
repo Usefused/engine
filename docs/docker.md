@@ -50,8 +50,8 @@ Containers need:
 - `FUSED_ENGINE_PUBLIC_URL` and `FUSED_ENGINE_PUBLIC_GRPC_URL` when the
   embedded UI should show copy-ready external HTTP and gRPC addresses; these
   values describe routes and do not create DNS or load-balancer configuration
-- `FUSED_REGISTRY_ENDPOINT` only when Fused support directs you away from the
-  production Fused Cloud Registry default
+- `FUSED_REGISTRY_ENDPOINT` only when connecting an Enterprise Engine to a
+  self-hosted Local Registry (leave unset to use the built-in Fused Cloud Registry)
 
 Fused accepts one standard PostgreSQL DSN and has no provider-specific
 database branching. It creates or upgrades its own tables through that

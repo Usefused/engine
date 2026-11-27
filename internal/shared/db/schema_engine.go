@@ -721,6 +721,7 @@ func engineSchemaQueries() []string {
 			unified_app_always_on_enabled boolean NOT NULL DEFAULT false,
 			webhook_ingestion_enabled boolean NOT NULL DEFAULT false,
 			sso_enabled boolean NOT NULL DEFAULT false,
+			local_registry_enabled boolean NOT NULL DEFAULT false,
 			execution_retention_days integer NOT NULL DEFAULT 30,
 			CHECK (singleton_key = 1)
 		);`,
@@ -732,6 +733,8 @@ func engineSchemaQueries() []string {
 		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS max_unified_app_concurrency integer NOT NULL DEFAULT 4;`,
 		// Existing Engines keep the warm-worker gate closed until the Registry issues their plan contract.
 		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS unified_app_always_on_enabled boolean NOT NULL DEFAULT false;`,
+		// Existing Engines keep Local Registry disabled until an Enterprise handshake explicitly enables it.
+		`ALTER TABLE fused_runtime_entitlements ADD COLUMN IF NOT EXISTS local_registry_enabled boolean NOT NULL DEFAULT false;`,
 		// A default unlimited row makes activation transactions total before the
 		// first handshake; Registry bootstrap atomically overwrites it with the licensed contract.
 		`INSERT INTO fused_runtime_entitlements (
@@ -739,11 +742,11 @@ func engineSchemaQueries() []string {
 			public_service_insights_enabled, heartbeat_interval_seconds,
 			heartbeat_stale_after_seconds, refreshed_at, max_buckets,
 			max_api_families, max_sdk_families, max_mcp_families, max_unified_app_families, max_unified_app_concurrency, max_services, max_sandbox_concurrency,
-			drift_monitoring_enabled, unified_app_always_on_enabled, webhook_ingestion_enabled, sso_enabled,
+			drift_monitoring_enabled, unified_app_always_on_enabled, webhook_ingestion_enabled, sso_enabled, local_registry_enabled,
 			execution_retention_days
 		) VALUES (
 			1, '', 'commercial', true, 'aggregate', false, 60, 300, NOW(),
-			-1, -1, -1, -1, -1, 4, -1, -1, true, false, false, false, 30
+			-1, -1, -1, -1, -1, 4, -1, -1, true, false, false, false, false, 30
 		) ON CONFLICT (singleton_key) DO NOTHING;`,
 
 		// The durable receipt ID is the exactly-once accounting boundary across JetStream redelivery.
@@ -782,14 +785,17 @@ func engineSchemaQueries() []string {
 		// service versions. The parent answers "is this service available here?";
 		// the child rows answer "which exact Registry service versions are usable?"
 		`CREATE TABLE IF NOT EXISTS fused_workspace_services (
-			id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-			service_id     uuid NOT NULL,
-			service_slug   text,
-			service_name   text,
-			added_by       uuid,
-			created_at     timestamptz DEFAULT clock_timestamp(),
+			id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+			service_id      uuid NOT NULL,
+			service_slug    text,
+			service_name    text,
+			registry_source text NOT NULL DEFAULT 'cloud' CHECK (registry_source IN ('local', 'cloud')),
+			added_by        uuid,
+			created_at      timestamptz DEFAULT clock_timestamp(),
 			UNIQUE(service_id)
 		);`,
+		// Existing workspaces default historical services to Fused Cloud Registry while pinning future Local activations explicitly.
+		`ALTER TABLE fused_workspace_services ADD COLUMN IF NOT EXISTS registry_source text NOT NULL DEFAULT 'cloud';`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_fused_workspace_services_slug_ci
 		ON fused_workspace_services(lower(service_slug)) WHERE service_slug IS NOT NULL;`,
 

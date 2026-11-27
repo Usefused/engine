@@ -61,6 +61,38 @@ func TestAdminCannotManageAccountOrBilling(t *testing.T) {
 	}
 }
 
+// TestCloudRegistryPermissionsDefaultToOwnerAndAdminAndSupportCustomRoles verifies permission-based Cloud fallback boundaries.
+func TestCloudRegistryPermissionsDefaultToOwnerAndAdminAndSupportCustomRoles(t *testing.T) {
+	for _, slug := range []string{RoleOwner, RoleAdmin} {
+		role := roleBySlug(t, slug)
+		// Owner and Admin receive Cloud fallback and Cloud publication through explicit role permissions.
+		for _, permission := range []Permission{PermissionCatalogueCloudRead, PermissionCatalogueCloudPublish} {
+			if !roleHasPermission(role, permission) {
+				t.Fatalf("role %q is missing %q", slug, permission)
+			}
+		}
+	}
+	for _, slug := range []string{RoleBuilder, RoleViewer} {
+		role := roleBySlug(t, slug)
+		// Builders and Viewers stay restricted to Local Registry unless granted Cloud permissions via a custom role or Team binding.
+		for _, permission := range []Permission{PermissionCatalogueCloudRead, PermissionCatalogueCloudPublish} {
+			if roleHasPermission(role, permission) {
+				t.Fatalf("role %q unexpectedly grants %q by default", slug, permission)
+			}
+		}
+	}
+	custom := RoleDefinition{
+		Slug:        "cloud-catalogue-reader",
+		DisplayName: "Cloud catalogue reader",
+		ScopeType:   ResourceWorkspace,
+		Permissions: []Permission{PermissionCatalogueRead, PermissionCatalogueCloudRead},
+	}
+	// Custom workspace roles must be able to bind Cloud Registry permissions independently of built-in role slugs.
+	if err := ValidateRoleDefinition(custom); err != nil {
+		t.Fatalf("ValidateRoleDefinition(custom): %v", err)
+	}
+}
+
 // TestWorkspaceShareRolesCannotManageSharedResources keeps resource sharing separate from resource administration.
 func TestWorkspaceShareRolesCannotManageSharedResources(t *testing.T) {
 	tests := []struct {

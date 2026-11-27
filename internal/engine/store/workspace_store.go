@@ -23,8 +23,69 @@ type WorkspaceService struct {
 	Version          string
 	ServiceVersionID uuid.UUID
 	ServiceName      string
+	RegistrySource   string
 	AddedBy          uuid.UUID
 	CreatedAt        time.Time
+}
+
+// WorkspaceServiceRegistryStore tracks whether each activated workspace service originated from Local or Cloud Registry.
+type WorkspaceServiceRegistryStore interface {
+	SetWorkspaceServiceRegistrySource(ctx context.Context, serviceID uuid.UUID, source string) error
+	GetWorkspaceServiceRegistrySources(ctx context.Context, serviceIDs []uuid.UUID) (map[uuid.UUID]string, error)
+}
+
+// SetWorkspaceServiceRegistrySource pins an activated service to either 'local' or 'cloud' Registry authority.
+func (s *postgresStore) SetWorkspaceServiceRegistrySource(ctx context.Context, serviceID uuid.UUID, source string) error {
+	normalized := normalizeWorkspaceRegistrySource(source)
+	// Reject unrecognized source labels rather than writing invalid provenance metadata.
+	if normalized == "" || serviceID == uuid.Nil {
+		return errors.New("valid service_id and registry_source ('local' or 'cloud') are required")
+	}
+	_, err := s.db.Exec(ctx, `
+		UPDATE fused_workspace_services
+		SET registry_source = $2
+		WHERE service_id = $1
+	`, serviceID, normalized)
+	return err
+}
+
+// GetWorkspaceServiceRegistrySources resolves the pinned Registry origin for a batch of workspace service IDs.
+func (s *postgresStore) GetWorkspaceServiceRegistrySources(ctx context.Context, serviceIDs []uuid.UUID) (map[uuid.UUID]string, error) {
+	result := make(map[uuid.UUID]string, len(serviceIDs))
+	// Empty lookups avoid unnecessary PostgreSQL round trips.
+	if len(serviceIDs) == 0 {
+		return result, nil
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT service_id, registry_source
+		FROM fused_workspace_services
+		WHERE service_id = ANY($1::uuid[])
+	`, serviceIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load workspace service registry sources: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		var source string
+		if err := rows.Scan(&id, &source); err != nil {
+			return nil, err
+		}
+		result[id] = normalizeWorkspaceRegistrySource(source)
+	}
+	return result, rows.Err()
+}
+
+// normalizeWorkspaceRegistrySource admits only canonical 'local' and 'cloud' provenance values.
+func normalizeWorkspaceRegistrySource(source string) string {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "local":
+		return "local"
+	case "cloud":
+		return "cloud"
+	default:
+		return ""
+	}
 }
 
 type WorkspaceServiceVersion struct {

@@ -275,6 +275,7 @@ func (e *workspaceServicePersistenceError) Unwrap() error {
 // Re-adding an active version refreshes verified identity without rewriting its immutable snapshot or pin.
 func verifyAndActivateService(ctx context.Context, s store.Store, verifier ServiceVerifier, call addServiceCall) error {
 	span := trace.SpanFromContext(ctx)
+	ctx, sourceCell := sandbox.WithRegistrySourceOut(ctx)
 
 	verifiedName, verifiedSlug, currentVersionTag, currentVersionID, err := verifier.VerifyServiceExists(ctx, call.serviceID, call.apiKey)
 	// Registry absence and dependency failure remain distinct bounded outcomes.
@@ -338,6 +339,10 @@ func verifyAndActivateService(ctx context.Context, s store.Store, verifier Servi
 		recordWorkspaceServiceMutationFailure(span, "failed", "workspace_service_add_failed")
 		slog.ErrorContext(ctx, "verifyAndActivateService: AddWorkspaceServiceVersion failed", slog.Any("error", err))
 		return &workspaceServicePersistenceError{cause: err, phase: "workspace_membership_commit", commitState: "unknown"}
+	}
+	// Persist whether Local or Cloud Registry resolved this service so subsequent refreshes target the same authority.
+	if regStore, ok := s.(store.WorkspaceServiceRegistryStore); ok && sourceCell.Value() != "" {
+		_ = regStore.SetWorkspaceServiceRegistrySource(ctx, call.serviceID, sourceCell.Value())
 	}
 
 	span.SetAttributes(attribute.String("outcome", "success"))

@@ -36,7 +36,10 @@ engine:
     max_concurrency: 1
     queue_capacity: 256
     queue_timeout_seconds: 5
-  registry_endpoint: "http://127.0.0.1:8090/graphql"
+  # Local dev override for Fused Cloud Registry (omit in production to use https://registry.usefused.com/graphql).
+  cloud_registry_endpoint: "http://127.0.0.1:8090/graphql"
+  # Optional Enterprise Local Registry URL; when set, internal specs and default lookups use Local Registry first.
+  # registry_endpoint: "https://local-registry.internal:8080"
   license_key: "" # your fused license key
   # Run payload retention is independent of activity history; zero keeps it indefinitely.
   execution_result_retention_days: 7

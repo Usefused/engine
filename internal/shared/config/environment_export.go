@@ -40,6 +40,8 @@ var yamlEnvironmentBindings = map[string]string{
 	"observability.traces_endpoint":              "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
 	"observability.metrics_endpoint":             "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
 	"observability.logs_endpoint":                "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+	"engine.registry_endpoint":                   "FUSED_REGISTRY_ENDPOINT",
+	"engine.cloud_registry_endpoint":             "FUSED_CLOUD_REGISTRY_ENDPOINT",
 	"engine.unified_apps.max_worker_concurrency": "FUSED_UNIFIED_APP_MAX_WORKER_CONCURRENCY",
 	"engine.unified_apps.max_concurrency":        "FUSED_UNIFIED_APP_MAX_CONCURRENCY",
 	"engine.unified_apps.queue_capacity":         "FUSED_UNIFIED_APP_QUEUE_CAPACITY",

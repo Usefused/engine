@@ -297,6 +297,7 @@ type rawRuntimeEntitlement struct {
 	UnifiedAppAlwaysOnEnabled    bool   `json:"unified_app_always_on_enabled"`
 	WebhookIngestionEnabled      bool   `json:"webhook_ingestion_enabled"`
 	SSOEnabled                   bool   `json:"sso_enabled"`
+	LocalRegistryEnabled         bool   `json:"local_registry_enabled"`
 	ExecutionRetentionDays       *int   `json:"execution_retention_days,omitempty"`
 }
 
@@ -369,6 +370,10 @@ func (c *HTTPRegistryClient) FetchConnectionProfileContracts(ctx context.Context
 	if len(versionIDs) == 0 {
 		return nil, nil
 	}
+	// Route Hybrid profile contract validation Local-first with Cloud fallback on misses.
+	if c.HasLocalRegistry() {
+		return c.fetchHybridConnectionProfileContracts(ctx, versionIDs, apiKey)
+	}
 	data, err := doBearerGraphQL[struct {
 		Contracts []ConnectionProfileContract `json:"connectionProfileContracts"`
 	}](ctx, c, "fetch connection profile contracts", graphqlQuery{
@@ -389,6 +394,10 @@ func (c *HTTPRegistryClient) FetchEligibleConnectionProfiles(ctx context.Context
 	// Skip the Registry round trip when no connection profile references were requested.
 	if len(refs) == 0 {
 		return nil, nil
+	}
+	// Route Hybrid profile stream lookups Local-first with Cloud fallback on misses.
+	if c.HasLocalRegistry() {
+		return c.fetchHybridEligibleConnectionProfiles(ctx, refs, apiKey)
 	}
 	variables := make([]map[string]interface{}, 0, len(refs))
 	for _, ref := range refs {
@@ -453,7 +462,11 @@ var ErrServiceNotFound = errors.New("service not found in registry")
 // also use it for local authorization. HTTPRegistryClient.do always replaces
 // it with FUSED_LICENSE_KEY before the request crosses into Registry.
 // The returned service reference is canonical (@provider/slug), suitable for workspace persistence.
+// VerifyServiceExists checks Local Registry first in Hybrid mode and falls back to Cloud only with permission.
 func (c *HTTPRegistryClient) VerifyServiceExists(ctx context.Context, serviceID uuid.UUID, apiKey string) (string, string, string, uuid.UUID, error) {
+	if c.HasLocalRegistry() {
+		return c.verifyHybridServiceExists(ctx, serviceID, apiKey)
+	}
 	req, err := c.buildVerifyServiceRequest(ctx, serviceID, apiKey)
 	if err != nil {
 		return "", "", "", uuid.Nil, err
@@ -603,6 +616,10 @@ func (c *HTTPRegistryClient) FetchServiceVisibility(ctx context.Context, service
 	if len(serviceIDs) == 0 {
 		return out, nil
 	}
+	// Partition visibility lookups across Local and Cloud Registries in Hybrid mode.
+	if c.HasLocalRegistry() {
+		return c.fetchHybridServiceVisibility(ctx, serviceIDs, apiKey)
+	}
 	reqBody := graphqlQuery{
 		Query: `
 			query ServiceVisibility($serviceIds: [String!]!) {
@@ -742,6 +759,14 @@ func (c *HTTPRegistryClient) putExecutionPolicy(ctx context.Context, opName, pat
 
 // UpdateServicePublic toggles service-level public visibility in Registry.
 func (c *HTTPRegistryClient) UpdateServicePublic(ctx context.Context, serviceID uuid.UUID, isPublic bool, apiKey string) error {
+	// Dispatch visibility updates to the service's authoritative Registry in Hybrid mode.
+	if c.HasLocalRegistry() {
+		target, err := c.clientForServiceMutation(ctx, serviceID)
+		if err != nil {
+			return err
+		}
+		return target.UpdateServicePublic(ctx, serviceID, isPublic, apiKey)
+	}
 	return c.updateVisibilityGraphQL(ctx, "UpdateServicePublic", `
 			mutation UpdateServicePublic($serviceId: String!, $isPublic: Boolean!) {
 				updateServicePublic(serviceId: $serviceId, isPublic: $isPublic)
@@ -753,6 +778,14 @@ func (c *HTTPRegistryClient) UpdateServicePublic(ctx context.Context, serviceID 
 // through the Registry API. Its caller owns the strict Registry projection so
 // this transport remains unaware of workspace-only policy controls.
 func (c *HTTPRegistryClient) PublishServiceExecutionPolicy(ctx context.Context, serviceID uuid.UUID, policy any, apiKey string) error {
+	// Dispatch policy publication to the service's authoritative Registry in Hybrid mode.
+	if c.HasLocalRegistry() {
+		target, err := c.clientForServiceMutation(ctx, serviceID)
+		if err != nil {
+			return err
+		}
+		return target.PublishServiceExecutionPolicy(ctx, serviceID, policy, apiKey)
+	}
 	return c.putExecutionPolicy(ctx, "PublishServiceExecutionPolicy", "/integrations/"+serviceID.String()+"/execution-policy", policy, apiKey)
 }
 
@@ -760,6 +793,14 @@ func (c *HTTPRegistryClient) PublishServiceExecutionPolicy(ctx context.Context, 
 // mutation to set is_public on one specific version, independent of the
 // service-level visibility set by UpdateServicePublic.
 func (c *HTTPRegistryClient) UpdateServiceVersionPublic(ctx context.Context, serviceID uuid.UUID, version string, isPublic bool, apiKey string) error {
+	// Dispatch version visibility updates to the service's authoritative Registry in Hybrid mode.
+	if c.HasLocalRegistry() {
+		target, err := c.clientForServiceMutation(ctx, serviceID)
+		if err != nil {
+			return err
+		}
+		return target.UpdateServiceVersionPublic(ctx, serviceID, version, isPublic, apiKey)
+	}
 	return c.updateVisibilityGraphQL(ctx, "UpdateServiceVersionPublic", `
 			mutation UpdateServiceVersionPublic($serviceId: String!, $version: String!, $isPublic: Boolean!) {
 				updateServiceVersionPublic(serviceId: $serviceId, version: $version, isPublic: $isPublic)
@@ -770,6 +811,14 @@ func (c *HTTPRegistryClient) UpdateServiceVersionPublic(ctx context.Context, ser
 // PublishServiceVersionExecutionPolicy publishes execution policy scoped to
 // just one provider version through the Registry API.
 func (c *HTTPRegistryClient) PublishServiceVersionExecutionPolicy(ctx context.Context, serviceID uuid.UUID, version string, policy any, apiKey string) error {
+	// Dispatch version policy publication to the service's authoritative Registry in Hybrid mode.
+	if c.HasLocalRegistry() {
+		target, err := c.clientForServiceMutation(ctx, serviceID)
+		if err != nil {
+			return err
+		}
+		return target.PublishServiceVersionExecutionPolicy(ctx, serviceID, version, policy, apiKey)
+	}
 	return c.putExecutionPolicy(ctx, "PublishServiceVersionExecutionPolicy", "/integrations/"+serviceID.String()+"/versions/"+version+"/execution-policy", policy, apiKey)
 }
 
@@ -781,6 +830,10 @@ func (c *HTTPRegistryClient) PublishServiceVersionExecutionPolicy(ctx context.Co
 // workspace.yaml apply path (connection_profiles[*].public: true) reaches the
 // same Registry mutation instead of a separate one.
 func (c *HTTPRegistryClient) PublishConnectionProfile(ctx context.Context, serviceID, serviceVersionID uuid.UUID, name string, profile connectionprofile.Profile, apiKey string) (*ConnectionProfileRevision, error) {
+	// Dispatch public connection-profile mutations to the service's owning Registry in Hybrid mode.
+	if c.HasLocalRegistry() {
+		return c.publishHybridConnectionProfile(ctx, serviceID, serviceVersionID, name, profile, apiKey)
+	}
 	data, err := doAPIKeyGraphQL[struct {
 		Profile *ConnectionProfileRevision `json:"setConnectionProfile"`
 	}](ctx, c, "PublishConnectionProfile", graphqlQuery{
@@ -823,7 +876,11 @@ func (c *HTTPRegistryClient) PublishConnectionProfile(ctx context.Context, servi
 // repository queries server-side to answer it, and had no way to carry a
 // provider per slug at all. serviceIdsBySlugs answers the whole batch in at
 // most two repository queries total (see resolveAccountScopedServices).
+// ResolveServiceIDsBySlugs resolves slugs against Local Registry first and queries Cloud only for misses when permitted.
 func (c *HTTPRegistryClient) ResolveServiceIDsBySlugs(ctx context.Context, slugs []string, apiKey string) (map[string]uuid.UUID, error) {
+	if c.HasLocalRegistry() {
+		return c.resolveHybridServiceIDsBySlugs(ctx, slugs, apiKey)
+	}
 	slugs = uniqueNonEmptyStrings(slugs)
 	if len(slugs) == 0 {
 		return map[string]uuid.UUID{}, nil
@@ -952,6 +1009,11 @@ type HTTPRegistryClient struct {
 	runtimeInstanceID uuid.UUID
 	httpClient        *http.Client
 
+	local          *HTTPRegistryClient
+	sourceResolver ServiceRegistrySourceResolver
+	cloudReadAuth  CloudFallbackAuthorizer
+	inlineBuilder  InlineSDKContractBuilder
+
 	// sfGroup collapses concurrent identical in-flight Registry calls into one.
 	// FetchServiceMetadata and FetchEndpointsByNames are the hot paths:
 	// multiple SDK connections arriving simultaneously for the same service +
@@ -1004,12 +1066,17 @@ func (c *HTTPRegistryClient) doWithClient(request *http.Request, client *http.Cl
 	return client.Do(outbound)
 }
 
+// ConfigureEngineIdentity binds installation and runtime UUIDs on both Cloud and any configured Local Registry client.
 func (c *HTTPRegistryClient) ConfigureEngineIdentity(installationID, runtimeInstanceID uuid.UUID) error {
 	if installationID == uuid.Nil || runtimeInstanceID == uuid.Nil {
 		return errors.New("Engine installation and runtime identities are required")
 	}
 	c.installationID = installationID
 	c.runtimeInstanceID = runtimeInstanceID
+	// Keep the Local Registry client's request identity synchronized with Cloud Registry.
+	if c.local != nil {
+		_ = c.local.ConfigureEngineIdentity(installationID, runtimeInstanceID)
+	}
 	return nil
 }
 
@@ -1102,6 +1169,9 @@ func postRegistryJSON[T any](ctx context.Context, c *HTTPRegistryClient, path st
 // FetchServiceVersionRevisions resolves arbitrarily sized selections through bounded
 // requests, preserving Registry rows and returning no partial result on failure.
 func (c *HTTPRegistryClient) FetchServiceVersionRevisions(ctx context.Context, refs []ServiceVersionRef, apiKey string) ([]ServiceVersionRevision, error) {
+	if c.HasLocalRegistry() {
+		return c.fetchHybridServiceVersionRevisions(ctx, refs, apiKey)
+	}
 	return fetchRegistryBatches(ctx, refs, serviceVersionRevisionBatchSize, func(chunk []ServiceVersionRef) ([]ServiceVersionRevision, error) {
 		batch, err := c.fetchServiceVersionRevisionBatch(ctx, chunk, apiKey)
 		// Earlier successful reads are unusable when any later dependency fails.
@@ -1150,6 +1220,10 @@ const registryServiceVersionBatchSize = 100
 
 // FetchServiceVersionAuthConfigs resolves arbitrarily large workspaces through bounded Registry requests.
 func (c *HTTPRegistryClient) FetchServiceVersionAuthConfigs(ctx context.Context, refs []ServiceVersionRef, apiKey string) ([]ServiceVersionAuthConfigs, error) {
+	// Partition auth config queries across Local and Cloud Registries in Hybrid mode.
+	if c.HasLocalRegistry() {
+		return c.fetchHybridServiceVersionAuthConfigs(ctx, refs, apiKey)
+	}
 	return fetchRegistryBatches(ctx, refs, registryServiceVersionBatchSize, func(chunk []ServiceVersionRef) ([]ServiceVersionAuthConfigs, error) {
 		return c.fetchServiceVersionAuthConfigBatch(ctx, chunk, apiKey)
 	})
@@ -1191,6 +1265,10 @@ func (c *HTTPRegistryClient) FetchServiceVersionIDs(ctx context.Context, refs []
 	if len(refs) == 0 {
 		return nil, nil
 	}
+	// Partition version ID resolution across Local and Cloud Registries in Hybrid mode.
+	if c.HasLocalRegistry() {
+		return c.fetchHybridServiceVersionIDs(ctx, refs, apiKey)
+	}
 	decoded, err := postRegistryJSON[serviceVersionResolveBatchResponse](ctx, c, "/integrations/versions/resolve", map[string][]ServiceVersionRef{"versions": refs}, apiKey)
 	// Propagate request or decoding errors directly to callers.
 	if err != nil {
@@ -1207,6 +1285,10 @@ func (c *HTTPRegistryClient) FetchLatestServiceVersions(ctx context.Context, ser
 	// Skip the Registry round trip when no service IDs need latest-version resolution.
 	if len(serviceIDs) == 0 {
 		return nil, nil
+	}
+	// Resolve latest versions Local-first with Cloud fallback in Hybrid mode.
+	if c.HasLocalRegistry() {
+		return c.fetchHybridLatestServiceVersions(ctx, serviceIDs, apiKey)
 	}
 	data, err := doAPIKeyGraphQL[struct {
 		LatestServiceVersions []ServiceVersionResolvedRef `json:"latestServiceVersions"`
@@ -1241,6 +1323,14 @@ func uuidStrings(ids []uuid.UUID) []string {
 // deprecated in the Registry. The Registry endpoint is idempotent — calling it
 // on an already-deprecated version returns 204 with no mutation.
 func (c *HTTPRegistryClient) DeprecateServiceVersion(ctx context.Context, serviceID uuid.UUID, version, apiKey string) error {
+	// Route version deprecation to the service's authoritative Registry in Hybrid mode.
+	if c.HasLocalRegistry() {
+		target, err := c.clientForServiceMutation(ctx, serviceID)
+		if err != nil {
+			return err
+		}
+		return target.DeprecateServiceVersion(ctx, serviceID, version, apiKey)
+	}
 	url := c.registryBaseURL() + "/integrations/" + serviceID.String() + "/versions/" + version + "/deprecate"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, nil)
 	if err != nil {
@@ -1263,6 +1353,14 @@ func (c *HTTPRegistryClient) DeprecateServiceVersion(ctx context.Context, servic
 // meaningful when the calling workspace owns the service; the Registry enforces
 // ownership on the DELETE endpoint and returns 403 for non-owners.
 func (c *HTTPRegistryClient) ArchiveService(ctx context.Context, serviceID uuid.UUID, apiKey string) error {
+	// Route service archiving to the service's authoritative Registry in Hybrid mode.
+	if c.HasLocalRegistry() {
+		target, err := c.clientForServiceMutation(ctx, serviceID)
+		if err != nil {
+			return err
+		}
+		return target.ArchiveService(ctx, serviceID, apiKey)
+	}
 	url := c.registryBaseURL() + "/integrations/" + serviceID.String()
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
@@ -1313,6 +1411,10 @@ func (c *HTTPRegistryClient) FetchServiceMetadataBatch(ctx context.Context, refs
 	// Empty selections retain the historical non-nil map contract without a dependency call.
 	if len(refs) == 0 {
 		return map[string]*fusedobject.ServiceMetadata{}, nil
+	}
+	// Partition webhook metadata batches across Local and Cloud Registries in Hybrid mode.
+	if c.HasLocalRegistry() {
+		return c.fetchHybridServiceMetadataBatch(ctx, refs)
 	}
 	metadata := make(map[string]*fusedobject.ServiceMetadata, len(refs))
 	// Preserve source partitions while keeping each set-based query within Registry's shared bound.
@@ -1421,7 +1523,12 @@ func decodeServiceMetadataBatch(body io.Reader, refs []ServiceMetadataRef) (map[
 	return result, nil
 }
 
+// FetchServiceMetadata loads runtime service metadata from the authoritative Registry.
 func (c *HTTPRegistryClient) FetchServiceMetadata(ctx context.Context, serviceID uuid.UUID, version string) (*fusedobject.ServiceMetadata, error) {
+	// Route Hybrid runtime metadata reads to the pinned Registry or Local-first fallback.
+	if c.HasLocalRegistry() {
+		return c.fetchHybridServiceMetadata(ctx, serviceID, version)
+	}
 	// Collapse concurrent identical fetches: multiple SDK connections arriving
 	// at the same time for the same (serviceID, version) share one outbound
 	// request rather than each firing their own. The singleflight result is a
@@ -1538,9 +1645,14 @@ func (c *HTTPRegistryClient) FetchEndpointByName(ctx context.Context, serviceID 
 	return &endpoints[0], nil
 }
 
+// FetchEndpointsByNames resolves named operations from the authoritative Registry.
 func (c *HTTPRegistryClient) FetchEndpointsByNames(ctx context.Context, serviceID uuid.UUID, serviceVersionID uuid.UUID, endpointNames []string) ([]fusedobject.Endpoint, error) {
 	if len(endpointNames) == 0 {
 		return nil, nil
+	}
+	// Route Hybrid endpoint lookups to the pinned Registry or Local-first fallback.
+	if c.HasLocalRegistry() {
+		return c.fetchHybridEndpointsByNames(ctx, serviceID, serviceVersionID, endpointNames)
 	}
 	// Collapse concurrent batch-fetches for the same (service, version, names)
 	// set. Sort names so that two callers requesting {"getUser","listUsers"} and
@@ -1587,6 +1699,10 @@ func (c *HTTPRegistryClient) fetchEndpointsByNames(ctx context.Context, serviceI
 // including the schema fields used by connection-profile validation. MCP
 // discovery reads the same fields from Engine snapshots instead.
 func (c *HTTPRegistryClient) FetchServiceOperations(ctx context.Context, serviceID uuid.UUID, serviceVersionID uuid.UUID) ([]fusedobject.Endpoint, error) {
+	// Route Hybrid operation lookups to the pinned Registry or Local-first fallback.
+	if c.HasLocalRegistry() {
+		return c.fetchHybridServiceOperations(ctx, serviceID, serviceVersionID)
+	}
 	sfKey := "serviceOperations:" + serviceID.String() + ":" + serviceVersionID.String()
 	v, err, _ := c.sfGroup.Do(sfKey, func() (interface{}, error) {
 		return c.fetchServiceOperations(ctx, serviceID, serviceVersionID)
@@ -1942,9 +2058,13 @@ func (c *HTTPRegistryClient) SendUsageReports(ctx context.Context, engineVersion
 	}, nil)
 }
 
+// RenewSDKPackageLeases renews SDK package retention on Local Registry when configured and Cloud Registry for legacy packages.
 func (c *HTTPRegistryClient) RenewSDKPackageLeases(ctx context.Context, apps []models.SDKPackageLeaseRenewal) (int64, error) {
 	if len(apps) == 0 {
 		return 0, nil
+	}
+	if c.HasLocalRegistry() {
+		return c.renewHybridSDKPackageLeases(ctx, apps)
 	}
 	var response sdkPackageLeaseResponse
 	err := c.postSignedEngineJSON(ctx, "/sdk-packages/leases/renew", sdkPackageLeaseRequest{Apps: apps}, &response)
@@ -1956,9 +2076,11 @@ func (c *HTTPRegistryClient) RenewSDKPackageLeases(ctx context.Context, apps []m
 
 const maxSDKGenerationResponseBytes = 16 << 20
 
-// GenerateSDK replays one deterministic SDK generation request without
-// forwarding a local control credential or waiting for package completion.
+// GenerateSDK routes SDK compilation to Local Registry in Hybrid mode unless every selected service is Cloud-owned.
 func (c *HTTPRegistryClient) GenerateSDK(ctx context.Context, generation models.SDKGenerationRequest) (models.SDKGenerationResult, error) {
+	if c.HasLocalRegistry() {
+		return c.generateHybridSDK(ctx, generation)
+	}
 	var result models.SDKGenerationResult
 	body, err := json.Marshal(generation)
 	// The immutable request must be encoded before any Registry mutation is attempted.
@@ -2037,7 +2159,11 @@ func readBoundedSDKGenerationResponse(body io.Reader) ([]byte, error) {
 	return limited, nil
 }
 
+// DownloadSDKPackage retrieves SDK archives from Local Registry first in Hybrid mode, falling back to Cloud on 404.
 func (c *HTTPRegistryClient) DownloadSDKPackage(ctx context.Context, appID uuid.UUID) (*http.Response, error) {
+	if c.HasLocalRegistry() {
+		return c.downloadHybridSDKPackage(ctx, appID)
+	}
 	if appID == uuid.Nil {
 		return nil, errors.New("SDK package app ID is required")
 	}
@@ -2058,6 +2184,10 @@ func (c *HTTPRegistryClient) FetchSDKPackageDownloadCounts(ctx context.Context, 
 	counts := make(map[uuid.UUID]int64, len(appIDs))
 	if len(appIDs) == 0 {
 		return counts, nil
+	}
+	// Merge Local and Cloud package download analytics in Hybrid mode.
+	if c.HasLocalRegistry() {
+		return c.fetchHybridSDKPackageDownloadCounts(ctx, appIDs)
 	}
 	if len(appIDs) > 100 {
 		return nil, errors.New("SDK package download count batch exceeds 100 apps")
@@ -2175,6 +2305,7 @@ func RuntimeEntitlementFromHandshake(raw *rawRuntimeEntitlement) models.RuntimeE
 	entitlement.UnifiedAppAlwaysOnEnabled = raw.UnifiedAppAlwaysOnEnabled
 	entitlement.WebhookIngestionEnabled = raw.WebhookIngestionEnabled
 	entitlement.SSOEnabled = raw.SSOEnabled
+	entitlement.LocalRegistryEnabled = raw.LocalRegistryEnabled
 	entitlement.ExecutionRetentionDays = raw.ExecutionRetentionDays
 	return entitlement.Normalized()
 }
@@ -2315,8 +2446,11 @@ func (c *HTTPRegistryClient) newGraphQLRequest(ctx context.Context, reqBody grap
 	return req, nil
 }
 
-// SearchCatalogue returns Registry services and their display metadata for the Engine catalogue.
+// SearchCatalogue queries Local Registry first in Hybrid mode and falls back to Cloud on zero hits when permitted.
 func (c *HTTPRegistryClient) SearchCatalogue(ctx context.Context, searchQuery string, page int, limit int) ([]CatalogueService, error) {
+	if c.HasLocalRegistry() {
+		return c.searchHybridCatalogue(ctx, searchQuery, page, limit)
+	}
 	query := `
 		query SearchServices($query: String!, $page: Int!, $limit: Int!) {
 			services(query: $query, page: $page, limit: $limit) {
@@ -2394,6 +2528,10 @@ func parseCatalogueResponse(body io.Reader) ([]CatalogueService, error) {
 
 // FetchDriftSnapshots loads pending drift snapshots for a single service from Registry.
 func (c *HTTPRegistryClient) FetchDriftSnapshots(ctx context.Context, serviceID uuid.UUID, apiKey string) ([]models.DriftSnapshot, error) {
+	// Route drift lookups to the service's authoritative Registry in Hybrid mode.
+	if c.HasLocalRegistry() {
+		return c.fetchHybridDriftSnapshots(ctx, serviceID, apiKey)
+	}
 	query := `
 		query GetDriftSnapshots($serviceId: String!) {
 			driftSnapshots(serviceId: $serviceId) {
@@ -2447,6 +2585,10 @@ func (c *HTTPRegistryClient) FetchDriftSnapshots(ctx context.Context, serviceID 
 func (c *HTTPRegistryClient) FetchDriftSnapshotsForServices(ctx context.Context, serviceIDs []uuid.UUID, apiKey string) ([]models.DriftSnapshot, error) {
 	if len(serviceIDs) == 0 {
 		return nil, nil
+	}
+	// Partition batched drift polling across Local and Cloud Registries in Hybrid mode.
+	if c.HasLocalRegistry() {
+		return c.fetchHybridDriftSnapshotsForServices(ctx, serviceIDs, apiKey)
 	}
 	req, err := c.buildDriftSnapshotsForServicesRequest(ctx, serviceIDs, apiKey)
 	if err != nil {
@@ -2559,6 +2701,10 @@ func decodeDriftSnapshotsForServices(resp *http.Response) ([]models.DriftSnapsho
 // that this is single-service, not batched, differ (see the RegistryClient
 // interface doc comment for why).
 func (c *HTTPRegistryClient) FetchServiceChangelogSince(ctx context.Context, serviceID uuid.UUID, since time.Time, apiKey string) ([]models.ServiceChangelogEntry, error) {
+	// Route changelog polling to the service's owning Registry in Hybrid mode.
+	if c.HasLocalRegistry() {
+		return c.fetchHybridServiceChangelogSince(ctx, serviceID, since, apiKey)
+	}
 	req, err := c.buildServiceChangelogSinceRequest(ctx, serviceID, since, apiKey)
 	if err != nil {
 		return nil, err

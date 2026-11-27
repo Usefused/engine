@@ -91,14 +91,19 @@ func forwardImportApplyWithAutoRegister(proxy Forwarder, s store.Store, contract
 // forwardPreparedImportApply keeps publication and activation on one bounded
 // request context while preserving the existing partial-outcome response path.
 func forwardPreparedImportApply(proxy Forwarder, s store.Store, contractFetcher RuntimeContractFetcher, w http.ResponseWriter, r *http.Request, accountID uuid.UUID) {
-	ctx := r.Context()
-	prepared, ok := prepareImportApplyPreflight(w, r, contractFetcher)
+	admittedReq, ok := AdmitImportApplyTarget(proxy, w, r)
+	// Stop before preflight or publication when --cloud or Enterprise Local Registry checks fail.
+	if !ok {
+		return
+	}
+	ctx := admittedReq.Context()
+	prepared, ok := prepareImportApplyPreflight(w, admittedReq, contractFetcher)
 	// A failed preflight proves Registry publication was never attempted.
 	if !ok {
 		return
 	}
 	proxy.ForwardAndInspect(w, prepared, "", func(response *http.Response, body []byte) {
-		audit := autoRegisterImportedService(ctx, s, contractFetcher, accountID, r.Header.Get("X-API-Key"), body)
+		audit := autoRegisterImportedService(ctx, s, contractFetcher, accountID, prepared.Header.Get("X-API-Key"), body)
 		// Registry has committed, so Engine-local activation failure must replace
 		// the success receipt with an authoritative partial outcome before write.
 		if autoRegistrationSucceeded(audit) || audit.operationID == uuid.Nil {
@@ -614,8 +619,25 @@ func activateImportedService(ctx context.Context, s store.Store, contractFetcher
 		audit.outcome = "activation_failed"
 		return audit
 	}
+	recordImportedWorkspaceServiceSource(ctx, s, audit.serviceID)
 	audit.outcome = "activated"
 	return audit
+}
+
+// recordImportedWorkspaceServiceSource persists 'local' or 'cloud' provenance on newly imported workspace services.
+func recordImportedWorkspaceServiceSource(ctx context.Context, s store.Store, serviceID uuid.UUID) {
+	regStore, ok := s.(store.WorkspaceServiceRegistryStore)
+	if !ok {
+		return
+	}
+	target := sandbox.RegistryTargetFromContext(ctx)
+	// Non-hybrid workspaces omit target metadata and retain the 'cloud' table default.
+	if target != sandbox.RegistrySourceLocal && target != sandbox.RegistrySourceCloud {
+		return
+	}
+	if err := regStore.SetWorkspaceServiceRegistrySource(ctx, serviceID, target); err != nil {
+		slog.WarnContext(ctx, "auto-register: failed to persist workspace service registry_source", slog.Any("error", err))
+	}
 }
 
 func importedServiceName(resp importApplyResponse) string {

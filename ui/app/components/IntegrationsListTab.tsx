@@ -30,6 +30,7 @@ export type ListableService = {
   service_id?: string;
   service_slug?: string;
   version?: string;
+  registry_source?: "local" | "cloud" | null;
 };
 
 /** Normalise a catalog Service into a ListableService. */
@@ -68,6 +69,7 @@ export function fromActivatedService(s: ActivatedService): ListableService {
     // UI links pair the bare Registry slug with provider identity; the CLI-oriented qualified slug is only a fallback.
     service_slug: s.registry_slug || s.service_slug,
     version: s.version,
+    registry_source: s.registry_source,
   };
 }
 
@@ -356,6 +358,8 @@ function IntegrationCard(props: IntegrationCardProps) {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          {/* Show Local vs Cloud provenance when recorded on workspace services. */}
+          <ServiceRegistrySourceBadge source={service.registry_source} />
           {/* Visibility and exact local version remain independently readable. */}
           <ServiceVisibilityBadge isPublic={service.is_public} />
           {/* Workspace versions remain visible when their cards appear in combined search results. */}
@@ -373,6 +377,15 @@ function IntegrationCard(props: IntegrationCardProps) {
       </div>}
     </article>
   );
+}
+
+/** Shows Registry provenance ('local' or 'cloud') when recorded on a workspace service. */
+function ServiceRegistrySourceBadge({ source }: { source?: "local" | "cloud" | null }) {
+  // Omit the provenance badge when the workspace runs in standard single-Registry mode.
+  if (source !== "local" && source !== "cloud") return null;
+  return source === "local"
+    ? <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-emerald-700">LOCAL</span>
+    : <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-indigo-700">CLOUD</span>;
 }
 
 /** Shows Registry visibility without presenting missing metadata as private. */

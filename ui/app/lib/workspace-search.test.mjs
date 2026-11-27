@@ -75,6 +75,7 @@ test('workspace search handles partial text, clearing, pagination, history and s
     '~/components/DefineServiceDrawer': { DefineServiceDrawer: Hidden },
     '~/components/Toast': { useToast: () => ({}) },
     '~/lib/authorization-error': {},
+    '~/lib/current-actor-access': { hasWorkspacePermission: () => false, loadCurrentActorAccess: async () => null },
     '~/lib/discovery-navigation': { discoveryNavigationFromQuery: () => ({ sessionID: null }) },
   };
   const source = readFileSync(new URL('../routes/integrations._index.tsx', import.meta.url), 'utf8');
@@ -198,6 +199,7 @@ test('show catalog paginates public Registry services beyond one page without re
     '~/components/DefineServiceDrawer': { DefineServiceDrawer: Hidden },
     '~/components/Toast': { useToast: () => ({}) },
     '~/lib/authorization-error': {},
+    '~/lib/current-actor-access': { hasWorkspacePermission: () => false, loadCurrentActorAccess: async () => null },
     '~/lib/discovery-navigation': { discoveryNavigationFromQuery: () => ({ sessionID: null }) },
   };
   const source = readFileSync(new URL('../routes/integrations._index.tsx', import.meta.url), 'utf8');

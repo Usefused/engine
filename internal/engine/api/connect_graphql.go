@@ -192,6 +192,7 @@ var workspaceServiceGraphQLType = graphql.NewObject(graphql.ObjectConfig{
 		"webhook_count":      &graphql.Field{Type: graphql.Int},
 		"provider":           &graphql.Field{Type: workspaceServiceProviderGraphQLType},
 		"canonical_ref":      &graphql.Field{Type: graphql.String},
+		"registry_source":    &graphql.Field{Type: graphql.String},
 		"is_owner":           &graphql.Field{Type: graphql.Boolean},
 		"is_public":          &graphql.Field{Type: graphql.Boolean},
 		"version":            &graphql.Field{Type: graphql.String},
@@ -744,6 +745,7 @@ func workspaceServicesGraphQLField(s store.Store, verifier ServiceVerifier) *gra
 				return nil, fmt.Errorf("list workspace services: %w", err)
 			}
 			serviceIDs := listedServiceIDs(services)
+			attachWorkspaceServiceRegistrySources(ctx, s, services, serviceIDs)
 			versions, err := s.ListWorkspaceServiceVersionsForServices(ctx, serviceIDs)
 			if err != nil {
 				return nil, fmt.Errorf("list workspace service versions: %w", err)
@@ -848,6 +850,7 @@ func workspaceServicePageGraphQLField(s store.Store, verifier ServiceVerifier) *
 				return nil, fmt.Errorf("list workspace services page: %w", err)
 			}
 			serviceIDs := listedServiceIDs(services)
+			attachWorkspaceServiceRegistrySources(ctx, s, services, serviceIDs)
 			versions, err := s.ListWorkspaceServiceVersionsForServices(ctx, serviceIDs)
 			// Do not present incomplete or unauthorized data as a valid result.
 			if err != nil {
@@ -2618,10 +2621,32 @@ func projectGraphQLBucketConnectSummary(summary *store.BucketConnectSummary) map
 	}
 }
 
+// attachWorkspaceServiceRegistrySources populates pinned 'local' or 'cloud' provenance onto workspace service rows when supported.
+func attachWorkspaceServiceRegistrySources(ctx context.Context, s store.Store, services []store.WorkspaceService, serviceIDs []uuid.UUID) {
+	regStore, ok := s.(store.WorkspaceServiceRegistryStore)
+	// Skip lookup on legacy mock stores or empty listings.
+	if !ok || len(services) == 0 || len(serviceIDs) == 0 {
+		return
+	}
+	sources, err := regStore.GetWorkspaceServiceRegistrySources(ctx, serviceIDs)
+	// Degrade gracefully without failing workspace service listings if provenance lookup errors.
+	if err != nil {
+		return
+	}
+	for i := range services {
+		services[i].RegistrySource = sources[services[i].ServiceID]
+	}
+}
+
 // projectGraphQLWorkspaceServices preserves the resolvable local reference alongside optional Registry display metadata.
 func projectGraphQLWorkspaceServices(services []store.WorkspaceService, versions map[uuid.UUID][]store.WorkspaceServiceVersion, metadata map[uuid.UUID]sandbox.ServiceVisibility, authOptions map[uuid.UUID][]map[string]interface{}) []map[string]interface{} {
 	items := make([]map[string]interface{}, 0, len(services))
 	for _, service := range services {
+		var registrySource interface{}
+		// Surface 'local' or 'cloud' provenance only when recorded for this workspace service.
+		if service.RegistrySource != "" {
+			registrySource = service.RegistrySource
+		}
 		item := map[string]interface{}{
 			"id":         service.ID.String(),
 			"service_id": service.ServiceID.String(), "service_name": service.ServiceName,
@@ -2634,6 +2659,7 @@ func projectGraphQLWorkspaceServices(services []store.WorkspaceService, versions
 			"webhook_count":      nil,
 			"provider":           nil,
 			"canonical_ref":      nil,
+			"registry_source":    registrySource,
 			"is_owner":           nil,
 			"is_public":          nil,
 			"enabled_versions":   projectGraphQLWorkspaceServiceVersions(versions[service.ServiceID]),

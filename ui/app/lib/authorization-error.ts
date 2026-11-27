@@ -230,6 +230,10 @@ function productPermissionAction(permission: string): string {
     "app.webhook.manage": "manage",
     "connection.read": "view connections in",
     "connection.manage": "manage connections in",
+    "catalogue.read": "browse the service catalogue in",
+    "catalogue.manage": "publish templates in",
+    "catalogue.cloud.read": "browse or import services from Fused Cloud Registry in",
+    "catalogue.cloud.publish": "publish specifications to Fused Cloud Registry in",
     "audit.read": "view access activity for",
   };
   return actions[permission.trim()] || "complete this action for";

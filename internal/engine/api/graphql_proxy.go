@@ -96,14 +96,14 @@ func (c *proxyResponseCache) remove(element *list.Element) {
 	c.order.Remove(element)
 }
 
-// proxyCacheKey partitions Registry responses by local subject and access
-// revision so differently scoped users in one workspace never share results.
-func proxyCacheKey(body []byte, actor accesscontrol.Actor) string {
+// proxyCacheKey partitions Registry responses by local subject, access revision, and explicit Registry target.
+func proxyCacheKey(body []byte, actor accesscontrol.Actor, registryTarget string) string {
 	h := sha256.New()
 	h.Write(body)
 	h.Write([]byte(actor.AccountID.String()))
 	h.Write([]byte(actor.SubjectID.String()))
 	h.Write([]byte(strconv.FormatInt(actor.Authorization.Revision, 10)))
+	h.Write([]byte(normalizedRegistryTarget(registryTarget)))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -240,7 +240,7 @@ func graphQLRequestCacheKey(r *http.Request, body []byte) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return proxyCacheKey(body, actor), true
+	return proxyCacheKey(body, actor, r.Header.Get(RegistryTargetHeader)), true
 }
 
 // graphQLCacheBypassRequested recognizes exact directive names across repeated header values.

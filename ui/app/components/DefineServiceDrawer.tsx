@@ -39,6 +39,9 @@ export interface DefineServiceDrawerProps {
   setStartError: (value: string) => void;
   handleStart: (e: FormEvent) => void;
   handleChangeImportSource: () => void;
+  canPublishToCloud?: boolean;
+  publishToCloud?: boolean;
+  setPublishToCloud?: (value: boolean) => void;
 }
 
 // The "Define a service" drawer: same import/plan/apply contract as before
@@ -76,6 +79,9 @@ export function DefineServiceDrawer({
   setStartError,
   handleStart,
   handleChangeImportSource,
+  canPublishToCloud,
+  publishToCloud,
+  setPublishToCloud,
 }: DefineServiceDrawerProps) {
   return (
     <>
@@ -168,6 +174,22 @@ export function DefineServiceDrawer({
             )}
             {/* The policy is editable only before review so an existing receipt cannot change meaning. */}
             {importMethod === "openapi" && setRepairMode && <ImportRepairMode value={repairMode} onChange={setRepairMode} disabled={starting || !!importPlan} />}
+            {/* Only actors holding catalogue.cloud.publish can opt into publishing publicly to Fused Cloud Registry. */}
+            {canPublishToCloud && setPublishToCloud && (
+              <label className="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3.5 text-sm">
+                <input
+                  type="checkbox"
+                  checked={Boolean(publishToCloud)}
+                  disabled={starting || Boolean(importPlan)}
+                  onChange={(e) => setPublishToCloud(e.target.checked)}
+                  className="mt-0.5 rounded border-slate-300 text-slate-950 focus:ring-slate-900 disabled:opacity-50"
+                />
+                <span>
+                  <span className="block font-medium text-slate-900">Publish publicly to Fused Cloud Registry</span>
+                  <span className="mt-0.5 block text-xs text-slate-500">Leave unchecked to store internal specifications privately in your Local Registry when configured.</span>
+                </span>
+              </label>
+            )}
             <ImportDiagnostics diagnostics={repairDiagnostics} />
             <div>
               {importPlan ? (

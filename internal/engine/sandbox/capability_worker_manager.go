@@ -119,9 +119,13 @@ func validCapabilityInvocation(familyID, appID string, input json.RawMessage, ho
 
 // effectiveCapabilityWorkerConcurrency applies plan changes within the operator's configured process ceiling.
 func effectiveCapabilityWorkerConcurrency(planConcurrency *int, capacity int) int {
-	// Old bundles retain their four-slot allowance even when an operator raises deployment capacity.
-	if planConcurrency == nil || *planConcurrency < 0 {
+	// Legacy bundles without an explicit field retain their four-slot compatibility allowance.
+	if planConcurrency == nil {
 		return min(workerlimits.DefaultConcurrency, capacity)
+	}
+	// Explicit negative limits (-1) grant unrestricted self-hosted capacity bounded only by engine.yaml.
+	if *planConcurrency < 0 {
+		return capacity
 	}
 	return min(*planConcurrency, capacity)
 }

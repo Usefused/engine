@@ -177,7 +177,8 @@ func runEngine(cmd *cobra.Command) {
 	}
 	rateLimits := requireProviderRateLimitCoordinator(ctx, rateLimitKV, postgresStore)
 	defer func() { _ = rateLimits.Close() }()
-	registryClient := sandbox.NewHTTPRegistryClient(cfg.Engine.RegistryEndpoint, envLicense)
+	cloudRegistryEndpoint := cfg.Engine.EffectiveCloudRegistryEndpoint()
+	registryClient := sandbox.NewHTTPRegistryClient(cloudRegistryEndpoint, envLicense)
 	if err := configureRegistryEngineIdentity(ctx, engineStore, registryClient); err != nil {
 		slog.ErrorContext(ctx, "FATAL: Failed to configure Engine installation identity", slog.Any("error", err))
 		os.Exit(1)
@@ -201,6 +202,12 @@ func runEngine(cmd *cobra.Command) {
 	} else {
 		entitlementpkg.LiveEntitlement.Store(entitlement)
 	}
+	localRegistryEndpoint := cfg.Engine.EffectiveLocalRegistryEndpoint()
+	// Surface a one-time notice when an existing deployment still sets FUSED_REGISTRY_ENDPOINT to Fused Cloud.
+	if strings.TrimSpace(cfg.Engine.RegistryEndpoint) != "" && localRegistryEndpoint == "" {
+		slog.WarnContext(ctx, "Ignoring legacy registry_endpoint pointing at Fused Cloud Registry; omit FUSED_REGISTRY_ENDPOINT for Cloud-only mode")
+	}
+	configureHybridLocalRegistryClient(ctx, localRegistryEndpoint, envLicense, entitlement, engineStore, registryClient)
 	backgroundStore := newSerializedBackgroundStore(engineStore)
 	engineWorkers := startEngineWorkers(ctx, engineStore, natsClient, cfg.Engine, runtimeTokenInvalidator)
 	engineWorkers.providerRateLimits = startProviderRateLimitProjection(ctx, postgresStore, natsClient)
@@ -246,9 +253,10 @@ func runEngine(cmd *cobra.Command) {
 	subscribeCacheInvalidation(natsClient, localObjectCache, webhookStreams)
 
 	// Billing returns use the configured Engine origin, never the browser Host or Referer.
-	registryProxy := api.NewRegistryProxy(cfg.Engine.RegistryEndpoint, envLicense, cfg.Engine.PublicURL)
+	cloudRegistryProxy := api.NewRegistryProxy(cloudRegistryEndpoint, envLicense, cfg.Engine.PublicURL)
 	// Billing sync uses the ordinary persisted heartbeat path so paid upgrades can unlock work immediately.
-	registryProxy.BillingSync = func(ctx context.Context) bool { return sendEngineHeartbeat(ctx, registryClient, entitlementStore) }
+	cloudRegistryProxy.BillingSync = func(ctx context.Context) bool { return sendEngineHeartbeat(ctx, registryClient, entitlementStore) }
+	registryProxy := buildEngineRegistryProxy(localRegistryEndpoint, envLicense, cfg.Engine.PublicURL, cloudRegistryProxy, engineStore)
 	authRefreshStore, err := backgroundStore.connectedAuthRefreshCapability()
 	if err != nil {
 		// Managed refresh cannot operate safely without durable claims;
@@ -328,6 +336,42 @@ func runEngine(cmd *cobra.Command) {
 	grpcServer := startEngineGRPCServer(ctx, engineStore, registryClient, masterKey, configStore, natsClient, tokenValidator, webhookStreams, managedAuthClientDependencies.connect, connectRedirectURI, bridgeHost)
 
 	waitForEngineShutdown(ctx, cancel, srv, webhookSrv, grpcServer)
+}
+
+// configureHybridLocalRegistryClient validates Enterprise entitlement and wires Local-first Registry resolution.
+func configureHybridLocalRegistryClient(ctx context.Context, localEndpoint, licenseKey string, entitlement models.RuntimeEntitlement, engineStore store.Store, registryClient *sandbox.HTTPRegistryClient) {
+	trimmed := strings.TrimSpace(localEndpoint)
+	// Leave non-Hybrid deployments untouched when no Local Registry URL is configured.
+	if trimmed == "" {
+		return
+	}
+	// Fail closed at startup when a non-Enterprise license attempts to enable Local Registry.
+	if !entitlement.LocalRegistryEnabled {
+		slog.ErrorContext(ctx, "FATAL: Local Registry requires an Enterprise license", slog.String("plan", entitlement.Plan))
+		os.Exit(1)
+	}
+	localClient := sandbox.NewLocalHTTPRegistryClient(trimmed, licenseKey)
+	var resolver sandbox.ServiceRegistrySourceResolver
+	if regStore, ok := engineStore.(store.WorkspaceServiceRegistryStore); ok {
+		resolver = regStore.GetWorkspaceServiceRegistrySources
+	}
+	registryClient.ConfigureHybridLocalRegistry(localClient, resolver, api.ActorHasCloudReadPermission)
+	// Enable mixed Local+Cloud SDK compilation using admitted Engine snapshots for Cloud-pinned services.
+	if inlineStore, ok := engineStore.(store.InlineSDKContractStore); ok {
+		registryClient.SetInlineSDKContractBuilder(inlineStore.BuildInlineSDKServiceContracts)
+	}
+	slog.InfoContext(ctx, "Configured Enterprise Hybrid Local Registry", slog.String("local_registry_endpoint", trimmed))
+}
+
+// buildEngineRegistryProxy wraps Cloud and Local Registry proxies when Hybrid mode is active.
+func buildEngineRegistryProxy(localEndpoint, licenseKey, publicURL string, cloudProxy *api.RegistryProxy, engineStore store.Store) api.Forwarder {
+	trimmed := strings.TrimSpace(localEndpoint)
+	// Preserve direct Cloud forwarding when no Local Registry endpoint is configured.
+	if trimmed == "" {
+		return cloudProxy
+	}
+	localProxy := api.NewRegistryProxy(trimmed, licenseKey, publicURL)
+	return api.NewHybridRegistryProxy(cloudProxy, localProxy, engineStore)
 }
 
 // loadEngineConfiguration admits the one configuration used by telemetry and runtime dependencies.
@@ -656,8 +700,10 @@ func startEngineWorkers(ctx context.Context, engineStore store.Store, natsClient
 	}
 }
 
+// engineExecutionRetentionDays applies positive Registry retention limits while deferring absent or unlimited (-1) values to engine.yaml.
 func engineExecutionRetentionDays(entitlement models.RuntimeEntitlement, fallback int) int {
-	if entitlement.ExecutionRetentionDays == nil {
+	// Self-hosted plans use -1 so each operator retains full control over local database retention.
+	if entitlement.ExecutionRetentionDays == nil || *entitlement.ExecutionRetentionDays < 0 {
 		return fallback
 	}
 	return *entitlement.ExecutionRetentionDays
@@ -1110,7 +1156,12 @@ func buildEngineRouter(deps engineRouterDeps) chi.Router {
 			return
 		}
 		client := &http.Client{Timeout: 2 * time.Second}
-		resp, err := client.Get(deps.cfg.Engine.RegistryEndpoint)
+		healthTarget := deps.cfg.Engine.EffectiveCloudRegistryEndpoint()
+		// Check Local Registry reachability when an Enterprise Local Registry is configured.
+		if trimmed := deps.cfg.Engine.EffectiveLocalRegistryEndpoint(); trimmed != "" {
+			healthTarget = trimmed
+		}
+		resp, err := client.Get(healthTarget)
 		status := "ok"
 		if err != nil || resp.StatusCode >= 500 {
 			status = "degraded, serving from local copy"
@@ -1287,7 +1338,7 @@ func newManagedAuthBrokerDeps(ctx context.Context, database *pgxpool.Pool, maste
 		return managedAuthBrokerDeps{}
 	}
 	installs := managedauthbroker.NewStore(database)
-	verifier := managedauthbroker.NewRegistryTicketVerifier(cfg.Engine.RegistryEndpoint, nil)
+	verifier := managedauthbroker.NewRegistryTicketVerifier(cfg.Engine.EffectiveCloudRegistryEndpoint(), nil)
 	service, err := managedauthbroker.NewService(installs, verifier)
 	if err != nil {
 		slog.ErrorContext(ctx, "FATAL: managed-auth broker service is unavailable despite being enabled", slog.Any("error", err))

@@ -83,6 +83,7 @@ type RuntimeEntitlement struct {
 	UnifiedAppAlwaysOnEnabled bool `json:"unified_app_always_on_enabled"`
 	WebhookIngestionEnabled   bool `json:"webhook_ingestion_enabled"`
 	SSOEnabled                bool `json:"sso_enabled"`
+	LocalRegistryEnabled      bool `json:"local_registry_enabled"`
 
 	// ─── Data governance (nil = missing, 0 = explicitly disallowed) ───
 	ExecutionRetentionDays *int `json:"execution_retention_days,omitempty"`
@@ -1188,8 +1189,9 @@ type SDKGenerationRequest struct {
 	// validated here -- selections, generator version, scope schema version --
 	// comes from Registry request preparation, so the published version is
 	// identical either way; only codegen and upload are skipped.
-	SkipPackaging    bool                 `json:"skip_packaging"`
-	ContractBindings []SDKContractBinding `json:"contract_bindings,omitempty"`
+	SkipPackaging    bool                       `json:"skip_packaging"`
+	ContractBindings []SDKContractBinding       `json:"contract_bindings,omitempty"`
+	InlineContracts  []InlineSDKServiceContract `json:"inline_contracts,omitempty"`
 }
 
 type SDKGenerationResult struct {
